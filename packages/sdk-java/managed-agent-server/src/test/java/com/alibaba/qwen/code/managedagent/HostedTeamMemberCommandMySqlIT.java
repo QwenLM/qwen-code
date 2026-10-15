@@ -5,9 +5,6 @@
 
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
-
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -21,6 +18,23 @@ import com.sun.net.httpserver.HttpServer;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.awaitility.core.ConditionFactory;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.AfterTestExecutionCallback;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.io.CleanupMode;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.core.Ordered;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -41,6 +55,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -48,21 +63,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.awaitility.core.ConditionFactory;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.extension.AfterTestExecutionCallback;
-import org.junit.jupiter.api.extension.RegisterExtension;
-import org.junit.jupiter.api.io.CleanupMode;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.core.Ordered;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * H4e-b3: the member board commands end to end. A real Spring server on
@@ -127,9 +130,15 @@ class HostedTeamMemberCommandMySqlIT {
             harness.destroy();
             harness.waitFor(20, TimeUnit.SECONDS);
         }
-        if (spring != null) spring.close();
-        if (model != null) model.stop(0);
-        if (modelThreads != null) modelThreads.shutdownNow();
+        if (spring != null) {
+            spring.close();
+        }
+        if (model != null) {
+            model.stop(0);
+        }
+        if (modelThreads != null) {
+            modelThreads.shutdownNow();
+        }
     }
 
     /**
@@ -175,7 +184,7 @@ class HostedTeamMemberCommandMySqlIT {
         // Every member's command did the full pass: handover → execute →
         // answered → consumed, never left pending.
         int stalled = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM qwen_managed_session_extension_record"
+                "SELECT COUNT(*) FROM ma_session_record"
                         + " WHERE tenant_id = ? AND domain = 'session_command'"
                         + " AND delivery_state IN ('planned', 'accepting')",
                 Integer.class, tenant);
@@ -184,52 +193,111 @@ class HostedTeamMemberCommandMySqlIT {
     }
 
     /**
-     * carol commits her command and parks; the Harness dies before her
-     * relay could hand it over, the new worker's wake re-enters her wait,
-     * the relay hands it over and executes it, and her report still
-     * lands — the relay's answer never asked the dead process anything.
+     * carol commits her command and parks; the Harness dies while her
+     * command is still planned, the new worker takes her Session over and
+     * resumes the parked wait, the relay hands the command over and
+     * executes it, and her report still lands — the relay's answer never
+     * asked the dead process anything. The relay is held from the start,
+     * so the kill always lands mid-wait (without the hold carol finishes
+     * long before the lead's Turn settles, and the restart interrupts
+     * nothing), and it is released only after a new writer generation
+     * holds her Session, so the reply folds into the wait the dead
+     * generation parked.
      */
     @Test
-    @Timeout(150)
+    @Timeout(180)
     void memberHarnessRestartDuringCommandWait() throws Exception {
         boot();
-        String lead = createLead("H4EB3_CMD_RESTART");
-        // Wait until carol's park is durable: the await_command
-        // checkpoint is committed before her outbox is, so sighting it
-        // fires the kill while the relay's next scan is still ahead —
-        // the Harness dies before the handover. The lead's own Turn must
-        // have settled first: a Harness dying mid-model-round loses that
-        // Turn for good (its input re-drives as a fresh one), and a
-        // FAILED row would break the acceptance below.
-        waiting().atMost(Duration.ofSeconds(60))
-                .pollInterval(Duration.ofMillis(50)).untilAsserted(() -> {
-                    assertNoModelFailure();
-                    assertNoFailedTurn(lead);
-                    assertNoFailedChild(lead);
-                    assertThat(openTurns(lead)).isEmpty();
-                    assertThat(parkedOnCommand(onlyChildOf(lead))).isTrue();
-                });
+        CountDownLatch releaseRelay = holdMessageRelay();
+        try {
+            String lead = createLead("H4EB3_CMD_RESTART");
+            // The lead's own Turn must have settled before the kill: a
+            // Harness dying mid-model-round loses that Turn for good (its
+            // input re-drives as a fresh one), and a FAILED row would
+            // break the acceptance below. carol's command cannot move
+            // while the relay is held, so it is still planned.
+            waiting().atMost(Duration.ofSeconds(60))
+                    .pollInterval(Duration.ofMillis(200)).untilAsserted(() -> {
+                        assertNoModelFailure();
+                        assertNoFailedTurn(lead);
+                        assertNoFailedChild(lead);
+                        assertThat(openTurns(lead)).isEmpty();
+                        assertThat(parkedOnCommand(onlyChildOf(lead))).isTrue();
+                        List<JsonNode> commands = commandsOf(lead, "carol");
+                        assertThat(commands).hasSize(1);
+                        assertThat(commands.get(0).path("run").path("delivery")
+                                .path("state").asText()).isEqualTo("planned");
+                    });
+            String carol = onlyChildOf(lead);
+            long parkedGeneration = writerGeneration(carol);
 
-        harness.descendants().forEach(ProcessHandle::destroyForcibly);
-        harness.destroyForcibly();
-        harness.waitFor(20, TimeUnit.SECONDS);
-        startHarness();
+            harness.descendants().forEach(ProcessHandle::destroyForcibly);
+            harness.destroyForcibly();
+            harness.waitFor(20, TimeUnit.SECONDS);
+            startHarness();
+            // The relay goes on only once the takeover holds carol's
+            // Session: while it is held, nothing but the coordinator's
+            // takeover load can fence the dead generation. A relay attach
+            // that wins the load race instead leaves the parked Turn
+            // without its continue — a separate race this case does not
+            // pin.
+            waiting().atMost(Duration.ofSeconds(100))
+                    .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
+                            assertThat(writerGeneration(carol))
+                                    .isGreaterThan(parkedGeneration));
+            releaseRelay.countDown();
 
-        waiting().atMost(Duration.ofSeconds(100))
-                .pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
-                    assertNoModelFailure();
-                    assertNoFailedTurn(lead);
-                    assertNoFailedChild(lead);
-                    // Her report after the dead generation is durable on
-                    // the lead's journal: the result was accepted, never
-                    // asked of the dead process.
-                    assertThat(childResultAccepted(lead)).isTrue();
-                    List<JsonNode> commands = commandsOf(lead, "carol");
-                    assertThat(commands).isNotEmpty();
-                    assertThat(commands.get(0).path("run").path("delivery")
-                            .path("state").asText()).isEqualTo("consumed");
-                });
-        closeAndSettle(lead);
+            waiting().atMost(Duration.ofSeconds(110))
+                    .pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
+                        assertNoModelFailure();
+                        assertNoFailedTurn(lead);
+                        assertNoFailedChild(lead);
+                        // Her report after the dead generation is durable on
+                        // the lead's journal: the result was accepted, never
+                        // asked of the dead process.
+                        assertThat(childResultAccepted(lead)).isTrue();
+                        List<JsonNode> commands = commandsOf(lead, "carol");
+                        assertThat(commands).hasSize(1);
+                        assertThat(commands.get(0).path("run").path("delivery")
+                                .path("state").asText()).isEqualTo("consumed");
+                    });
+            closeAndSettle(lead);
+        } finally {
+            releaseRelay.countDown();
+        }
+    }
+
+    /**
+     * Holds the session message relay: its scheduler runs one thread, so a
+     * task parked on it keeps every scan, and with it every command
+     * handover, from running until the latch is released.
+     */
+    private CountDownLatch holdMessageRelay() throws InterruptedException {
+        ThreadPoolTaskScheduler scheduler = spring.getBean(
+                "messageRelayScheduler", ThreadPoolTaskScheduler.class);
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        scheduler.execute(() -> {
+            held.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertThat(held.await(30, TimeUnit.SECONDS))
+                .as("the message relay's scheduler takes the hold")
+                .isTrue();
+        return release;
+    }
+
+    /** The writer generation of a Session's journal head. */
+    private long writerGeneration(String session) {
+        Long generation = jdbc.queryForObject(
+                "SELECT writer_generation FROM ma_session_head"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session);
+        return generation == null ? 0 : generation;
     }
 
     // ------------------------------------------------------------ scenario plumbing
@@ -288,7 +356,7 @@ class HostedTeamMemberCommandMySqlIT {
                 .pollInterval(Duration.ofMillis(500)).untilAsserted(() -> {
                     assertThat(jdbc.queryForList(
                             "SELECT operation_kind, state, delivery_state FROM"
-                                    + " managed_agent_operation WHERE tenant_id"
+                                    + " ma_operation WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'ACTION_RESPONSE', 'TASK_CANCEL') AND tenant_id"
                                     + " = ? AND delivery_state IN ('PENDING',"
                                     + " 'LEASED', 'BLOCKED')", tenant))
                             .isEmpty();
@@ -298,13 +366,13 @@ class HostedTeamMemberCommandMySqlIT {
                     // fixture's runtime broker keeps workspace execution
                     // off, macOS and CI alike.
                     assertThat(jdbc.queryForList(
-                            "SELECT child_run_id, state FROM"
-                                    + " qwen_managed_child_result_relay WHERE"
+                            "SELECT operation_id AS child_run_id, state FROM"
+                                    + " ma_operation WHERE operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE') AND"
                                     + " tenant_id = ? AND state NOT IN"
                                     + " ('done','orphaned','unknown',"
                                     + " 'close_debt')", tenant)).isEmpty();
                     assertThat(jdbc.queryForList(
-                            "SELECT session_id, status FROM managed_agent_turn"
+                            "SELECT session_id, status FROM ma_turn"
                                     + " WHERE tenant_id = ? AND status NOT IN"
                                     + " ('COMPLETED', 'FAILED', 'CANCELLED')",
                             tenant)).isEmpty();
@@ -404,7 +472,9 @@ class HostedTeamMemberCommandMySqlIT {
     private static Set<String> reportedIn(JsonNode body) {
         Set<String> names = new LinkedHashSet<>();
         for (JsonNode message : body.path("messages")) {
-            if (!"user".equals(message.path("role").asText())) continue;
+            if (!"user".equals(message.path("role").asText())) {
+                continue;
+            }
             names.addAll(teammates(message.toString()));
         }
         return names;
@@ -460,20 +530,25 @@ class HostedTeamMemberCommandMySqlIT {
     /** A tool answer as plain text, whatever JSON escaping carried it. */
     private static String plain(String text) {
         String out = text;
-        for (int pass = 0; pass < 4; pass++)
+        for (int pass = 0; pass < 4; pass++) {
             out = out.replace("\\\\", "\\").replace("\\\"", "\"")
-                    .replace("\\n", "\n");
+            .replace("\\n", "\n");
+        }
         return out;
     }
 
     /** The number a member's own task_create opened, from its reply. */
     private String createdNumber(JsonNode body) {
         for (JsonNode message : body.path("messages")) {
-            if (!"tool".equals(message.path("role").asText())) continue;
+            if (!"tool".equals(message.path("role").asText())) {
+                continue;
+            }
             String text = plain(message.path("content").toString());
             Matcher number = Pattern.compile(
                     "Task #(\\d+) created").matcher(text);
-            if (number.find()) return number.group(1);
+            if (number.find()) {
+                return number.group(1);
+            }
         }
         throw new AssertionError("member task_create reply lacks its number");
     }
@@ -485,8 +560,11 @@ class HostedTeamMemberCommandMySqlIT {
 
     private static long countRoleTool(JsonNode body) {
         long results = 0;
-        for (JsonNode message : body.path("messages"))
-            if ("tool".equals(message.path("role").asText())) results += 1;
+        for (JsonNode message : body.path("messages")) {
+            if ("tool".equals(message.path("role").asText())) {
+                results += 1;
+            }
+        }
         return results;
     }
 
@@ -545,11 +623,15 @@ class HostedTeamMemberCommandMySqlIT {
 
     private static String firstUserText(JsonNode body) {
         for (JsonNode message : body.path("messages")) {
-            if (!"user".equals(message.path("role").asText())) continue;
+            if (!"user".equals(message.path("role").asText())) {
+                continue;
+            }
             String text = message.path("content").isTextual()
                     ? message.path("content").asText()
                     : message.path("content").toString();
-            if (text.contains("H4EB3_")) return text;
+            if (text.contains("H4EB3_")) {
+                return text;
+            }
         }
         return "";
     }
@@ -558,14 +640,16 @@ class HostedTeamMemberCommandMySqlIT {
         Set<String> names = new LinkedHashSet<>();
         Matcher matcher = TEAMMATE.matcher(text.replace("\\u003c", "<")
                 .replace("\\u003e", ">"));
-        while (matcher.find()) names.add(matcher.group(1));
+        while (matcher.find()) {
+            names.add(matcher.group(1));
+        }
         return names;
     }
 
     /** Every command chain a member committed, newest revision each. */
     private List<JsonNode> commandsOf(String lead, String member) {
         List<String> children = jdbc.queryForList(
-                "SELECT session_id FROM managed_agent_session"
+                "SELECT session_id FROM ma_session"
                         + " WHERE tenant_id = ? AND parent_session_id = ?",
                 String.class, tenant, lead);
         for (String child : children) {
@@ -576,8 +660,9 @@ class HostedTeamMemberCommandMySqlIT {
                 if (task != null && task.toString().contains("\"" + member
                         + "\"")) {
                     List<JsonNode> out = new ArrayList<>();
-                    for (Map<String, Object> row : commands)
+                    for (Map<String, Object> row : commands) {
                         out.add(body(row));
+                    }
                     return out;
                 }
             }
@@ -589,8 +674,8 @@ class HostedTeamMemberCommandMySqlIT {
         return jdbc.queryForList(
                 "SELECT r.record_id, r.revision, CAST(res.inline_bytes AS CHAR)"
                         + " AS body FROM"
-                        + " qwen_managed_session_extension_record r"
-                        + " JOIN qwen_managed_session_resource res ON"
+                        + " ma_session_record r"
+                        + " JOIN ma_resource res ON"
                         + " res.session_scope_key = r.session_scope_key"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
@@ -636,7 +721,7 @@ class HostedTeamMemberCommandMySqlIT {
 
     private void assertNoFailedTurn(String session) {
         List<Map<String, Object>> failed = jdbc.queryForList(
-                "SELECT turn_id, error_code FROM managed_agent_turn"
+                "SELECT turn_id, error_code FROM ma_turn"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND status = 'FAILED'",
                 tenant, session);
@@ -651,7 +736,7 @@ class HostedTeamMemberCommandMySqlIT {
      */
     private List<Map<String, Object>> openTurns(String session) {
         return jdbc.queryForList(
-                "SELECT turn_id, status FROM managed_agent_turn"
+                "SELECT turn_id, status FROM ma_turn"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND completed_at IS NULL",
                 tenant, session);
@@ -660,7 +745,7 @@ class HostedTeamMemberCommandMySqlIT {
     /** The restart fixture's single member: the lead's only child. */
     private String onlyChildOf(String lead) {
         List<String> children = jdbc.queryForList(
-                "SELECT session_id FROM managed_agent_session"
+                "SELECT session_id FROM ma_session"
                         + " WHERE tenant_id = ? AND parent_session_id = ?",
                 String.class, tenant, lead);
         if (children.size() != 1) {
@@ -673,7 +758,7 @@ class HostedTeamMemberCommandMySqlIT {
     /** Whether the lead's journal accepted a member result durably. */
     private boolean childResultAccepted(String lead) {
         Integer accepted = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM qwen_managed_session_journal_tx"
+                "SELECT COUNT(*) FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND operation = 'acceptChildResult'",
                 Integer.class, tenant, lead);
@@ -683,7 +768,7 @@ class HostedTeamMemberCommandMySqlIT {
     /** Whether the Session parks a Turn on an `await_command` checkpoint. */
     private boolean parkedOnCommand(String session) {
         Integer parked = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM qwen_managed_session_resource"
+                "SELECT COUNT(*) FROM ma_resource"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND kind = 'managed-checkpoint'"
                         + " AND CAST(inline_bytes AS CHAR) LIKE"
@@ -724,7 +809,7 @@ class HostedTeamMemberCommandMySqlIT {
         model.start();
         startSpring(cli, node, workspace);
         jdbc.update(
-                "INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
+                "INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name,"
                         + " config_ref, policy_ref, state) VALUES (?,"
                         + " 'workspace-0', 1, 'storage-0', 'H4e-b3', ?, ?,"
@@ -732,7 +817,7 @@ class HostedTeamMemberCommandMySqlIT {
                 tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update(
-                "INSERT INTO managed_workspace_access (tenant_id, workspace_id,"
+                "INSERT INTO ma_workspace_access (tenant_id, workspace_id,"
                         + " actor_id, role) VALUES (?, 'workspace-0', ?,"
                         + " 'OPERATOR')",
                 tenant, "actor".getBytes(StandardCharsets.UTF_8));
@@ -752,6 +837,10 @@ class HostedTeamMemberCommandMySqlIT {
                 "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:"
                         + port,
                 "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
+                // A dead writer's lease lapses within the member command's
+                // own 2-minute bound with room to spare, so the restart
+                // case's takeover resumes a wait that is still open.
+                "--qwen.managed-agent.session-store.writer-lease-duration=15s",
                 "--qwen.managed-agent.harness.enabled=true",
                 "--qwen.managed-agent.harness.workspace-files-enabled=true",
                 "--qwen.managed-agent.harness.base-url=http://127.0.0.1:"
@@ -819,25 +908,27 @@ class HostedTeamMemberCommandMySqlIT {
                 .redirectErrorStream(true).redirectOutput(log.toFile());
         Map<String, String> environment = builder.environment();
         environment.clear();
-        if (System.getenv("PATH") != null)
+        if (System.getenv("PATH") != null) {
             environment.put("PATH", System.getenv("PATH"));
+        }
         environment.putAll(Map.of(
-                "HOME", home.toString(),
-                "USERPROFILE", home.toString(),
-                "QWEN_HOME", config.toString(),
-                "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(),
-                "OPENAI_API_KEY", "fake-local-key",
-                "OPENAI_BASE_URL", modelUrl,
-                "QWEN_SERVER_TOKEN", TOKEN,
-                "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
+                    "HOME", home.toString(),
+                    "USERPROFILE", home.toString(),
+                    "QWEN_HOME", config.toString(),
+                    "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(),
+                    "OPENAI_API_KEY", "fake-local-key",
+                    "OPENAI_BASE_URL", modelUrl,
+                    "QWEN_SERVER_TOKEN", TOKEN,
+                    "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
         environment.put("TEMP", temporary.toString());
         for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH",
                 "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
-                "QWEN_CODE_TRUSTED_FOLDERS_PATH"))
+                "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
             environment.put(name,
-                    temporary.resolve(name + ".json").toString());
+                        temporary.resolve(name + ".json").toString());
+        }
         harness = builder.start();
         waiting().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
             if (!harness.isAlive()) {
@@ -875,7 +966,9 @@ class HostedTeamMemberCommandMySqlIT {
                         body == null ? HttpRequest.BodyPublishers.noBody()
                                 : HttpRequest.BodyPublishers.ofString(
                                         json.writeValueAsString(body)));
-        if (key != null) request.header("Idempotency-Key", key);
+        if (key != null) {
+            request.header("Idempotency-Key", key);
+        }
         HttpResponse<String> response = http.send(request.build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode())

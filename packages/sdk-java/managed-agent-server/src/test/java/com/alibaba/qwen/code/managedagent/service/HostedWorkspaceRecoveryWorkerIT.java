@@ -1,9 +1,18 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.*;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.*;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
+
+import javax.sql.DataSource;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -11,14 +20,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.io.TempDir;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import javax.sql.DataSource;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.annotation.DirtiesContext;
+
+import static org.assertj.core.api.Assertions.*;
 
 // Closed after the class, like every Hosted*IT Spring test context: the
 // classes share one failsafe fork, and a cached context keeps its
@@ -85,10 +88,10 @@ class HostedWorkspaceRecoveryWorkerIT {
                 assertThat(fixture.executions.findByExecutionCallId(receipt.getExecutionCallId()).getState())
                         .isEqualTo(ToolExecutionRecord.State.ABANDONED);
             }
-            jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", fixture.tenant);
-            jdbc.update("UPDATE managed_agent_session SET status = 'DELETED', deleted_at = 2 WHERE session_id = ?",
+            jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", fixture.tenant);
+            jdbc.update("UPDATE ma_session SET status = 'DELETED', deleted_at = 2 WHERE session_id = ?",
                     fixture.session.sessionId());
-            jdbc.update("UPDATE managed_workspace_registry SET storage_id = 'changed', state = 'REMOVED' WHERE tenant_id = ?",
+            jdbc.update("UPDATE ma_workspace SET storage_id = 'changed', state = 'REMOVED' WHERE tenant_id = ?",
                     fixture.tenant);
             var noMounts = new WorkspaceRuntimeResolver(store, authority, new ManagedAgentProperties());
             try (var local = LocalRebootTestSupport.provisioner(List.of("must-not-run"), state, http, true);
@@ -102,7 +105,7 @@ class HostedWorkspaceRecoveryWorkerIT {
                 assertThat(released.getLossEvidence()).isEqualTo(firstLoss);
                 assertThat(released.getStopEvidence().source()).isEqualTo("trusted-host-reboot");
                 assertThat(fixture.sessions.countActiveByBinding(original.getBindingId(), original.getGeneration())).isZero();
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease WHERE binding_id = ?",
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?",
                         Long.class, original.getBindingId())).isZero();
                 assertThat(fixture.bindings.findActive(original.getRequest())).isNull();
                 assertThat(worker.isAlive()).isFalse();

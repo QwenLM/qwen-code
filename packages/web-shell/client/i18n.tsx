@@ -22,6 +22,10 @@ import {
 import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
+  MCP_APP_MESSAGES_EN,
+  MCP_APP_MESSAGES_ZH,
+} from './mcp-app/messages.js';
+import {
   COLLAB_MESSAGES_EN,
   COLLAB_MESSAGES_ZH,
 } from './components/workspace-agents/messages.js';
@@ -1802,7 +1806,7 @@ const EN: Messages = {
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
   'webPreview.title': 'Web preview',
-  'webPreview.openHint': 'Preview a running web app',
+  'webPreview.openHint': 'Preview web apps',
   'webPreview.address': 'Development URL',
   'webPreview.open': 'Open',
   'webPreview.refresh': 'Refresh preview',
@@ -3335,7 +3339,7 @@ const EN: Messages = {
   'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
   'trajectory.title': 'Trajectory',
-  'trajectory.description': 'See where a run spent its time and tokens',
+  'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
@@ -3430,6 +3434,10 @@ const EN: Messages = {
   'trajectory.noStart':
     'Recorded durations have no start time, so no bars can be plotted.',
   'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
+  'trajectory.historyGap':
+    'History may have changed while disconnected. Refresh the latest window to update.',
+  'trajectory.lifecycleIncomplete':
+    'Lifecycle details may be incomplete or outside the retained limit.',
   'trajectory.selected.label': 'Selected',
   'trajectory.selected.none': 'Choose a record',
   'trajectory.selected.noTiming': 'no request or tool timing',
@@ -4377,6 +4385,7 @@ const EN: Messages = {
   'welcome.prompt': 'What would you like to do?',
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
+  ...MCP_APP_MESSAGES_EN,
   ...VOICE_MESSAGES_EN,
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
@@ -6085,7 +6094,7 @@ const ZH: Messages = {
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
   'webPreview.title': '网页预览',
-  'webPreview.openHint': '预览正在运行的网页应用',
+  'webPreview.openHint': '预览网页应用',
   'webPreview.address': '开发地址',
   'webPreview.open': '打开',
   'webPreview.refresh': '刷新预览',
@@ -7497,7 +7506,7 @@ const ZH: Messages = {
   'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
   'trajectory.title': '轨迹',
-  'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
+  'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
   'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
@@ -7581,6 +7590,8 @@ const ZH: Messages = {
   'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
   'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
+  'trajectory.historyGap': '断线期间历史记录可能已变化，请刷新最新窗口。',
+  'trajectory.lifecycleIncomplete': '生命周期详情可能不完整或超出保留上限。',
   'trajectory.selected.label': '所选',
   'trajectory.selected.none': '请选择一条记录',
   'trajectory.selected.noTiming': '无请求或工具计时',
@@ -8453,6 +8464,7 @@ const ZH: Messages = {
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
+  ...MCP_APP_MESSAGES_ZH,
   ...VOICE_MESSAGES_ZH,
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,

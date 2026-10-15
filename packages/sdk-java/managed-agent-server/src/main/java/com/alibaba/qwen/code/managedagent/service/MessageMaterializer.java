@@ -2,12 +2,13 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 public class MessageMaterializer {
@@ -75,6 +76,32 @@ public class MessageMaterializer {
                             target.sessionId(), error.toString());
                 }
             }
+        }
+    }
+
+    /**
+     * One batch for a Session an EventTransport notice named (design
+     * 2026-10-04-managed-agent-event-transport, phase MQ2c): the same store
+     * call as the scheduled pass, so ordering, the gap guard and the Snapshot
+     * discipline are unchanged, and the store's row locks serialize it with
+     * the pass. A Session the pass is backing off is left to the pass — a
+     * notice never bypasses the backoff, so a poisoned Session cannot warn at
+     * the event rate. Returns whether a batch ran.
+     */
+    public boolean materializeNotified(String tenantId, String sessionId) {
+        String key = tenantId + ":" + sessionId;
+        if (failures.containsKey(key)) {
+            return false;
+        }
+        try {
+            store.materializeNextBatch(tenantId, sessionId, EVENT_LIMIT);
+            return true;
+        } catch (RuntimeException error) {
+            // Hand the Session to the pass's backoff from its first step.
+            failures.putIfAbsent(key, 1);
+            LOG.warn("Failed to materialize Managed Agent session {}",
+                    sessionId, error);
+            return false;
         }
     }
 

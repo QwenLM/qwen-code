@@ -344,6 +344,7 @@ export type ArtifactPanelTab =
        * its loading state until then.
        */
       loadPage?: TrajectoryPageLoader;
+      historyGapRevision?: number;
     }
   | {
       id: string;
@@ -1298,6 +1299,7 @@ export function ArtifactPanel({
               <button
                 type="button"
                 className={styles.emptyAction}
+                data-testid="right-panel-open-web-preview"
                 onClick={onOpenWebPreview}
               >
                 <span className={styles.emptyActionIcon} aria-hidden="true">
@@ -1565,7 +1567,11 @@ export function ArtifactPanel({
             sessionId={activeTab.sessionId}
           />
         ) : activeTab.kind === 'trajectory' ? (
-          <TrajectoryPanel key={activeTab.id} loadPage={activeTab.loadPage} />
+          <TrajectoryPanel
+            key={activeTab.id}
+            loadPage={activeTab.loadPage}
+            historyGapRevision={activeTab.historyGapRevision}
+          />
         ) : activeTab.kind === 'token_usage' ? (
           <TokenUsagePanel
             key={activeTab.id}

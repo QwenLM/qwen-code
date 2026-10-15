@@ -100,17 +100,23 @@ final class ActionJournal {
                                             .put("inputRevision", 1)
                                             .put("state", state);
                             payload.set("optionsRef", ref);
-                            if (decision == null) payload.putNull("decisionRef");
-                            else
+                            if (decision == null) {
+                                payload.putNull("decisionRef");
+                            } else {
                                 payload.set(
                                         "decisionRef",
                                         reference(decision, "managed-action-decision"));
+                            }
                         },
                         records -> records);
         List<CommitResource> resources = new ArrayList<>();
         resources.add(resource(bytes, "managed-action-options"));
-        if (input != null) resources.add(resource(input, "managed-tool-input"));
-        if (decision != null) resources.add(resource(decision, "managed-action-decision"));
+        if (input != null) {
+            resources.add(resource(input, "managed-tool-input"));
+        }
+        if (decision != null) {
+            resources.add(resource(decision, "managed-action-decision"));
+        }
         ObjectNode request = JSON.valueToTree(original);
         request.set("resources", JSON.valueToTree(resources));
         return JSON.treeToValue(request, CommitTransactionRequest.class);

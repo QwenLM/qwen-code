@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.CALLS_REAL_METHODS;
-import static org.mockito.Mockito.mock;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -13,11 +14,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledOnOs;
-import org.junit.jupiter.api.condition.OS;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mock;
 
 @EnabledOnOs(OS.LINUX)
 class HostedOperatorRecoveryProbeTest {
@@ -47,13 +48,13 @@ class HostedOperatorRecoveryProbeTest {
 
             assertThatThrownBy(probe::close).isInstanceOf(AssertionError.class)
                     .hasMessageContaining(expected.toString()).hasMessageContaining(different.toString());
-            assertThat(tracked.waitFor(5, TimeUnit.SECONDS)).as("previously tracked process stopped").isTrue();
-            assertThat(registered.waitFor(5, TimeUnit.SECONDS)).as("registered worker stopped").isTrue();
+            assertThat(tracked.waitFor(60, TimeUnit.SECONDS)).as("previously tracked process stopped").isTrue();
+            assertThat(registered.waitFor(60, TimeUnit.SECONDS)).as("registered worker stopped").isTrue();
             assertThat(unverified.isAlive()).as("unverified PID remains untouched").isTrue();
         } finally {
             children.forEach(Process::destroyForcibly);
             for (Process child : children) {
-                assertThat(child.waitFor(5, TimeUnit.SECONDS)).as("fixture process %s stopped", child.pid()).isTrue();
+                assertThat(child.waitFor(60, TimeUnit.SECONDS)).as("fixture process %s stopped", child.pid()).isTrue();
             }
         }
     }

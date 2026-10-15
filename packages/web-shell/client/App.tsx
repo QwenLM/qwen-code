@@ -20,7 +20,10 @@ import { useWebShellNavigation } from './navigation';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
-import { isSessionWriterBlockedCode } from './daemon/session/session-context';
+import {
+  isSessionWriterBlockedCode,
+  sessionContextKey,
+} from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import {
@@ -191,6 +194,7 @@ import {
 import { TodoPanel } from './components/panels/TodoPanel';
 import {
   EnvironmentPanel,
+  isTaskInProgress,
   type EnvironmentAgentTask,
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
@@ -302,7 +306,11 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
-import { McpAppHostContext } from './mcpAppHostContext';
+import { McpAppHostContext, McpAppMessagesContext } from './mcpAppHostContext';
+import {
+  useMcpAppMessages,
+  type McpAppPromptSubmission,
+} from './hooks/useMcpAppMessages';
 import {
   isItemVisible,
   isSettingVisible,
@@ -459,7 +467,11 @@ import {
   shouldDisableComposerInput,
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
-import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
+import {
+  isDefinitelyRejectedPromptAdmission,
+  isMcpAppPromptAdmissionRejected,
+  PromptDispatchCancelledError,
+} from './utils/promptAdmission';
 import { base64ToBlob } from './utils/base64';
 import type {
   ACPToolCall,
@@ -751,11 +763,13 @@ function resolvePreparedSubmit(
 
 interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
+  source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
+  beforeDispatch?: (clientId: string | undefined) => void;
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
@@ -1525,8 +1539,8 @@ export interface WebShellProps {
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /**
-   * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Controls composer uploads (drag-and-drop and the @ panel upload item)
+   * and Files tree drag-and-drop uploads. Does not disable attachments.
    * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: `false` force-
    * disables upload even when the daemon advertises the capability, while
@@ -1538,13 +1552,14 @@ export interface WebShellProps {
    */
   fileDropAction?: 'upload' | 'attach';
   /**
-   * Directory that drag-and-dropped files upload into, **relative to the
+   * Directory that composer-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
    * `'uploads'`, `'uploads/images'`, or omit it to upload into the
    * workspace root (the default). A leading-slash path like `'/uploads'`
    * is rejected by the daemon as outside the workspace. The directory
    * (including intermediate components) is created automatically on upload
-   * when it does not exist.
+   * when it does not exist. Files tree drops use the explicit tree destination
+   * instead of this setting.
    */
   fileUploadDirectory?: string;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
@@ -1663,6 +1678,7 @@ export interface WebShellProps {
   onSubmitBefore?: (params: {
     sessionId: string | undefined;
     prompt: string;
+    source?: 'mcp-app';
   }) => Promise<void>;
 }
 
@@ -1792,6 +1808,21 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
 ];
+/**
+ * Right-panel entries that work without a session; the empty new-task page
+ * offers only these.
+ */
+const EMPTY_STATE_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
+  'files',
+  'terminal',
+  'webPreview',
+];
+/**
+ * Key prefix backing the empty new-task page's panel state: one draft entry
+ * per workspace, migrated to the session's key when the first prompt
+ * materializes one.
+ */
+const DRAFT_PANEL_KEY_PREFIX = 'draft\0';
 /**
  * One trajectory tab per session, so re-opening an already-open one reveals it
  * rather than stacking a second. Shared with the entry, which hides itself
@@ -2516,6 +2547,15 @@ function findReviewChangesByToolCallIds(
   );
 }
 
+function getEvictedArtifactPanelStateKeys(keys: Iterable<string>): string[] {
+  const entries = [...keys];
+  return [false, true].flatMap((draft) =>
+    entries
+      .filter((key) => key.startsWith(DRAFT_PANEL_KEY_PREFIX) === draft)
+      .slice(0, -MAX_ARTIFACT_PANEL_SESSION_STATES),
+  );
+}
+
 function readStoredArtifactPanelStates(
   key: string,
 ): Record<string, ArtifactPanelPersistedState> {
@@ -2531,9 +2571,7 @@ function readStoredArtifactPanelStates(
     if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
     delete storedStates['v'];
     const result: Record<string, ArtifactPanelPersistedState> = {};
-    for (const [sessionKey, value] of Object.entries(storedStates).slice(
-      -MAX_ARTIFACT_PANEL_SESSION_STATES,
-    )) {
+    for (const [sessionKey, value] of Object.entries(storedStates)) {
       if (!value || typeof value !== 'object') continue;
       const state = value as Record<string, unknown>;
       if (typeof state['open'] !== 'boolean') continue;
@@ -2550,6 +2588,11 @@ function readStoredArtifactPanelStates(
           : [],
       };
     }
+    for (const evictedKey of getEvictedArtifactPanelStateKeys(
+      Object.keys(result),
+    )) {
+      delete result[evictedKey];
+    }
     return result;
   } catch {
     // localStorage can be unavailable in private or embedded contexts.
@@ -2563,10 +2606,10 @@ function writeStoredArtifactPanelStates(
 ): void {
   if (typeof window === 'undefined') return;
   try {
-    while (Object.keys(states).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
-      const oldestSessionKey = Object.keys(states)[0];
-      if (!oldestSessionKey) break;
-      delete states[oldestSessionKey];
+    for (const evictedKey of getEvictedArtifactPanelStateKeys(
+      Object.keys(states),
+    )) {
+      delete states[evictedKey];
     }
     window.localStorage.setItem(key, JSON.stringify({ v: 1, ...states }));
   } catch (error) {
@@ -3460,6 +3503,11 @@ export function App({
   const contextUsageHeaderItemVisible =
     chatHeaderItems.includes('contextUsage');
   const rightPanelItems = rightPanel?.items ?? DEFAULT_RIGHT_PANEL_ITEMS;
+  // Workspace-scoped entries are the only ones usable before a session
+  // exists; the empty new-task page offers just those.
+  const emptyStateRightPanelItems = rightPanelItems.filter((item) =>
+    EMPTY_STATE_RIGHT_PANEL_ITEMS.includes(item),
+  );
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
   // The environment panel is only reachable through the chat header toggle,
@@ -4432,6 +4480,17 @@ export function App({
   const headerWorkspaceName = activeWorkspaceCwd
     ? workspaceLabelForCwd(activeWorkspaceCwd, ordinaryWorkspaces)
     : undefined;
+  // The artifact panel keys its state per session; the empty new-task page
+  // gets a per-workspace draft key so its files/terminal/web-preview tabs
+  // persist and restore like a session's.
+  const panelWorkspaceCwd = connection.sessionId
+    ? connection.workspaceCwd
+    : activeWorkspaceCwd;
+  const panelStateKey =
+    logicalSessionKey ??
+    (workspaceContextActive && activeWorkspaceCwd
+      ? `${DRAFT_PANEL_KEY_PREFIX}${activeWorkspaceCwd}`
+      : undefined);
   const workspaceWorkflowsEnabled =
     workspaces.find(
       (entry) =>
@@ -4838,8 +4897,7 @@ export function App({
     initialArtifactPanelPersistedStates,
   );
   const initialArtifactPanelOpen = Boolean(
-    logicalSessionKey &&
-      initialArtifactPanelPersistedStates[logicalSessionKey]?.open,
+    panelStateKey && initialArtifactPanelPersistedStates[panelStateKey]?.open,
   );
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(
     initialArtifactPanelOpen,
@@ -5113,18 +5171,17 @@ export function App({
   }, [artifactPanelTabs, blocks, logicalSessionKey]);
   useLayoutEffect(() => {
     if (
-      !logicalSessionKey ||
-      artifactPanelRestoredSessionKeyRef.current !== logicalSessionKey
+      !panelStateKey ||
+      artifactPanelRestoredSessionKeyRef.current !== panelStateKey
     )
       return;
     const previousPersistedState =
-      artifactPanelPersistedStatesRef.current[logicalSessionKey];
-    delete artifactPanelPersistedStatesRef.current[logicalSessionKey];
+      artifactPanelPersistedStatesRef.current[panelStateKey];
+    delete artifactPanelPersistedStatesRef.current[panelStateKey];
     const serializedTabs = serializeArtifactPanelTabs(artifactPanelTabs);
     const deferredTabs =
-      artifactPanelDeferredPersistedTabsRef.current.get(logicalSessionKey) ??
-      [];
-    artifactPanelPersistedStatesRef.current[logicalSessionKey] = {
+      artifactPanelDeferredPersistedTabsRef.current.get(panelStateKey) ?? [];
+    artifactPanelPersistedStatesRef.current[panelStateKey] = {
       open: artifactPanelOpen,
       activeTabId:
         activeArtifactPanelTabId ??
@@ -5147,7 +5204,7 @@ export function App({
     activeArtifactPanelTabId,
     artifactPanelOpen,
     artifactPanelTabs,
-    logicalSessionKey,
+    panelStateKey,
   ]);
   const [reviewChanges, setReviewChanges] = useState<
     readonly TurnOutputFileChange[]
@@ -5194,7 +5251,14 @@ export function App({
   const artifactPanelStateBySessionRef = useRef(
     new Map<string, ArtifactPanelSessionState>(),
   );
-  const artifactPanelSessionIdRef = useRef(logicalSessionKey);
+  const artifactPanelSessionIdRef = useRef(panelStateKey);
+  // Set when a session materialized out of the empty new-task state and
+  // adopted the panel as-is; cleared on the next real session switch.
+  const artifactPanelAdoptedSessionRef = useRef<string | undefined>(undefined);
+  // Set when the lazy first-prompt creation allocates a session id: the panel
+  // effect then treats the draft→session transition as a migration (panel
+  // carries over, draft entry dropped) instead of a session switch.
+  const draftMaterializedSessionIdRef = useRef<string | undefined>(undefined);
   artifactPanelSessionStateRef.current = {
     open: artifactPanelOpen,
     tabs: artifactPanelTabs,
@@ -5213,10 +5277,7 @@ export function App({
     workspaceContextActive &&
     rightPanelItems.includes('files') &&
     Boolean(
-      resolveArtifactWorkspaceOwner(
-        workspace.capabilities,
-        connection.workspaceCwd,
-      ),
+      resolveArtifactWorkspaceOwner(workspace.capabilities, panelWorkspaceCwd),
     );
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
@@ -5333,13 +5394,13 @@ export function App({
       id,
       kind: 'terminal',
       title: count === 0 ? base : `${base} (${count + 1})`,
-      workspaceCwd: connection.workspaceCwd,
+      workspaceCwd: panelWorkspaceCwd,
       initialized: true,
     };
     setArtifactPanelTabs((tabs) => [...tabs, tab]);
     setActiveArtifactPanelTabId(tab.id);
     setArtifactPanelOpen(true);
-  }, [connection.workspaceCwd, t]);
+  }, [panelWorkspaceCwd, t]);
   const sideTaskCreationPromisesRef = useRef(
     new Map<string, Promise<{ sessionId: string; displayName?: string }>>(),
   );
@@ -5973,7 +6034,11 @@ export function App({
         kind: 'trajectory',
         title: t('trajectory.title'),
         sessionId: sourceSessionId,
-        loadPage: createTrajectoryPageLoader(workspace.client, sourceSessionId),
+        loadPage: createTrajectoryPageLoader(
+          workspace.client,
+          sourceSessionId,
+          sessionContextKey(connection.sessionContext),
+        ),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -5986,7 +6051,12 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t, workspace.client],
+    [
+      getDefaultReviewPanelWidth,
+      t,
+      workspace.client,
+      connection.sessionContext,
+    ],
   );
   const openContextUsagePanel = useCallback(
     (
@@ -6524,7 +6594,11 @@ export function App({
     true;
   useLayoutEffect(() => {
     const previousSessionId = artifactPanelSessionIdRef.current;
-    const nextSessionId = logicalSessionKey;
+    const nextSessionId = panelStateKey;
+    const materializedSessionId = draftMaterializedSessionIdRef.current;
+    if (previousSessionId !== nextSessionId) {
+      draftMaterializedSessionIdRef.current = undefined;
+    }
     setArtifactPanelRestoring(false);
     if (
       previousSessionId &&
@@ -6540,27 +6614,28 @@ export function App({
           pendingRestore:
             artifactPanelRestoredSessionKeyRef.current !== previousSessionId,
         });
-        if (
-          artifactPanelStateBySessionRef.current.size >
-          MAX_ARTIFACT_PANEL_SESSION_STATES
-        ) {
-          const oldestSessionId = Array.from(
-            artifactPanelStateBySessionRef.current.keys(),
-          ).find((sessionId) => sessionId !== nextSessionId);
-          if (oldestSessionId) {
-            const oldestState =
-              artifactPanelStateBySessionRef.current.get(oldestSessionId);
-            for (const tab of oldestState?.tabs ?? []) {
-              if (tab.kind === 'terminal') {
-                releaseDetachedWebTerminal(
-                  workspace.baseUrl,
-                  tab.id,
-                  tab.workspaceCwd,
-                );
-              }
+        const nextState = nextSessionId
+          ? artifactPanelStateBySessionRef.current.get(nextSessionId)
+          : undefined;
+        if (nextSessionId && nextState) {
+          artifactPanelStateBySessionRef.current.delete(nextSessionId);
+          artifactPanelStateBySessionRef.current.set(nextSessionId, nextState);
+        }
+        for (const evictedKey of getEvictedArtifactPanelStateKeys(
+          artifactPanelStateBySessionRef.current.keys(),
+        )) {
+          const evictedState =
+            artifactPanelStateBySessionRef.current.get(evictedKey);
+          for (const tab of evictedState?.tabs ?? []) {
+            if (tab.kind === 'terminal') {
+              releaseDetachedWebTerminal(
+                workspace.baseUrl,
+                tab.id,
+                tab.workspaceCwd,
+              );
             }
-            artifactPanelStateBySessionRef.current.delete(oldestSessionId);
           }
+          artifactPanelStateBySessionRef.current.delete(evictedKey);
         }
       }
     }
@@ -6577,15 +6652,74 @@ export function App({
         nextSavedState?.width ?? getDefaultReviewPanelWidth(),
       );
       setArtifactPanelFullscreen(false);
+      artifactPanelAdoptedSessionRef.current = undefined;
     }
 
     artifactPanelSessionIdRef.current = nextSessionId;
     if (!nextSessionId) {
       artifactPanelRestoredSessionKeyRef.current = undefined;
       setArtifactPanelRestoring(false);
-      setArtifactPanelOpen(false);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      // Steady no-key states keep an already-open panel usable; only a real
+      // key change (leaving a session, or a draft losing its workspace
+      // context) drops the live panel content — persisted entries survive.
+      if (previousSessionId !== nextSessionId) {
+        setArtifactPanelOpen(false);
+        setArtifactPanelTabs([]);
+        setActiveArtifactPanelTabId(null);
+      }
+      return;
+    }
+    if (
+      previousSessionId !== undefined &&
+      previousSessionId.startsWith(DRAFT_PANEL_KEY_PREFIX) &&
+      materializedSessionId !== undefined &&
+      materializedSessionId === connection.sessionId
+    ) {
+      // The first prompt consumed the draft: the panel carries into the new
+      // session, and the workspace's draft resets to empty for the next
+      // new-task visit.
+      artifactPanelStateBySessionRef.current.delete(previousSessionId);
+      const previousDraftPersisted =
+        artifactPanelPersistedStatesRef.current[previousSessionId];
+      delete artifactPanelPersistedStatesRef.current[previousSessionId];
+      // Deferred tabs belong to the draft too: move them under the session
+      // key so a capability flip can still restore them later.
+      const deferredDraftTabs =
+        artifactPanelDeferredPersistedTabsRef.current.get(previousSessionId) ??
+        [];
+      artifactPanelDeferredPersistedTabsRef.current.delete(previousSessionId);
+      if (deferredDraftTabs.length > 0) {
+        setBoundedMapEntry(
+          artifactPanelDeferredPersistedTabsRef.current,
+          nextSessionId,
+          deferredDraftTabs,
+          MAX_ARTIFACT_PANEL_SESSION_STATES * 2,
+        );
+      }
+      // Persist the carried-over state under the session key immediately: the
+      // persist writer already ran earlier in this commit (before this
+      // effect) and would otherwise leave the session unrecorded until the
+      // next panel change.
+      const carriedState = artifactPanelSessionStateRef.current;
+      if (carriedState) {
+        setArtifactPanelWidth(carriedState.width);
+        setArtifactPanelFullscreen(artifactPanelFullscreenRef.current);
+        artifactPanelPersistedStatesRef.current[nextSessionId] = {
+          open: carriedState.open,
+          activeTabId: carriedState.activeTabId,
+          tabs: mergePersistedArtifactPanelTabs(
+            serializeArtifactPanelTabs(carriedState.tabs),
+            deferredDraftTabs,
+            previousDraftPersisted?.tabs,
+          ),
+        };
+      }
+      writeStoredArtifactPanelStates(
+        RIGHT_PANEL_STATE_STORAGE_KEY,
+        artifactPanelPersistedStatesRef.current,
+      );
+      artifactPanelAdoptedSessionRef.current = nextSessionId;
+      artifactPanelRestoredSessionKeyRef.current = nextSessionId;
       return;
     }
     const newlyAvailableDeferredTab = (
@@ -6606,12 +6740,48 @@ export function App({
     ) {
       return;
     }
+    if (
+      artifactPanelAdoptedSessionRef.current === nextSessionId &&
+      !newlyAvailableDeferredTab
+    ) {
+      // An adopted new-task panel stays untouched through the session's
+      // first load (transcript/artifact flips included).
+      return;
+    }
     const saveCurrentState = () => {
       if (artifactPanelRestoredSessionKeyRef.current !== nextSessionId) return;
       const currentState = artifactPanelSessionStateRef.current;
       if (!currentState) return;
       artifactPanelStateBySessionRef.current.delete(nextSessionId);
       artifactPanelStateBySessionRef.current.set(nextSessionId, currentState);
+    };
+    const retainCurrentTrajectory = () => {
+      const retainedTabs = artifactPanelTabsRef.current.filter(
+        (tab) =>
+          previousSessionId === nextSessionId &&
+          trajectoryAvailable &&
+          tab.kind === 'trajectory' &&
+          tab.loadPage ===
+            createTrajectoryPageLoader(
+              workspace.client,
+              tab.sessionId,
+              sessionContextKey(connection.sessionContext),
+            ),
+      );
+      setArtifactPanelTabs(
+        retainedTabs.map((tab) =>
+          tab.kind === 'trajectory'
+            ? { ...tab, historyGapRevision: (tab.historyGapRevision ?? 0) + 1 }
+            : tab,
+        ),
+      );
+      setActiveArtifactPanelTabId(
+        retainedTabs.some(
+          (tab) => tab.id === activeArtifactPanelTabIdRef.current,
+        )
+          ? activeArtifactPanelTabIdRef.current
+          : null,
+      );
     };
     if (connection.loadingTranscript) {
       saveCurrentState();
@@ -6623,8 +6793,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (connection.status !== 'connected') {
@@ -6637,8 +6806,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (artifactsLoading) {
@@ -6651,8 +6819,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
 
@@ -6700,7 +6867,7 @@ export function App({
         artifactPanelDeferredPersistedTabsRef.current,
         nextSessionId,
         deferredPersistedTabs,
-        MAX_ARTIFACT_PANEL_SESSION_STATES,
+        MAX_ARTIFACT_PANEL_SESSION_STATES * 2,
       );
     } else {
       artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
@@ -6903,6 +7070,7 @@ export function App({
                     loadPage: createTrajectoryPageLoader(
                       workspace.client,
                       tab.sessionId,
+                      sessionContextKey(connection.sessionContext),
                     ),
                   };
                 }
@@ -6954,12 +7122,13 @@ export function App({
       const desiredActiveTabId =
         savedState?.activeTabId ?? persisted?.activeTabId ?? null;
       const tabsOpenedDuringRestore = artifactPanelTabsRef.current;
-      const newlyOpenedIds = new Set(
-        tabsOpenedDuringRestore.map((tab) => tab.id),
+      const openedById = new Map(
+        tabsOpenedDuringRestore.map((tab) => [tab.id, tab]),
       );
+      const restoredIds = new Set(mergedRestoredTabs.map((tab) => tab.id));
       const candidateTabs = [
-        ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
-        ...tabsOpenedDuringRestore,
+        ...mergedRestoredTabs.map((tab) => openedById.get(tab.id) ?? tab),
+        ...tabsOpenedDuringRestore.filter((tab) => !restoredIds.has(tab.id)),
       ];
       const mergedTabs = candidateTabs.filter(
         (tab) =>
@@ -7027,13 +7196,14 @@ export function App({
     };
   }, [
     artifactsLoading,
+    connection.sessionContext,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
-    logicalSessionKey,
+    panelStateKey,
     resetEmptyArtifactPanel,
     sessionAgentTraceSupported,
     sessionActions,
@@ -7086,7 +7256,7 @@ export function App({
   const openFilesPanel = useCallback(() => {
     const owner = resolveArtifactWorkspaceOwner(
       workspace.capabilities,
-      connection.workspaceCwd,
+      panelWorkspaceCwd,
     );
     if (!filesAvailable || !owner) return;
     rememberArtifactPanelTrigger();
@@ -7106,7 +7276,7 @@ export function App({
     );
     setArtifactPanelOpen(true);
   }, [
-    connection.workspaceCwd,
+    panelWorkspaceCwd,
     filesAvailable,
     getMaxArtifactPanelWidth,
     rememberArtifactPanelTrigger,
@@ -8068,6 +8238,13 @@ export function App({
     () => sessionTasks.filter(isComposerTask),
     [sessionTasks],
   );
+  // The header dot promises only what the panel can show, so it follows the
+  // same section gating and the same in-progress rule as the panel's rows.
+  const environmentRunning =
+    (environmentPanelItems.includes('subagents') &&
+      environmentAgentTasks.some((task) => isTaskInProgress(task.status))) ||
+    (environmentPanelItems.includes('backgroundTasks') &&
+      backgroundTasks.some((task) => isTaskInProgress(task.status)));
   const monitorDetailsSessionIdRef = useRef(connection.sessionId);
   monitorDetailsSessionIdRef.current = connection.sessionId;
   const openMonitorPanelFromTool = useCallback(
@@ -10951,6 +11128,7 @@ export function App({
               await onSessionCreatedRef.current?.(sessionId);
             },
             onSessionAllocated: (sessionId) => {
+              draftMaterializedSessionIdRef.current = sessionId;
               notify?.(sessionId);
               preparingSessionIdRef.current = sessionId;
               allocatedSessionId = sessionId;
@@ -11099,8 +11277,11 @@ export function App({
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
+        source?: 'mcp-app';
+        isCurrent?: () => boolean;
+        beforeDispatch?: (clientId: string | undefined) => void;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
-        onAdmitted?: () => void;
+        onAdmitted?: (admission: { promptId: string }) => void;
         onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
@@ -11115,6 +11296,7 @@ export function App({
           'InvalidStateError',
         );
       }
+      const preserveComposer = opts?.source === 'mcp-app';
       let preparedPrompt = text;
       let preparedInputAnnotations = opts?.inputAnnotations
         ? [...opts.inputAnnotations]
@@ -11172,6 +11354,7 @@ export function App({
       };
       const admissionSourceIsCurrent = (allocatedSessionId?: string) =>
         admissionOwnerIsCurrent(allocatedSessionId) &&
+        (opts?.isCurrent?.() ?? true) &&
         !sessionWriteBlockedRef.current &&
         sessionWriteBlockGenerationRef.current ===
           admissionSource.writeBlockGeneration;
@@ -11183,6 +11366,7 @@ export function App({
               sessionId: admissionSource.sessionId,
               prompt: preparedPrompt,
               inputAnnotations: preparedInputAnnotations,
+              ...(opts?.source ? { source: opts.source } : {}),
             });
             const resolved = resolvePreparedSubmit(
               preparedPrompt,
@@ -11200,6 +11384,7 @@ export function App({
             await submitBefore({
               sessionId: admissionSource.sessionId,
               prompt: preparedPrompt,
+              ...(opts?.source ? { source: opts.source } : {}),
             });
           }
         } catch (err) {
@@ -11218,6 +11403,7 @@ export function App({
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
           // cancelled prompt.
           restoreCancelledSubmitState();
+          if (preserveComposer && !isAbortError(err)) throw err;
           return;
         }
         if (!appMountedRef.current) return;
@@ -11283,6 +11469,7 @@ export function App({
         : existingSessionWorkspaceCwd;
       const isSlashPreparedSubmit = preparedPrompt.trimStart().startsWith('/');
       if (
+        !preserveComposer &&
         !opts?.retry &&
         opts?.optimisticUserMessage !== false &&
         !isSlashPreparedSubmit
@@ -11311,6 +11498,7 @@ export function App({
           snapshot: sessionOwnerGuard.capture(),
         };
       } else if (
+        !preserveComposer &&
         !opts?.retry &&
         opts?.optimisticUserMessage !== false &&
         isSlashPreparedSubmit
@@ -11320,14 +11508,16 @@ export function App({
         // resend the already-succeeded earlier prompt.
         disarmSubmittedPromptRetry();
       }
-      setShowRetryHint(false);
+      if (!preserveComposer) setShowRetryHint(false);
       finishPreparing();
       if (opts?.ownerRef) opts.ownerRef.current = sessionOwnerGuard.capture();
-      clearFollowup();
-      if (opts?.commitComposerAccepted) {
-        opts.commitComposerAccepted();
-      } else if (opts?.clearComposerOnPromptStart) {
-        editorRef.current?.clear();
+      if (!preserveComposer) {
+        clearFollowup();
+        if (opts?.commitComposerAccepted) {
+          opts.commitComposerAccepted();
+        } else if (opts?.clearComposerOnPromptStart) {
+          editorRef.current?.clear();
+        }
       }
       let admissionStarted = false;
       let admitted = false;
@@ -11339,6 +11529,7 @@ export function App({
       // attachments only once it is admitted, so both points try.
       const trackInFlightPrompt = () => {
         if (
+          preserveComposer ||
           inFlightPrompt ||
           opts?.retry ||
           opts?.optimisticUserMessage === false ||
@@ -11361,6 +11552,7 @@ export function App({
         ...(opts?.submittedPrompt !== undefined
           ? { submittedPrompt: opts.submittedPrompt }
           : {}),
+        ...(opts?.source ? { source: opts.source } : {}),
         images,
         files,
         inputAnnotations:
@@ -11369,14 +11561,21 @@ export function App({
             : undefined,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
+        ...(opts?.beforeDispatch
+          ? { beforeDispatch: opts.beforeDispatch }
+          : {}),
         onAdmissionStarted: () => {
-          admissionStarted = true;
           opts?.onAdmissionStarted?.(
             connectionRef.current.sessionId ?? allocatedSessionId,
           );
+          admissionStarted = true;
         },
         onAdmitted: (admission) => {
           admitted = true;
+          if (preserveComposer && admissionOwnerIsCurrent()) {
+            disarmSubmittedPromptRetry();
+            setShowRetryHint(false);
+          }
           if (sessionIdAfterEnsure && promptWorkspaceCwd) {
             sessionCatalogController.promptAdmitted(
               promptWorkspaceCwd,
@@ -11387,7 +11586,7 @@ export function App({
           if (inFlightPrompt && admission?.promptId) {
             inFlightPrompt.promptId = admission.promptId;
           }
-          opts?.onAdmitted?.();
+          opts?.onAdmitted?.(admission);
         },
       };
       if (
@@ -11434,7 +11633,9 @@ export function App({
         if (
           admissionStarted &&
           !admitted &&
-          !isDefinitelyRejectedPromptAdmission(error) &&
+          !(preserveComposer
+            ? isMcpAppPromptAdmissionRejected(error)
+            : isDefinitelyRejectedPromptAdmission(error)) &&
           promptWorkspaceCwd
         ) {
           sessionCatalogController.promptAdmissionUncertain(promptWorkspaceCwd);
@@ -11954,6 +12155,96 @@ export function App({
     editorRef,
     reportError,
     t,
+  });
+
+  const mcpAppQueueBusyRef = useRef(queuedPrompts.length > 0);
+  mcpAppQueueBusyRef.current = queuedPrompts.length > 0;
+  const submitMcpAppMessage = useCallback(
+    async (text: string, submission: McpAppPromptSubmission) => {
+      const sessionId = connectionRef.current.sessionId;
+      const clientId = connectionRef.current.clientId;
+      const workspaceCwd = getComposerWorkspaceCwd();
+      const sourceVersion = composerSourceVersionRef.current;
+      const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
+      const isCurrent = () => {
+        const current = connectionRef.current;
+        return (
+          appMountedRef.current &&
+          !submission.signal.aborted &&
+          submission.isCurrent() &&
+          current.status === 'connected' &&
+          !current.runtimeStopped &&
+          Boolean(sessionId && clientId) &&
+          current.sessionId === sessionId &&
+          current.clientId === clientId &&
+          getComposerWorkspaceCwd() === workspaceCwd &&
+          composerSourceVersionRef.current === sourceVersion &&
+          !sessionWriteBlockedRef.current &&
+          sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
+          !current.standaloneSession?.creationRecovery &&
+          !isSessionWriterBlockedCode(current.standaloneSession?.errorCode) &&
+          current.standaloneSession?.errorCode !==
+            'working_directory_missing' &&
+          current.standaloneSession?.errorCode !==
+            'working_directory_compromised' &&
+          !(
+            unknownPromptAdmissionRef.current?.payloadAvailable &&
+            unknownPromptAdmissionRef.current.sessionId === sessionId
+          )
+        );
+      };
+      const assertCurrent = () => {
+        if (!isCurrent()) throw new DOMException('Cancelled', 'AbortError');
+      };
+      const assertIdle = () => {
+        if (
+          streamingStateRef.current !== 'idle' ||
+          sessionHasActivePromptRef.current ||
+          isGoalGateBlocked() ||
+          mcpAppQueueBusyRef.current ||
+          queuedShellCommandsRef.current.length > 0 ||
+          shellSubmitInFlightRef.current
+        ) {
+          throw new Error(t('mcpApp.message.busy'));
+        }
+      };
+      assertCurrent();
+      assertIdle();
+      if (promptPreparationOwnerRef.current) {
+        throw new Error(t('mcpApp.message.busy'));
+      }
+      return sendPrompt(text, undefined, undefined, {
+        source: 'mcp-app',
+        isCurrent,
+        beforeAdmission: async () => {
+          assertCurrent();
+          assertIdle();
+        },
+        beforeDispatch: (dispatchClientId) => {
+          try {
+            assertCurrent();
+            if (dispatchClientId !== clientId) {
+              throw new DOMException('Session client changed', 'AbortError');
+            }
+            submission.onDispatched();
+          } catch (error) {
+            throw new PromptDispatchCancelledError('Cancelled before sending', {
+              cause: error,
+            });
+          }
+        },
+        onAdmissionStarted: assertCurrent,
+        onAdmitted: submission.onAdmitted,
+      });
+    },
+    [getComposerWorkspaceCwd, isGoalGateBlocked, sendPrompt, t],
+  );
+  const mcpAppMessages = useMcpAppMessages({
+    enabled: connection.status === 'connected' && !connection.runtimeStopped,
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    captureOwner: () => sessionOwnerGuard.capture({ includeRecovery: true }),
+    submit: submitMcpAppMessage,
   });
 
   const enqueuePrompt = useCallback(
@@ -13881,9 +14172,9 @@ export function App({
   // so the panel is revealed even when the click comes while scrolled up.
   const showContextUsage = useCallback(
     (commandText: string, detail: boolean) => {
-      // Read-only: every entry point (keyboard, status-bar button, in-chat
-      // "context detail" click) runs immediately, even mid-turn — only the
-      // echo is skipped while streaming so the active turn is not split.
+      // Read-only: every entry point (keyboard, status-bar button) runs
+      // immediately, even mid-turn — only the echo is skipped while streaming
+      // so the active turn is not split.
       if (!requireActiveSessionForLocalCommand()) return;
       const owner = sessionOwnerGuard.capture();
       echoLocalCommandIfIdle(commandText);
@@ -13911,22 +14202,10 @@ export function App({
       t,
     ],
   );
-  // Stable identity: ChatEditor is memoized and an inline closure would
-  // re-render it on every app render.
-  const handleShowContextUsage = useCallback(
-    () => showContextUsage('/context', false),
-    [showContextUsage],
-  );
   const contextUsageAvailable = !shouldBlockComposerSubmit({
     connectionStatus: connection.status,
     hasSession: Boolean(connection.sessionId),
   });
-
-  // Stable reference: this travels through the memoized MessageList →
-  // MessageItem chain, so an inline closure would defeat their memo.
-  const handleShowContextDetail = useCallback(() => {
-    showContextUsage('/context detail', true);
-  }, [showContextUsage]);
 
   const pendingBranchRequestsRef = useRef(new Map<string, Promise<void>>());
   const branchCurrentSession = useCallback(
@@ -19377,6 +19656,18 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  // Custom header renderers require a session. The built-in empty-state
+  // header exposes only configured workspace actions with a resolved owner.
+  const emptyStateChatHeader =
+    isChatEmptyState &&
+    Boolean(header) &&
+    !renderChatHeader &&
+    workspaceContextActive &&
+    Boolean(activeWorkspaceCwd) &&
+    mainView === 'chat' &&
+    ((rightPanelHeaderItemVisible && emptyStateRightPanelItems.length > 0) ||
+      showMobileAccess ||
+      workspaceHostsEnabled);
   const handleAgentCollaborationError = useCallback(
     (message: string) => pushToast('error', message),
     [pushToast],
@@ -19575,6 +19866,14 @@ export function App({
     effectiveSessionContext?.kind,
     isChatEmptyState,
   ]);
+  const composerNamesWorkspace =
+    composerWorkspaceSelectEnabled &&
+    visibleComposerToolbarActions.includes('workspace') &&
+    composerWorkspaces !== undefined &&
+    (composerWorkspaces.length > 1 ||
+      scratchWorkspaceRegistrationSupported ||
+      dynamicWorkspaceRegistrationSupported ||
+      (standaloneSessionsSupported && !lockedWorkspaceCwd));
   const useMobileWelcomeMiddleLayout =
     isChatEmptyState && mobileWelcomeFooterMiddle;
   const showMobileWelcomeFooterMiddle =
@@ -20104,7 +20403,7 @@ export function App({
     activeTabId: activeArtifactPanelTabId,
     reviewChanges,
     selectedReviewPath,
-    workspaceCwd: connection.workspaceCwd || '',
+    workspaceCwd: panelWorkspaceCwd || '',
     loading: artifactsLoading,
     restoring: artifactPanelRestoring,
     error: artifactsError,
@@ -20149,7 +20448,7 @@ export function App({
     trajectoryTabId: connection.sessionId
       ? trajectoryTabId(connection.sessionId)
       : undefined,
-    items: rightPanelItems,
+    items: isChatEmptyState ? emptyStateRightPanelItems : rightPanelItems,
     sideTaskAvailable: sideTasksAvailable,
     sideTasks: visibleSideTasks,
     sideTasksLoading,
@@ -20246,6 +20545,7 @@ export function App({
       {/* prettier-ignore */}
       <BrandProvider value={resolvedBrand}>
       <I18nProvider language={selectedLanguage}>
+        <McpAppMessagesContext.Provider value={mcpAppMessages.context}>
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
@@ -20261,6 +20561,7 @@ export function App({
           data-compact-sidebar={compactShell ? '' : undefined}
           lang={selectedLanguage}
         >
+          {mcpAppMessages.review}
           {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
           {!onToast && (
             <ToastHost
@@ -21009,7 +21310,7 @@ export function App({
               aria-hidden={artifactPanelFullscreen || undefined}
             >
               {chatHeaderEnabled &&
-                !isChatEmptyState &&
+                (!isChatEmptyState || emptyStateChatHeader) &&
                 !activePanel &&
                 (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
@@ -21083,27 +21384,34 @@ export function App({
                       location={
                         workspaceHostsEnabled && mainView === 'chat' ? (
                           <WorkspaceLocation
-                            cwd={connection.workspaceCwd}
+                            cwd={panelWorkspaceCwd}
                             hostOrigin={focusedHostOrigin}
                           />
                         ) : undefined
                       }
                       content={
-                        titleHeaderItemVisible
+                        titleHeaderItemVisible && !isChatEmptyState
                           ? (sessionDisplayName ?? t('session.new'))
                           : null
                       }
                       workspaceName={headerWorkspaceName}
                       workspacePath={activeWorkspaceCwd}
+                      hideWorkspaceIcon={isChatEmptyState && composerNamesWorkspace}
                       environmentOpen={environmentPanelVisible}
                       environmentAvailable={
-                        mainView === 'chat' && environmentHeaderItemVisible
+                        !isChatEmptyState &&
+                        mainView === 'chat' &&
+                        environmentHeaderItemVisible
                       }
+                      environmentRunning={environmentRunning}
                       rightPanelOpen={artifactPanelOpen}
                       rightPanelAvailable={
                         mainView === 'chat' &&
                         rightPanelHeaderItemVisible &&
-                        !artifactPanelOpen
+                        !artifactPanelOpen &&
+                        (!isChatEmptyState ||
+                          (Boolean(activeWorkspaceCwd) &&
+                            emptyStateRightPanelItems.length > 0))
                       }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
@@ -21181,19 +21489,13 @@ export function App({
             >
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
-                (!chatHeaderEnabled || isChatEmptyState) &&
+                (!chatHeaderEnabled ||
+                  (isChatEmptyState && !emptyStateChatHeader)) &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
                     type="button"
-                    className={[
-                      styles.hamburgerButton,
-                      !chatHeaderEnabled || isChatEmptyState
-                        ? styles.hamburgerButtonFloating
-                        : undefined,
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
+                    className={`${styles.hamburgerButton} ${styles.hamburgerButtonFloating}`}
                     onClick={() => {
                       setForceMobileDrawer(false);
                       setMobileDrawerOpen((open) => !open);
@@ -22050,7 +22352,11 @@ export function App({
                                   terminalBackgroundShellTaskIds
                                 }
                                 pendingApproval={pendingToolApproval}
-                                onShowContextDetail={handleShowContextDetail}
+                                onShowContextDetail={
+                                  contextUsageAvailable
+                                    ? openCurrentContextUsagePanel
+                                    : undefined
+                                }
                                 loadingTranscript={connection.loadingTranscript}
                                 catchingUp={connection.catchingUp}
                                 hasOlderHistory={transcriptHistory.hasMore}
@@ -22827,9 +23133,6 @@ export function App({
                           contextUsageAlwaysVisible={
                             contextUsageAlwaysVisible
                           }
-                          onShowContextUsage={
-                            contextUsageAvailable ? handleShowContextUsage : undefined
-                          }
                           contextUsageControls={
                             connection.sessionId
                               ? contextUsageControls[connection.sessionId]
@@ -23337,6 +23640,7 @@ export function App({
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
+        </McpAppMessagesContext.Provider>
       </I18nProvider>
       </BrandProvider>
     </ThemeProvider>
