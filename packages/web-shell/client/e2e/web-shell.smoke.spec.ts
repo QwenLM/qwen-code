@@ -105,8 +105,8 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   // #8214: pin the explicit ::selection rule on message content. This
   // asserts the rule is present and matches every [data-user-selectable]
   // wrapper row (user and assistant alike), not just the first one; it
-  // does not verify the Firefox paint effect itself (this repo's Playwright
-  // projects are chromium-only).
+  // does not verify the Firefox paint effect itself (no Firefox project is
+  // configured).
   const selectionBackgrounds = await page.evaluate(() => {
     // Match the wrapper rows themselves, not their descendants - a single
     // row renders many descendant elements, so counting descendants does
@@ -309,7 +309,7 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   await expect.poll(() => daemon.configOptionRequests().length).toBe(3);
   expect(requestBodyRecord(daemon.configOptionRequests()[2]!)).toEqual({
     configId: 'reasoning_effort',
-    value: 'default',
+    value: 'xhigh',
     persist: true,
   });
   await expect(thinking).toBeChecked();
@@ -444,7 +444,9 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   const daemon = await installScenario(page, scenario, testInfo);
 
   await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
 
   const modelButton = page.locator('[data-web-shell-model-button]');
   await expect(modelButton).toContainText('qwen3.8-max · Extra High');
@@ -591,7 +593,10 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
     ).length;
   const providersBeforeClear = qualifiedProviderRequestCount();
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'New task', exact: true })
+    .first()
+    .click();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/');
   await expect(modelButton).toContainText('qwen3.8-max · Medium');
   expect(qualifiedProviderRequestCount()).toBe(providersBeforeClear);
@@ -672,7 +677,7 @@ test('keeps mandatory qwen3.8-max effort switchable before lazy session creation
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
 });
 
-test('discards an incompatible welcome effort when switching away and back @smoke', async ({
+test('keeps the target welcome preference when switching away and back @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -729,34 +734,14 @@ test('discards an incompatible welcome effort when switching away and back @smok
     .locator('[data-web-shell-toolbar-popover]:visible')
     .getByRole('button', { name: 'qwen3.8-max', exact: true })
     .click();
-  await expect(modelButton).toContainText('qwen3.8-max · Extra High');
-  await expect(modelButton).not.toContainText('Medium');
+  await expect(modelButton).toContainText('qwen3.8-max · Medium');
 
   await page.keyboard.press('Escape');
-  await fillComposer(page, 'Use the reset model default');
+  await fillComposer(page, 'Use the existing model preference');
   await page.locator('[data-web-shell-composer-submit]').click();
 
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
-  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
-  expect(
-    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
-  ).toEqual({
-    configId: 'reasoning_effort',
-    value: 'default',
-    persist: true,
-  });
-  const configRequestIndex = daemon.requests.findIndex(
-    (request) =>
-      request.method === 'POST' &&
-      /\/session\/[^/]+\/config-option$/.test(request.path),
-  );
-  const promptRequestIndex = daemon.requests.findIndex(
-    (request) =>
-      request.method === 'POST' &&
-      /\/session\/[^/]+\/prompt\/?$/.test(request.path),
-  );
-  expect(configRequestIndex).toBeGreaterThanOrEqual(0);
-  expect(configRequestIndex).toBeLessThan(promptRequestIndex);
+  expect(daemon.configOptionRequests()).toEqual([]);
 });
 
 test('cancels the first prompt when live reasoning capability is missing @smoke', async ({
@@ -1096,7 +1081,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
 
   await gotoSession(page, scenario, daemon);
   await submitLocalCommand(page, '/extensions');
-  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('tab', { name: 'Archive' }).click();
   const archiveInput = page.getByLabel('Select a .zip or .tar.gz archive.');
   await archiveInput.setInputFiles({
@@ -1105,7 +1090,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
     buffer: Buffer.from('stale-archive'),
   });
   await page.getByRole('button', { name: 'Cancel' }).click();
-  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('tab', { name: 'Archive' }).click();
   await expect(page.getByText('Selected archive: stale.zip')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
@@ -1223,7 +1208,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
     page.getByRole('heading', { name: 'Add Extension' }),
   ).toHaveCount(0);
   await expect(page.getByText('Extension "demo" installed.')).toBeVisible();
-  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(page.getByRole('tab', { name: 'Source' })).toHaveAttribute(
     'aria-selected',
     'true',
@@ -1726,6 +1711,52 @@ test('anchors the empty mobile composer with a custom footer but no welcome foot
   });
 });
 
+test('keeps desktop history search reachable in a short window @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 300 });
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'qwen-web-shell-history',
+      JSON.stringify(
+        Array.from({ length: 8 }, (_, index) => `saved input ${index + 1}`),
+      ),
+    ),
+  );
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  await replaceComposerText(page, 'working draft');
+  await page.keyboard.press('Control+r');
+  const search = page.locator('[data-web-shell-composer-history-search]');
+  await expect(search).toBeFocused();
+  await expect(
+    page.getByRole('button', { name: /saved input 1/ }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      search.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        return [rect.top + 1, rect.top + rect.height / 2].every((y) =>
+          element.contains(document.elementFromPoint(x, y)),
+        );
+      }),
+    )
+    .toBe(true);
+  const panel = search.locator('..').locator('..');
+  const surface = page.locator('[data-web-shell-composer-surface]');
+  const panelBox = (await panel.boundingBox())!;
+  const surfaceBox = (await surface.boundingBox())!;
+  expect(panelBox.y + panelBox.height).toBeGreaterThan(surfaceBox.y);
+  await page.keyboard.press('Escape');
+  await expect(search).toHaveCount(0);
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await expect(editor).toHaveText('working draft');
+  await expect(editor).toBeFocused();
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
   test(`grows long text to the responsive composer cap at ${viewportHeight}px @smoke`, async ({
     page,
@@ -1737,7 +1768,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
     await gotoSession(page, scenario, daemon);
     const surface = page.locator('[data-web-shell-composer-surface]');
     const initialHeight = await composerHeight(page);
-    expect(initialHeight).toBe(140);
+    expect(initialHeight).toBe(116);
 
     await replaceComposerText(
       page,
@@ -2000,7 +2031,9 @@ async function gotoSession(
   daemon: MockDaemonController,
 ): Promise<void> {
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await completeReplay(
     page,
     daemon,
@@ -2017,7 +2050,9 @@ async function gotoComposerLayoutHarness(
   await page.goto(
     `/e2e/composer-layout-harness.html?sessionId=${encodeURIComponent(scenario.sessionId)}`,
   );
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await completeReplay(page, daemon, scenario.sessionId);
 }
 

@@ -18,7 +18,7 @@
  */
 
 import { useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { toOriginalKey } from './key-map.js';
@@ -31,6 +31,7 @@ import {
   DialogFrame,
   DialogSelect,
   FooterHint,
+  dialogContentWidth,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
@@ -73,9 +74,12 @@ export function computeModelDialogMaxItems(
   );
 }
 
+export const ADVISOR_OFF_OPTION = '$advisor-off';
+
 export type ModelDialogMode =
   | 'primary'
   | 'fast'
+  | 'advisor'
   | 'voice'
   | 'vision'
   | 'compaction'
@@ -147,13 +151,18 @@ export function parseModelSelectionKey(key: string): {
 
 /**
  * Parity of `encodeAuxModelSelector` in ModelDialog.tsx: encode a selection
- * key into the `authType:modelId` form persisted for the fast/vision auxiliary
- * models (baseUrl discarded). Handles the three selection-key shapes.
+ * key into the `authType:modelId[\0baseUrl]` form persisted for the
+ * fast/vision auxiliary models, keeping the baseUrl endpoint disambiguator
+ * when the row carries one (#12760). Handles the three selection-key shapes.
  */
 export function encodeAuxModelSelector(selected: string): string {
   if (selected.includes('::')) {
     const parsed = parseModelSelectionKey(selected);
-    return `${parsed.authType}:${parsed.modelId}`;
+    const selector = `${parsed.authType}:${parsed.modelId}`;
+    // Parity of the ink dialog: the suffix is persisted registry-exact because
+    // it is the routing key consumers compare with `===`. Egress surfaces scrub
+    // it through `aux-model-selector.ts`.
+    return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
   }
   if (selected.startsWith('$runtime|')) {
     const parts = selected.split('|');
@@ -162,18 +171,9 @@ export function encodeAuxModelSelector(selected: string): string {
   return selected;
 }
 
-/**
- * Parity of `encodeVisionModelSelector` in ModelDialog.tsx: keep the selected
- * row's baseUrl when present (so same-provider same-id endpoints stay
- * distinct), otherwise fall back to the aux encoding.
- */
+/** Keep the existing vision/image export while sharing aux-selector encoding. */
 export function encodeVisionModelSelector(selected: string): string {
-  if (!selected.includes('::')) {
-    return encodeAuxModelSelector(selected);
-  }
-  const parsed = parseModelSelectionKey(selected);
-  const selector = `${parsed.authType}:${parsed.modelId}`;
-  return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
+  return encodeAuxModelSelector(selected);
 }
 
 /** Parity of the ModelDialog title line. */
@@ -190,9 +190,11 @@ export function modelDialogTitle(
           ? t('Select Compaction Model')
           : mode === 'image'
             ? t('Select Image Model')
-            : mode === 'fast'
-              ? t('Select Fast Model')
-              : t('Select Model');
+            : mode === 'advisor'
+              ? t('Select Advisor Model')
+              : mode === 'fast'
+                ? t('Select Fast Model')
+                : t('Select Model');
   const suffix =
     persistScope === 'workspace'
       ? t(' (this project)')
@@ -220,6 +222,7 @@ export interface OpenTuiModelEntry extends DialogListItem<string> {
 
 /** Plain-text row title (colors are applied at render time). */
 export function formatModelOptionLabel(entry: OpenTuiModelEntry): string {
+  if (entry.key === ADVISOR_OFF_OPTION) return entry.label;
   let label = `[${entry.authType}] ${entry.label}`;
   if (entry.modelId !== entry.label) label += ` (${entry.modelId})`;
   if (entry.isRuntime) label += ' (Runtime)';
@@ -254,6 +257,8 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
 
   const isAuxMode = mode !== 'primary';
   const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
+  const { width: terminalWidth } = useTerminalDimensions();
+  const ruleWidth = dialogContentWidth(terminalWidth);
 
   const initialIndex = initialKey
     ? Math.max(
@@ -333,19 +338,22 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
             onSelectIndex={list.selectIndex}
             onWheel={(direction) =>
               list.setActiveIndex(
-                list.activeIndex + (direction === 'down' ? 1 : -1),
+                list.activeIndexRef.current + (direction === 'down' ? 1 : -1),
               )
             }
             renderLabel={(item, { titleColor }) => (
-              <text fg={titleColor}>{formatModelOptionLabel(item)}</text>
+              <box flexDirection="column">
+                <text fg={titleColor}>{formatModelOptionLabel(item)}</text>
+                {item.description && <text fg={C.dim}>{item.description}</text>}
+              </box>
             )}
           />
         </box>
       )}
 
-      {highlightedEntry && (
+      {highlightedEntry && highlightedEntry.key !== ADVISOR_OFF_OPTION && (
         <box flexDirection="column" marginTop={1}>
-          <text fg={C.dim}>{'─'.repeat(20)}</text>
+          <text fg={C.dim}>{'─'.repeat(ruleWidth)}</text>
           {highlightedEntry.isQwenOAuth && !highlightedEntry.isRuntime && (
             <box marginTop={1}>
               <text fg={C.yellow}>

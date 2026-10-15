@@ -82,6 +82,16 @@ class TeamCreateInvocation extends BaseToolInvocation<
       };
     }
 
+    if (this.config.getAgentExecutionBackend?.() === 'container') {
+      const msg =
+        'Container execution is required; team and Arena agents are unsupported.';
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
     // Build team file. The owner identity (session UUID + PID) is what
     // lets a later `team_create` distinguish "name in use by a live
     // session" from "stranded by an exit that never ran team_delete".

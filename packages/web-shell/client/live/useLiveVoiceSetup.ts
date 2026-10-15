@@ -6,12 +6,20 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  DaemonLiveHostInstallState,
   DaemonLiveSetupStatus,
   DaemonLiveSetupUpdate,
 } from '@qwen-code/sdk';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 
 const POLL_INTERVAL_MS = 1_000;
+// After an install/launch the host app needs a few seconds to say hello; stop
+// waiting after a bounded window so a host that never runs does not poll
+// forever — the focus/visibility refresh remains as the recovery path.
+const HOST_READY_WAIT_MS = 30_000;
+
+export const INSTALLING_STATES: ReadonlySet<DaemonLiveHostInstallState> =
+  new Set(['checking', 'downloading', 'verifying', 'installing', 'launching']);
 
 export interface UseLiveVoiceSetupResult {
   supported: boolean;
@@ -25,7 +33,10 @@ export interface UseLiveVoiceSetupResult {
   launchHost: () => Promise<void>;
 }
 
-export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
+export function useLiveVoiceSetup(
+  supported: boolean,
+  active = true,
+): UseLiveVoiceSetupResult {
   const workspace = useWorkspace();
   const [status, setStatus] = useState<DaemonLiveSetupStatus>();
   const [loading, setLoading] = useState(false);
@@ -48,7 +59,7 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
   }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (!supported) return;
+    if (!supported || !active) return;
     const generation = generationRef.current;
     if (mutationRef.current === generation) return;
     if (requestRef.current?.generation === generation) {
@@ -79,7 +90,7 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
     })();
     requestRef.current = { generation, promise: request };
     return await request;
-  }, [supported, workspace.client]);
+  }, [supported, active, workspace.client]);
 
   useEffect(() => {
     if (
@@ -95,22 +106,52 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
     setMutating(false);
     setRefreshError(undefined);
     setMutationError(undefined);
-    if (!supported) return undefined;
+  }, [supported, workspace.client]);
+
+  useEffect(() => {
+    if (!supported || !active) return undefined;
     void refresh();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void refresh();
-    }, POLL_INTERVAL_MS);
     const onVisible = () => {
       if (document.visibilityState === 'visible') void refresh();
     };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onVisible);
     return () => {
-      window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, [refresh, supported, workspace.client]);
+  }, [refresh, supported, active, workspace.client]);
+
+  const hostWaiting = Boolean(
+    status?.enabled &&
+      status.install.state === 'installed' &&
+      status.live.requirements?.host !== 'ready',
+  );
+  const [hostWaitExpired, setHostWaitExpired] = useState(false);
+  useEffect(() => {
+    if (!hostWaiting) {
+      setHostWaitExpired(false);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setHostWaitExpired(true),
+      HOST_READY_WAIT_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [hostWaiting]);
+
+  const statusPending =
+    !status ||
+    Boolean(refreshError) ||
+    INSTALLING_STATES.has(status.install.state) ||
+    (hostWaiting && !hostWaitExpired);
+  useEffect(() => {
+    if (!supported || !active || !statusPending) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh();
+    }, POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [supported, active, statusPending, refresh]);
 
   const mutate = useCallback(
     async (operation: () => Promise<DaemonLiveSetupStatus>): Promise<void> => {

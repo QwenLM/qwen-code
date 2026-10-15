@@ -15,8 +15,12 @@ import {
   launchToolBudget,
   reverseAuditRoundCap,
   reverseAuditRoundTier,
+  sizeTier,
   cappedRoundTier,
   reviewBudget as deriveReviewBudget,
+  isFixAuditRound,
+  isTerritoryFanOut,
+  interactionEntryOf,
   type BudgetContext,
   type BudgetInput,
 } from './budget.js';
@@ -1213,18 +1217,20 @@ describe('cappedRoundTier — the operator ceiling may only lower a tier', () =>
   });
 });
 
-describe('the huge reduction applies only where there is a wall to fit inside', () => {
+describe('the huge reduction applies only under an explicit clock — a ceiling to fit inside', () => {
   const HUGE = { srcDiffLines: 5000, diffLines: 5000 };
   const LARGE = { srcDiffLines: 900, diffLines: 900 };
   const SMALL = { srcDiffLines: 100, diffLines: 100 };
 
-  it('a huge diff with no deadline is just a large 3B diff', () => {
+  it('a huge diff without an explicit clock is just a large 3B diff', () => {
     // Three is not a claim that a huge diff converges sooner — it has more
     // defects and more territory, and on recall it deserves MORE rounds. It is
-    // a claim that five ~90-minute rounds do not fit a six-hour ceiling. With
-    // no ceiling the premise is absent, and trading recall away to fit a wall
-    // that is not there is a pure loss on exactly the tier where recall
-    // matters most.
+    // a claim that five ~90-minute rounds do not fit a six-hour ceiling. The
+    // premise is an EXPLICIT clock — CI's epoch or `--deadline` — not the
+    // presence of a wall: the plan's default wall is sized above the run,
+    // so under it the premise is absent, and trading recall away to fit a
+    // ceiling that is not there is a pure loss on exactly the tier where
+    // recall matters most.
     expect(reverseAuditRoundTier(HUGE, false)).toBe(5);
     expect(reverseAuditRoundTier(HUGE, true)).toBe(3);
     expect(reviewBudget(HUGE, { hasDeadline: false }).reverseAuditRounds).toBe(
@@ -1264,5 +1270,196 @@ describe('the huge reduction applies only where there is a wall to fit inside', 
     const withClock = { ...HUGE, budget: { reverseAuditRounds: 3 } };
     expect(reverseAuditRoundCap(withClock, true)).toBe(3);
     expect(reverseAuditRoundCap(withClock, false)).toBe(3); // in [3,5], honoured
+  });
+});
+
+describe('isFixAuditRound and the topology override (#10104)', () => {
+  const POSTURE = {
+    incremental: {
+      since: 'a'.repeat(40),
+      effective: true,
+      posture: 'critical',
+      scope: { anchor: 'a'.repeat(40), deltaFiles: ['x.ts'], interaction: [] },
+    },
+  };
+
+  it('reads the posture only from a well-formed effective block', () => {
+    expect(isFixAuditRound(POSTURE)).toBe(true);
+    expect(isFixAuditRound({})).toBe(false);
+    expect(isFixAuditRound({ incremental: null })).toBe(false);
+    expect(
+      isFixAuditRound({
+        incremental: { ...POSTURE.incremental, effective: false },
+      }),
+    ).toBe(false);
+    expect(
+      isFixAuditRound({
+        incremental: { ...POSTURE.incremental, scope: undefined },
+      }),
+    ).toBe(false);
+    expect(
+      isFixAuditRound({
+        incremental: { ...POSTURE.incremental, posture: 'CRITICAL' },
+      }),
+    ).toBe(false);
+  });
+
+  it('refuses the scopes the brief builder refuses — one bar across readers', () => {
+    // `incrementalScopeOf` degrades to full scope when the delta list is
+    // empty beside an empty interaction list, and when it carries a
+    // non-string element; the shape readers must refuse the same plans, or
+    // the roster fans out per territory while every brief runs full-scope.
+    const scope = POSTURE.incremental.scope;
+    const divergent = [
+      { ...scope, deltaFiles: [], interaction: [] },
+      { ...scope, deltaFiles: ['x.ts', 42] },
+      { ...scope, deltaFiles: [''] },
+    ];
+    for (const s of divergent) {
+      expect(
+        isFixAuditRound({
+          incremental: { ...POSTURE.incremental, scope: s },
+        }),
+      ).toBe(false);
+    }
+    // …and neither shape flips the topology or the round-cap tier.
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(
+      isTerritoryFanOut({
+        ...small,
+        incremental: { ...POSTURE.incremental, scope: divergent[0] },
+      }),
+    ).toBe(false);
+    expect(
+      reverseAuditRoundTier(
+        {
+          ...small,
+          incremental: { ...POSTURE.incremental, scope: divergent[1] },
+        },
+        false,
+      ),
+    ).toBe(10);
+
+    // …but a delta list mixing a valid path with an empty string is one the
+    // brief builder ACCEPTS — `incrementalScopeOf` rejects only non-string
+    // elements and filters '' AFTER admission — so the shape readers must
+    // accept it too, or the briefs render an incremental frame while every
+    // isFixAuditRound reader goes full: the exact two-reader disagreement
+    // this bar exists to eliminate.
+    expect(
+      isFixAuditRound({
+        incremental: {
+          ...POSTURE.incremental,
+          scope: { ...scope, deltaFiles: ['x.ts', ''] },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isTerritoryFanOut({
+        ...small,
+        incremental: {
+          ...POSTURE.incremental,
+          scope: { ...scope, deltaFiles: ['x.ts', ''] },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it('flips a small plan into the territory fan-out', () => {
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(isTerritoryFanOut(small)).toBe(false);
+    expect(isTerritoryFanOut({ ...small, ...POSTURE })).toBe(true);
+  });
+
+  it('prices the round cap at the territory tier it flips to', () => {
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(reverseAuditRoundTier(small, false)).toBe(10);
+    expect(reverseAuditRoundTier({ ...small, ...POSTURE }, false)).toBe(5);
+    // …while the size reading the default wall shares never sees the
+    // posture: a posture is not a size, so the same plan reads the same
+    // tier with or without its incremental block.
+    expect(sizeTier({ ...small, ...POSTURE })).toBe('small');
+    // The huge finishability ruling still wins under an explicit clock.
+    const huge = { srcDiffLines: 4000, diffLines: 5000, ...POSTURE };
+    expect(reverseAuditRoundTier(huge, true)).toBe(3);
+  });
+
+  it('stamps the flipped tier into the recorded budget', () => {
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(reviewBudget(small, {}).reverseAuditRounds).toBe(10);
+    expect(
+      reviewBudget(small, { incremental: POSTURE.incremental })
+        .reverseAuditRounds,
+    ).toBe(5);
+  });
+});
+
+describe('interactionEntryOf — one admission for every interaction-entry reader (#10136)', () => {
+  it('keeps the edge and nothing else an entry carries', () => {
+    expect(
+      interactionEntryOf({
+        path: 'src/b.ts',
+        importsChanged: ['src/a.ts'],
+        seam: { kept: 1, total: 2 },
+        note: 'a field no reader renders',
+      }),
+    ).toEqual({ path: 'src/b.ts', importsChanged: ['src/a.ts'] });
+  });
+
+  it('refuses an entry the briefs would not render', () => {
+    for (const raw of [
+      null,
+      'src/b.ts',
+      { importsChanged: ['src/a.ts'] },
+      { path: '', importsChanged: ['src/a.ts'] },
+      { path: 'src/b.ts' },
+      { path: 'src/b.ts', importsChanged: [] },
+      { path: 'src/b.ts', importsChanged: ['', 3] },
+    ]) {
+      expect(interactionEntryOf(raw)).toBeNull();
+    }
+  });
+});
+
+describe('sizeTier — the one topology reading the caps and the default wall share', () => {
+  it('names the three tiers by the same arithmetic the round cap uses', () => {
+    expect(sizeTier({ srcDiffLines: 100, diffLines: 100 })).toBe('small');
+    expect(sizeTier({ srcDiffLines: 500, diffLines: 3200 })).toBe('small'); // at both floors
+    expect(sizeTier({ srcDiffLines: 501, diffLines: 501 })).toBe('large'); // src past the floor
+    expect(sizeTier({ srcDiffLines: 10, diffLines: 3201 })).toBe('large'); // total past the floor
+    expect(sizeTier({ srcDiffLines: 2999, diffLines: 2999 })).toBe('large');
+    expect(sizeTier({ srcDiffLines: 3000, diffLines: 3000 })).toBe('huge');
+    // An all-non-source diff counts at an eighth: 24,000 total → 3,000 effective.
+    expect(sizeTier({ srcDiffLines: 0, diffLines: 24_000 })).toBe('huge');
+    expect(sizeTier({ srcDiffLines: 0, diffLines: 23_999 })).toBe('large');
+  });
+
+  it('reads garbled or missing sizes as the large tier, like the cap does', () => {
+    for (const bad of [
+      {},
+      { srcDiffLines: 100 },
+      { diffLines: 100 },
+      { srcDiffLines: -1, diffLines: 100 },
+      { srcDiffLines: Number.NaN, diffLines: 100 },
+      { srcDiffLines: '100' as unknown as number, diffLines: 100 },
+    ]) {
+      expect(sizeTier(bad)).toBe('large');
+    }
+  });
+
+  it('agrees with reverseAuditRoundTier on every tier, both sides of the clock', () => {
+    const byTier = { small: 10, large: 5, huge: 3 } as const;
+    for (const size of [
+      { srcDiffLines: 100, diffLines: 100 },
+      { srcDiffLines: 900, diffLines: 900 },
+      { srcDiffLines: 5000, diffLines: 5000 },
+      {},
+    ]) {
+      const tier = sizeTier(size);
+      expect(reverseAuditRoundTier(size, true)).toBe(byTier[tier]);
+      expect(reverseAuditRoundTier(size, false)).toBe(
+        tier === 'huge' ? 5 : byTier[tier],
+      );
+    }
   });
 });

@@ -37,6 +37,8 @@ import type {
 } from './io/BaseJsonOutputAdapter.js';
 import { computeSessionStats } from '../ui/utils/computeStats.js';
 import { getAvailableCommands } from '../nonInteractiveCliCommands.js';
+import type { LoadedSettings } from '../config/settings.js';
+import type { ICommandLoader } from '../services/types.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE');
 
@@ -150,13 +152,20 @@ export function insertAfterFunctionResponses(
  * @param config - Config instance
  * @returns Promise resolving to array of slash command names
  */
-async function loadSlashCommandNames(config: Config): Promise<string[]> {
+async function loadSlashCommandNames(
+  config: Config,
+  settings: LoadedSettings,
+  modCommands?: ICommandLoader,
+): Promise<string[]> {
   const controller = new AbortController();
   try {
     const commands = await getAvailableCommands(
       config,
       controller.signal,
       'non_interactive',
+      settings,
+      undefined,
+      modCommands,
     );
 
     // Extract command names and sort
@@ -193,6 +202,8 @@ export async function buildSystemMessage(
   config: Config,
   sessionId: string,
   permissionMode: PermissionMode,
+  settings: LoadedSettings,
+  modCommands?: ICommandLoader,
 ): Promise<CLISystemMessage> {
   const toolRegistry = config.getToolRegistry();
   const tools = toolRegistry ? toolRegistry.getAllToolNames() : [];
@@ -205,8 +216,12 @@ export async function buildSystemMessage(
       }))
     : [];
 
-  // Load slash commands available in ACP mode
-  const slashCommands = await loadSlashCommandNames(config);
+  // 首轮模型请求前同时注册 Skill 可调用命令，避免只返回客户端命令列表。
+  const slashCommands = await loadSlashCommandNames(
+    config,
+    settings,
+    modCommands,
+  );
 
   // Load subagent names from config
   let agentNames: string[] = [];

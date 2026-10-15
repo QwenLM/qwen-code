@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
+  armCapturedInputInjection,
   decodeCapturedInput,
   drainCapturedInputAsText,
   injectCapturedInput,
@@ -124,5 +125,60 @@ describe('injectCapturedInput', () => {
     // Should not throw or loop forever; disposing is a no-op afterwards.
     vi.advanceTimersByTime(100);
     dispose();
+  });
+});
+
+describe('armCapturedInputInjection', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('re-arms past the budget and delivers once the composer mounts (R6-3)', () => {
+    vi.useFakeTimers();
+    let handle: { setText: (t: string) => void } | null = null;
+    const setText = vi.fn();
+
+    const dispose = armCapturedInputInjection(() => handle, 'early text', {
+      intervalMs: 25,
+      maxAttempts: 4,
+    });
+
+    // Boot dialog keeps the composer unmounted: the first budget exhausts
+    // without a delivery.
+    vi.advanceTimersByTime(25 * 4 + 10);
+    expect(setText).not.toHaveBeenCalled();
+
+    // Dialog closes, composer mounts: a later budget still delivers.
+    handle = { setText };
+    vi.advanceTimersByTime(250 + 25 * 4 + 10);
+    expect(setText).toHaveBeenCalledTimes(1);
+    expect(setText).toHaveBeenCalledWith('early text');
+
+    // Delivered exactly once — no second poller rewrites the composer.
+    vi.advanceTimersByTime(5000);
+    expect(setText).toHaveBeenCalledTimes(1);
+    dispose();
+  });
+
+  it('does nothing for empty text', () => {
+    const setTimeoutFn = vi.fn();
+    const dispose = armCapturedInputInjection(() => null, '', {
+      setTimeoutFn,
+    });
+    expect(setTimeoutFn).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it('cancels the pending re-arm when disposed', () => {
+    vi.useFakeTimers();
+    let handle: { setText: (t: string) => void } | null = null;
+    const setText = vi.fn();
+    const dispose = armCapturedInputInjection(() => handle, 'x', {
+      intervalMs: 25,
+      maxAttempts: 2,
+    });
+    vi.advanceTimersByTime(100); // first budget exhausts
+    dispose();
+    handle = { setText };
+    vi.advanceTimersByTime(2000);
+    expect(setText).not.toHaveBeenCalled();
   });
 });

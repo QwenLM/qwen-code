@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+
 import type {
   Config,
   ConfigInitializeOptions,
@@ -11,9 +13,11 @@ import type {
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { buildSessionRecoveryPlanFromApiHistory } from '@qwen-code/qwen-code-core/core/session-recovery.js';
 import { TURN_INTERRUPTION_HISTORY_TAIL_COUNT } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
+import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/services/session-turn-state.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
+import { ModSession } from './mod-session.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlService } from './control/ControlService.js';
@@ -77,9 +81,10 @@ class Session {
   private activeTurnAbortController: AbortController | null = null;
   private config: Config;
   private sessionId: string;
-  private promptIdCounter: number = 0;
+  private promptIdCounter: number | null = null;
   private inputReader: StreamJsonInputReader;
   private outputAdapter: StreamJsonOutputAdapter;
+  private readonly modSession?: ModSession;
   private controlContext: ControlContext | null = null;
   private dispatcher: ControlDispatcher | null = null;
   private controlService: ControlService | null = null;
@@ -116,6 +121,7 @@ class Session {
       config,
       config.getIncludePartialMessages(),
     );
+    this.modSession = ModSession.create(config, settings, this.outputAdapter);
     this.unsubscribeRecordingFailure = subscribeToHeadlessChatRecordingFailures(
       config,
       this.outputAdapter,
@@ -142,7 +148,38 @@ class Session {
     });
   }
 
+  /**
+   * Mints the next promptId for this process.
+   *
+   * The counter is seeded from the resumed transcript on first use. Without
+   * that seed a `--resume`/`--continue` chain restarts at 1 every process and
+   * re-mints promptIds the previous run already persisted, so one transcript
+   * carries several turns under a single id: the key the rewind mapping from
+   * #9466 anchors on (it fails closed to a positional walk when ids repeat),
+   * and the `prompt_id` on persisted `ui_telemetry` records, which is what
+   * the next resume reads back to seed from. Headless turns write no
+   * file-history snapshots themselves, but one retained from an earlier
+   * interactive turn outlives the conversation-only rewind that discarded its
+   * turn, so this seed still reads `file_history_snapshot` ordinals — or the
+   * replacement turn re-wears that identity (#11408).
+   *
+   * ACP seeds through this same helper (`primeTurnFromHistory`). Interactive
+   * mode seeds too, but by its own inline count of resumed user turns
+   * (`seedPromptCount` in AppContainer), which ignores the turns the
+   * transcript actually claims.
+   *
+   * Seeding is lazy because resumed data only becomes authoritative after
+   * `config.initialize()` re-reads the session file, which this class defers
+   * until the first control request.
+   */
   private getNextPromptId(): string {
+    if (this.promptIdCounter === null) {
+      const records =
+        this.config.getResumedSessionData?.()?.conversation.messages;
+      this.promptIdCounter = records
+        ? computeInitialTurnFromHistory(records, this.sessionId)
+        : 0;
+    }
     this.promptIdCounter++;
     return `${this.sessionId}########${this.promptIdCounter}`;
   }
@@ -480,6 +517,7 @@ class Session {
 
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
+        modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
@@ -522,9 +560,14 @@ class Session {
     const historyTail =
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
+    const cancellation = getLastApiPromptCancellation(
+      chat.getHistoryShallow(),
+      await this.config.getChatRecordingService()!.readActiveTranscriptChain(),
+    );
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
-      apiHistory: historyTail,
+      apiHistory: cancellation ? [] : historyTail,
+      completedToolCallIds: chat.getCompletedToolCallIds?.(),
     });
     debugLogger.info('[Session] requestContinueLastTurn recovery', {
       sessionId: this.sessionId,
@@ -573,6 +616,7 @@ class Session {
       const promptId = this.getNextPromptId();
       turnAbortController = this.startTurn();
       await runNonInteractive(this.config, this.settings, '', promptId, {
+        modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
@@ -644,6 +688,7 @@ class Session {
         combinedModelText,
         promptId,
         {
+          modSession: this.modSession,
           abortController: turnAbortController,
           adapter: this.outputAdapter,
           controlService: this.controlService ?? undefined,
@@ -919,7 +964,8 @@ class Session {
     }
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    await this.modSession?.close();
     this.unsubscribeRecordingFailure();
   }
 
@@ -1069,6 +1115,6 @@ export async function runNonInteractiveStreamJson(
     await manager.run();
   } finally {
     await settleChatRecording(config, { finalize: true });
-    manager.dispose();
+    await manager.dispose();
   }
 }

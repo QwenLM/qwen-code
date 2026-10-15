@@ -58,6 +58,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `metadata: ${event.displayName ?? '(no display name)'}`,
         '36',
       );
+    case 'session.source.changed':
+      return '';
     case 'session.artifact.changed':
       return terminalLine(
         'artifact',
@@ -242,6 +244,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       return `[image: ${sanitizeTerminalText(event.mimeType)}]`;
     case 'user.file.delta':
       return `[file: ${sanitizeTerminalText(event.name)}]`;
+    case 'user.resource_link.delta':
+      return `[file: ${sanitizeTerminalText(event.resourceLink.name)}]`;
     default:
       return assertNever(event);
   }
@@ -252,7 +256,16 @@ export function transcriptBlockToTerminalText(
 ): string {
   switch (block.kind) {
     case 'user':
-      return terminalLine('qwen', block.text, '38;5;42');
+      return terminalLine(
+        'qwen',
+        [
+          block.text,
+          ...(block.resourceLinks ?? []).map((link) => `[file: ${link.name}]`),
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        '38;5;42',
+      );
     case 'assistant':
       return sanitizeTerminalText(block.text).replace(/\r?\n/g, '\r\n');
     case 'thought':

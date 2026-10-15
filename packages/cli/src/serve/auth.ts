@@ -11,6 +11,16 @@ import {
   type ListenerScopedCredentials,
 } from './local-control/credentials.js';
 import { listenerIdentityOf } from './local-control/listener-identity.js';
+import { ACCESS_LOG_REJECT_LOCAL } from './server/access-log.js';
+
+/**
+ * Stamp the access-log reject marker so the line is charged to the
+ * pre-authentication budget, not the operator one. res.locals is an
+ * Express convenience that embedded shims may not provide.
+ */
+function markPreAuthReject(res: Response): void {
+  (res.locals ??= {})[ACCESS_LOG_REJECT_LOCAL] = true;
+}
 
 /**
  * Reject any request that carries an `Origin` header. CLI/SDK clients never
@@ -27,6 +37,7 @@ export const denyBrowserOriginCors: RequestHandler = (
 ) => {
   if (req.headers.origin) {
     res.setHeader('Vary', 'Origin');
+    markPreAuthReject(res);
     res.status(403).json({ error: 'Request denied by CORS policy' });
     return;
   }
@@ -243,6 +254,7 @@ export function allowOriginCors(
     // flag if/when that materializes.
     if (origin === 'null') {
       res.setHeader('Vary', 'Origin');
+      markPreAuthReject(res);
       res.status(403).json({ error: 'Request denied by CORS policy' });
       return;
     }
@@ -276,6 +288,7 @@ export function allowOriginCors(
     // awareness could otherwise serve a stale 403 to a different
     // origin. The match path sets the same header for symmetry.
     res.setHeader('Vary', 'Origin');
+    markPreAuthReject(res);
     res.status(403).json({ error: 'Request denied by CORS policy' });
   };
 }
@@ -316,6 +329,7 @@ export function hostAllowlist(
       listener.authority === undefined ||
       (host !== listener.authority && host !== browserHost)
     ) {
+      markPreAuthReject(res);
       res.status(403).json({ error: 'Invalid Host header' });
       return;
     }
@@ -375,6 +389,7 @@ function buildPrimaryHostGate(
     // get 403 with an exact-string compare. Lowercase both sides.
     const host = (req.headers.host || '').toLowerCase();
     if (!allowedFor(port).has(host)) {
+      markPreAuthReject(res);
       res.status(403).json({ error: 'Invalid Host header' });
       return;
     }

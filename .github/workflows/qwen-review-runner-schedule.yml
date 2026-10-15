@@ -1,0 +1,63 @@
+name: 'Qwen Review Runner Schedule'
+
+# Switch every online hk1/hk2 runner at 17:00 / 05:00 Asia/Shanghai.
+# GitHub cron uses UTC. Manual runs can select either pool explicitly.
+# Running jobs finish; only the labels for the next job change.
+#
+# RUNNER_ADMIN_PAT needs runner-label write access: repo scope for a
+# classic PAT, or repository Administration: write for a fine-grained PAT.
+# Store it in the environment below, restricted to `main`.
+# To pause the schedule, disable this workflow.
+
+on:
+  schedule:
+    - cron: '0 9 * * *' # 17:00 Asia/Shanghai: enable reviews
+    - cron: '0 21 * * *' # 05:00 Asia/Shanghai: return to CI
+  workflow_dispatch:
+    inputs:
+      pool:
+        description: 'Pool for all online hk1/hk2 runners'
+        type: 'choice'
+        required: true
+        default: 'ci'
+        options:
+          - 'review'
+          - 'ci'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'qwen-review-runner-schedule'
+  cancel-in-progress: false
+
+jobs:
+  converge:
+    # The ref clause is the in-repo half of the fence on RUNNER_ADMIN_PAT:
+    # `workflow_dispatch` can be aimed at any branch, and this job checks out
+    # and executes the script from the dispatched ref. Without it the only
+    # thing stopping branch-chosen script code from running with an admin
+    # token is the environment's deployment-branch policy, which lives in
+    # repository settings and is invisible here. `schedule` events always
+    # evaluate against the default branch, so this only blocks dispatches.
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    # deployment: false — the job needs the environment's secret, not a
+    # deployment record for a label switch.
+    environment:
+      name: 'qwen-review-runner-schedule'
+      deployment: false
+    steps:
+      - name: 'Checkout the schedule script'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+          sparse-checkout: '.github/scripts/review-runner-schedule.mjs'
+          sparse-checkout-cone-mode: false
+
+      - name: 'Switch runner pool'
+        env:
+          RUNNER_ADMIN_TOKEN: '${{ secrets.RUNNER_ADMIN_PAT }}'
+          POOL: "${{ github.event_name == 'workflow_dispatch' && inputs.pool || (github.event.schedule == '0 9 * * *' && 'review' || 'ci') }}"
+        run: 'node .github/scripts/review-runner-schedule.mjs "$GITHUB_REPOSITORY" "$POOL"'

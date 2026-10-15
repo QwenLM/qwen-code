@@ -75,6 +75,8 @@ export function injectCapturedInput(
     maxAttempts?: number;
     setTimeoutFn?: (fn: () => void, ms: number) => unknown;
     clearTimeoutFn?: (handle: unknown) => void;
+    onDelivered?: () => void;
+    onExhausted?: () => void;
   } = {},
 ): () => void {
   if (text.length === 0) return () => {};
@@ -97,10 +99,14 @@ export function injectCapturedInput(
     const handle = getText();
     if (handle) {
       handle.setText(text);
+      opts.onDelivered?.();
       return;
     }
     attempts += 1;
-    if (attempts >= maxAttempts) return;
+    if (attempts >= maxAttempts) {
+      opts.onExhausted?.();
+      return;
+    }
     timer = setTimeoutFn(attempt, intervalMs);
   };
 
@@ -111,5 +117,68 @@ export function injectCapturedInput(
   return () => {
     disposed = true;
     if (timer !== null) clearTimeoutFn(timer);
+  };
+}
+
+/**
+ * Arms the injection and keeps re-arming until the text is actually
+ * delivered: a boot dialog can keep the composer unmounted for longer than
+ * one attempt budget, and the capture buffer is already drained, so a
+ * one-shot injection would silently drop the text (R6-3). At most one
+ * poller is live at any time; the pending text is cleared only after a
+ * successful setText. Returns a disposer that cancels the live poller and
+ * any scheduled re-arm.
+ */
+export function armCapturedInputInjection(
+  getText: () => { setText: (t: string) => void } | null,
+  text: string,
+  opts: {
+    intervalMs?: number;
+    maxAttempts?: number;
+    retryDelayMs?: number;
+    setTimeoutFn?: (fn: () => void, ms: number) => unknown;
+    clearTimeoutFn?: (handle: unknown) => void;
+  } = {},
+): () => void {
+  if (text.length === 0) return () => {};
+  const retryDelayMs = opts.retryDelayMs ?? 250;
+  const setTimeoutFn =
+    opts.setTimeoutFn ??
+    ((fn: () => void, ms: number): unknown => setTimeout(fn, ms));
+  const clearTimeoutFn =
+    opts.clearTimeoutFn ??
+    ((handle: unknown): void =>
+      clearTimeout(handle as ReturnType<typeof setTimeout>));
+
+  let pending: string | null = text;
+  let disposed = false;
+  let pollerDisposer: (() => void) | null = null;
+  let retryTimer: unknown = null;
+
+  const arm = (): void => {
+    if (disposed) return;
+    const pendingText = pending;
+    if (pendingText === null) return;
+    pollerDisposer = injectCapturedInput(getText, pendingText, {
+      intervalMs: opts.intervalMs,
+      maxAttempts: opts.maxAttempts,
+      setTimeoutFn: opts.setTimeoutFn,
+      clearTimeoutFn: opts.clearTimeoutFn,
+      onDelivered: () => {
+        pending = null;
+      },
+      onExhausted: () => {
+        if (disposed) return;
+        retryTimer = setTimeoutFn(arm, retryDelayMs);
+      },
+    });
+  };
+
+  arm();
+
+  return () => {
+    disposed = true;
+    pollerDisposer?.();
+    if (retryTimer !== null) clearTimeoutFn(retryTimer);
   };
 }

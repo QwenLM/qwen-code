@@ -19,6 +19,7 @@ const TERMINAL_HEARTBEAT_MS = 15_000;
 export interface WebTerminalWorkspaceContext {
   workspaceCwd: string;
   env: Readonly<NodeJS.ProcessEnv>;
+  command?: { file: string; args: string[] };
 }
 
 type TerminalControl =
@@ -151,6 +152,14 @@ export function createTerminalWsHandler(
         ws.close(4004, 'Terminal released');
         return;
       }
+      if (url.searchParams.get('replay') !== '1') {
+        sendControl(ws, {
+          type: 'error',
+          message: 'Terminal protocol changed; reload this page.',
+        });
+        ws.close(4002, 'Terminal protocol mismatch');
+        return;
+      }
       const workspaceSelector = selector;
 
       let created = false;
@@ -194,6 +203,7 @@ export function createTerminalWsHandler(
             terminalId,
             workspaceCwd: workspace.workspaceCwd,
             env: workspace.env,
+            command: workspace.command,
           });
         } catch {
           result = { error: 'Failed to create terminal' } as const;
@@ -328,6 +338,11 @@ export function createTerminalWsHandler(
       ws.off('error', markClosed);
       ws.on('error', cleanup);
       if (!ensureWorkspaceAvailable()) return;
+      sendControl(ws, {
+        type: 'snapshot',
+        replay: !created,
+        handlesPrimaryDa: snapshot.handlesPrimaryDa === true,
+      });
       if (!sendOutput(ws, snapshot.output)) {
         cleanup();
         ws.close(1013, 'Terminal output backpressure');

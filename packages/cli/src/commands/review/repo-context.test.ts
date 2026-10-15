@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import {
   MAX_IDENTITY_BYTES,
   type RepositoryContextProvider,
@@ -33,12 +34,107 @@ import {
   runRepoContext,
 } from './repo-context.js';
 import { stringifyPlanReport } from './lib/report.js';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import { isolateHostGitConfig, plantAdminEntry } from './lib/test-utils.js';
 import {
   appendRunSession,
   priorSessionIds,
   recordResume,
 } from './lib/run-ledger.js';
+
+// Lets a test pose as a volume whose 64-bit file ids exceed the JS
+// safe-integer range (NTFS — #12574). While armed, each DISTINCT file (by
+// real dev/ino) is assigned a sequential id on top of 2^60. Double spacing
+// at 2^60 is 256 with round-half-even, so the ids share ONE double-rounding
+// bucket only while the offset stays <= 128: 2^60+128 still rounds to 2^60,
+// 2^60+129 does not. The helper throws past that bound instead of handing
+// out ids that quietly stop colliding, and every armed test asserts the
+// collision it depends on. Ids stay exact as bigints; the pose is reported
+// as a bigint when the caller asks for `{ bigint: true }`, and as the
+// rounded double a number-backed `Stats` would carry — so a comparator that
+// stats without the flag sees two distinct files as one (fail-open), and the
+// guard under test only fires if it asked for the exact id.
+const bigInodeVolume = vi.hoisted(() => ({
+  armed: false,
+  ids: new Map<string, bigint>(),
+  next: 1n,
+  maxOffset: 128n,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  // Forward EVERY stat option through — the in-tree precedent for the shape
+  // is commands/review/lib/stale-bundle.test.ts:54-64, `(p, ...rest) =>
+  // real.statSync(p, ...rest)`; commands/review/lib/same-file.test.ts:44-51
+  // takes no options argument and forwards none. `bigint` is resolved from
+  // the caller's own bag and re-applied LAST so the pose below knows which
+  // flavour to hand back, and no other option may be dropped. Dropping the
+  // bag entirely does not let the bigint cases pass unexercised — it fails
+  // 34 of the file's 54 tests loudly, and leaves `mtimeNs` `undefined`, so
+  // `Number(undefined - undefined) > 1e6` is false and the mtime disjunct of
+  // both guards goes dead. Keeping only `bigint` (the shape this replaces)
+  // is green today and silently discards everything else, e.g.
+  // `throwIfNoEntry: false` — an established pattern in this package
+  // (config/settings-cache.ts:81), where an absent file must read as
+  // `undefined` rather than throw ENOENT, so the failure would present as a
+  // production bug rather than a mock artifact. The `it` below pins the
+  // forwarding; no production caller passes a second option yet, so nothing
+  // else does.
+  const statSync = ((filePath: string, options?: { bigint?: boolean }) => {
+    const bigint = options?.bigint === true;
+    const stats = actual.statSync(String(filePath), { ...options, bigint });
+    if (bigInodeVolume.armed) {
+      const real = actual.statSync(String(filePath), { bigint: true });
+      const key = `${real.dev}:${real.ino}`;
+      let pose = bigInodeVolume.ids.get(key);
+      if (pose === undefined) {
+        if (bigInodeVolume.next > bigInodeVolume.maxOffset) {
+          throw new Error(
+            'bigInodeVolume: poses left the 2^60 double-rounding bucket',
+          );
+        }
+        pose = 2n ** 60n + bigInodeVolume.next++;
+        bigInodeVolume.ids.set(key, pose);
+      }
+      (stats as unknown as { ino: number | bigint }).ino = bigint
+        ? pose
+        : Number(pose);
+    }
+    return stats;
+  }) as typeof actual.statSync;
+  return { ...actual, statSync, default: { ...actual, statSync } };
+});
+
+function armBigInodeVolume(): void {
+  bigInodeVolume.armed = true;
+  bigInodeVolume.ids.clear();
+  bigInodeVolume.next = 1n;
+}
+
+function disarmBigInodeVolume(): void {
+  bigInodeVolume.armed = false;
+  bigInodeVolume.ids.clear();
+  bigInodeVolume.next = 1n;
+}
+
+it('the statSync mock forwards every option, not just `bigint`', () => {
+  // Pins the forwarding the mock's own comment claims. `throwIfNoEntry:
+  // false` is an established pattern in this package; a mock that rebuilt the
+  // options bag from `bigint` alone dropped it, so an absent file threw
+  // ENOENT instead of reading as `undefined` — a failure that presents as a
+  // production bug rather than a mock artifact. The same rebuild also left
+  // `mtimeNs` undefined, killing the mtime disjunct of both plan guards.
+  const root = mkdtempSync(join(tmpdir(), 'repo-context-mock-'));
+  try {
+    expect(
+      statSync(join(root, 'no-such-file.json'), { throwIfNoEntry: false }),
+    ).toBeUndefined();
+    const present = join(root, 'present.json');
+    writeFileSync(present, '{}');
+    expect(typeof statSync(present, { bigint: true }).ino).toBe('bigint');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const tempRoots: string[] = [];
 
@@ -165,6 +261,52 @@ function run(
 }
 
 describe('repo-context providers and trust boundary', () => {
+  it.each([
+    { requiredAgents: [], effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'high', revoke: true },
+    { requiredAgents: ['test-matrix'] as const, effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'medium', revoke: false },
+  ])(
+    'applies roster policy before revoking the profile: %j',
+    ({ requiredAgents, effort, revoke }) => {
+      const root = temp();
+      const worktree = join(root, 'worktree');
+      mkdirSync(worktree);
+      const { planPath } = run(
+        root,
+        worktree,
+        {
+          files: [{ path: 'docs/_meta.ts' }],
+          reviewProfile: DOCS_NAV_PROFILE,
+          prNumber: '11426',
+          ownerRepo: 'QwenLM/qwen-code',
+          worktreePath: worktree,
+          effort,
+          srcDiffLines: 0,
+          diffLines: 13,
+        },
+        [
+          {
+            provide: () => ({
+              ...context(),
+              requiredAgents: [...requiredAgents],
+            }),
+          },
+        ],
+      );
+      expect(readJson(planPath)).toMatchObject({
+        repositoryContext: { provider: 'fake-provider' },
+      });
+      if (revoke)
+        expect(readJson(planPath)).not.toHaveProperty('reviewProfile');
+      else
+        expect(readJson(planPath)).toHaveProperty(
+          'reviewProfile',
+          DOCS_NAV_PROFILE,
+        );
+    },
+  );
+
   it('writes null and clears stale context when no provider matches', () => {
     const root = temp();
     const worktree = join(root, 'worktree');
@@ -744,6 +886,94 @@ describe('repo-context providers and trust boundary', () => {
     expect(readJson(planPath)).toHaveProperty('repositoryContext', context());
   });
 
+  // On Windows `mountRootFor` refuses every absolute path (a drive letter is a
+  // colon), so containment cannot exist there and this pair of cases has no
+  // answer to assert.
+  const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
+
+  itWhereContainmentExists(
+    'refuses to read identity files through a rewritten review-worktree gitfile',
+    () => {
+      // This command's whole point is that the identity files come from the
+      // MERGE BASE rather than from the PR head — and every read it makes
+      // (`--git-common-dir`, `cat-file -e`, `ls-tree`, `show <base>:<path>`)
+      // resolves the repository through the review worktree's own `.git`,
+      // which sits inside the directory the sandbox hands the reviewed code
+      // read-write. Read through a rewritten pointer, the "merge base"
+      // identity is whatever the PR author committed into a repository they
+      // planted, and the boundary is decoration.
+      const root = temp();
+      const repository = join(root, 'repository');
+      initGit(repository);
+      write(join(repository, 'src', 'change.ts'), 'base\n');
+      const base = commitAll(repository);
+      const worktree = join(repository, '.qwen', 'tmp', 'review-pr-1');
+      mkdirSync(dirname(worktree), { recursive: true });
+      execFileSync('git', [
+        '-C',
+        repository,
+        'worktree',
+        'add',
+        '-q',
+        '--detach',
+        worktree,
+        'HEAD',
+      ]);
+      // The plant: an admin entry copied beside the tree, inside the same
+      // temp dir, with git's own BARE backpointer so the round-trip gates
+      // this command inherits all agree with it.
+      plantAdminEntry(
+        join(repository, '.qwen', 'tmp', '.evil-git'),
+        join(repository, '.git', 'worktrees', 'review-pr-1'),
+        worktree,
+        join(repository, '.git'),
+      );
+
+      expect(() =>
+        run(root, worktree, {
+          files: [{ path: 'src/change.ts' }],
+          mergeBaseSha: base,
+        }),
+      ).toThrow(/refusing to read the repository context/);
+    },
+  );
+
+  itWhereContainmentExists(
+    'still reads a review worktree whose pointer is the one the pipeline wrote',
+    () => {
+      // The admit arm: the geometry the gate above refuses is the SAME
+      // geometry every PR review runs in, so a gate that refused on location
+      // alone would refuse every review.
+      const root = temp();
+      const repository = join(root, 'repository');
+      initGit(repository);
+      // Committed, because the identity read this command makes is
+      // `git show <mergeBase>:<path>` — a manifest that exists only in the
+      // working tree is the HEAD-side one the trust boundary refuses.
+      writeManifest(repository);
+      write(join(repository, 'src', 'change.ts'), 'base\n');
+      const base = commitAll(repository);
+      const worktree = join(repository, '.qwen', 'tmp', 'review-pr-1');
+      mkdirSync(dirname(worktree), { recursive: true });
+      execFileSync('git', [
+        '-C',
+        repository,
+        'worktree',
+        'add',
+        '-q',
+        '--detach',
+        worktree,
+        'HEAD',
+      ]);
+
+      const { outPath } = run(root, worktree, {
+        files: [{ path: 'src/change.ts' }],
+        mergeBaseSha: base,
+      });
+      expect(readJson(outPath)).toEqual(manifestContext());
+    },
+  );
+
   it('rejects a recorded worktree path that matches no checkout', () => {
     // The guard's rejection branch: a plan recorded for one checkout must
     // not be served identity reads from a different worktree.
@@ -866,7 +1096,7 @@ describe('repo-context providers and trust boundary', () => {
     );
   });
 
-  it('rejects plan/out aliases and preserves the plan on artifact failure', () => {
+  it('rejects plan/out aliases and preserves the plan on artifact failure', (ctx) => {
     const root = temp();
     const worktree = join(root, 'worktree');
     mkdirSync(worktree);
@@ -879,6 +1109,16 @@ describe('repo-context providers and trust boundary', () => {
 
     const alias = join(root, 'alias.json');
     linkSync(planPath, alias);
+    // The guard needs the volume to expose a file id at all. `isSameFile`
+    // stats with `{ bigint: true }` (the #11848 conversion), so a 64-bit
+    // NTFS id above 2^53 arrives exact and the alias is refused there too;
+    // only an ino-0 volume (FAT/exFAT/SMB) still degrades to canonical
+    // spellings, which cannot see a hard link — that skip is by design.
+    const inode = statSync(planPath).ino;
+    if (inode <= 0) {
+      ctx.skip();
+      return;
+    }
     expect(() =>
       runRepoContext({ plan: planPath, worktree, out: alias }, [
         { provide: () => context() },
@@ -1237,6 +1477,61 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
     }
   });
 
+  it('aborts on a rename-replacement whose inode shares a double-rounding bucket (#12574)', () => {
+    // On a volume whose file ids exceed 2^53 (NTFS), a number-backed
+    // `Stats.ino` rounds at the JS boundary: 2^60+1 and 2^60+2 are the SAME
+    // double. The compare-and-refuse guard then sees a replacement as the
+    // same file, and this run writes contents derived from the OLD plan
+    // under the NEW run's epoch — the fail-open the guard exists to
+    // prevent. The pose assigns each distinct file a sequential id above
+    // 2^60; only a `{ bigint: true }` comparison keeps them apart.
+    armBigInodeVolume();
+    try {
+      const root = mkdtempSync(join(tmpdir(), 'repo-context-bucket-'));
+      try {
+        const worktree = join(root, 'wt');
+        mkdirSync(worktree, { recursive: true });
+        const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+        const before = statSync(planPath);
+        // Pin the pose itself, on two DISTINCT files (the helper dedupes by
+        // real dev/ino, so stat'ing one path twice yields one id). Without
+        // this both #12574 witnesses can pass while exercising nothing: with
+        // the mock inert, or a pose base below 2^53, the racer's rename still
+        // produces genuinely distinct ids, the guard fires for the wrong
+        // reason, and reverting `{ bigint: true }` in production ships green.
+        const posedScratch = join(root, 'pose-probe.json');
+        writeFileSync(posedScratch, '{}');
+        const posedPlan = statSync(planPath, { bigint: true });
+        const posedOther = statSync(posedScratch, { bigint: true });
+        expect(posedPlan.ino).not.toBe(posedOther.ino);
+        expect(Number(posedPlan.ino)).toBe(Number(posedOther.ino));
+        rmSync(posedScratch);
+        const racer: RepositoryContextProvider = {
+          provide() {
+            // Replace the FILE (new inode in the same double bucket), then
+            // put the old mtime back — the mtime disjunct stays silent.
+            const tmp = join(root, 'swap.json');
+            writeFileSync(tmp, readFileSync(planPath, 'utf8'));
+            rmSync(planPath);
+            renameSync(tmp, planPath);
+            utimesSync(planPath, before.atime, before.mtime);
+            return null;
+          },
+        };
+        expect(() =>
+          runRepoContext(
+            { plan: planPath, worktree, out: join(root, 'ctx.json') },
+            [racer],
+          ),
+        ).toThrow(/changed while repository context was being computed/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    } finally {
+      disarmBigInodeVolume();
+    }
+  });
+
   it('aborts when the plan changed while providers were running', () => {
     // The plan path is shared per PR and providers take real time: a
     // concurrent capture can replace the file mid-computation, and this run
@@ -1301,8 +1596,18 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       runRepoContext({ plan: planPath, worktree, out: join(root, 'ctx.json') });
 
       if (hasSubMs) {
+        // 10us, not the ledger's 1ms rail. Measured over 400 samples of this
+        // fixture: the nanosecond restore round-trips it with drift exactly
+        // 0, while a millisecond-truncating one — `Number(anchor.mtimeMs) /
+        // 1000`, the one-token "simplification" that reads as equivalent now
+        // that `anchor` is a `BigIntStats` whose `mtimeMs` truncates toward
+        // zero — drifts 0.4568ms, the fixture's whole sub-ms fraction. At the
+        // 1ms rail both pass, the run epoch moves on every content-changing
+        // enrichment, and that eats 46% of the tolerance the resume ledger
+        // fences on. 10us separates them ~46x and stays inside the 1ms check
+        // production itself applies (repo-context.ts:534).
         expect(Math.abs(statSync(planPath).mtimeMs - mtimeBefore)).toBeLessThan(
-          1,
+          0.01,
         );
       }
       // The consequence that actually matters, asserted end to end rather
@@ -1310,8 +1615,9 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       // before this command ran is still THIS run's. Honest scope note: with
       // the ledger fence tolerating 1ms, a `Date`-based restore (which loses
       // strictly less than 1ms) would ALSO pass this assertion — the fence's
-      // tolerance is what makes that regression benign, and this test pins
-      // the end-to-end visibility, not the float restore itself.
+      // tolerance is what makes that regression benign, so what pins the
+      // end-to-end visibility is this assertion, and what pins the float
+      // restore itself is the tightened `hasSubMs` bound above.
       expect(priorSessionIds(planPath, { QWEN_CODE_SESSION_ID: 'S1' })).toEqual(
         ['S0'],
       );
@@ -1347,12 +1653,23 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
     // under the old epoch — never the new plan under a new one. The
     // separate write-then-restore pair had exactly that instant, and the
     // skip-when-identical retry guard made it permanent.
-    const anchor = statSync(plan);
+    const anchor = statSync(plan, { bigint: true });
     commitPlanPreservingEpoch(plan, '{"new":true}', anchor);
     expect(readFileSync(plan, 'utf8')).toBe('{"new":true}');
+    // Reference the nanosecond field the way production verifies this same
+    // restore (repo-context.ts:534), not `anchor.mtimeMs`: that bigint
+    // millisecond field TRUNCATES toward zero, and `utimesSync`'s double-
+    // seconds conversion lands this `Date` fixture up to a millisecond BELOW
+    // its own whole-ms value — measured over 400 distinct `Date` anchors, 194
+    // kept an ns remainder above 0.9ms. Against the truncating reference a
+    // PERFECT restore therefore read as much as 1.000244ms of apparent error,
+    // i.e. the old `<= 1` bound was not merely tight, it was crossable by a
+    // correct implementation. Against `mtimeNs` the same restore reads at most
+    // 0.000244ms, while a millisecond-truncating restore reads 1.000000ms, so
+    // this 10us bound separates them instead of passing both.
     expect(
-      Math.abs(statSync(plan).mtimeMs - anchor.mtimeMs),
-    ).toBeLessThanOrEqual(1);
+      Math.abs(statSync(plan).mtimeMs - Number(anchor.mtimeNs) / 1e6),
+    ).toBeLessThan(0.01);
     expect(readdirSync(root).filter((n) => n.includes('enrich-tmp'))).toEqual(
       [],
     );
@@ -1363,7 +1680,7 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
     // concurrent capture landing inside it was silently overwritten with
     // stale derived contents under the OTHER run's epoch. Identity is
     // re-checked against the anchor immediately before the rename.
-    const anchor = statSync(plan);
+    const anchor = statSync(plan, { bigint: true });
     writeFileSync(plan, '{"captured":"by-another-run"}');
     expect(() =>
       commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
@@ -1375,7 +1692,7 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
   });
 
   it('refuses when the inode moved even if the mtime was forged back', () => {
-    const anchor = statSync(plan);
+    const anchor = statSync(plan, { bigint: true });
     // The imposter is created WHILE the original still exists, then renamed
     // over it — so its inode is guaranteed distinct. A delete-then-create
     // fixture is not: ext4 recycles a just-freed inode number immediately,
@@ -1385,9 +1702,45 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
     writeFileSync(imposter, '{"captured":"by-another-run"}');
     renameSync(imposter, plan);
     // Forge the anchor's mtime onto the imposter: the inode still differs.
-    utimesSync(plan, anchor.atimeMs / 1000, anchor.mtimeMs / 1000);
+    utimesSync(
+      plan,
+      Number(anchor.atimeMs) / 1000,
+      Number(anchor.mtimeMs) / 1000,
+    );
     expect(() =>
       commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
     ).toThrow(/changed while repository context was being committed/);
+  });
+
+  it('refuses when the replacement inode shares a double-rounding bucket (#12574)', () => {
+    // Same fail-open, second guard: `now.ino !== anchor.ino` compared two
+    // doubles, so a capture whose file id rounds into the anchor's bucket
+    // passed the fence and `renameSync` overwrote another run's capture
+    // with stale contents.
+    armBigInodeVolume();
+    try {
+      const anchor = statSync(plan, { bigint: true });
+      const imposter = join(root, 'imposter.json');
+      writeFileSync(imposter, '{"captured":"by-another-run"}');
+      // Pin the pose on the exact pair this fence compares (see the
+      // runRepoContext witness for why an unpinned pose is not a witness).
+      const posedImposter = statSync(imposter, { bigint: true });
+      expect(anchor.ino).not.toBe(posedImposter.ino);
+      expect(Number(anchor.ino)).toBe(Number(posedImposter.ino));
+      renameSync(imposter, plan);
+      // Forge the anchor's mtime onto the imposter: only the inode
+      // disjunct can catch the swap, and both ids are in one bucket.
+      utimesSync(
+        plan,
+        Number(anchor.atimeMs) / 1000,
+        Number(anchor.mtimeMs) / 1000,
+      );
+      expect(() =>
+        commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
+      ).toThrow(/changed while repository context was being committed/);
+      expect(readFileSync(plan, 'utf8')).toBe('{"captured":"by-another-run"}');
+    } finally {
+      disarmBigInodeVolume();
+    }
   });
 });

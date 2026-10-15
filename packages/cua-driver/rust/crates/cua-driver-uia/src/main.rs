@@ -11,11 +11,11 @@
 //             {"method":"describe","name":"<tool>"}
 //             {"method":"shutdown"}
 //   response: {"ok":true,"result":...}
+//             {"ok":true,"result":...,"restart_required":true}
 //             {"ok":false,"error":"...","exit_code":N}
 //
-// The protocol is intentionally byte-identical to cua-driver/serve.rs for a
-// future authorized parent-daemon forwarding path. No public client route is
-// exposed while that forwarding path is unavailable.
+// The restart marker is private to this authenticated worker hop; no public
+// client route is exposed.
 
 #[cfg(not(target_os = "windows"))]
 fn main() {
@@ -46,6 +46,8 @@ struct PipeResponse {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restart_required: Option<bool>,
 }
 
 #[cfg(target_os = "windows")]
@@ -56,6 +58,7 @@ impl PipeResponse {
             result: Some(result),
             error: None,
             exit_code: None,
+            restart_required: None,
         }
     }
     fn err(msg: impl Into<String>, code: i32) -> Self {
@@ -64,6 +67,7 @@ impl PipeResponse {
             result: None,
             error: Some(msg.into()),
             exit_code: Some(code),
+            restart_required: None,
         }
     }
 }
@@ -404,17 +408,20 @@ async fn async_main(authorized_parent_pid: u32) -> anyhow::Result<()> {
                     {
                         structured.remove("_uia_worker_restart_required");
                     }
+                    resp.restart_required = Some(true);
                 }
-                let _ = writer
+                let write_result = writer
                     .write_all((serde_json::to_string(&resp).unwrap() + "\n").as_bytes())
                     .await;
-                let _ = writer.flush().await;
+                if let Err(error) = write_result {
+                    tracing::warn!("failed to write UIAccess response: {error}");
+                    break;
+                }
                 if restart_required {
                     // A provider-blocked COM thread cannot be cancelled safely.
-                    // The response already contains the screenshot/Win32 surface
-                    // and any completed partial tree, so retire this process and
-                    // let the authenticated parent launch a clean generation.
-                    std::process::exit(75);
+                    // Keep the process alive until the parent has parsed this
+                    // response; the authenticated parent then retires this PID.
+                    break;
                 }
             }
         });

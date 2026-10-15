@@ -70,6 +70,70 @@ afterEach(() => {
 });
 
 describe('Injector window conditions', () => {
+  it('drains thousands of independent control receipts without recursive stack growth', () => {
+    injector.noteSpeechStarted();
+    for (let index = 0; index < 10_000; index += 1) {
+      injector.enqueue({
+        kind: 'control',
+        controlId: String(index),
+        context: `receipt ${index}`,
+      });
+      if (index % 100 === 0) injector.enqueue(complete(`ordinary ${index}`));
+    }
+    expect(() => injector.noteInputCommitted()).not.toThrow();
+    expect(injector.pendingCount).toBe(0);
+    const receipts = sink.contextCalls.filter((text) =>
+      text.startsWith('receipt'),
+    );
+    expect(receipts).toHaveLength(10_000);
+    expect(receipts[0]).toBe('receipt 0');
+    expect(receipts.at(-1)).toBe('receipt 9999');
+    expect(
+      sink.injected.filter(({ item }) => item.kind === 'control'),
+    ).toHaveLength(10_000);
+  });
+
+  it('delivers control receipts separately and completely beyond the ordinary batch cap', () => {
+    injector.noteSpeechStarted();
+    const first = 'A'.repeat(7_000);
+    const second = 'B'.repeat(7_000);
+    injector.enqueue({
+      kind: 'control',
+      controlId: 'one',
+      context: first,
+      spoken: 'must not speak',
+    });
+    injector.enqueue({ kind: 'control', controlId: 'one', context: first });
+    injector.enqueue({ kind: 'control', controlId: 'two', context: second });
+    expect(injector.pendingCount).toBe(2);
+    injector.noteInputCommitted(true);
+    expect(sink.contextCalls).toEqual([]);
+    injector.noteResponseCreated('direct');
+    injector.noteResponseDone('direct');
+    expect(sink.contextCalls).toEqual([first, second]);
+    expect(sink.speechCalls).toEqual([]);
+    expect(sink.injected.map((entry) => entry.spoken)).toEqual([false, false]);
+  });
+
+  it('does not acknowledge a control receipt through speech-only acceptance', () => {
+    sink.contextResult = false;
+    sink.speechResult = true;
+    injector.enqueue({
+      kind: 'control',
+      controlId: 'one',
+      context: 'Complete owned text',
+      spoken: 'speech',
+    });
+    expect(sink.injected).toEqual([]);
+    expect(sink.speechCalls).toEqual([]);
+    expect(injector.pendingCount).toBe(1);
+    sink.contextResult = true;
+    vi.advanceTimersByTime(QUIET_GAP_MS);
+    expect(sink.injected).toHaveLength(1);
+    expect(sink.injected[0]?.item.context).toBe('Complete owned text');
+    expect(injector.pendingCount).toBe(0);
+  });
+
   it('deduplicates a replayed permission while its ask is queued', () => {
     injector.noteSpeechStarted();
     const permission: InjectorItem = {

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export { DaemonAttachmentUploadError } from './DaemonAttachmentUploadError.js';
 export {
   DaemonClient,
   DaemonHttpError,
@@ -22,7 +23,9 @@ export {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type ResumeSessionRequest,
   type SubscribeOptions,
+  type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
 export {
   isSessionLevelNotFound,
@@ -49,6 +52,10 @@ export type { RestSseTransport } from './RestSseTransport.js';
 // The `NegotiateTransportOptions` *type* stays available from this barrel
 // for backward compatibility (type-only, no bundle cost).
 export type { NegotiateTransportOptions } from './negotiateTransport.js';
+export {
+  WEB_SHELL_PWA_ASSETS,
+  WEB_SHELL_SERVICE_WORKER_ROUTE,
+} from './pwa-assets.js';
 export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
 export type { TransportFactory } from './AutoReconnectTransport.js';
 export {
@@ -91,6 +98,7 @@ export {
   type DaemonUnarchiveStandaloneSessionsResult,
   type RestoreStandaloneSessionRequest,
 } from './standalone-sessions.js';
+export { DaemonStartupConfigError } from './session-startup-config.js';
 export {
   asKnownDaemonEvent,
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
@@ -132,6 +140,7 @@ export {
   estimateDaemonTranscriptBlockBytes,
   extractContentPart,
   extractServerTimestamp,
+  extractTranscriptTiming,
   formatBlockTimestamp,
   getOutputText as getDaemonUiOutputText,
   getSessionUpdatePayload,
@@ -180,6 +189,7 @@ export type {
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
@@ -196,7 +206,9 @@ export type {
   DaemonTranscriptSidechannelState,
   DaemonTranscriptState,
   DaemonTranscriptStore,
+  DaemonTranscriptTimingMeta,
   DaemonTranscriptTruncationDetail,
+  DaemonTurnUsage,
   DaemonUiAssistantDoneEvent,
   DaemonUiAuthDeviceFlowAuthorizedEvent,
   DaemonUiAuthDeviceFlowCancelledEvent,
@@ -222,6 +234,7 @@ export type {
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiSessionMetadataChangedEvent,
+  DaemonUiSessionSourceChangedEvent,
   DaemonUiShellOutputEvent,
   DaemonUiStateResyncRequiredEvent,
   DaemonUiReplayCompleteEvent,
@@ -229,6 +242,7 @@ export type {
   DaemonUiFollowupSuggestionEvent,
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUiUserResourceLinkEvent,
   DaemonUiToolProvenance,
   DaemonUiToolUpdateEvent,
   DaemonUiWorkspaceAgentChangedEvent,
@@ -244,6 +258,7 @@ export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
+  GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_PAUSE_REASON_COMMAND,
   isDaemonContentHash,
   requireWorkspaceCwd,
@@ -251,6 +266,8 @@ export {
 export type {
   DaemonAgentChangedData,
   DaemonAgentChangedEvent,
+  DaemonSourceChangedData,
+  DaemonSourceChangedEvent,
   DaemonArtifactChangedData,
   DaemonArtifactChangedEvent,
   DaemonApprovalModeChangedData,
@@ -456,6 +473,7 @@ export type {
   DaemonMidTurnMessageSummary,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -485,6 +503,8 @@ export type {
   DaemonWorkspacePermissionsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelConfiguration,
+  DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
   DaemonModelProviderRuntimeSyncResult,
@@ -526,15 +546,23 @@ export type {
   DaemonDiffHunk,
   DaemonGitLogEntry,
   DaemonGitLog,
+  DaemonGitLogOptions,
   DaemonGitCommitFileStat,
   DaemonGitCommitDetail,
   DaemonGitBranchInfo,
   DaemonGitTagInfo,
   DaemonGitBranchesResult,
   DaemonGitCheckoutResult,
+  DaemonGitWorktree,
+  DaemonGitWorktreesResult,
+  DaemonGitWorktreeStatus,
+  DaemonGitWorktreeRemoveResult,
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
+  DaemonGitRemoteInfo,
+  DaemonGitRemotesResult,
+  DaemonGitRemoteMutationResult,
   DaemonGitHubPullRequestReviewDecision,
   DaemonGitHubPullRequestChecks,
   DaemonGitHubPullRequest,
@@ -542,8 +570,17 @@ export type {
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceRemovalActivity,
   DaemonWorkspaceRemovalResult,
+  DaemonRuntimeStopRequest,
+  DaemonRuntimeStopSession,
+  DaemonRuntimeStopChannel,
+  DaemonRuntimeStopResult,
+  DaemonRuntimeStopSnapshot,
+  DaemonRuntimeStopOption,
+  DaemonRuntimeStopOptions,
+  DaemonWorkspaceRuntimeStopResult,
   DaemonAvailableCommand,
   DaemonArchiveSessionsResult,
+  DaemonBrand,
   DaemonCapabilities,
   DaemonContextCategoryBreakdown,
   DaemonContextFileScope,
@@ -565,6 +602,7 @@ export type {
   DaemonBranchSessionResult,
   DaemonBranchedSession,
   HistoricalBranchSessionRequest,
+  WorktreeBranchSessionRequest,
   DaemonPersistedBranchedSession,
   DaemonSideTaskSession,
   DaemonForkSessionResult,
@@ -580,6 +618,7 @@ export type {
   DaemonBranchPoint,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
+  DaemonSessionToolCalls,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
   DaemonSessionTurnIndexEntry,
@@ -599,15 +638,21 @@ export type {
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonLspServerStatus,
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
+  DaemonMcpAppToolCall,
+  DaemonMcpAppToolResult,
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonWorkflowApprovalStatusEntry,
+  DaemonWorkflowSizeWarning,
   DaemonWorkflowDispatchStatus,
   DaemonWorkflowDispatchStatusEntry,
+  DaemonWorkflowCallTrace,
   DaemonWorkflowEvent,
   DaemonWorkflowPhaseVisit,
   DaemonSessionProcessTaskLifecycleStatus,
@@ -623,6 +668,11 @@ export type {
   DaemonSessionGroupUpdate,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
+  DaemonSessionCatalogWorkspace,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogPage,
+  DaemonSessionCatalogError,
+  DaemonSessionCatalogResult,
   DaemonSessionListView,
   DaemonSessionSearchMatch,
   DaemonSessionSearchOptions,
@@ -673,6 +723,7 @@ export type {
   DaemonLogIssue,
   DaemonLogMode,
   DaemonStatusReport,
+  DaemonUpdateStatus,
   DaemonStatusReportDetail,
   DaemonStatusReportIssue,
   DaemonStatusReportLevel,
@@ -757,6 +808,8 @@ export type {
   DaemonExtensionEntry,
   DaemonExtensionUpdateState,
   DaemonWorkspaceExtensionsStatus,
+  DaemonExtensionSummary,
+  DaemonWorkspaceExtensionSummaries,
   ExtensionInstallRequest,
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
@@ -802,6 +855,8 @@ export type {
   SetModelResult,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
+  SessionStartupConfig,
+  SessionStartupConfigApplied,
   SetSessionLanguageResult,
   SetUserLanguageResult,
   KnownDaemonSessionArtifactChangeAction,
@@ -824,8 +879,65 @@ export type {
   DaemonSessionArtifactRestoreState,
   DaemonSessionArtifactRetention,
   DaemonSessionArtifactsEnvelope,
+  SessionSource,
+  SessionSourceLocator,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourcesSnapshot,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   DaemonSessionArtifactSource,
   DaemonSessionArtifactStatus,
   DaemonSessionArtifactStorage,
   SessionMetadataResult,
 } from './types.js';
+
+export { parseDaemonBackgroundTurn } from './types.js';
+export type { DaemonBackgroundTurn } from './types.js';
+
+export { isShellResultDisplay } from './shellResult.js';
+export type { ShellResultDisplay } from './shellResult.js';
+
+export {
+  QWEN_AGENT_MESSAGE_META_KEY,
+  parseQwenAgentMessageMeta,
+} from './session-agents.js';
+export type {
+  QwenAgentMessageMeta,
+  SessionAgentAuthor,
+  SessionAgentChangedFrame,
+  SessionAgentEventFrame,
+  SessionAgentPermissionPrompt,
+  SessionAgentProgram,
+  SessionAgentRunFrame,
+  SessionAgentRunStatus,
+  SessionAgentStep,
+  SessionAgentTerminalStatus,
+  SessionSquad,
+  SessionSquadLeaderIssue,
+  SessionSquadMember,
+  SessionSquadOutcome,
+  SessionSquadView,
+} from './session-agents.js';
+
+export {
+  createExecutionLifecycleState,
+  extractExecutionLifecycle,
+  reduceExecutionLifecycle,
+} from './ui/execution-lifecycle.js';
+export type {
+  DaemonExecutionLifecycle,
+  ExecutionLifecycleEntry,
+  ExecutionLifecycleState,
+} from './ui/execution-lifecycle.js';
+
+export {
+  createToolLifecycleState,
+  extractToolLifecycle,
+  reduceToolLifecycle,
+} from './ui/tool-lifecycle.js';
+export type {
+  DaemonToolLifecycle,
+  ToolLifecycleEntry,
+  ToolLifecycleState,
+} from './ui/tool-lifecycle.js';

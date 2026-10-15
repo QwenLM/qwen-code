@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// The Step 3A fan-out, as a workflow script.
+// A review roster or selected wave, as a workflow script.
 //
 // The script has two parts and only one of them varies. `FAN_OUT_BODY` is a
 // fixed constant — the dispatch loop, the accounting, the fail-closed guards —
@@ -62,7 +62,7 @@ if (!Array.isArray(AGENTS) || AGENTS.length === 0) {
 }
 
 phase('Review');
-log(AGENTS.length + ' agents required by the plan');
+log(AGENTS.length + ' agents required by this batch');
 
 // One thunk per required agent, dispatched together. The roster is data the
 // CLI computed and wrote into this file; this loop cannot shorten it, and
@@ -129,26 +129,20 @@ for (let i = 0; i < AGENTS.length; i++) {
 // silently lacks one of them.
 if (missingRoles.length > 0) {
   if (missingRoles.length === AGENTS.length) {
-    // Nothing delivered is not one dead agent — it is the dispatch itself:
-    // a pin the runtime rejects fails every dispatch before the first
-    // request, an exhausted runtime nulls every one of them. The roster and
-    // the pin are baked into this file, so the re-emit the partial-failure
-    // message prescribes regenerates the identical script and loops whoever
-    // follows it; name the dispatch, not the emitter.
     throw new Error(
       'review fan-out: every agent failed to deliver (' +
         missingRoles.join(', ') +
-        '). No agent delivered anything, so the failure is the dispatch ' +
-        'itself, not one agent — the roster and the worktree pin are ' +
-        'baked into this file, and re-running \\'qwen review emit-workflow\\' ' +
-        'writes the identical script. Fix what the dispatch reads (the ' +
-        'worktree pin, the runtime) and dispatch this same script again.',
+        '). Check the workflow journal and agent transcripts for the cause ' +
+        '(including runtime limits and the worktree pin) before retrying. ' +
+        'Do not treat this batch as a clean review.',
     );
   }
   throw new Error(
     'review fan-out: required agents failed to deliver (' +
       missingRoles.join(', ') +
-      '). Re-run \\'qwen review emit-workflow\\' and dispatch again.',
+      '). Recover completed results from the workflow journal and agent ' +
+      'transcripts, then retry the missing agents. Do not aggregate this ' +
+      'batch as complete until every required agent delivers.',
   );
 }
 
@@ -185,8 +179,8 @@ export function buildReviewWorkflowScript(
     typeof worktreePath === 'string' && worktreePath ? worktreePath : null;
   return (
     `export const meta = {\n` +
-    `  name: 'review-step-3a',\n` +
-    `  description: 'Review Step 3A: launch every agent the plan requires, in one fan-out',\n` +
+    `  name: 'review-batch',\n` +
+    `  description: 'Launch every agent selected for this review batch in one fan-out',\n` +
     `  phases: [{ title: 'Review', detail: 'one agent per required role' }],\n` +
     `};\n\n` +
     `// Written by \`qwen review emit-workflow\`. The roster below is the one\n` +

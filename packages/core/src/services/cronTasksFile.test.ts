@@ -7,8 +7,10 @@ import {
   addCronTask,
   annotateCronRunSession,
   appendCronRun,
+  cronTaskSessionDeletionId,
   generateCronTaskId,
   getCronFilePath,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   MAX_TASK_RUNS,
   readCronTasks,
   removeCronTasks,
@@ -18,12 +20,15 @@ import {
 import { Storage } from '../config/storage.js';
 import { getProjectHash } from '../utils/paths.js';
 
-/** Seeds the on-disk tasks file directly, creating its (now hashed) dir. */
-async function seedTasksFile(projectRoot: string, raw: string): Promise<void> {
-  const file = getCronFilePath(projectRoot);
+/** Writes `raw` to `file`, creating its parent dir. */
+async function seedFile(file: string, raw: string): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, raw);
 }
+
+/** Seeds the on-disk tasks file directly, creating its (now hashed) dir. */
+const seedTasksFile = (projectRoot: string, raw: string) =>
+  seedFile(getCronFilePath(projectRoot), raw);
 
 // Hook for the stale-lock race test: runs just before the implementation
 // renames a stale update lock aside, so a test can interleave a competing
@@ -31,11 +36,18 @@ async function seedTasksFile(projectRoot: string, raw: string): Promise<void> {
 const renameHook = vi.hoisted(() => ({
   current: null as ((src: string) => Promise<void>) | null,
 }));
+const accessHook = vi.hoisted(() => ({
+  current: null as ((target: string) => Promise<void>) | null,
+}));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    access: (async (...args: Parameters<typeof actual.access>) => {
+      if (accessHook.current) await accessHook.current(String(args[0]));
+      return actual.access(...args);
+    }) as typeof actual.access,
     rename: (async (
       src: Parameters<typeof actual.rename>[0],
       dst: Parameters<typeof actual.rename>[1],
@@ -71,9 +83,17 @@ describe('cronTasksFile', () => {
 
   afterEach(async () => {
     renameHook.current = null;
+    accessHook.current = null;
     Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
+
+  const writeIds = (...ids: string[]) =>
+    writeCronTasks(
+      tmpDir,
+      ids.map((id) => makeTask({ id })),
+    );
+  const readIds = async () => (await readCronTasks(tmpDir)).map((t) => t.id);
 
   describe('getCronFilePath', () => {
     it('resolves to the per-project runtime dir, not the working tree', () => {
@@ -92,6 +112,16 @@ describe('cronTasksFile', () => {
   });
 
   describe('readCronTasks', () => {
+    const seedTask = (fields: object) =>
+      seedTasksFile(tmpDir, JSON.stringify([{ ...makeTask(), ...fields }]));
+    const expectInvalidEntry = () =>
+      expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    async function expectRoundTrip(overrides: Partial<DurableCronTask>) {
+      const task = makeTask(overrides);
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    }
+
     it('returns [] when file does not exist', async () => {
       expect(await readCronTasks(tmpDir)).toEqual([]);
     });
@@ -116,7 +146,7 @@ describe('cronTasksFile', () => {
         makeTask({ id: 'good2' }),
       ];
       await seedTasksFile(tmpDir, JSON.stringify(data));
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      await expectInvalidEntry();
     });
 
     it('throws for non-finite timestamps', async () => {
@@ -127,9 +157,9 @@ describe('cronTasksFile', () => {
         `[{"id":"t1","cron":"* * * * *","prompt":"p","recurring":true,` +
         `"createdAt":${createdAt},"lastFiredAt":${lastFiredAt}}]`;
       await seedTasksFile(tmpDir, raw('-1e999', 'null'));
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      await expectInvalidEntry();
       await seedTasksFile(tmpDir, raw(`${Date.now()}`, '1e999'));
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      await expectInvalidEntry();
     });
 
     it('reads valid tasks', async () => {
@@ -139,29 +169,16 @@ describe('cronTasksFile', () => {
       expect(result).toEqual([task]);
     });
 
-    it('round-trips the optional name/enabled fields', async () => {
-      const task = makeTask({ name: 'Weekly digest', enabled: false });
-      await writeCronTasks(tmpDir, [task]);
-      const result = await readCronTasks(tmpDir);
-      expect(result).toEqual([task]);
-    });
+    it('round-trips the optional name/enabled fields', () =>
+      expectRoundTrip({ name: 'Weekly digest', enabled: false }));
 
-    it('round-trips optional channel delivery metadata', async () => {
-      const task = makeTask({
+    it('round-trips optional channel delivery metadata', () =>
+      expectRoundTrip({
         delivery: {
           kind: 'channel',
-          target: {
-            channelName: 'dingtalk',
-            type: 'user',
-            id: 'user-1',
-          },
+          target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
         },
-      });
-
-      await writeCronTasks(tmpDir, [task]);
-
-      expect(await readCronTasks(tmpDir)).toEqual([task]);
-    });
+      }));
 
     it.each([
       {
@@ -183,12 +200,8 @@ describe('cronTasksFile', () => {
         },
       },
     ])('rejects malformed delivery metadata %#', async (delivery) => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([{ ...makeTask(), delivery }]),
-      );
-
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      await seedTask({ delivery });
+      await expectInvalidEntry();
     });
 
     it('accepts legacy tasks with no name/enabled fields', async () => {
@@ -200,127 +213,110 @@ describe('cronTasksFile', () => {
       expect(result[0]!.enabled).toBeUndefined();
     });
 
-    it('rejects a task whose name is not a string', async () => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([{ ...makeTask(), name: 123 }]),
-      );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    it.each([
+      ['rejects a task whose name is not a string', { name: 123 }],
+      ['rejects a task whose enabled is not a boolean', { enabled: 'yes' }],
+      [
+        'rejects a non-boolean session ownership marker',
+        { sessionId: 'sess-1', sessionOwnedByTask: 'yes' },
+      ],
+      ['rejects an unknown session mode', { sessionMode: 'new' }],
+      ['rejects a task whose runs is not an array', { runs: 'nope' }],
+      [
+        'rejects a run entry whose kind is not a string',
+        { runs: [{ at: 1718000240000, kind: 7 }] },
+      ],
+      [
+        'rejects a run entry whose withheld is not a boolean',
+        { runs: [{ at: 1718000240000, withheld: 'yes' }] },
+      ],
+    ])('%s', async (_title, fields) => {
+      await seedTask(fields);
+      await expectInvalidEntry();
     });
 
-    it('rejects a task whose enabled is not a boolean', async () => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([{ ...makeTask(), enabled: 'yes' }]),
-      );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
-    });
-
-    it('rejects a non-boolean session ownership marker', async () => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([
-          { ...makeTask(), sessionId: 'sess-1', sessionOwnedByTask: 'yes' },
-        ]),
-      );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
-    });
-
-    it('round-trips per-run session mode and dispatch failures', async () => {
-      const task = makeTask({
+    it('round-trips per-run session mode and dispatch failures', () =>
+      expectRoundTrip({
         sessionMode: 'per_run',
+        modelServiceId: 'qwen-max(openai)',
+        groupId: 'group-1',
         runs: [
-          {
-            at: 1718000240000,
-            kind: 'scheduled',
-            sessionDispatchFailed: true,
-          },
+          { at: 1718000240000, kind: 'scheduled', sessionDispatchFailed: true },
         ],
+      }));
+
+    it.each(['modelServiceId', 'groupId'] as const)(
+      'rejects an unsafe %s',
+      async (field) => {
+        for (const value of [
+          'x'.repeat(MAX_CRON_TASK_ROUTING_ID_LENGTH + 1),
+          'value\nqwen serve: forged',
+        ]) {
+          await seedTask({ sessionMode: 'per_run', [field]: value });
+          await expectInvalidEntry();
+        }
+      },
+    );
+
+    it('strips routing fields from a persistent task instead of failing the file', async () => {
+      // A version downgrade or hand edit can strand routing fields on a
+      // non-per-run task. They are inert without per-run dispatch, so read
+      // normalizes them away — the same normalization the PATCH route applies
+      // on write — rather than making the whole schedule unreadable.
+      await seedTask({
+        sessionMode: 'persistent',
+        modelServiceId: 'qwen-max(openai)',
+        groupId: 'group-1',
       });
-      await writeCronTasks(tmpDir, [task]);
-      expect(await readCronTasks(tmpDir)).toEqual([task]);
+
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]).not.toHaveProperty('modelServiceId');
+      expect(tasks[0]).not.toHaveProperty('groupId');
+      expect(tasks[0]?.sessionMode).toBe('persistent');
     });
 
-    it('rejects an unknown session mode', async () => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([{ ...makeTask(), sessionMode: 'new' }]),
-      );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
-    });
+    // 129–256 characters: session creation always allowed these, so the task
+    // file must too, or a valid session model id could never be scheduled.
+    it('accepts a routing id within the shared session cap', () =>
+      expectRoundTrip({
+        sessionMode: 'per_run',
+        modelServiceId: 'm'.repeat(200),
+        groupId: 'g'.repeat(200),
+      }));
 
-    it('round-trips the optional runs history', async () => {
-      const task = makeTask({
+    it('round-trips the optional runs history', () =>
+      expectRoundTrip({
         lastFiredAt: 1718000300000,
         runs: [
           { at: 1718000240000, kind: 'scheduled' },
           { at: 1718000300000, kind: 'catch-up' },
         ],
-      });
-      await writeCronTasks(tmpDir, [task]);
-      expect(await readCronTasks(tmpDir)).toEqual([task]);
-    });
+      }));
 
     it('accepts a run entry with no kind (defaults on read)', async () => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([{ ...makeTask(), runs: [{ at: 1718000240000 }] }]),
-      );
+      await seedTask({ runs: [{ at: 1718000240000 }] });
       const result = await readCronTasks(tmpDir);
       expect(result[0]!.runs).toEqual([{ at: 1718000240000 }]);
     });
 
-    it('rejects a task whose runs is not an array', async () => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([{ ...makeTask(), runs: 'nope' }]),
-      );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
-    });
-
     it('rejects a run entry with a non-finite/absent timestamp', async () => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([{ ...makeTask(), runs: [{ kind: 'scheduled' }] }]),
-      );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      await seedTask({ runs: [{ kind: 'scheduled' }] });
+      await expectInvalidEntry();
       // -Infinity (from -1e999) is typeof number but not finite — must reject.
       await seedTasksFile(
         tmpDir,
         `[{"id":"t1","cron":"* * * * *","prompt":"p","recurring":true,` +
           `"createdAt":1718000000000,"lastFiredAt":null,"runs":[{"at":-1e999}]}]`,
       );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      await expectInvalidEntry();
     });
 
-    it('rejects a run entry whose kind is not a string', async () => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([
-          { ...makeTask(), runs: [{ at: 1718000240000, kind: 7 }] },
-        ]),
-      );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
-    });
-
-    it('round-trips a run entry with the legacy withheld marker', async () => {
-      const task = makeTask({
+    it('round-trips a run entry with the legacy withheld marker', () =>
+      expectRoundTrip({
         lastFiredAt: 1718000300000,
         runs: [{ at: 1718000300000, kind: 'scheduled', withheld: true }],
-      });
-      await writeCronTasks(tmpDir, [task]);
-      expect(await readCronTasks(tmpDir)).toEqual([task]);
-    });
-
-    it('rejects a run entry whose withheld is not a boolean', async () => {
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([
-          { ...makeTask(), runs: [{ at: 1718000240000, withheld: 'yes' }] },
-        ]),
-      );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
-    });
+      }));
   });
 
   describe('appendCronRun', () => {
@@ -401,17 +397,18 @@ describe('cronTasksFile', () => {
   });
 
   describe('writeCronTasks', () => {
+    const readFileJson = async () =>
+      JSON.parse(await fs.readFile(getCronFilePath(tmpDir), 'utf-8'));
+
     it('creates the tasks dir if missing', async () => {
       await writeCronTasks(tmpDir, [makeTask()]);
-      const content = await fs.readFile(getCronFilePath(tmpDir), 'utf-8');
-      expect(JSON.parse(content)).toHaveLength(1);
+      expect(await readFileJson()).toHaveLength(1);
     });
 
     it('overwrites existing file', async () => {
       await writeCronTasks(tmpDir, [makeTask()]);
       await writeCronTasks(tmpDir, []);
-      const content = await fs.readFile(getCronFilePath(tmpDir), 'utf-8');
-      expect(JSON.parse(content)).toEqual([]);
+      expect(await readFileJson()).toEqual([]);
     });
 
     it('replaces a symlink at the tasks path instead of writing through it', async () => {
@@ -437,7 +434,7 @@ describe('cronTasksFile', () => {
 
   describe('addCronTask', () => {
     it('appends to existing tasks', async () => {
-      await writeCronTasks(tmpDir, [makeTask({ id: 'first' })]);
+      await writeIds('first');
       await addCronTask(tmpDir, makeTask({ id: 'second' }));
       const tasks = await readCronTasks(tmpDir);
       expect(tasks).toHaveLength(2);
@@ -446,17 +443,13 @@ describe('cronTasksFile', () => {
 
     it('creates file when none exists', async () => {
       await addCronTask(tmpDir, makeTask());
-      const tasks = await readCronTasks(tmpDir);
-      expect(tasks).toHaveLength(1);
+      expect(await readCronTasks(tmpDir)).toHaveLength(1);
     });
   });
 
   describe('removeCronTasks', () => {
     it('removes tasks by id', async () => {
-      await writeCronTasks(tmpDir, [
-        makeTask({ id: 'keep' }),
-        makeTask({ id: 'remove' }),
-      ]);
+      await writeIds('keep', 'remove');
       await removeCronTasks(tmpDir, ['remove']);
       const tasks = await readCronTasks(tmpDir);
       expect(tasks).toHaveLength(1);
@@ -466,15 +459,11 @@ describe('cronTasksFile', () => {
     it('handles missing ids gracefully', async () => {
       await writeCronTasks(tmpDir, [makeTask()]);
       await removeCronTasks(tmpDir, ['nonexistent']);
-      const tasks = await readCronTasks(tmpDir);
-      expect(tasks).toHaveLength(1);
+      expect(await readCronTasks(tmpDir)).toHaveLength(1);
     });
 
     it('returns the number of tasks removed', async () => {
-      await writeCronTasks(tmpDir, [
-        makeTask({ id: 'a' }),
-        makeTask({ id: 'b' }),
-      ]);
+      await writeIds('a', 'b');
       expect(await removeCronTasks(tmpDir, ['a', 'b', 'missing'])).toBe(2);
       expect(await removeCronTasks(tmpDir, ['a'])).toBe(0);
     });
@@ -486,14 +475,173 @@ describe('cronTasksFile', () => {
         fs.stat(path.dirname(getCronFilePath(tmpDir))),
       ).rejects.toThrow();
     });
+
+    it('removes a task restored after the initial file check', async () => {
+      const filePath = getCronFilePath(tmpDir);
+      await writeIds('keep');
+      let releaseAccess!: () => void;
+      let markAccessed!: () => void;
+      const accessed = new Promise<void>((resolve) => {
+        markAccessed = resolve;
+      });
+      accessHook.current = async (target) => {
+        if (target !== filePath) return;
+        accessHook.current = null;
+        markAccessed();
+        await new Promise<void>((resolve) => {
+          releaseAccess = resolve;
+        });
+      };
+
+      const removal = removeCronTasks(tmpDir, ['restored']);
+      await accessed;
+      await writeIds('keep', 'restored');
+      releaseAccess();
+
+      expect(await removal).toBe(1);
+      expect(await readIds()).toEqual(['keep']);
+    });
+  });
+
+  it('canonicalizes UUID deletion keys while keeping legacy and Arena IDs distinct', () => {
+    const uuid = 'ABCDEF12-3456-4789-ABCD-123456789ABC';
+    expect(cronTaskSessionDeletionId(uuid)).toBe(
+      `session:${uuid.toLowerCase()}`,
+    );
+    expect(cronTaskSessionDeletionId('legacy-A')).not.toBe(
+      cronTaskSessionDeletionId('legacy-a'),
+    );
+    expect(cronTaskSessionDeletionId(`${uuid}-agent-A`)).toBe(
+      `session:${uuid}-agent-A`,
+    );
   });
 
   describe('updateCronTasks', () => {
+    type DeletionState = {
+      version: number;
+      watermark: number;
+      entries: Array<[string, number]>;
+    };
+    const statePath = () => `${getCronFilePath(tmpDir)}.deletions`;
+    const readState = async () =>
+      JSON.parse(await fs.readFile(statePath(), 'utf8')) as DeletionState;
+    const seedStaleLock = async () => {
+      const lockPath = `${getCronFilePath(tmpDir)}.lock`;
+      await seedFile(lockPath, '99999');
+      const past = new Date(Date.now() - 60_000);
+      await fs.utimes(lockPath, past, past);
+      return lockPath;
+    };
+
+    it('bounds deletion generations without reusing an evicted generation', async () => {
+      await writeCronTasks(tmpDir, []);
+      await seedFile(
+        statePath(),
+        JSON.stringify({
+          version: 2,
+          watermark: 1,
+          entries: Array.from({ length: 10_000 }, (_, index) => [
+            `old-${index}`,
+            1,
+          ]),
+        }),
+      );
+
+      expect(await removeCronTasks(tmpDir, ['newest'])).toBe(0);
+      let state = await readState();
+      expect(state.entries).toHaveLength(10_000);
+      expect(state.entries.at(-1)).toEqual(['newest', 2]);
+      expect(state.entries.some(([id]) => id === 'old-0')).toBe(false);
+
+      expect(await removeCronTasks(tmpDir, ['old-0'])).toBe(0);
+      state = await readState();
+      expect(state.entries).toHaveLength(10_000);
+      expect(state.entries.at(-1)).toEqual(['old-0', 3]);
+      expect(state.watermark).toBe(3);
+    });
+
+    it('rebuilds a corrupt deletion sidecar instead of failing the update', async () => {
+      // The tick's fire/removal persist rides on this path, so a torn sidecar
+      // (the atomic write's in-place fallback can leave one after a crash)
+      // must not veto the tasks write, or the removal is lost and the
+      // one-shot wedges as a zombie. The state is rebuilt from empty; a
+      // pre-corruption generation an in-flight restore observed can no
+      // longer match, so the restore declines safely.
+      await writeIds('task-1');
+      await seedFile(statePath(), JSON.stringify({ version: 1, entries: [] }));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      try {
+        expect(await removeCronTasks(tmpDir, ['task-1'])).toBe(1);
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining('.deletions'),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+
+      expect(await readCronTasks(tmpDir)).toEqual([]);
+      expect(await readState()).toEqual({
+        version: 2,
+        watermark: 1,
+        entries: [['task-1', 1]],
+      });
+    });
+
+    it('skips the deletion observation when the sidecar is unreadable', async () => {
+      // "Unknown" must not be fabricated into "never deleted" (generation 0):
+      // with no observation recorded, a consumer declines to restore.
+      await writeIds('task-1');
+      await seedFile(statePath(), '{torn');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      try {
+        const onDeletionGenerations = vi.fn();
+        await updateCronTasks(tmpDir, (tasks) => tasks, {
+          observeDeletionIds: ['task-1'],
+          onDeletionGenerations,
+        });
+
+        expect(onDeletionGenerations).not.toHaveBeenCalled();
+        // The tasks file itself is untouched and still readable.
+        expect(await readCronTasks(tmpDir)).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('shares deletion generations across module instances', async () => {
+      const taskId = 'cross-process-delete';
+      const observedGeneration = async () => {
+        let generation: number | undefined;
+        await updateCronTasks(tmpDir, (tasks) => tasks, {
+          observeDeletionIds: [taskId],
+          onDeletionGenerations: (generations) => {
+            generation = generations.get(taskId);
+          },
+        });
+        return generation;
+      };
+      await writeIds(taskId);
+      const beforeDelete = await observedGeneration();
+
+      vi.resetModules();
+      const { Storage: otherStorage } = await import('../config/storage.js');
+      otherStorage.setRuntimeBaseDir(tmpDir);
+      try {
+        const otherProcess = await import('./cronTasksFile.js');
+        expect(await otherProcess.removeCronTasks(tmpDir, [taskId])).toBe(1);
+      } finally {
+        otherStorage.setRuntimeBaseDir(null);
+      }
+
+      const afterDelete = await observedGeneration();
+      expect(beforeDelete).toBe(0);
+      expect(afterDelete).toBe(1);
+    });
+
     it('applies the mutation in a single read-modify-write', async () => {
-      await writeCronTasks(tmpDir, [
-        makeTask({ id: 'a' }),
-        makeTask({ id: 'b' }),
-      ]);
+      await writeIds('a', 'b');
       await updateCronTasks(tmpDir, (tasks) =>
         tasks
           .filter((t) => t.id !== 'b')
@@ -508,8 +656,7 @@ describe('cronTasksFile', () => {
     it('does not lose mutations under concurrent updates', async () => {
       const ids = Array.from({ length: 10 }, (_, i) => `task-${i}`);
       await Promise.all(ids.map((id) => addCronTask(tmpDir, makeTask({ id }))));
-      const tasks = await readCronTasks(tmpDir);
-      expect(tasks.map((t) => t.id).sort()).toEqual([...ids].sort());
+      expect((await readIds()).sort()).toEqual([...ids].sort());
     });
 
     it('skips the write when mutate returns the input unchanged', async () => {
@@ -525,7 +672,7 @@ describe('cronTasksFile', () => {
     });
 
     it('checks the caller guard at the commit boundary', async () => {
-      await writeCronTasks(tmpDir, [makeTask({ id: 'existing' })]);
+      await writeIds('existing');
       const assertCanCommit = vi.fn(() => {
         throw new Error('generation closed');
       });
@@ -539,54 +686,40 @@ describe('cronTasksFile', () => {
       ).rejects.toThrow('generation closed');
 
       expect(assertCanCommit).toHaveBeenCalledOnce();
-      expect((await readCronTasks(tmpDir)).map((task) => task.id)).toEqual([
-        'existing',
-      ]);
+      expect(await readIds()).toEqual(['existing']);
     });
 
     it('steals a stale update lock left by a crashed holder', async () => {
-      const lockPath = `${getCronFilePath(tmpDir)}.lock`;
-      await fs.mkdir(path.dirname(lockPath), { recursive: true });
-      await fs.writeFile(lockPath, '99999');
-      const past = new Date(Date.now() - 60_000);
-      await fs.utimes(lockPath, past, past);
-
+      await seedStaleLock();
       await addCronTask(tmpDir, makeTask());
       expect(await readCronTasks(tmpDir)).toHaveLength(1);
     });
 
     it('refuses to clobber a malformed file', async () => {
-      const filePath = getCronFilePath(tmpDir);
-      await fs.mkdir(path.dirname(filePath), { recursive: true });
-      await fs.writeFile(filePath, 'NOT JSON{{{');
-
+      await seedTasksFile(tmpDir, 'NOT JSON{{{');
       await expect(
         updateCronTasks(tmpDir, (tasks) => tasks.filter(() => true)),
       ).rejects.toThrow(/Malformed JSON/);
       // The corrupted (hand-recoverable) content survives untouched.
-      expect(await fs.readFile(filePath, 'utf-8')).toBe('NOT JSON{{{');
+      expect(await fs.readFile(getCronFilePath(tmpDir), 'utf-8')).toBe(
+        'NOT JSON{{{',
+      );
     });
 
     it('refuses to clobber a file with invalid task entries', async () => {
-      const filePath = getCronFilePath(tmpDir);
       const raw = JSON.stringify([makeTask(), { id: 'bad' }]);
       await seedTasksFile(tmpDir, raw);
-
       await expect(
         updateCronTasks(tmpDir, (tasks) => [
           ...tasks,
           makeTask({ id: 'new-task' }),
         ]),
       ).rejects.toThrow(/Invalid task entry/);
-      expect(await fs.readFile(filePath, 'utf-8')).toBe(raw);
+      expect(await fs.readFile(getCronFilePath(tmpDir), 'utf-8')).toBe(raw);
     });
 
     it('does not displace a fresh lock created after the stale inspection', async () => {
-      const lockPath = `${getCronFilePath(tmpDir)}.lock`;
-      await fs.mkdir(path.dirname(lockPath), { recursive: true });
-      await fs.writeFile(lockPath, '99999');
-      const past = new Date(Date.now() - 60_000);
-      await fs.utimes(lockPath, past, past);
+      const lockPath = await seedStaleLock();
 
       // Between the stat seeing a stale lock and the rename-aside, a
       // competing process clears the stale lock and creates a fresh one.
@@ -615,9 +748,7 @@ describe('cronTasksFile', () => {
       // The live holder releases; the blocked update proceeds.
       await fs.unlink(lockPath);
       await update;
-      expect((await readCronTasks(tmpDir)).map((t) => t.id)).toContain(
-        'after-race',
-      );
+      expect(await readIds()).toContain('after-race');
     });
   });
 

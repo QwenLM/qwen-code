@@ -26,6 +26,10 @@ export class LiveLogger {
     ] as LogLevel | undefined) ?? 'info',
   ) {}
 
+  get debugEnabled(): boolean {
+    return this.minLevel === 'debug';
+  }
+
   private write(level: LogLevel, message: string): void {
     if (LEVEL_ORDER[level] < (LEVEL_ORDER[this.minLevel] ?? 20)) return;
     process.stderr.write(

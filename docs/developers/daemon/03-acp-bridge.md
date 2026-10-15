@@ -124,6 +124,16 @@ sequenceDiagram
 
 Failures at the queue tail are **swallowed** so that a prior prompt's rejection does not poison subsequent prompts; the original caller still receives the rejection on its own returned promise. The `transportClosedReject` cached on the session races the prompt promise against `channel.exited` so a crashed child surfaces immediately rather than hanging.
 
+### Resource-link prompt metadata
+
+When the ACP child converts a `resource_link` with a non-`file://` URI into model input, it retains the `@URI` reference and includes the client-provided `name` as an original filename. For example, `{ "type": "resource_link", "uri": "https://example.com/objects/7f9a2c", "name": "季度报告.csv" }` becomes:
+
+```text
+@https://example.com/objects/7f9a2c (original filename: "季度报告.csv")
+```
+
+The name is JSON-quoted so quotes and newlines remain unambiguous metadata. Empty names and legacy inputs without a name keep the URI-only text. This conversion does not fetch non-file resources or infer filenames from URI paths; `file://` links continue through the existing file-resolution path.
+
 ### Permission flow (high-level)
 
 ```mermaid
@@ -246,7 +256,12 @@ In addition to the core `spawnOrAttach`, `sendPrompt`, `cancelSession`,
 
 `BridgeSpawnRequest.sessionScope` was renamed from `'per-client'` to
 `'thread'`. `BridgeRestoredSession` now carries `compactedReplay`,
-`liveJournal`, and `lastEventId`. Those replay fields are a bounded in-memory
+`liveJournal`, optional `lifecycleReplay` and `lifecycleReplayIncomplete`, and
+`lastEventId`. The lifecycle supplement contains at most 1024 metadata-only
+frames from the in-memory replay window when refreshing a persisted page; it
+can overlap that page. A true incomplete flag means unavailable, degraded, or
+truncated lifecycle coverage. Neither the supplement nor a false flag promises
+complete history or currently running status. Those replay fields are a bounded in-memory
 window for live sessions, capped by `BridgeOptions.compactedReplayMaxBytes`
 (default 4 MiB, hard ceiling 256 MiB). The in-flight `liveJournal` is
 separately capped by `BridgeOptions.maxJournalEvents` (default 10 000 replay

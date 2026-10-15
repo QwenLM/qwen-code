@@ -49,16 +49,51 @@ describe('SessionService - rename and custom title', () => {
   };
 
   const recordB1: ChatRecord = {
+    ...recordA1,
     uuid: 'b1',
-    parentUuid: null,
     sessionId: sessionIdB,
     timestamp: '2024-01-02T00:00:00Z',
-    type: 'user',
     message: { role: 'user', parts: [{ text: 'hi session b' }] },
-    cwd: '/test/project/root',
-    version: '1.0.0',
     gitBranch: 'feature',
   };
+
+  /** One `custom_title` system record line, newline-terminated. */
+  const titleLine = (customTitle: string, titleSource?: string) =>
+    JSON.stringify({
+      type: 'system',
+      subtype: 'custom_title',
+      systemPayload: { customTitle, ...(titleSource ? { titleSource } : {}) },
+    }) + '\n';
+
+  /** An fs.readSync implementation that serves `content` as the file tail. */
+  const readsAs =
+    (content: string) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_fd: number, buffer: any) => {
+      const data = Buffer.from(content);
+      data.copy(buffer);
+      return data.length;
+    };
+
+  /** statSync reports `content`'s size (unless `stat` overrides it) and readSync serves it. */
+  function serveTail(content: string, stat: object = {}) {
+    statSyncSpy.mockReturnValue({
+      size: content.length,
+      mtimeMs: Date.now(),
+      ...stat,
+    } as unknown as fs.Stats);
+    readSyncSpy.mockImplementation(readsAs(content));
+  }
+
+  /** Records from any cwd other than the project root hash to another project. */
+  const hashOnlyProjectRoot = () =>
+    vi
+      .mocked(getProjectHash)
+      .mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
 
   beforeEach(() => {
     vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
@@ -83,11 +118,10 @@ describe('SessionService - rename and custom title', () => {
     vi.spyOn(fs, 'openSync').mockReturnValue(42);
     readSyncSpy = vi.spyOn(fs, 'readSync').mockReturnValue(0);
     vi.spyOn(fs, 'closeSync').mockImplementation(() => undefined);
-    // Platforms without O_NOFOLLOW (Windows) open session files through an
-    // lstat -> open -> fstat identity check (openSyncNoFollow). Spy both
-    // stats so that fallback accepts the fabricated paths above: a regular
-    // (non-symlink) file whose identity trivially matches itself. On
-    // platforms with the flag the spies stay inert.
+    // Without O_NOFOLLOW (Windows) session files open through an lstat ->
+    // open -> fstat identity check (openSyncNoFollow); these stats make that
+    // fallback accept the fabricated paths as a regular, self-matching file.
+    // With the flag the spies stay inert.
     vi.spyOn(fs, 'lstatSync').mockImplementation(
       () =>
         ({
@@ -129,36 +163,33 @@ describe('SessionService - rename and custom title', () => {
     it('should append a custom_title record to the session file', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
 
-      const result = await sessionService.renameSession(
-        sessionIdA,
-        'my-feature',
+      expect(await sessionService.renameSession(sessionIdA, 'my-feature')).toBe(
+        true,
       );
-
-      expect(result).toBe(true);
       expect(jsonl.writeLineSync).toHaveBeenCalledOnce();
 
-      const writtenRecord = vi.mocked(jsonl.writeLineSync).mock
+      const written = vi.mocked(jsonl.writeLineSync).mock
         .calls[0][1] as ChatRecord;
-      expect(writtenRecord.type).toBe('system');
-      expect(writtenRecord.subtype).toBe('custom_title');
-      expect(writtenRecord.systemPayload).toEqual({
+      expect(written.type).toBe('system');
+      expect(written.subtype).toBe('custom_title');
+      expect(written.systemPayload).toEqual({
         customTitle: 'my-feature',
         titleSource: 'manual',
       });
-      expect(writtenRecord.sessionId).toBe(sessionIdA);
+      expect(written.sessionId).toBe(sessionIdA);
     });
 
     it('should rename a session in the archive store', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
 
-      const result = await sessionService.renameSession(
-        sessionIdA,
-        'archived session',
-        'manual',
-        'archived',
-      );
-
-      expect(result).toBe(true);
+      expect(
+        await sessionService.renameSession(
+          sessionIdA,
+          'archived session',
+          'manual',
+          'archived',
+        ),
+      ).toBe(true);
       expect(vi.mocked(jsonl.writeLineSync).mock.calls[0][0]).toContain(
         `/archive/${sessionIdA}.jsonl`,
       );
@@ -167,18 +198,7 @@ describe('SessionService - rename and custom title', () => {
     it('runs lifecycle mutation fences before appending the title', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
       const internals = sessionService as unknown as {
-        resolveMaintainableSessionSnapshot: () => Promise<{
-          location: 'active';
-          identities: Array<{
-            state: 'active';
-            filePath: string;
-            dev: number;
-            ino: number;
-            size: number;
-            mtimeMs: number;
-            ctimeMs: number;
-          }>;
-        }>;
+        resolveMaintainableSessionSnapshot: () => Promise<unknown>;
         assertMaintainableSessionUnchanged: () => void;
       };
       vi.spyOn(
@@ -230,33 +250,24 @@ describe('SessionService - rename and custom title', () => {
     it('should return false when session does not exist', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([]);
 
-      const result = await sessionService.renameSession(
-        '00000000-0000-0000-0000-000000000000',
-        'test',
-      );
-
-      expect(result).toBe(false);
+      expect(
+        await sessionService.renameSession(
+          '00000000-0000-0000-0000-000000000000',
+          'test',
+        ),
+      ).toBe(false);
       expect(jsonl.writeLineSync).not.toHaveBeenCalled();
     });
 
     it('should return false for session from different project', async () => {
-      const differentProjectRecord: ChatRecord = {
-        ...recordA1,
-        cwd: '/different/project',
-      };
-      vi.mocked(jsonl.readLines).mockResolvedValue([differentProjectRecord]);
-      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
-        cwd === '/test/project/root'
-          ? 'test-project-hash'
-          : 'other-project-hash',
-      );
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        { ...recordA1, cwd: '/different/project' },
+      ]);
+      hashOnlyProjectRoot();
 
-      const result = await sessionService.renameSession(
-        sessionIdA,
-        'my-feature',
+      expect(await sessionService.renameSession(sessionIdA, 'my-feature')).toBe(
+        false,
       );
-
-      expect(result).toBe(false);
       expect(jsonl.writeLineSync).not.toHaveBeenCalled();
     });
 
@@ -265,207 +276,105 @@ describe('SessionService - rename and custom title', () => {
       error.code = 'ENOENT';
       vi.mocked(jsonl.readLines).mockRejectedValue(error);
 
-      const result = await sessionService.renameSession(
-        '00000000-0000-0000-0000-000000000000',
-        'test',
-      );
-
-      expect(result).toBe(false);
+      expect(
+        await sessionService.renameSession(
+          '00000000-0000-0000-0000-000000000000',
+          'test',
+        ),
+      ).toBe(false);
     });
   });
 
   describe('getSessionTitle', () => {
     it('should return custom title from session file tail', () => {
-      const titleRecord = JSON.stringify({
-        type: 'system',
-        subtype: 'custom_title',
-        systemPayload: { customTitle: 'my-feature' },
-      });
-
-      statSyncSpy.mockReturnValue({
-        size: titleRecord.length + 1,
-        mtimeMs: Date.now(),
-      } as unknown as fs.Stats);
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(titleRecord + '\n');
-          data.copy(buffer);
-          return data.length;
-        },
-      );
-
-      const title = sessionService.getSessionTitle(sessionIdA);
-      expect(title).toBe('my-feature');
+      serveTail(titleLine('my-feature'));
+      expect(sessionService.getSessionTitle(sessionIdA)).toBe('my-feature');
     });
 
     it('should return last custom title when multiple exist', () => {
-      const line1 = JSON.stringify({
-        type: 'system',
-        subtype: 'custom_title',
-        systemPayload: { customTitle: 'old-name' },
-      });
-      const line2 = JSON.stringify({
-        type: 'system',
-        subtype: 'custom_title',
-        systemPayload: { customTitle: 'new-name' },
-      });
-      const content = line1 + '\n' + line2 + '\n';
-
-      statSyncSpy.mockReturnValue({
-        size: content.length,
-        mtimeMs: Date.now(),
-      } as unknown as fs.Stats);
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(content);
-          data.copy(buffer);
-          return data.length;
-        },
-      );
-
-      const title = sessionService.getSessionTitle(sessionIdA);
-      expect(title).toBe('new-name');
+      serveTail(titleLine('old-name') + titleLine('new-name'));
+      expect(sessionService.getSessionTitle(sessionIdA)).toBe('new-name');
     });
 
     it('should return undefined when no custom title exists', () => {
-      const userRecord = JSON.stringify({
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'hello' }] },
-      });
-
-      statSyncSpy.mockReturnValue({
-        size: userRecord.length + 1,
-        mtimeMs: Date.now(),
-      } as unknown as fs.Stats);
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(userRecord + '\n');
-          data.copy(buffer);
-          return data.length;
-        },
+      serveTail(
+        JSON.stringify({
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        }) + '\n',
       );
-
-      const title = sessionService.getSessionTitle(sessionIdA);
-      expect(title).toBeUndefined();
+      expect(sessionService.getSessionTitle(sessionIdA)).toBeUndefined();
     });
 
     it('should return undefined when file does not exist', () => {
       statSyncSpy.mockImplementation(() => {
         throw new Error('ENOENT');
       });
-
-      const title = sessionService.getSessionTitle(sessionIdA);
-      expect(title).toBeUndefined();
+      expect(sessionService.getSessionTitle(sessionIdA)).toBeUndefined();
     });
   });
 
   describe('findSessionsByTitle', () => {
     const now = Date.now();
 
-    function setupSessionFiles(
-      sessions: Array<{
-        id: string;
-        record: ChatRecord;
-        mtime: number;
-        titleContent?: string;
-      }>,
+    /**
+     * Lists `sessions` as session files (stat'ed at their mtime, or `now`),
+     * serves each one's record as its head and `tail` (default: empty) as
+     * every file's tail, then searches for `query`.
+     */
+    function findByTitle(
+      query: string,
+      sessions: Array<{ id: string; record: ChatRecord; mtime?: number }>,
+      tail?: string,
     ) {
       readdirSyncSpy.mockReturnValue(
         sessions.map((s) => `${s.id}.jsonl`) as unknown as Array<
           fs.Dirent<Buffer>
         >,
       );
-
       statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
         const p = filePath.toString();
         const session = sessions.find((s) => p.includes(s.id));
         return {
           mtimeMs: session?.mtime ?? now,
-          size: session?.titleContent?.length ?? 100,
+          size: tail?.length ?? 100,
           isFile: () => true,
         } as unknown as fs.Stats;
       });
-
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
           const session = sessions.find((s) => filePath.includes(s.id));
           return session ? [session.record] : [];
         },
       );
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, _buffer: any) =>
-          // For simplicity, return empty content (no title by default)
-          // Individual tests can override this
-          0,
-      );
+      readSyncSpy.mockImplementation(readsAs(tail ?? ''));
+      return sessionService.findSessionsByTitle(query);
     }
 
     it('should find session by exact custom title (case-insensitive)', async () => {
-      const titleContent =
-        JSON.stringify({
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'My-Feature' },
-        }) + '\n';
-
-      setupSessionFiles([
-        { id: sessionIdA, record: recordA1, mtime: now, titleContent },
-      ]);
-
-      // Override readSync to return title for session A
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(titleContent);
-          data.copy(buffer);
-          return data.length;
-        },
+      const matches = await findByTitle(
+        'my-feature',
+        [{ id: sessionIdA, record: recordA1 }],
+        titleLine('My-Feature'),
       );
-
-      const matches = await sessionService.findSessionsByTitle('my-feature');
 
       expect(matches).toHaveLength(1);
       expect(matches[0].sessionId).toBe(sessionIdA);
     });
 
     it('omits messageCount and avoids createReadStream (perf contract)', async () => {
-      // findSessionsByTitle is the second user-facing call site that the
-      // perf work removed `messageCount` from. This test pins both
-      // contracts: matched items must have `messageCount === undefined`,
-      // and the per-match `fs.createReadStream` count pass must not run
-      // — re-introducing it would silently bring back the O(file-size)
-      // cost without any other test failing.
-      const titleContent =
-        JSON.stringify({
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'my-feature' },
-        }) + '\n';
-
-      setupSessionFiles([
-        { id: sessionIdA, record: recordA1, mtime: now, titleContent },
-      ]);
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(titleContent);
-          data.copy(buffer);
-          return data.length;
-        },
-      );
-
+      // findSessionsByTitle is the second user-facing call site the perf work
+      // removed `messageCount` from. Pins both contracts: matches carry
+      // `messageCount === undefined`, and no per-match `fs.createReadStream`
+      // count pass runs; reintroducing it would silently bring back the
+      // O(file-size) cost without any other test failing.
       const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
 
-      const matches = await sessionService.findSessionsByTitle('my-feature');
+      const matches = await findByTitle(
+        'my-feature',
+        [{ id: sessionIdA, record: recordA1 }],
+        titleLine('my-feature'),
+      );
 
       expect(matches).toHaveLength(1);
       expect(matches[0].messageCount).toBeUndefined();
@@ -473,28 +382,14 @@ describe('SessionService - rename and custom title', () => {
     });
 
     it('should return empty array when no session matches', async () => {
-      setupSessionFiles([{ id: sessionIdA, record: recordA1, mtime: now }]);
-
-      const matches = await sessionService.findSessionsByTitle('nonexistent');
+      const matches = await findByTitle('nonexistent', [
+        { id: sessionIdA, record: recordA1 },
+      ]);
 
       expect(matches).toHaveLength(0);
     });
 
     it('should find a migrated session when runtime status matches this project', async () => {
-      const titleContent =
-        JSON.stringify({
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'my-feature' },
-        }) + '\n';
-      const migratedRecord: ChatRecord = {
-        ...recordA1,
-        cwd: '/old/project',
-      };
-
-      setupSessionFiles([
-        { id: sessionIdA, record: migratedRecord, mtime: now, titleContent },
-      ]);
       vi.mocked(readRuntimeStatus).mockResolvedValue({
         schemaVersion: 1,
         pid: 123,
@@ -504,86 +399,40 @@ describe('SessionService - rename and custom title', () => {
         startedAt: 1,
         qwenVersion: null,
       });
-      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
-        cwd === '/test/project/root'
-          ? 'test-project-hash'
-          : 'other-project-hash',
-      );
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(titleContent);
-          data.copy(buffer);
-          return data.length;
-        },
-      );
+      hashOnlyProjectRoot();
 
-      const matches = await sessionService.findSessionsByTitle('my-feature');
+      const matches = await findByTitle(
+        'my-feature',
+        [{ id: sessionIdA, record: { ...recordA1, cwd: '/old/project' } }],
+        titleLine('my-feature'),
+      );
 
       expect(matches).toHaveLength(1);
       expect(matches[0].sessionId).toBe(sessionIdA);
     });
 
     it('should not skip matches when multiple sessions share the same mtime (regression for PR #3093 review)', async () => {
-      // Three sessions sharing identical mtimes would fall on the page
-      // boundary of a paginated listSessions() and the third would be
-      // dropped by the strict `mtime < cursor` filter. Verify the exhaustive
-      // scan path returns all three.
+      // Three sessions sharing one mtime would straddle a page boundary of a
+      // paginated listSessions(), and its strict `mtime < cursor` filter
+      // would drop the third. The exhaustive scan must return all three.
       const sessionIdC = '7ba7b810-9dad-11d1-80b4-00c04fd430c9';
       const recordC1: ChatRecord = {
+        ...recordA1,
         uuid: 'c1',
-        parentUuid: null,
         sessionId: sessionIdC,
         timestamp: '2024-01-03T00:00:00Z',
-        type: 'user',
         message: { role: 'user', parts: [{ text: 'hi session c' }] },
-        cwd: '/test/project/root',
-        version: '1.0.0',
-        gitBranch: 'main',
       };
 
-      const titleContent =
-        JSON.stringify({
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'shared-name' },
-        }) + '\n';
-
-      readdirSyncSpy.mockReturnValue([
-        `${sessionIdA}.jsonl`,
-        `${sessionIdB}.jsonl`,
-        `${sessionIdC}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
-
-      const sharedMtime = now;
-      statSyncSpy.mockImplementation(
-        () =>
-          ({
-            mtimeMs: sharedMtime,
-            size: titleContent.length,
-            isFile: () => true,
-          }) as unknown as fs.Stats,
+      const matches = await findByTitle(
+        'shared-name',
+        [
+          { id: sessionIdA, record: recordA1 },
+          { id: sessionIdB, record: recordB1 },
+          { id: sessionIdC, record: recordC1 },
+        ],
+        titleLine('shared-name'),
       );
-
-      vi.mocked(jsonl.readLines).mockImplementation(
-        async (filePath: string) => {
-          if (filePath.includes(sessionIdA)) return [recordA1];
-          if (filePath.includes(sessionIdB)) return [recordB1];
-          if (filePath.includes(sessionIdC)) return [recordC1];
-          return [];
-        },
-      );
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(titleContent);
-          data.copy(buffer);
-          return data.length;
-        },
-      );
-
-      const matches = await sessionService.findSessionsByTitle('shared-name');
 
       expect(matches).toHaveLength(3);
       const matchedIds = matches.map((m) => m.sessionId).sort();
@@ -591,189 +440,60 @@ describe('SessionService - rename and custom title', () => {
     });
 
     it('should return multiple matches for duplicate titles', async () => {
-      const titleContent =
-        JSON.stringify({
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'shared-name' },
-        }) + '\n';
-
-      readdirSyncSpy.mockReturnValue([
-        `${sessionIdA}.jsonl`,
-        `${sessionIdB}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
-
-      statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
-        const p = filePath.toString();
-        return {
-          mtimeMs: p.includes(sessionIdB) ? now : now - 1000,
-          size: titleContent.length,
-          isFile: () => true,
-        } as unknown as fs.Stats;
-      });
-
-      vi.mocked(jsonl.readLines).mockImplementation(
-        async (filePath: string) => {
-          if (filePath.includes(sessionIdA)) return [recordA1];
-          return [recordB1];
-        },
+      const matches = await findByTitle(
+        'shared-name',
+        [
+          { id: sessionIdA, record: recordA1, mtime: now - 1000 },
+          { id: sessionIdB, record: recordB1 },
+        ],
+        titleLine('shared-name'),
       );
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(titleContent);
-          data.copy(buffer);
-          return data.length;
-        },
-      );
-
-      const matches = await sessionService.findSessionsByTitle('shared-name');
 
       expect(matches).toHaveLength(2);
     });
   });
 
   describe('listSessions with customTitle', () => {
-    it('should include customTitle in session list items', async () => {
-      const now = Date.now();
-      const titleContent =
-        JSON.stringify({
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'my-feature' },
-        }) + '\n';
-
+    /** Lists session A, its tail holding `content` (stat'ed at `size`). */
+    async function listWithTail(content: string, size = content.length) {
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`,
       ] as unknown as Array<fs.Dirent<Buffer>>);
-
-      statSyncSpy.mockReturnValue({
-        mtimeMs: now,
-        size: titleContent.length,
-        isFile: () => true,
-      } as unknown as fs.Stats);
-
+      serveTail(content, { size, isFile: () => true });
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      return (await sessionService.listSessions()).items;
+    }
 
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(titleContent);
-          data.copy(buffer);
-          return data.length;
-        },
-      );
+    it('should include customTitle in session list items', async () => {
+      const items = await listWithTail(titleLine('my-feature'));
 
-      const result = await sessionService.listSessions();
-
-      expect(result.items).toHaveLength(1);
-      expect(result.items[0].customTitle).toBe('my-feature');
+      expect(items).toHaveLength(1);
+      expect(items[0].customTitle).toBe('my-feature');
     });
 
     it('should return undefined customTitle when none set', async () => {
-      const now = Date.now();
+      const items = await listWithTail('', 100);
 
-      readdirSyncSpy.mockReturnValue([
-        `${sessionIdA}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
-
-      statSyncSpy.mockReturnValue({
-        mtimeMs: now,
-        size: 100,
-        isFile: () => true,
-      } as unknown as fs.Stats);
-
-      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, _buffer: any) => 0,
-      );
-
-      const result = await sessionService.listSessions();
-
-      expect(result.items).toHaveLength(1);
-      expect(result.items[0].customTitle).toBeUndefined();
-      expect(result.items[0].titleSource).toBeUndefined();
+      expect(items).toHaveLength(1);
+      expect(items[0].customTitle).toBeUndefined();
+      expect(items[0].titleSource).toBeUndefined();
     });
 
     it('should surface titleSource on session list items', async () => {
-      const now = Date.now();
-      const titleContent =
-        JSON.stringify({
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: {
-            customTitle: 'Fix login bug',
-            titleSource: 'auto',
-          },
-        }) + '\n';
+      const items = await listWithTail(titleLine('Fix login bug', 'auto'));
 
-      readdirSyncSpy.mockReturnValue([
-        `${sessionIdA}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
-
-      statSyncSpy.mockReturnValue({
-        mtimeMs: now,
-        size: titleContent.length,
-        isFile: () => true,
-      } as unknown as fs.Stats);
-
-      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(titleContent);
-          data.copy(buffer);
-          return data.length;
-        },
-      );
-
-      const result = await sessionService.listSessions();
-
-      expect(result.items[0].customTitle).toBe('Fix login bug');
-      expect(result.items[0].titleSource).toBe('auto');
+      expect(items[0].customTitle).toBe('Fix login bug');
+      expect(items[0].titleSource).toBe('auto');
     });
 
     it('leaves titleSource undefined for legacy records without the field', async () => {
-      // Back-compat: old sessions written before titleSource existed should
-      // be treated as manual (via `undefined` — consumers check `=== 'auto'`),
-      // so auto-generation never dims a title the user chose pre-upgrade.
-      const now = Date.now();
-      const titleContent =
-        JSON.stringify({
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'legacy-title' },
-        }) + '\n';
+      // Back-compat: sessions written before titleSource existed count as
+      // manual (via `undefined`; consumers check `=== 'auto'`), so
+      // auto-generation never dims a title the user chose pre-upgrade.
+      const items = await listWithTail(titleLine('legacy-title'));
 
-      readdirSyncSpy.mockReturnValue([
-        `${sessionIdA}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
-
-      statSyncSpy.mockReturnValue({
-        mtimeMs: now,
-        size: titleContent.length,
-        isFile: () => true,
-      } as unknown as fs.Stats);
-
-      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
-
-      readSyncSpy.mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (_fd: number, buffer: any) => {
-          const data = Buffer.from(titleContent);
-          data.copy(buffer);
-          return data.length;
-        },
-      );
-
-      const result = await sessionService.listSessions();
-
-      expect(result.items[0].customTitle).toBe('legacy-title');
-      expect(result.items[0].titleSource).toBeUndefined();
+      expect(items[0].customTitle).toBe('legacy-title');
+      expect(items[0].titleSource).toBeUndefined();
     });
   });
 });

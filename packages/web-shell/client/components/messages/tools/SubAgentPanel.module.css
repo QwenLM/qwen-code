@@ -203,12 +203,27 @@
   position: relative;
 }
 
+/*
+ * Mirrors MessageTimestamp's `.tip`, and had the same defect in a worse form:
+ * it declared no `background` at all, so the chip's digits composited directly
+ * onto the row's text. `.lineArg` reaches the row's right edge and
+ * `.lineElapsed` sits there for every running sub-tool, so the collision is
+ * structural, not incidental.
+ *
+ * Only the background is fixed here. `.tip` also moved to the bottom of its
+ * row, which works because a message wraps and its last line is a ragged
+ * remainder -- this row cannot wrap (`.lineArg` is `white-space: nowrap`) and
+ * is roughly as tall as the chip, so it has no vertical slack to move into and
+ * `bottom` would land in the same place `top` does. The text under the chip is
+ * still covered; it is now cleanly covered rather than overprinted.
+ */
 .toolTimeRow > .toolTimeTip {
   position: absolute;
   top: 2px;
   right: 4px;
   z-index: 5;
   color: var(--muted-foreground);
+  background: var(--background);
   font-size: 11px;
   line-height: 1.4;
   white-space: nowrap;

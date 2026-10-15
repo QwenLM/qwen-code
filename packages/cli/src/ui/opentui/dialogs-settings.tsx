@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -32,6 +32,7 @@ import {
   getDialogSettingKeys,
   getSettingDefinition,
   getEffectiveValue,
+  nextBooleanSettingValue,
   setPendingSettingValueAny,
   saveModifiedSettings,
   getDisplayValue,
@@ -43,10 +44,12 @@ import {
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 import {
+  isNumericSettingType,
   TOGGLE_TYPES,
   type SettingsType,
   type SettingsValue,
 } from '../../config/settingsSchema.js';
+import { formatSettingRowValue } from '../../utils/aux-model-selector.js';
 import { isAutoLanguage } from '../../i18n/languageUtils.js';
 import {
   getExtendedSystemInfo,
@@ -56,13 +59,19 @@ import { getSystemInfoFields } from '../systemInfoFields.js';
 import { ICON } from '../constants.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { toOriginalKey } from './key-map.js';
+import { useBatchSafeCursor } from './batch-cursor.js';
 import {
   DialogFrame,
   DialogSelect,
+  dialogContentWidth,
   FooterHint,
   useDialogSelect,
 } from './dialogs-shared.js';
+
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
+import { followScrollOffset, wrappedRows } from './dialogs-core.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 export type SettingsTab = 'settings' | 'status' | 'stats';
 
@@ -73,6 +82,29 @@ export const SETTINGS_TAB_ORDER: readonly SettingsTab[] = [
 ];
 
 export const SETTINGS_LIST_MAX_ITEMS = 8;
+
+// Rows the dialog spends outside the settings list: the frame's border and
+// padding (4), the tab bar and its spacer (2), the bordered search box and
+// its spacer (4), the description row and its margin (2), and the footer
+// hint's (2) — ink's SettingsDialog charges the same items (its footer is
+// one row; this port's FooterHint carries a margin row) before windowing
+// its list to what is left. The scroll arrows are not in the flat charge:
+// they paint only when the window is a strict subset with rows to spare, so
+// the budget pays them out of the list rows at exactly those sizes (the rule
+// the mode list's budget ports) — charging them flat showed one row fewer
+// than ink at every size the arrows never paint. The description and the
+// footer hint are clipped to the frame's content width at paint time, the
+// way ink's wrap="truncate" keeps them to the charged row; the restart
+// prompt stays wrapped, so its rows are measured and charged on top.
+const SETTINGS_LIST_CHROME_ROWS = 14;
+// The scope step beside it has no search box, arrows, description or restart
+// prompt: its chrome is the frame (4), the tab bar and its spacer (2), the
+// `> Apply To` title and its spacer (2), and the footer hint (2), which this
+// step paints unconditionally. Leaving the hint out granted the list two
+// rows the region could not pay — measured at region ten, where one down
+// moved the highlight onto a row nothing painted and onHighlight retargeted
+// every later write.
+const SETTINGS_SCOPE_CHROME_ROWS = 10;
 
 /** Parity of configTabLabel in SettingsDialog.tsx. */
 export function settingsTabLabel(tab: SettingsTab): string {
@@ -98,6 +130,11 @@ export const SUB_DIALOG_SETTING_KEYS = [
 export function isSubDialogSetting(key: string): boolean {
   return (SUB_DIALOG_SETTING_KEYS as readonly string[]).includes(key);
 }
+
+// The rule itself lives in `utils/aux-model-selector.ts` next to the rest of
+// the selector-scrub surface, so the ink and OpenTUI `/settings` rows cannot
+// drift apart. Re-exported here for this dialog's existing unit test.
+export { formatSettingRowValue };
 
 export interface SettingsListItem {
   key: string;
@@ -151,13 +188,14 @@ export function nextToggleValue(
     | {
         type?: SettingsType;
         options?: ReadonlyArray<{ value: SettingsValue }>;
+        default?: SettingsValue;
       }
     | undefined,
   currentValue: SettingsValue,
 ): SettingsValue | undefined {
   if (!definition || !TOGGLE_TYPES.has(definition.type)) return undefined;
   if (definition.type === 'boolean') {
-    return !(currentValue as boolean);
+    return nextBooleanSettingValue(currentValue, definition.default);
   }
   if (definition.type === 'enum' && definition.options) {
     const options = definition.options;
@@ -181,7 +219,7 @@ export function parseEditCommit(
   buffer: string,
 ): string | number | null | undefined {
   const trimmed = buffer.trim();
-  if (type === 'number') {
+  if (isNumericSettingType(type)) {
     if (trimmed === '') return null;
     const numParsed = Number(trimmed);
     return Number.isNaN(numParsed) ? null : numParsed;
@@ -251,14 +289,24 @@ export interface OpenTuiSettingsDialogProps {
 }
 
 export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
-  const { settings, onSelect, onRestartRequest, onSettingApplied, config } =
-    props;
+  const {
+    settings,
+    onSelect,
+    onRestartRequest,
+    onSettingApplied,
+    config,
+    availableTerminalHeight,
+  } = props;
 
   const [mode, setMode] = useState<'settings' | 'scope'>('settings');
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
     SettingScope.User,
   );
-  const [activeSettingIndex, setActiveSettingIndex] = useState(0);
+  const {
+    cursor: activeSettingIndex,
+    cursorRef: activeSettingIndexRef,
+    setCursor: setActiveSettingIndex,
+  } = useBatchSafeCursor();
   const [scrollOffset, setScrollOffset] = useState(0);
   const [activeTab, setActiveTab] = useState<SettingsTab>('settings');
   const [focusZone, setFocusZone] = useState<'tabs' | 'search' | 'list'>(
@@ -281,6 +329,9 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   const [statusReloadNonce, setStatusReloadNonce] = useState(0);
 
   const showRestartPrompt = restartRequiredSettings.size > 0;
+  const restartText = t(
+    'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
+  );
 
   // Rebase the pending snapshot on scope switches, mirroring the ink effect.
   useEffect(() => {
@@ -317,7 +368,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   useEffect(() => {
     setActiveSettingIndex(0);
     setScrollOffset(0);
-  }, [searchQuery]);
+  }, [searchQuery, setActiveSettingIndex]);
 
   const allItems = buildSettingsListItems({
     excludeWorkspaceRestricted: selectedScope === SettingScope.Workspace,
@@ -326,10 +377,76 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     getScopeMessageForSetting(key, selectedScope, settings),
   );
 
-  const maxItemsToShow = SETTINGS_LIST_MAX_ITEMS;
+  // Window the list to the region the mount hands over, like ink's
+  // SettingsDialog does with the same charge-out: an unsized frame inside the
+  // fixed-height region is squeezed, and a list that still asks for eight
+  // rows there overpaints its neighbours into illegibility while Enter keeps
+  // committing the row under the cursor.
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  // The prompt renders as wrapping text, so the flat one-row charge ink pays
+  // is short a row at any content width under 83 columns — and the list is
+  // granted a row the region cannot pay for. Charge the rows the text
+  // actually takes, measured at the frame's content width.
+  const restartRows = showRestartPrompt
+    ? wrappedRows(restartText, contentWidth)
+    : 0;
+  const listRows =
+    regionHeight === undefined
+      ? undefined
+      : regionHeight - SETTINGS_LIST_CHROME_ROWS - restartRows;
+  // The arrows cost two rows and exist only when the window can scroll, so a
+  // window of one or two rows spends them on items instead.
+  const arrowsPaint =
+    listRows === undefined
+      ? true
+      : listRows > 2 &&
+        Math.min(SETTINGS_LIST_MAX_ITEMS, listRows) < items.length;
+  const maxItemsToShow =
+    listRows === undefined
+      ? SETTINGS_LIST_MAX_ITEMS
+      : Math.max(
+          0,
+          Math.min(SETTINGS_LIST_MAX_ITEMS, listRows - (arrowsPaint ? 2 : 0)),
+        );
+  // Re-follow the highlight when the window's own size changes — a resize,
+  // or the restart prompt taking a row — the way useDialogSelect's
+  // scroll-follow effect does. A window left stale strands the highlight on
+  // a row nothing paints while Enter still commits it. A zero-row window has
+  // no anchor to follow to — the rule would walk the offset off the top row
+  // and back on every list change — so it is left alone until the budget
+  // paints rows again, the rule the shared hook keeps.
+  useEffect(() => {
+    if (maxItemsToShow < 1) return;
+    setScrollOffset((prev) =>
+      followScrollOffset(
+        activeSettingIndexRef.current,
+        // The follow rule leaves the offset alone while the highlight stays
+        // inside the window, so a grown window would inherit the smaller
+        // window's offset and paint fewer rows than the budget grants; clamp
+        // to the last full start first, the same bound selectionWindow
+        // derives at paint time.
+        Math.min(prev, Math.max(0, items.length - maxItemsToShow)),
+        items.length,
+        maxItemsToShow,
+      ),
+    );
+  }, [activeSettingIndexRef, items.length, maxItemsToShow]);
+
+  // A collapse to a zero-row window unpaints the row an in-flight edit is
+  // open on, and the edit's commit path sits above the zero-row guard — left
+  // open it would still write on Escape, a value the frame no longer shows.
+  useEffect(() => {
+    if (maxItemsToShow < 1) setEditingKey(null);
+  }, [maxItemsToShow]);
+
   const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
-  const showScrollUp = scrollOffset > 0;
-  const showScrollDown = scrollOffset + maxItemsToShow < items.length;
+  const showScrollUp = arrowsPaint && maxItemsToShow > 0 && scrollOffset > 0;
+  const showScrollDown =
+    arrowsPaint &&
+    maxItemsToShow > 0 &&
+    scrollOffset + maxItemsToShow < items.length;
 
   const applySettingValue = (key: string, value: SettingsValue) => {
     setPendingSettings((prev) => setPendingSettingValueAny(key, value, prev));
@@ -395,7 +512,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   };
 
   const resetCurrentToDefault = (key: string) => {
-    const currentSetting = items[activeSettingIndex];
+    const currentSetting = items[activeSettingIndexRef.current];
     if (!currentSetting || currentSetting.key !== key) return;
     const defaultValue = getDefaultValue(key);
     applySettingValue(key, defaultValue);
@@ -430,10 +547,24 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   const initialScopeIndex = scopeItems.findIndex(
     (item) => item.value === selectedScope,
   );
+  // Decision 70's rule for the mode dialog's Tab step, applied here: a
+  // region too short for even one scope row must not leave the keys a row
+  // nothing painted — onHighlight alone retargets every later write.
+  const scopeMaxItemsToShow =
+    regionHeight === undefined
+      ? scopeItems.length
+      : Math.max(
+          0,
+          Math.min(
+            scopeItems.length,
+            regionHeight - SETTINGS_SCOPE_CHROME_ROWS,
+          ),
+        );
   const scopeList = useDialogSelect({
     items: scopeItems,
     initialIndex: initialScopeIndex >= 0 ? initialScopeIndex : 0,
     focused: activeTab === 'settings' && mode === 'scope',
+    maxItemsToShow: scopeMaxItemsToShow,
     onSelect: (scope) => {
       setSelectedScope(scope);
       setMode('settings');
@@ -562,7 +693,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       const definition = getSettingDefinition(editingKey);
       const ch = original.sequence;
       let isValidChar = false;
-      if (definition?.type === 'number') {
+      if (isNumericSettingType(definition?.type)) {
         isValidChar = /^[0-9\-+.]$/.test(ch);
       } else {
         isValidChar = ch.length === 1 && ch >= ' ' && !ctrl;
@@ -572,49 +703,84 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       }
       return;
     }
+    // A zero-row budget paints no list row; the row under the cursor is one
+    // nothing paints, so the keys that move or commit it stay refused. The
+    // keys that address no row keep working: Tab (handled above), Escape,
+    // the restart prompt's `r`, up from the top row into the search box
+    // (thence the tab bar), and type-to-search. Three printable shapes stay
+    // refused because the chain reads them as row keys first: the space bar
+    // (its sequence is a printable blank, but the commit branch reads its
+    // name — hence the strict `> ' '` below), the k/j highlight aliases, and
+    // a digit on a numeric row, which opens an edit on a row nothing paints.
+    const typeToSearchKey =
+      !ctrl &&
+      original.sequence.length === 1 &&
+      original.sequence > ' ' &&
+      !keyMatchers[Command.SELECTION_UP](original) &&
+      !keyMatchers[Command.SELECTION_DOWN](original) &&
+      !(
+        /^[0-9]$/.test(original.sequence) &&
+        isNumericSettingType(items[activeSettingIndexRef.current]?.type)
+      );
+    if (
+      maxItemsToShow < 1 &&
+      name !== 'escape' &&
+      !(showRestartPrompt && name === 'r') &&
+      !(
+        keyMatchers[Command.SELECTION_UP](original) &&
+        activeSettingIndexRef.current === 0
+      ) &&
+      !typeToSearchKey
+    )
+      return;
     if (keyMatchers[Command.SELECTION_UP](original)) {
-      if (activeSettingIndex === 0) {
+      if (activeSettingIndexRef.current === 0) {
         setFocusZone('search');
         setScrollOffset(0);
       } else {
-        const newIndex = activeSettingIndex - 1;
+        const newIndex = activeSettingIndexRef.current - 1;
         setActiveSettingIndex(newIndex);
         if (newIndex < scrollOffset) setScrollOffset(newIndex);
       }
     } else if (keyMatchers[Command.SELECTION_DOWN](original)) {
       const newIndex =
-        activeSettingIndex < items.length - 1 ? activeSettingIndex + 1 : 0;
+        activeSettingIndexRef.current < items.length - 1
+          ? activeSettingIndexRef.current + 1
+          : 0;
       setActiveSettingIndex(newIndex);
       if (newIndex === 0) setScrollOffset(0);
       else if (newIndex >= scrollOffset + maxItemsToShow)
         setScrollOffset(newIndex - maxItemsToShow + 1);
     } else if (name === 'return' || name === 'space') {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (!currentItem) return;
       if (isSubDialogSetting(currentItem.key)) {
         if (name === 'return') onSelect(currentItem.key, selectedScope);
         return;
       }
-      if (currentItem.type === 'number' || currentItem.type === 'string') {
+      if (
+        isNumericSettingType(currentItem.type) ||
+        currentItem.type === 'string'
+      ) {
         startEditing(currentItem.key);
       } else {
         toggleCurrent(currentItem.key);
       }
     } else if (name === 'right') {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (currentItem && isSubDialogSetting(currentItem.key)) {
         onSelect(currentItem.key, selectedScope);
       }
     } else if (/^[0-9]$/.test(original.sequence)) {
-      const currentItem = items[activeSettingIndex];
-      if (currentItem?.type === 'number') {
+      const currentItem = items[activeSettingIndexRef.current];
+      if (isNumericSettingType(currentItem?.type)) {
         startEditing(currentItem.key, original.sequence);
       } else {
         setFocusZone('search');
         setSearchQuery((q) => q + original.sequence);
       }
     } else if (ctrl && (name === 'c' || name === 'l')) {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (currentItem) resetCurrentToDefault(currentItem.key);
     } else if (showRestartPrompt && name === 'r') {
       applyRestart();
@@ -640,6 +806,14 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     focusZone === 'list' &&
     items[activeSettingIndex]?.description;
 
+  // The bar is charged as one row; the hint gets the columns the tabs leave
+  // rather than wrapping onto a second.
+  const settingsTabsWidth = SETTINGS_TAB_ORDER.reduce(
+    (total, tab) =>
+      total + getCachedStringWidth(` ${settingsTabLabel(tab)} `) + 2,
+    0,
+  );
+
   return (
     <DialogFrame>
       <box flexDirection="row">
@@ -659,9 +833,12 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
         })}
         <text fg={C.dim}>
           {' '}
-          {focusZone === 'tabs'
-            ? t('(←/→ to switch, ↓ to return)')
-            : t('(↑ to switch tabs)')}
+          {truncateToWidth(
+            focusZone === 'tabs'
+              ? t('(←/→ to switch, ↓ to return)')
+              : t('(↑ to switch tabs)'),
+            Math.max(0, contentWidth - settingsTabsWidth - 1),
+          )}
         </text>
       </box>
       <box height={1} />
@@ -707,13 +884,15 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             items={scopeItems}
             activeIndex={scopeList.activeIndex}
             scrollOffset={scopeList.scrollOffset}
+            maxItemsToShow={scopeMaxItemsToShow}
             showNumbers={true}
             focused={true}
             onHover={scopeList.setActiveIndex}
             onSelectIndex={scopeList.selectIndex}
             onWheel={(direction) =>
               scopeList.setActiveIndex(
-                scopeList.activeIndex + (direction === 'down' ? 1 : -1),
+                scopeList.activeIndexRef.current +
+                  (direction === 'down' ? 1 : -1),
               )
             }
             renderLabel={(item, { titleColor }) => (
@@ -727,10 +906,13 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             borderStyle="rounded"
             borderColor={focusZone === 'search' ? C.accent : C.dim}
             paddingX={1}
+            flexDirection="row"
           >
             <text fg={C.dim}>⌕ </text>
             {searchQuery ? (
-              <text fg={C.text}>{searchQuery}</text>
+              <text fg={C.text}>
+                {truncateToWidth(searchQuery, contentWidth - 6)}
+              </text>
             ) : (
               <text fg={C.dim}>{t('Search settings…')}</text>
             )}
@@ -749,7 +931,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             let displayValue: string;
             if (isEditing) {
               displayValue = edit.buffer;
-            } else if (item.type === 'number' || item.type === 'string') {
+            } else if (
+              isNumericSettingType(item.type) ||
+              item.type === 'string'
+            ) {
               const path = item.key.split('.');
               const currentValue = getNestedValue(pendingSettings, path);
               const defaultValue = getDefaultValue(item.key);
@@ -768,7 +953,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
                 effectiveCurrentValue !== undefined &&
                 effectiveCurrentValue !== null
               ) {
-                displayValue = String(effectiveCurrentValue);
+                displayValue = formatSettingRowValue(
+                  item.key,
+                  effectiveCurrentValue,
+                );
               } else {
                 displayValue = '';
               }
@@ -798,6 +986,25 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
               settings,
             );
 
+            // ink truncates the label and the value (wrap="truncate"); an
+            // unclipped label would wrap the row into a second physical row
+            // the window charged as one. The value box keeps its natural
+            // width (flexShrink 0); the label box gets what the indicator,
+            // the margin and the value leave.
+            const labelBudget = Math.max(
+              0,
+              contentWidth - 3 - getCachedStringWidth(displayValue),
+            );
+            const labelFitsWhole =
+              getCachedStringWidth(item.label) <= labelBudget;
+            const scopeMessageFits =
+              scopeMessage !== undefined &&
+              labelFitsWhole &&
+              getCachedStringWidth(item.label) +
+                1 +
+                getCachedStringWidth(scopeMessage) <=
+                labelBudget;
+
             return (
               <box
                 key={item.key}
@@ -813,12 +1020,14 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
                   </text>
                 </box>
                 <box flexGrow={1} flexShrink={1}>
-                  <text fg={isActive ? C.green : C.text}>
-                    {item.label}
-                    {scopeMessage ? (
-                      <text fg={C.dim}> {scopeMessage}</text>
+                  <box flexDirection="row">
+                    <text fg={isActive ? C.green : C.text}>
+                      {truncateToWidth(item.label, labelBudget)}
+                    </text>
+                    {scopeMessageFits ? (
+                      <text fg={C.dim}>{` ${scopeMessage}`}</text>
                     ) : null}
-                  </text>
+                  </box>
                 </box>
                 <box marginLeft={1} flexShrink={0}>
                   <text
@@ -842,29 +1051,26 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
 
       {activeDescription && mode === 'settings' && activeTab === 'settings' ? (
         <box marginTop={1}>
-          <text fg={C.dim}>{activeDescription}</text>
+          <text fg={C.dim}>
+            {truncateToWidth(activeDescription, contentWidth)}
+          </text>
         </box>
       ) : null}
 
       {activeTab === 'settings' && (
         <FooterHint
-          text={
+          text={truncateToWidth(
             mode === 'settings'
               ? t('(Use Enter to select, Tab to configure scope)')
-              : t('(Use Enter to apply scope, Tab to go back)')
-          }
+              : t('(Use Enter to apply scope, Tab to go back)'),
+            contentWidth,
+          )}
         />
       )}
       {showRestartPrompt &&
         activeTab === 'settings' &&
         mode === 'settings' &&
-        focusZone === 'list' && (
-          <text fg={C.yellow}>
-            {t(
-              'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
-            )}
-          </text>
-        )}
+        focusZone === 'list' && <text fg={C.yellow}>{restartText}</text>}
     </DialogFrame>
   );
 }

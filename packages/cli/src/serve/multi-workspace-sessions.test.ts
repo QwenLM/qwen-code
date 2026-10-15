@@ -5,6 +5,8 @@
  */
 
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,6 +40,7 @@ import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { ServeOptions } from './types.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
@@ -50,6 +53,7 @@ import {
   workspaceTranscriptCursorExceedsLimitForTesting,
 } from './routes/session.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -138,6 +142,10 @@ interface FakeBridge extends AcpSessionBridge {
   readonly removeMidTurnMessageCalls: Array<{
     sessionId: string;
     messageId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly sendMidTurnNowCalls: Array<{
+    sessionId: string;
     context?: BridgeClientRequestContext;
   }>;
   readonly taskCancelCalls: Array<{
@@ -476,6 +484,7 @@ function makeBridge(
   const midTurnMessageCalls: FakeBridge['midTurnMessageCalls'] = [];
   const getMidTurnMessagesCalls: FakeBridge['getMidTurnMessagesCalls'] = [];
   const removeMidTurnMessageCalls: FakeBridge['removeMidTurnMessageCalls'] = [];
+  const sendMidTurnNowCalls: FakeBridge['sendMidTurnNowCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
   const continueCalls: FakeBridge['continueCalls'] = [];
@@ -516,6 +525,7 @@ function makeBridge(
     midTurnMessageCalls,
     getMidTurnMessagesCalls,
     removeMidTurnMessageCalls,
+    sendMidTurnNowCalls,
     taskCancelCalls,
     goalClearCalls,
     continueCalls,
@@ -769,6 +779,16 @@ function makeBridge(
       });
       return { removed: workspaceCwd === SECONDARY_CWD };
     },
+    sendMidTurnMessagesNow(
+      sessionId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      sendMidTurnNowCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return { requested: workspaceCwd === SECONDARY_CWD };
+    },
     async cancelSessionTask(
       sessionId: string,
       taskId: string,
@@ -831,6 +851,12 @@ function makeBridge(
         refreshed: params.syncOutputLanguage,
       };
     },
+    getSessionSources: vi.fn(async () => ({ revision: 0, sources: [] })),
+    upsertSessionSource: vi.fn(async () => ({
+      revision: 1,
+      change: 'created',
+    })),
+    removeSessionSource: vi.fn(async () => ({ revision: 1, removed: true })),
     async addSessionArtifact(
       sessionId: string,
       artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1],
@@ -1032,6 +1058,7 @@ function makeRuntime(input: {
 }): WorkspaceRuntime {
   return {
     ...input,
+    generationGuard: createWorkspaceGenerationGuard(),
     sessionRuntimeBaseDir:
       input.sessionRuntimeBaseDir ?? Storage.getRuntimeBaseDir(),
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -1570,6 +1597,103 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.rewindCalls).toHaveLength(3);
   });
 
+  const sourceAuth = (test: request.Test) =>
+    test.set('Host', host()).set('Authorization', TEST_AUTHORIZATION);
+
+  it('session sources use the trusted secondary owner for all metadata operations', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const sessionId = '22222222-2222-4222-a222-222222222222';
+    const input = {
+      title: 'Secondary source',
+      locator: { type: 'url', url: 'https://example.com/' },
+    };
+    const listed = await sourceAuth(
+      request(app).get(`/session/${sessionId}/sources`),
+    );
+    const added = await sourceAuth(
+      request(app).post(`/session/${sessionId}/sources`),
+    )
+      .set('X-Qwen-Client-Id', 'client-secondary')
+      .send(input);
+    const removed = await sourceAuth(
+      request(app).delete(`/session/${sessionId}/sources/source-1`),
+    ).set('X-Qwen-Client-Id', 'client-secondary');
+    expect([listed.status, added.status, removed.status]).toEqual([
+      200, 200, 200,
+    ]);
+    expect(secondaryBridge.getSessionSources).toHaveBeenCalledWith(
+      sessionId,
+      undefined,
+    );
+    expect(secondaryBridge.upsertSessionSource).toHaveBeenCalledWith(
+      sessionId,
+      input,
+      { clientId: 'client-secondary' },
+    );
+    expect(secondaryBridge.removeSessionSource).toHaveBeenCalledWith(
+      sessionId,
+      'source-1',
+      { clientId: 'client-secondary' },
+    );
+    expect(primaryBridge.getSessionSources).not.toHaveBeenCalled();
+    expect(primaryBridge.upsertSessionSource).not.toHaveBeenCalled();
+    expect(primaryBridge.removeSessionSource).not.toHaveBeenCalled();
+  });
+
+  it.each(['unknown', 'untrusted', 'ambiguous', 'replacing'] as const)(
+    'session sources fail closed for %s owners without primary fallback',
+    async (state) => {
+      const sessionId =
+        state === 'unknown'
+          ? 'missing'
+          : '22222222-2222-4222-a222-222222222222';
+      const harness = makeHarness({
+        token: TEST_TOKEN,
+        secondaryTrusted: state !== 'untrusted',
+        ...(state === 'ambiguous'
+          ? { primarySummaries: [makeSummary(sessionId, PRIMARY_CWD)] }
+          : {}),
+      });
+      if (state === 'replacing') {
+        harness.registry.beginReplacement(
+          harness.registry.getEntryByWorkspaceId('secondary-id')!,
+          'policy-2',
+        );
+      }
+      const responses = [
+        await sourceAuth(
+          request(harness.app).get(`/session/${sessionId}/sources`),
+        ),
+        await sourceAuth(
+          request(harness.app).post(`/session/${sessionId}/sources`),
+        )
+          .set('X-Qwen-Client-Id', 'client-secondary')
+          .send({}),
+        await sourceAuth(
+          request(harness.app).delete(`/session/${sessionId}/sources/source-1`),
+        ).set('X-Qwen-Client-Id', 'client-secondary'),
+      ];
+      const status = {
+        unknown: 404,
+        untrusted: 403,
+        ambiguous: 500,
+        replacing: 404,
+      }[state];
+      expect(responses.map((response) => response.status)).toEqual([
+        status,
+        status,
+        status,
+      ]);
+      for (const bridge of [harness.primaryBridge, harness.secondaryBridge]) {
+        expect(bridge.getSessionSources).not.toHaveBeenCalled();
+        expect(bridge.upsertSessionSource).not.toHaveBeenCalled();
+        expect(bridge.removeSessionSource).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it('fails closed for unknown, untrusted, and ambiguous rewind owners', async () => {
     const unknown = makeHarness();
     const unknownRes = await request(unknown.app)
@@ -2082,6 +2206,57 @@ describe('multi-workspace session dispatch', () => {
       },
     );
   });
+
+  it.each(['load', 'resume'] as const)(
+    'runs a cold %s inside the selected workspace runtime root',
+    async (action) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          action === 'load'
+            ? '550e8400-e29b-41d4-a716-446655440124'
+            : '550e8400-e29b-41d4-a716-446655440125';
+        const runtimeRoot = Storage.getRuntimeBaseDir();
+        const secondaryRuntimeBaseDir = path.join(
+          runtimeRoot,
+          'secondary-runtime',
+        );
+        await Storage.runWithResolvedRuntimeBaseDir(
+          secondaryRuntimeBaseDir,
+          () =>
+            writeStoredSession({
+              sessionId,
+              cwd: SECONDARY_CWD,
+              timestamp: '2026-07-08T00:16:00.000Z',
+              prompt: `secondary ${action} target`,
+              mtime: new Date('2026-07-08T00:16:00.000Z'),
+            }),
+        );
+        const { app, secondaryBridge } = makeHarness({
+          secondaryRuntimeBaseDir,
+          secondarySummaries: [],
+        });
+        const restoreMethod =
+          action === 'load' ? 'loadSession' : 'resumeSession';
+        const originalRestore =
+          secondaryBridge[restoreMethod].bind(secondaryBridge);
+        let observedRuntimeBaseDir: string | undefined;
+        vi.spyOn(secondaryBridge, restoreMethod).mockImplementation(
+          async (request) => {
+            observedRuntimeBaseDir = Storage.getRuntimeBaseDir();
+            return originalRestore(request);
+          },
+        );
+
+        const response = await request(app)
+          .post(`/session/${sessionId}/${action}`)
+          .set('Host', host())
+          .send({ cwd: SECONDARY_CWD });
+
+        expect(response.status).toBe(200);
+        expect(observedRuntimeBaseDir).toBe(secondaryRuntimeBaseDir);
+      });
+    },
+  );
 
   it('loads a projectless task created from Live in the Conversations runtime', async () => {
     await withStoredProjectlessLiveTasks(
@@ -3013,6 +3188,175 @@ describe('multi-workspace session dispatch', () => {
     );
   });
 
+  it.each([false, true])(
+    'creates a secondary side task with an active parent: %s',
+    async (hasActivePrompt) => {
+      const sessionId = '22222222-2222-4222-a222-222222222222';
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondarySummaries: [
+          makeSummary(sessionId, SECONDARY_CWD, { hasActivePrompt }),
+        ],
+      });
+      const create = vi.spyOn(secondaryBridge, 'createSideTaskSession');
+      const primaryCreate = vi.spyOn(primaryBridge, 'createSideTaskSession');
+
+      const response = await request(app)
+        .post(`/session/${sessionId}/side-task`)
+        .set('Host', host())
+        .set('X-Qwen-Client-Id', 'client-secondary')
+        .send({ name: 'Secondary research' });
+
+      expect(response.status).toBe(201);
+      expect(response.body).toMatchObject({
+        workspaceCwd: SECONDARY_CWD,
+        parentSessionId: sessionId,
+        sessionId: `${sessionId}-side-task`,
+      });
+      expect(create).toHaveBeenCalledExactlyOnceWith(
+        sessionId,
+        { name: 'Secondary research' },
+        { clientId: 'client-secondary' },
+      );
+      expect(primaryCreate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['unknown', 'untrusted', 'ambiguous', 'draining', 'closed'] as const)(
+    'rejects side-task creation for %s owners without primary fallback',
+    async (state) => {
+      const sessionId =
+        state === 'unknown'
+          ? 'missing'
+          : '22222222-2222-4222-a222-222222222222';
+      const { app, registry, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryTrusted: state !== 'untrusted',
+        ...(state === 'ambiguous'
+          ? { primarySummaries: [makeSummary(sessionId, PRIMARY_CWD)] }
+          : {}),
+      });
+      const generation =
+        registry.getEntryByWorkspaceId('secondary-id')!.current!;
+      if (state === 'draining') registry.beginDrain(generation.runtime);
+      if (state === 'closed') generation.guard.close();
+
+      const response = await request(app)
+        .post(`/session/${sessionId}/side-task`)
+        .set('Host', host())
+        .send({ name: 'Must not be created' });
+
+      const expected = {
+        unknown: [404, 'session_not_found'],
+        untrusted: [403, 'untrusted_workspace'],
+        ambiguous: [500, 'ambiguous_session_owner'],
+        draining: [404, 'session_not_found'],
+        closed: [503, 'workspace_runtime_unavailable'],
+      }[state];
+      expect([response.status, response.body.code]).toEqual(expected);
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    },
+  );
+
+  it('cleans up a secondary side task in its owner when creation outlives the generation', async () => {
+    const { app, registry, primaryBridge, secondaryBridge } = makeHarness();
+    const generation = registry.getEntryByWorkspaceId('secondary-id')!.current!;
+    const create = secondaryBridge.createSideTaskSession.bind(secondaryBridge);
+    vi.spyOn(secondaryBridge, 'createSideTaskSession').mockImplementation(
+      async (...args) => {
+        const result = await create(...args);
+        generation.guard.close();
+        return result;
+      },
+    );
+    const removedFrom: string[] = [];
+    const remove = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async function (this: SessionService) {
+        removedFrom.push(this.getProjectRoot());
+        return true;
+      });
+    try {
+      const response = await request(app)
+        .post('/session/22222222-2222-4222-a222-222222222222/side-task')
+        .set('Host', host())
+        .send({ name: 'Interrupted creation' });
+
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+      expect(secondaryBridge.killCalls).toEqual([
+        '22222222-2222-4222-a222-222222222222-side-task',
+      ]);
+      expect(remove).toHaveBeenCalledExactlyOnceWith(
+        '22222222-2222-4222-a222-222222222222-side-task',
+      );
+      expect(removedFrom).toEqual([SECONDARY_CWD]);
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      expect(primaryBridge.killCalls).toEqual([]);
+    } finally {
+      remove.mockRestore();
+    }
+  });
+
+  it('lists and restores persisted secondary side tasks in their workspace', async () => {
+    const parentId = '22222222-2222-4222-a222-222222222222';
+    const sideTaskId = '33333333-3333-4333-a333-333333333333';
+    for (const [sessionId, cwd, sourceId] of [
+      [sideTaskId, SECONDARY_CWD, parentId],
+      ['44444444-4444-4444-a444-444444444444', SECONDARY_CWD, 'other-parent'],
+      ['55555555-5555-4555-a555-555555555555', PRIMARY_CWD, parentId],
+    ]) {
+      await writeStoredSession({
+        sessionId,
+        cwd,
+        sourceType: 'side_task',
+        sourceId,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'Persisted side question',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+    }
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    const listed = await request(app)
+      .get(`/workspace/${encodeURIComponent(SECONDARY_CWD)}/sessions`)
+      .query({
+        sourceType: 'side_task',
+        sourceId: parentId,
+        archiveState: 'active',
+      })
+      .set('Host', host());
+
+    expect(listed.status).toBe(200);
+    expect(listed.body.sessions).toEqual([
+      expect.objectContaining({
+        sessionId: sideTaskId,
+        workspaceCwd: SECONDARY_CWD,
+        sourceType: 'side_task',
+        sourceId: parentId,
+      }),
+    ]);
+
+    const restored = await request(app)
+      .post(`/session/${sideTaskId}/load`)
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD, clientId: 'side-task-restored' });
+
+    expect(restored.status).toBe(200);
+    expect(secondaryBridge.restoreCalls).toEqual([
+      {
+        action: 'load',
+        req: expect.objectContaining({
+          sessionId: sideTaskId,
+          workspaceCwd: SECONDARY_CWD,
+          sourceType: 'side_task',
+          sourceId: parentId,
+        }),
+      },
+    ]);
+    expect(primaryBridge.restoreCalls).toEqual([]);
+    expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
+  });
+
   it.each([
     {
       suffix: 'branch',
@@ -3169,6 +3513,26 @@ describe('multi-workspace session dispatch', () => {
     expect(primaryBridge.setApprovalModeCalls).toEqual([]);
   });
 
+  it('routes DAC planning controls to the live-session owner without a primary fallback', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/approval-mode')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ mode: 'auto-edit', planMode: true });
+
+    expect(res.status).toBe(200);
+    expect(secondaryBridge.setApprovalModeCalls).toEqual([
+      expect.objectContaining({
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        mode: 'auto-edit',
+        opts: { persist: false, planMode: true },
+        context: { clientId: 'secondary-client' },
+      }),
+    ]);
+    expect(primaryBridge.setApprovalModeCalls).toEqual([]);
+  });
+
   it('still rejects model/approval-mode mutations on an untrusted non-primary session', async () => {
     // Opening these routes to non-primary owners must not bypass the trust
     // gate: an untrusted workspace runtime is refused before the bridge runs.
@@ -3254,6 +3618,17 @@ describe('multi-workspace session dispatch', () => {
     expect(removeMidTurnRes.status).toBe(200);
     expect(removeMidTurnRes.body).toEqual({ removed: true });
 
+    const sendNowRes = await request(app)
+      .post(
+        '/session/22222222-2222-4222-a222-222222222222/mid-turn-messages/send-now',
+      )
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({});
+    expect(sendNowRes.status).toBe(200);
+    expect(sendNowRes.body).toEqual({ requested: true });
+
     const taskCancelRes = await request(app)
       .post('/session/22222222-2222-4222-a222-222222222222/tasks/task-1/cancel')
       .set('Host', host())
@@ -3309,6 +3684,12 @@ describe('multi-workspace session dispatch', () => {
         context: { clientId: 'secondary-client' },
       },
     ]);
+    expect(secondaryBridge.sendMidTurnNowCalls).toEqual([
+      {
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
     expect(secondaryBridge.taskCancelCalls).toEqual([
       {
         sessionId: '22222222-2222-4222-a222-222222222222',
@@ -3326,6 +3707,7 @@ describe('multi-workspace session dispatch', () => {
       primaryBridge.btwCalls,
       primaryBridge.midTurnMessageCalls,
       primaryBridge.removeMidTurnMessageCalls,
+      primaryBridge.sendMidTurnNowCalls,
       primaryBridge.taskCancelCalls,
       primaryBridge.goalClearCalls,
     ]) {
@@ -3371,6 +3753,115 @@ describe('multi-workspace session dispatch', () => {
     } finally {
       await fsp.rm(secondaryPath, { force: true });
     }
+  });
+
+  it('reads a saved HTML version only from its registered session and owner runtime', async () => {
+    const root = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-snapshot-route-'),
+    );
+    const primaryRoot = path.join(root, 'primary');
+    const secondaryRoot = path.join(root, 'secondary');
+    const id = 'fce7cbe1-15de-422d-9b9a-2e2ab3370ca4';
+    const relativeFile = path.join('artifacts', 'snapshots', id, 'index.html');
+    const file = path.join(secondaryRoot, relativeFile);
+    const html = '<h1>Saved secondary version</h1>';
+    try {
+      for (const runtimeRoot of [primaryRoot, secondaryRoot]) {
+        await fsp.mkdir(path.dirname(path.join(runtimeRoot, relativeFile)), {
+          recursive: true,
+        });
+        await fsp.writeFile(path.join(runtimeRoot, relativeFile), html);
+      }
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        token: TEST_TOKEN,
+        primaryRuntimeBaseDir: primaryRoot,
+        secondaryRuntimeBaseDir: secondaryRoot,
+      });
+      const sessionId = '22222222-2222-4222-a222-222222222222';
+      const artifact = {
+        id: 'saved-version',
+        title: 'Saved version',
+        kind: 'html' as const,
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        status: 'available' as const,
+        retention: 'restorable' as const,
+        clientRetained: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        url: pathToFileURL(file).href,
+        managedId: `preview-${id}`,
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          'qwen.published.sha256': createHash('sha256')
+            .update(html)
+            .digest('hex'),
+        },
+      };
+      const listSecondary = vi.fn(async () => ({
+        v: 1 as const,
+        sessionId,
+        artifacts: [artifact],
+        generatedAt: new Date().toISOString(),
+        limits: { maxArtifacts: 200 },
+      }));
+      const listPrimary = vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: '11111111-1111-4111-a111-111111111111',
+        artifacts: [],
+        generatedAt: new Date().toISOString(),
+        limits: { maxArtifacts: 200 },
+      }));
+      secondaryBridge.getSessionArtifacts = listSecondary;
+      primaryBridge.getSessionArtifacts = listPrimary;
+      const read = (ownerId = sessionId, artifactId = artifact.id) =>
+        request(app)
+          .get(`/session/${ownerId}/artifacts/${artifactId}/content`)
+          .set('Host', host())
+          .set('Authorization', TEST_AUTHORIZATION)
+          .set('X-Qwen-Client-Id', 'secondary-client');
+      const response = await read();
+      expect(response.status).toBe(200);
+      expect(response.text).toBe(html);
+      expect(response.headers['content-disposition']).toContain('attachment');
+      expect(response.headers['x-content-type-options']).toBe('nosniff');
+      expect(response.headers['cache-control']).toBe('private, no-store');
+      expect(listSecondary).toHaveBeenCalledWith(sessionId, {
+        clientId: 'secondary-client',
+      });
+      expect(listPrimary).not.toHaveBeenCalled();
+      expect((await read(sessionId, 'unregistered')).status).toBe(404);
+      expect((await read('11111111-1111-4111-a111-111111111111')).status).toBe(
+        404,
+      );
+      await fsp.writeFile(file, '<h1>Modified</h1>');
+      expect((await read()).status).toBe(404);
+      await fsp.unlink(file);
+      expect((await read()).status).toBe(404);
+      // An identical version in the primary runtime must never be a fallback.
+      expect(
+        await fsp.readFile(path.join(primaryRoot, relativeFile), 'utf8'),
+      ).toBe(html);
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects saved HTML reads for an untrusted owner before listing its artifacts', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+    });
+    const listArtifacts = vi.fn();
+    primaryBridge.getSessionArtifacts = listArtifacts;
+    secondaryBridge.getSessionArtifacts = listArtifacts;
+    const response = await request(app)
+      .get(
+        '/session/22222222-2222-4222-a222-222222222222/artifacts/saved/content',
+      )
+      .set('Host', host());
+    expect(response.status).toBe(403);
+    expect(listArtifacts).not.toHaveBeenCalled();
   });
 
   it('routes continue, language, and artifact mutations to the owning non-primary bridge', async () => {
@@ -3612,9 +4103,16 @@ describe('multi-workspace session dispatch', () => {
           '/session/missing/mid-turn-messages/mid-missing',
         ),
       ).set('X-Qwen-Client-Id', 'secondary-client'),
+      auth(
+        request(missing.app).post(
+          '/session/missing/mid-turn-messages/send-now',
+        ),
+      )
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({}),
     ]);
     expect(missingResponses.map((response) => response.status)).toEqual([
-      404, 404, 404, 404, 404,
+      404, 404, 404, 404, 404, 404,
     ]);
     for (const response of missingResponses) {
       expect(response.body.code).toBe('session_not_found');
@@ -3625,6 +4123,7 @@ describe('multi-workspace session dispatch', () => {
       expect(bridge.addArtifactCalls).toEqual([]);
       expect(bridge.removeArtifactCalls).toEqual([]);
       expect(bridge.removeMidTurnMessageCalls).toEqual([]);
+      expect(bridge.sendMidTurnNowCalls).toEqual([]);
     }
 
     const duplicate = makeSummary('duplicate-session', PRIMARY_CWD);
@@ -3645,9 +4144,14 @@ describe('multi-workspace session dispatch', () => {
           '/session/duplicate-session/mid-turn-messages/mid-duplicate',
         ),
       ),
+      auth(
+        request(ambiguous.app).post(
+          '/session/duplicate-session/mid-turn-messages/send-now',
+        ),
+      ).send({}),
     ]);
     expect(ambiguousResponses.map((response) => response.status)).toEqual([
-      500, 500, 500,
+      500, 500, 500, 500,
     ]);
     for (const response of ambiguousResponses) {
       expect(response.body.code).toBe('ambiguous_session_owner');
@@ -3658,6 +4162,8 @@ describe('multi-workspace session dispatch', () => {
     expect(ambiguous.secondaryBridge.continueCalls).toEqual([]);
     expect(ambiguous.primaryBridge.removeMidTurnMessageCalls).toEqual([]);
     expect(ambiguous.secondaryBridge.removeMidTurnMessageCalls).toEqual([]);
+    expect(ambiguous.primaryBridge.sendMidTurnNowCalls).toEqual([]);
+    expect(ambiguous.secondaryBridge.sendMidTurnNowCalls).toEqual([]);
   });
 
   it('preserves primary routing for remaining mutations', async () => {
@@ -3787,10 +4293,16 @@ describe('multi-workspace session dispatch', () => {
           '/session/22222222-2222-4222-a222-222222222222/mid-turn-messages/mid-1',
         )
         .set('Host', host()),
+      request(app)
+        .post(
+          '/session/22222222-2222-4222-a222-222222222222/mid-turn-messages/send-now',
+        )
+        .set('Host', host())
+        .send({}),
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      401, 401, 401, 401,
+      401, 401, 401, 401, 401,
     ]);
     expect(primaryBridge.metadataCalls).toEqual([]);
     expect(secondaryBridge.metadataCalls).toEqual([]);
@@ -3800,6 +4312,8 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.goalClearCalls).toEqual([]);
     expect(primaryBridge.removeMidTurnMessageCalls).toEqual([]);
     expect(secondaryBridge.removeMidTurnMessageCalls).toEqual([]);
+    expect(primaryBridge.sendMidTurnNowCalls).toEqual([]);
+    expect(secondaryBridge.sendMidTurnNowCalls).toEqual([]);
   });
 
   it('rejects invalid secondary owner-local inputs before bridge actions', async () => {
@@ -3892,10 +4406,17 @@ describe('multi-workspace session dispatch', () => {
         .set('Host', host())
         .set('Authorization', TEST_AUTHORIZATION)
         .send({}),
+      request(app)
+        .post(
+          '/session/22222222-2222-4222-a222-222222222222/mid-turn-messages/send-now',
+        )
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({}),
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      403, 403, 403, 403, 403, 403, 403, 403,
+      403, 403, 403, 403, 403, 403, 403, 403, 403,
     ]);
     for (const response of responses) {
       expect(response.body.code).toBe('untrusted_workspace');
@@ -3907,6 +4428,7 @@ describe('multi-workspace session dispatch', () => {
       expect(bridge.midTurnMessageCalls).toEqual([]);
       expect(bridge.getMidTurnMessagesCalls).toEqual([]);
       expect(bridge.removeMidTurnMessageCalls).toEqual([]);
+      expect(bridge.sendMidTurnNowCalls).toEqual([]);
       expect(bridge.taskCancelCalls).toEqual([]);
       expect(bridge.goalClearCalls).toEqual([]);
     }
@@ -4590,36 +5112,41 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('falls back to live-only listing when persisted probing fails', async () => {
-    await withRuntimeDir(async () => {
-      const chatsDir = path.join(
-        new Storage(SECONDARY_CWD).getProjectDir(),
-        'chats',
-      );
-      await fsp.mkdir(chatsDir, { recursive: true });
-      await fsp.chmod(chatsDir, 0o000);
-      try {
-        const { app } = makeHarness({
-          secondarySummaries: [
-            makeSummary('secondary-live-fallback', SECONDARY_CWD),
-          ],
-        });
+  // Where permission bits do not bind, the mode-000 chats directory stays
+  // readable and the fallback is never taken.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'falls back to live-only listing when persisted probing fails',
+    async () => {
+      await withRuntimeDir(async () => {
+        const chatsDir = path.join(
+          new Storage(SECONDARY_CWD).getProjectDir(),
+          'chats',
+        );
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.chmod(chatsDir, 0o000);
+        try {
+          const { app } = makeHarness({
+            secondarySummaries: [
+              makeSummary('secondary-live-fallback', SECONDARY_CWD),
+            ],
+          });
 
-        const res = await request(app)
-          .get('/workspace/secondary-id/sessions')
-          .set('Host', host())
-          .expect(200);
-        expect(res.body.sessions).toEqual([
-          expect.objectContaining({
-            sessionId: 'secondary-live-fallback',
-            workspaceCwd: SECONDARY_CWD,
-          }),
-        ]);
-      } finally {
-        await fsp.chmod(chatsDir, 0o700);
-      }
-    });
-  });
+          const res = await request(app)
+            .get('/workspace/secondary-id/sessions')
+            .set('Host', host())
+            .expect(200);
+          expect(res.body.sessions).toEqual([
+            expect.objectContaining({
+              sessionId: 'secondary-live-fallback',
+              workspaceCwd: SECONDARY_CWD,
+            }),
+          ]);
+        } finally {
+          await fsp.chmod(chatsDir, 0o700);
+        }
+      });
+    },
+  );
 
   it('preserves the legacy invalid workspace selector message', async () => {
     const { app } = makeHarness();
@@ -6962,6 +7489,81 @@ describe('workspace session live-state route', () => {
         updatedAt: '2026-07-08T00:02:00.000Z',
       },
     ]);
+  });
+
+  it('omits the hidden agent host without changing the catalog version', async () => {
+    const { app } = makeHarness({
+      primarySummaries: [
+        makeSummary('11111111-1111-4111-a111-111111111111', PRIMARY_CWD),
+        makeSummary('22222222-2222-4222-a222-222222222222', PRIMARY_CWD, {
+          sourceType: 'agent-host',
+        }),
+      ],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(res.body.catalogVersion).toEqual({
+      generation: expect.any(String),
+      revision: expect.any(Number),
+    });
+    expect(
+      res.body.sessions.map(
+        (session: { sessionId: string }) => session.sessionId,
+      ),
+    ).toEqual(['11111111-1111-4111-a111-111111111111']);
+  });
+
+  it.each([true, false, undefined])(
+    'preserves running background task state %s while the main prompt is idle',
+    async (hasRunningBackgroundTasks) => {
+      const { app } = makeHarness({
+        primarySummaries: [
+          makeSummary('11111111-1111-4111-a111-111111111111', PRIMARY_CWD, {
+            hasActivePrompt: false,
+            hasRunningBackgroundTasks,
+          }),
+        ],
+      });
+      const res = await request(app)
+        .get(liveStatePath('primary-id'))
+        .set('Host', host())
+        .expect(200);
+      expect(res.body.sessions[0].hasActivePrompt).toBe(false);
+      expect(res.body.sessions[0].hasRunningBackgroundTasks).toBe(
+        hasRunningBackgroundTasks,
+      );
+      if (hasRunningBackgroundTasks === undefined)
+        expect(res.body.sessions[0]).not.toHaveProperty(
+          'hasRunningBackgroundTasks',
+        );
+    },
+  );
+
+  it('preserves the active automatic execution in the live-state projection', async () => {
+    const backgroundTurn = {
+      turnId: 'automatic-turn',
+      taskId: 'background-agent',
+      kind: 'agent' as const,
+      sourceTurnId: 'source-turn',
+      startedAt: 1234,
+    };
+    const { app } = makeHarness({
+      primarySummaries: [
+        makeSummary('11111111-1111-4111-a111-111111111111', PRIMARY_CWD, {
+          hasActivePrompt: true,
+          backgroundTurn,
+        }),
+      ],
+    });
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+    expect(res.body.sessions[0].backgroundTurn).toEqual(backgroundTurn);
   });
 
   it('omits updatedAt when the bridge summary has no activity watermark', async () => {

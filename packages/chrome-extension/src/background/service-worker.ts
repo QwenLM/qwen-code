@@ -21,6 +21,7 @@ import {
 } from './cdp-bridge';
 import { getDaemonConfig } from '../daemon/config.js';
 import { checkDaemonHealth } from '../daemon/discovery.js';
+import './browser-use-bridge.js';
 
 /* global WebSocket, console, setTimeout, chrome, TextEncoder, btoa */
 

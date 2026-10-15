@@ -102,6 +102,20 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
+it('keeps browser gates hosted independently of the shared Linux runner', () => {
+  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
+  // Slow hosted browser installs took over 23 min, so reserve time in the
+  // 60-minute job for transcript/smoke tests and artifact upload, while the
+  // install step itself stays bounded.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(60);
+  const hostedInstall = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Install Playwright Chromium and WebKit (hosted)',
+  );
+  expect(hostedInstall['timeout-minutes']).toBe(30);
+});
+
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
 //
 // It decides by EVALUATING each gate for the event, not by looking for tokens
@@ -362,7 +376,11 @@ describe('post-merge push lane', () => {
     // dispatch and push; widening this — say by copying `test`'s block when
     // adding a reporter — hands write tokens to that code. `test`'s own
     // wider block is legitimate: dorny/test-reporter needs `checks: write`.
-    expect(ci.jobs.lint_and_static.permissions).toEqual({ contents: 'read' });
+    // The contract guard reads the PR file list; it needs no write access.
+    expect(ci.jobs.lint_and_static.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'read',
+    });
   });
 
   it('keeps every shared prelude step identical between test and lint_and_static', () => {
@@ -468,8 +486,8 @@ describe('post-merge push lane', () => {
       'Run i18n check',
       'Generate settings schema',
       'Check settings schema is up-to-date',
-      'Generate VS Code companion notices',
-      'Check VS Code companion notices are up-to-date',
+      'Generate Web Shell and VS Code companion notices',
+      'Check Web Shell and VS Code companion notices are up-to-date',
       'Check serve fast-path bundle closure',
       'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
@@ -489,6 +507,30 @@ describe('post-merge push lane', () => {
         )
         .map((x) => x.name),
     ).toEqual(FULL_PAYLOAD);
+    const generateNotices = stepByName.get(
+      'Generate Web Shell and VS Code companion notices',
+    ).run;
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=@qwen-code/web-shell',
+    );
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=qwen-code-vscode-ide-companion',
+    );
+    expect(
+      stepByName.get(
+        'Check Web Shell and VS Code companion notices are up-to-date',
+      ).run,
+    ).toContain(
+      'git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt',
+    );
+    const checkNotices = stepByName.get(
+      'Check Web Shell and VS Code companion notices are up-to-date',
+    );
+    expect(checkNotices['continue-on-error']).toBeUndefined();
+    expect(checkNotices.run).toContain(
+      'if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then',
+    );
+    expect(checkNotices.run).toContain('exit 1');
     for (const n of FULL_PAYLOAD) {
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
     }
@@ -647,14 +689,53 @@ describe('GitHub helper tests', () => {
       .filter((step) => String(step.run ?? '').includes('env.HELPER_TESTS'));
     expect(helperSteps).not.toHaveLength(0);
     for (const step of helperSteps) {
-      expect(String(step.run), step.name).toContain('--test-concurrency=1');
+      // Split at each `node --test` occurrence, not per line: a second
+      // invocation on the SAME line still gets its own segment.
+      const invocations = String(step.run)
+        .split(/(?=node --test)/)
+        .filter((segment) => segment.startsWith('node --test'));
+      expect(invocations, step.name).not.toHaveLength(0);
+      for (const invocation of invocations) {
+        expect(invocation, step.name).toContain('--test-concurrency=1');
+      }
     }
+  });
+
+  it('retries the full-profile battery once against pool contention', () => {
+    // #12772: the battery spawns real subprocess loops on the shared ECS
+    // pool, and a push to main has no flaky-rerun patrol — one host hiccup
+    // failed the lane on a CSS-only commit. The unit lane got VITEST_RETRY
+    // for the same fleet condition (#10868); this lane retries inline. The
+    // github_ci_only fast lane stays single-attempt: it runs only on PRs, so
+    // a red check is visible to its author and manually re-runnable. (The
+    // flaky-rerun patrol is PR-scoped but best-effort — do not rely on it.)
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    const invocations =
+      String(step.run).match(/node --test --test-concurrency=1/g) ?? [];
+    expect(invocations).toHaveLength(2);
+    expect(String(step.run)).toContain('||');
+    // The retry re-runs the SAME battery, not a cheaper subset.
+    expect(String(step.run)).not.toContain('HELPER_TESTS_DEP_FREE');
+    // The retry's exit status decides the step: nothing swallows it.
+    expect(String(step.run)).not.toMatch(/\|\|\s*(true|:)/);
+    expect(String(step.run).trimEnd().endsWith('}')).toBe(true);
+    expect(step['continue-on-error']).toBeUndefined();
+    // The warning fires only when the retry absorbed the flake, and names
+    // the attempt-1 failures (the datum #12772 asked for).
+    expect(String(step.run)).toMatch(/&&\s+echo "::warning::/);
+    expect(String(step.run)).toMatch(
+      /tee "\$\{RUNNER_TEMP\}\/helper-attempt1\.log"/,
+    );
+    expect(String(step.run)).toMatch(/::warning::.*\$\(/);
   });
 
   it('keeps the dependency-free fast lane off npm-package suites', () => {
     // The github_ci_only helper step runs before ANY dependency install (the
     // setup-node and `npm ci` steps are gated on the full profile), so every
-    // suite it lists must import node: builtins only. These 9 suites import
+    // suite it lists must import node: builtins only. These 11 suites import
     // the `yaml` npm package; letting the fast lane run the full list made an
     // ECS-updater-only fork PR fail closed with ERR_MODULE_NOT_FOUND on a
     // fresh hosted runner (#10548 review R6-1). The full-profile helper step
@@ -678,6 +759,8 @@ describe('GitHub helper tests', () => {
       '.github/scripts/ci-runner-routing.test.mjs',
       '.github/scripts/assign-pr-owner.test.mjs',
       '.github/scripts/ci-disk-pressure.test.mjs',
+      '.github/scripts/e2e-build.test.mjs',
+      '.github/scripts/ecs-runner/review-scratch-cleanup.test.mjs',
     ];
     for (const suite of yamlSuites) {
       expect(depFreeSuites, suite).not.toContain(suite);

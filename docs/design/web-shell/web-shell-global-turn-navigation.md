@@ -2,8 +2,16 @@
 
 ## Status
 
-Accepted; Phases 1 and 2A implemented, Phases 2B–3 proposed; delivery boundary
-clarified 2026-09-04.
+Phases 1 and 2A merged in #10751 and #11054. Phase 2B and the agreed Phase 3
+global rail are implemented in
+[#11208](https://github.com/QwenLM/qwen-code/pull/11208), which is still open.
+Status updated 2026-09-07 against implementation commit `02e975e9fa`.
+
+Phase 3 functionality and scoped frontend verification are complete. The rail
+preserves ordinary upward scrolling, uses compact ticks with hover/focus previews,
+and loads distant turns on demand. Integrated browser-to-real-daemon lifecycle
+acceptance remains unverified; implementation, frontend verification, and merge
+status are separate milestones. See the delivery and verification sections below.
 
 This design complements
 `web-shell-bounded-transcript-and-subagent-details.md`. That document defines
@@ -29,7 +37,10 @@ The durable turn identity is the UUID of the persisted user record that starts
 the navigable item. A prompt ID is only a live correlation key. A Web Shell
 block ID and an array index are never protocol locators.
 
-## Current state and the actual gap
+## Original baseline and gap
+
+This section describes the baseline before Phases 1–3, not the implementation
+now available in #11208.
 
 The compact rail introduced in `MessageList` is already a useful presentation
 component, but its data source is local:
@@ -432,9 +443,17 @@ subset:
 
 - `aria-setsize=effectiveTurnCount`;
 - `aria-posinset=ordinal + 1`;
-- Home/End select the first/latest turn;
+- Home/End move focus to the first/latest turn; Enter activates it;
 - arrow and page keys move by ordinal and fetch metadata as needed; and
-- placeholder labels announce “Turn N, details loading”.
+- placeholder labels retain the turn number until metadata arrives.
+
+The delivered rail uses short horizontal ticks with a prompt title and available
+public assistant preview on hover or keyboard focus. Hovering does not fetch
+transcript pages. The selected tick marks the last chosen turn; manual body
+scrolling does not update selection. Separate styling for every turn kind and
+loading state, scroll-following selection, and dedicated snapshot-expiry copy
+are optional follow-ups, not requirements for this Phase 3 delivery. Existing
+error, retry, and return-to-latest controls provide recovery.
 
 The current responsive constraints remain: the rail may hide on narrow,
 split-pane, or reduced-layout surfaces. Completeness refers to the underlying
@@ -584,8 +603,11 @@ provisional reconciliation, and canonical locator map — belong to this phase,
 leaving Phase 3 as the rail UI. The detailed design lives in
 `web-shell-global-turn-navigation-phase2.md`.)
 
-Phase 2A (implemented in [#11054](https://github.com/QwenLM/qwen-code/pull/11054),
-under review) delivers steps 1–3. Phase 2B delivers step 4. The
+Phase 2A (merged in [#11054](https://github.com/QwenLM/qwen-code/pull/11054))
+delivers steps 1–3. Phase 2B is implemented in
+[#11208](https://github.com/QwenLM/qwen-code/pull/11208), following the
+[historical viewport design](web-shell-global-turn-navigation-phase2b.md),
+and delivers step 4. The
 [implementation plan](../../plans/2026-09-04-web-shell-global-turn-navigation-phase2.md)
 defines the current client contract and delivery slices.
 
@@ -596,16 +618,27 @@ defines the current client contract and delivery slices.
    window, with bidirectional boundaries, deduplication by record ID, page
    admission, eviction, detached-live behavior, and random anchored reads.
 3. Expose the complete headless state and locator contract needed by the rail.
-4. Migrate existing sequential prepend pagination behind the page-table
-   boundary while preserving its current public behavior.
+4. Add a bounded historical viewport over the same page table for built-in
+   main and split views, preserving legacy public hooks and sequential
+   pagination as the compatibility path.
 
 ### Phase 3: global rail
 
-1. Virtualize `SessionTimeline` by total ordinal count.
-2. Add loaded and unloaded selection paths, retry, placeholders, keyboard
-   navigation, and jump-to-latest integration.
-3. Keep the old `getSessionTimelineEntries(messages)` path as the capability
-   fallback.
+Implemented in #11208 together with Phase 2B:
+
+1. Virtualize the global rail by total ordinal count, with compact ticks and
+   hover/focus previews instead of a persistent text sidebar.
+2. Support loaded and unloaded selection, metadata placeholders, retry,
+   keyboard navigation, logical collection accessibility attributes, and the
+   existing return-to-latest action.
+3. Preserve ordinary upward pagination without a snapshot toolbar; selecting a
+   distant turn opens a bounded historical range while the live tail continues.
+4. Keep `getSessionTimelineEntries(messages)` as the capability fallback and
+   preserve the compact/narrow and split-pane visibility policy.
+
+Frozen historical fragments do not expose row mutation controls, including
+checkpoint branching. `/branch` remains an active-session command while reading
+history; checkpoint branching is available on the normal loaded Assistant rows.
 
 ## Implementation map
 
@@ -624,6 +657,35 @@ route variants must be reviewed against the exact runtime/storage ownership
 rules before the capability is advertised.
 
 ## Verification plan
+
+### Completed frontend verification and remaining acceptance
+
+The final compact-rail build at `02e975e9fa` passed three browser scenarios for
+hover/focus previews, keyboard entry, responsive visibility, 5,000-turn
+virtualization, and loaded/distant selection. Earlier scrolling and cache
+verification is recorded on #11208.
+
+Eight distinct lifecycle browser scenarios passed across an initial run and a
+targeted branch rerun, with no browser page errors. Same-owner SSE reconnect
+preserved the historical reading row; owner replacement returned to fresh live
+replay; rewind refreshed the count and removed tail; branching loaded the child
+and subsequent navigation requested child-session history. Delayed source
+selection and boundary responses could not replace the resulting view. An
+additional 105 targeted store, viewport, provider, and action tests passed; these
+overlap earlier unit runs and must not be added to them as unique coverage.
+
+This does not mean all PR checks passed. The Ubuntu test job for `02e975e9fa`
+failed with an uncaught `requestAnimationFrame is not defined` after the
+`TranscriptViewport.pending.test.tsx` environment was torn down. That CI failure
+remains an integration follow-up; the scoped local results above do not resolve
+it. Current check status is tracked on #11208.
+
+The browser scenarios use real Chromium and the built frontend with deterministic
+HTTP/SSE fixtures, including actual rewind dialogs and branch controls. They do
+not prove real daemon persistence, restart/failover, or filesystem rewind/branch
+semantics. Integrated browser-to-real-daemon acceptance, assistive-technology
+checks, and the larger performance matrix below remain verification follow-ups.
+The scenarios below describe the broader verification plan, not completed runs.
 
 ### Core reader
 

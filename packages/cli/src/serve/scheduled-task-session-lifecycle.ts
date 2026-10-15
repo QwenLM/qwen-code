@@ -15,12 +15,15 @@
  *  - deleting the session → remove the task
  *
  * These run from the shared session archive/delete choke points, so both the
- * REST and ACP surfaces are covered. Every function is best-effort and a no-op
- * when no task is bound to the given sessions (returning the input array
- * unchanged skips the write), so it's side-effect-free for ordinary sessions.
+ * REST and ACP surfaces are covered. Archive updates skip writes when no task
+ * matches. Deletion also records session tombstones when a task file exists,
+ * because an in-flight one-shot may be temporarily absent from that file.
  */
 
+import { access } from 'node:fs/promises';
 import {
+  cronTaskSessionDeletionId,
+  getCronFilePath,
   updateCronTasks,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -131,15 +134,28 @@ export async function removeTasksForSessions(
   options: { assertCanCommit?: () => void } = {},
 ): Promise<void> {
   if (sessionIds.length === 0) return;
-  const targets = new Set(sessionIds);
+  try {
+    await access(getCronFilePath(projectRoot));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  const targets = new Set(sessionIds.map(cronTaskSessionDeletionId));
+  const removedIds: string[] = [];
   await updateCronTasks(
     projectRoot,
     (tasks) => {
-      const next = tasks.filter(
-        (task) => !isBoundTask(task) || !targets.has(task.sessionId),
-      );
+      const next = tasks.filter((task) => {
+        if (
+          !isBoundTask(task) ||
+          !targets.has(cronTaskSessionDeletionId(task.sessionId))
+        )
+          return true;
+        removedIds.push(task.id);
+        return false;
+      });
       return next.length === tasks.length ? tasks : next;
     },
-    options,
+    { ...options, deletionIds: () => [...removedIds, ...targets] },
   );
 }

@@ -16,6 +16,7 @@
 
 import * as net from 'node:net';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { PeerDropReason } from './peer-admission.js';
 import {
   buildAuthLine,
   buildDeliveryStatusFrame,
@@ -192,7 +193,13 @@ export function sendPeerFrame(
  */
 export async function sendDeliveryStatus(
   socketPath: string,
-  fields: { status: PeerDeliveryStatus; origMsgId: string; from?: string },
+  fields: {
+    status: PeerDeliveryStatus;
+    origMsgId: string;
+    from?: string;
+    dropReason?: PeerDropReason;
+    droppedMsgIds?: string[];
+  },
   authToken?: string,
 ): Promise<void> {
   try {

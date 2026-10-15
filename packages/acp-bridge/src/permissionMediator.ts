@@ -668,6 +668,33 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   }
 
   /**
+   * Per-turn sibling of `forgetSession`: resolves every pending request
+   * whose `(sessionId, promptId)` matches as agent-cancelled. A background
+   * notification turn can end (or be aborted) while its approval is still
+   * outstanding; the bridge attributes those requests to the turn's id, so
+   * finishing the turn cancels exactly them and leaves a concurrently live
+   * user prompt's requests pending.
+   */
+  cancelForPrompt(sessionId: string, promptId: string): void {
+    // Snapshot the keys to avoid mutating the Map during iteration.
+    const requestIds: string[] = [];
+    for (const [id, pending] of this.pending) {
+      if (pending.sessionId === sessionId && pending.promptId === promptId)
+        requestIds.push(id);
+    }
+    for (const id of requestIds) {
+      const pending = this.pending.get(id);
+      if (!pending) continue;
+      this.resolveEntry(
+        pending,
+        { kind: 'cancelled', reason: 'agent_cancelled' },
+        { type: 'agent-cancelled' },
+        undefined,
+      );
+    }
+  }
+
+  /**
    * Lookup the sessionId for a given requestId. Used by the legacy
    * `bridge.respondToPermission(requestId, ...)` route which doesn't
    * carry a sessionId in the URL. NOT part of the

@@ -71,6 +71,7 @@ export interface LocalDirectoryLimits {
   maxSearchFiles: number;
   maxSearchBytes: number;
   maxSearchHits: number;
+  maxSearchDirs: number;
 }
 
 export const DEFAULT_LOCAL_DIRECTORY_LIMITS: LocalDirectoryLimits = {
@@ -80,6 +81,7 @@ export const DEFAULT_LOCAL_DIRECTORY_LIMITS: LocalDirectoryLimits = {
   maxSearchFiles: 2_000,
   maxSearchBytes: 20_000_000,
   maxSearchHits: 200,
+  maxSearchDirs: 10_000,
 };
 
 export interface LocalDirectoryEntry {
@@ -118,8 +120,10 @@ export interface LocalSearchResult {
   bytesScanned: number;
   /** Files seen but not searched: over the read cap, binary, or unreadable. */
   filesSkipped: number;
+  /** Directory skeletons walked; bounded by its own cap, not maxFiles. */
+  dirsScanned: number;
   truncated: boolean;
-  truncatedBy: 'hits' | 'files' | 'bytes' | null;
+  truncatedBy: 'hits' | 'files' | 'bytes' | 'directories' | null;
 }
 
 export interface LocalListResult {
@@ -491,6 +495,7 @@ export class LocalDirectory {
     const hits: LocalSearchHit[] = [];
     let filesScanned = 0;
     let filesExamined = 0;
+    let dirsExamined = 0;
     let bytesScanned = 0;
     let filesSkipped = 0;
     let truncatedBy: LocalSearchResult['truncatedBy'] = null;
@@ -505,6 +510,15 @@ export class LocalDirectory {
         for await (const entry of dir.values()) {
           if (truncatedBy !== null) break;
           if (isDirectoryEntry(entry)) {
+            // No other cap fires on a directory entry, and each skeleton
+            // costs a values() round trip, so without a bound of its own a
+            // huge near-file-less grant could keep one tool call walking
+            // long after the file, byte and hit budgets were spent.
+            if (dirsExamined >= this.limits.maxSearchDirs) {
+              truncatedBy = 'directories';
+              break;
+            }
+            dirsExamined += 1;
             queue.push({ dir: entry, prefix: [...prefix, entry.name] });
             continue;
           }
@@ -588,6 +602,7 @@ export class LocalDirectory {
       filesScanned,
       bytesScanned,
       filesSkipped,
+      dirsScanned: dirsExamined,
       truncated: truncatedBy !== null,
       truncatedBy,
     };

@@ -9,56 +9,52 @@ import { APIUserAbortError as AnthropicAPIUserAbortError } from '@anthropic-ai/s
 import { APIConnectionError, APIUserAbortError } from 'openai';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 
+/** An Error with a Node-style `code`, like undici's syscall errors. */
+const coded = (message: string, code: string) =>
+  Object.assign(new Error(message), { code });
+
+/** An Error whose `name` is overridden, like DOMException-style errors. */
+const named = (message: string, name: string) =>
+  Object.assign(new Error(message), { name });
+
+/** OpenAI's `Connection error.` wrapping undici's `fetch failed` over `cause`. */
+const connectionError = (cause: unknown) =>
+  new Error('Connection error.', {
+    cause: new TypeError('fetch failed', { cause }),
+  });
+
 describe('getErrorMessage cause unwrapping', () => {
   it('returns the plain message when there is no cause', () => {
     expect(getErrorMessage(new Error('boom'))).toBe('boom');
   });
 
-  it('surfaces ECONNREFUSED from the real OpenAI and undici error chain', () => {
-    const syscall = Object.assign(
-      new Error('connect ECONNREFUSED 127.0.0.1:29900'),
-      { code: 'ECONNREFUSED' },
-    );
-    const fetchFailed = new TypeError('fetch failed', { cause: syscall });
-    const err = new Error('Connection error.', { cause: fetchFailed });
-
-    const msg = getErrorMessage(err);
-    expect(msg).toContain('ECONNREFUSED');
-  });
-
-  it('surfaces ENOTFOUND from the real OpenAI and undici error chain', () => {
-    const syscall = Object.assign(
-      new Error('getaddrinfo ENOTFOUND nonexistent.example'),
-      { code: 'ENOTFOUND' },
-    );
-    const fetchFailed = new TypeError('fetch failed', { cause: syscall });
-    const err = new Error('Connection error.', { cause: fetchFailed });
-
-    expect(getErrorMessage(err)).toContain('ENOTFOUND');
-  });
+  it.each([
+    ['ECONNREFUSED', 'connect ECONNREFUSED 127.0.0.1:29900'],
+    ['ENOTFOUND', 'getaddrinfo ENOTFOUND nonexistent.example'],
+  ])(
+    'surfaces %s from the real OpenAI and undici error chain',
+    (code, message) => {
+      const err = connectionError(coded(message, code));
+      expect(getErrorMessage(err)).toContain(code);
+    },
+  );
 
   it('surfaces coded causes from an undici AggregateError', () => {
     const refused = new TypeError('fetch failed', {
-      cause: Object.assign(new Error('connect ECONNREFUSED ::1:29900'), {
-        code: 'ECONNREFUSED',
-      }),
+      cause: coded('connect ECONNREFUSED ::1:29900', 'ECONNREFUSED'),
     });
     const timedOut = new TypeError('fetch failed', {
-      cause: Object.assign(new Error('connect ETIMEDOUT 127.0.0.1:29900'), {
-        code: 'ETIMEDOUT',
-      }),
+      cause: coded('connect ETIMEDOUT 127.0.0.1:29900', 'ETIMEDOUT'),
     });
     const aggregate = new AggregateError([refused, timedOut]);
-    const fetchFailed = new TypeError('fetch failed', { cause: aggregate });
-    const err = new Error('Connection error.', { cause: fetchFailed });
 
-    const msg = getErrorMessage(err);
+    const msg = getErrorMessage(connectionError(aggregate));
     expect(msg).toContain('ECONNREFUSED');
     expect(msg).toContain('ETIMEDOUT');
   });
 
   it('surfaces a single Error cause that has a code but empty message', () => {
-    const cause = Object.assign(new Error(''), { code: 'ECONNREFUSED' });
+    const cause = coded('', 'ECONNREFUSED');
     const err = new TypeError('fetch failed', { cause });
     expect(getErrorMessage(err)).toBe('fetch failed (cause: ECONNREFUSED)');
   });
@@ -175,9 +171,7 @@ describe('getErrorMessage cause unwrapping', () => {
 
 describe('isAbortError', () => {
   it('should return true for DOMException-style AbortError', () => {
-    const abortError = new Error('The operation was aborted');
-    abortError.name = 'AbortError';
-
+    const abortError = named('The operation was aborted', 'AbortError');
     expect(isAbortError(abortError)).toBe(true);
   });
 
@@ -194,24 +188,15 @@ describe('isAbortError', () => {
   });
 
   it('should return true for Node.js abort error (ABORT_ERR code)', () => {
-    const nodeAbortError = new Error(
-      'Request aborted',
-    ) as NodeJS.ErrnoException;
-    nodeAbortError.code = 'ABORT_ERR';
-
-    expect(isAbortError(nodeAbortError)).toBe(true);
+    expect(isAbortError(coded('Request aborted', 'ABORT_ERR'))).toBe(true);
   });
 
-  it('should return false for regular errors', () => {
-    expect(isAbortError(new Error('Regular error'))).toBe(false);
-  });
-
-  it('should return false for null', () => {
-    expect(isAbortError(null)).toBe(false);
-  });
-
-  it('should return false for undefined', () => {
-    expect(isAbortError(undefined)).toBe(false);
+  it.each([
+    ['regular errors', new Error('Regular error')],
+    ['null', null],
+    ['undefined', undefined],
+  ])('should return false for %s', (_label, value) => {
+    expect(isAbortError(value)).toBe(false);
   });
 
   it('should return false for non-object values', () => {
@@ -221,28 +206,22 @@ describe('isAbortError', () => {
   });
 
   it('should return false for errors with different names', () => {
-    const timeoutError = new Error('Request timed out');
-    timeoutError.name = 'TimeoutError';
-
+    const timeoutError = named('Request timed out', 'TimeoutError');
     expect(isAbortError(timeoutError)).toBe(false);
   });
 
   it('should return false for errors with other error codes', () => {
-    const networkError = new Error('Network error') as NodeJS.ErrnoException;
-    networkError.code = 'ECONNREFUSED';
-
-    expect(isAbortError(networkError)).toBe(false);
+    expect(isAbortError(coded('Network error', 'ECONNREFUSED'))).toBe(false);
   });
 
+  // Both SDK cases assert the requirement (the name-based branch can't match)
+  // rather than the SDK-internal `.name === 'Error'`, which would break if
+  // OpenAI/Anthropic ever set a name without changing the correct behavior.
   it('should return true for the OpenAI SDK APIUserAbortError (user cancel)', () => {
     // The OpenAI SDK is the request path for auth_type=openai; a user cancel
     // surfaces as APIUserAbortError. It does not set `.name` (stays 'Error')
     // and has no ABORT_ERR code, so the checks above miss it.
     const error = new APIUserAbortError({ message: 'Request was aborted.' });
-
-    // Assert the requirement (the name-based branch can't match it) rather than
-    // the SDK internal `.name === 'Error'`, which would break if OpenAI/Anthropic
-    // ever set a name without changing the correct behavior here.
     expect(error.name).not.toBe('AbortError');
     expect(isAbortError(error)).toBe(true);
   });
@@ -254,10 +233,6 @@ describe('isAbortError', () => {
     const error = new AnthropicAPIUserAbortError({
       message: 'Request was aborted.',
     });
-
-    // Assert the requirement (the name-based branch can't match it) rather than
-    // the SDK internal `.name === 'Error'`, which would break if OpenAI/Anthropic
-    // ever set a name without changing the correct behavior here.
     expect(error.name).not.toBe('AbortError');
     expect(isAbortError(error)).toBe(true);
   });
@@ -275,16 +250,11 @@ describe('isAbortError', () => {
 
 describe('isNodeError', () => {
   it('should return true for Error with code property', () => {
-    const nodeError = new Error('File not found') as NodeJS.ErrnoException;
-    nodeError.code = 'ENOENT';
-
-    expect(isNodeError(nodeError)).toBe(true);
+    expect(isNodeError(coded('File not found', 'ENOENT'))).toBe(true);
   });
 
   it('should return false for Error without code property', () => {
-    const regularError = new Error('Regular error');
-
-    expect(isNodeError(regularError)).toBe(false);
+    expect(isNodeError(new Error('Regular error'))).toBe(false);
   });
 
   it('should return false for non-Error objects', () => {

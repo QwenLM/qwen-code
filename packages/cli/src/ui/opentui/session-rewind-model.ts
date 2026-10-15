@@ -45,6 +45,16 @@ export function rewindableTurns(turns: readonly RewindTurn[]): RewindTurn[] {
  * decorations (attachment suffixes, compression) cannot break the match.
  * Returns -1 when the history holds fewer real user prompts than
  * requested (e.g. the turn was absorbed by chat compression).
+ *
+ * Near-twin of core's `findApiRewindCutPoint`, with a deliberately different
+ * degenerate contract: this walk is 1-based and returns -1 for
+ * `occurrence <= 0`, where the core walk is 0-based and returns the end of
+ * the startup context for `turnIndex <= 0`. The two agree on the first turn
+ * only because nothing sits between the startup prelude and the first user
+ * prompt today. Any change to the walk semantics — `includeCompressed`, a
+ * new structural entry kind to skip, the -1 convention — must be made in
+ * both, or OpenTUI rewind computes a different boundary than ACP for the
+ * same history.
  */
 export function rewindApiCutPoint(
   apiHistory: Content[],
@@ -169,7 +179,7 @@ export type RewindAction =
   | { type: 'select-up' }
   | { type: 'select-down' }
   | { type: 'enter-pick'; fileCheckpointingEnabled: boolean }
-  | { type: 'option-up' }
+  | { type: 'option-up'; optionCount: number }
   | { type: 'option-down'; optionCount: number }
   | { type: 'back' }
   | { type: 'begin-restore' }
@@ -184,6 +194,19 @@ export function createRewindState(turnCount: number): RewindState {
     selectedTurnIndex: null,
     restoreOptionIndex: 0,
   };
+}
+
+/**
+ * One clamped step of the restore-option cursor. Shared by the reducer and by
+ * the key handler, which has to know where a burst of arrows landed before
+ * React has re-rendered the reducer's answer.
+ */
+export function stepRestoreOption(
+  current: number,
+  delta: -1 | 1,
+  optionCount: number,
+): number {
+  return Math.min(Math.max(0, optionCount - 1), Math.max(0, current + delta));
 }
 
 export function rewindReducer(
@@ -215,16 +238,21 @@ export function rewindReducer(
       if (state.phase !== 'restore-options') return state;
       return {
         ...state,
-        restoreOptionIndex: Math.max(0, state.restoreOptionIndex - 1),
+        restoreOptionIndex: stepRestoreOption(
+          state.restoreOptionIndex,
+          -1,
+          action.optionCount,
+        ),
       };
     }
     case 'option-down': {
       if (state.phase !== 'restore-options') return state;
       return {
         ...state,
-        restoreOptionIndex: Math.min(
-          Math.max(0, action.optionCount - 1),
-          state.restoreOptionIndex + 1,
+        restoreOptionIndex: stepRestoreOption(
+          state.restoreOptionIndex,
+          1,
+          action.optionCount,
         ),
       };
     }

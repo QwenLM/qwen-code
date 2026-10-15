@@ -5,35 +5,33 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { McpBudgetEvent } from './mcp-client-manager.js';
+import type { McpBudgetEvent, McpBudgetMode } from './mcp-client-manager.js';
 import { WorkspaceMcpBudget } from './mcp-workspace-budget.js';
+
+/** A budget; the `onEvent` key is present only when a listener is given. */
+const mk = (clientBudget: number, mode: McpBudgetMode, onEvent?: () => void) =>
+  new WorkspaceMcpBudget({ clientBudget, mode, ...(onEvent && { onEvent }) });
+
+const reserve = (budget: WorkspaceMcpBudget, ...names: string[]) =>
+  names.forEach((name) => budget.tryReserve(name));
 
 describe('WorkspaceMcpBudget', () => {
   describe('tryReserve', () => {
     it('returns reserved on first acquire of a name', () => {
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 3,
-        mode: 'enforce',
-      });
+      const budget = mk(3, 'enforce');
       expect(budget.tryReserve('foo')).toBe('reserved');
       expect(budget.getReservedCount()).toBe(1);
     });
 
     it('returns already_held on second acquire of same name', () => {
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 3,
-        mode: 'enforce',
-      });
+      const budget = mk(3, 'enforce');
       budget.tryReserve('foo');
       expect(budget.tryReserve('foo')).toBe('already_held');
       expect(budget.getReservedCount()).toBe(1);
     });
 
     it('returns refused under enforce mode when cap is full', () => {
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 2,
-        mode: 'enforce',
-      });
+      const budget = mk(2, 'enforce');
       expect(budget.tryReserve('a')).toBe('reserved');
       expect(budget.tryReserve('b')).toBe('reserved');
       expect(budget.tryReserve('c')).toBe('refused');
@@ -41,15 +39,14 @@ describe('WorkspaceMcpBudget', () => {
     });
 
     it('still reserves under warn mode past cap (measure-only)', () => {
-      const budget = new WorkspaceMcpBudget({ clientBudget: 2, mode: 'warn' });
-      budget.tryReserve('a');
-      budget.tryReserve('b');
+      const budget = mk(2, 'warn');
+      reserve(budget, 'a', 'b');
       expect(budget.tryReserve('c')).toBe('reserved');
       expect(budget.getReservedCount()).toBe(3);
     });
 
     it('off mode is a no-op (no slot tracked)', () => {
-      const budget = new WorkspaceMcpBudget({ clientBudget: 1, mode: 'off' });
+      const budget = mk(1, 'off');
       expect(budget.tryReserve('a')).toBe('reserved');
       expect(budget.getReservedCount()).toBe(0);
     });
@@ -57,30 +54,19 @@ describe('WorkspaceMcpBudget', () => {
 
   describe('release', () => {
     it('clears the slot and returns true if held', () => {
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 2,
-        mode: 'enforce',
-      });
+      const budget = mk(2, 'enforce');
       budget.tryReserve('foo');
       expect(budget.release('foo')).toBe(true);
       expect(budget.getReservedCount()).toBe(0);
     });
 
     it('returns false if not held (idempotent)', () => {
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 2,
-        mode: 'enforce',
-      });
-      expect(budget.release('never-reserved')).toBe(false);
+      expect(mk(2, 'enforce').release('never-reserved')).toBe(false);
     });
 
     it('frees capacity for a fresh reservation', () => {
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 2,
-        mode: 'enforce',
-      });
-      budget.tryReserve('a');
-      budget.tryReserve('b');
+      const budget = mk(2, 'enforce');
+      reserve(budget, 'a', 'b');
       expect(budget.tryReserve('c')).toBe('refused');
       budget.release('a');
       expect(budget.tryReserve('c')).toBe('reserved');
@@ -90,13 +76,8 @@ describe('WorkspaceMcpBudget', () => {
   describe('hysteresis warning', () => {
     it('fires once on upward 75% crossing', () => {
       const onEvent = vi.fn();
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 4,
-        mode: 'enforce',
-        onEvent,
-      });
-      budget.tryReserve('a'); // 25% — no fire
-      budget.tryReserve('b'); // 50% — no fire
+      const budget = mk(4, 'enforce', onEvent);
+      reserve(budget, 'a', 'b'); // 25%, 50% — no fire
       expect(onEvent).not.toHaveBeenCalled();
       budget.tryReserve('c'); // 75% — fires
       expect(onEvent).toHaveBeenCalledTimes(1);
@@ -110,28 +91,15 @@ describe('WorkspaceMcpBudget', () => {
 
     it('does not re-fire while above threshold', () => {
       const onEvent = vi.fn();
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 4,
-        mode: 'enforce',
-        onEvent,
-      });
-      budget.tryReserve('a');
-      budget.tryReserve('b');
-      budget.tryReserve('c'); // 75% — fires once
-      budget.tryReserve('d'); // 100% — no fire
+      // 'c' reaches 75% and fires once; 'd' at 100% does not fire.
+      reserve(mk(4, 'enforce', onEvent), 'a', 'b', 'c', 'd');
       expect(onEvent).toHaveBeenCalledTimes(1);
     });
 
     it('re-arms only after dropping below 37.5%', () => {
       const onEvent = vi.fn();
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 4,
-        mode: 'enforce',
-        onEvent,
-      });
-      budget.tryReserve('a');
-      budget.tryReserve('b');
-      budget.tryReserve('c'); // 75% — fires
+      const budget = mk(4, 'enforce', onEvent);
+      reserve(budget, 'a', 'b', 'c'); // 75% — fires
       budget.release('a'); // 50% — still over 37.5%, doesn't re-arm
       budget.release('b'); // 25% — drops below 37.5%, re-arms
       budget.tryReserve('a'); // 50% — armed but below 75%, no fire
@@ -141,14 +109,7 @@ describe('WorkspaceMcpBudget', () => {
 
     it('off mode is a hard no-op (no events ever)', () => {
       const onEvent = vi.fn();
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 1,
-        mode: 'off',
-        onEvent,
-      });
-      budget.tryReserve('a');
-      budget.tryReserve('b');
-      budget.tryReserve('c');
+      reserve(mk(1, 'off', onEvent), 'a', 'b', 'c');
       expect(onEvent).not.toHaveBeenCalled();
     });
   });
@@ -156,11 +117,7 @@ describe('WorkspaceMcpBudget', () => {
   describe('refused batch coalescing', () => {
     it('coalesces per-pass refusals into one refused_batch event', () => {
       const onEvent = vi.fn();
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 1,
-        mode: 'enforce',
-        onEvent,
-      });
+      const budget = mk(1, 'enforce', onEvent);
       budget.beginBulkPass();
       budget.tryReserve('a'); // reserved
       onEvent.mockClear(); // ignore the warning event from a's reservation
@@ -179,21 +136,14 @@ describe('WorkspaceMcpBudget', () => {
         budget: 1,
         mode: 'enforce',
       });
-      const batchEvent = onEvent.mock.calls[0]?.[0] as McpBudgetEvent & {
+      const batch = onEvent.mock.calls[0]?.[0] as McpBudgetEvent & {
         refusedServers: Array<{ name: string; transport: string }>;
       };
-      expect(batchEvent.refusedServers.map((r) => r.name)).toEqual([
-        'b',
-        'c',
-        'd',
-      ]);
+      expect(batch.refusedServers.map((r) => r.name)).toEqual(['b', 'c', 'd']);
     });
 
     it('exposes refused names via getRefusedServerNames', () => {
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 1,
-        mode: 'enforce',
-      });
+      const budget = mk(1, 'enforce');
       budget.beginBulkPass();
       budget.tryReserve('a');
       budget.recordRefusal('b', 'stdio');
@@ -203,10 +153,7 @@ describe('WorkspaceMcpBudget', () => {
     });
 
     it('clears refused names at start of next bulk pass', () => {
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 1,
-        mode: 'enforce',
-      });
+      const budget = mk(1, 'enforce');
       budget.beginBulkPass();
       budget.tryReserve('a');
       budget.recordRefusal('b', 'stdio');
@@ -221,20 +168,15 @@ describe('WorkspaceMcpBudget', () => {
 
   describe('getters', () => {
     it('reports configured mode + budget unchanged', () => {
-      const budget = new WorkspaceMcpBudget({ clientBudget: 5, mode: 'warn' });
+      const budget = mk(5, 'warn');
       expect(budget.getMode()).toBe('warn');
       expect(budget.getBudget()).toBe(5);
     });
 
     it('returns fresh array from getReservedSlots', () => {
-      const budget = new WorkspaceMcpBudget({
-        clientBudget: 3,
-        mode: 'enforce',
-      });
-      budget.tryReserve('a');
-      budget.tryReserve('b');
-      const snap = budget.getReservedSlots();
-      snap.push('mutate-me');
+      const budget = mk(3, 'enforce');
+      reserve(budget, 'a', 'b');
+      budget.getReservedSlots().push('mutate-me');
       expect(budget.getReservedSlots()).toEqual(['a', 'b']);
     });
   });

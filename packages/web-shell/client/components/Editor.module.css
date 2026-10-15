@@ -519,6 +519,7 @@
   width: min(320px, calc(100vw - 32px));
   max-width: min(320px, calc(100vw - 32px)) !important;
   max-height: min(280px, calc(100vh - 32px));
+  max-height: min(280px, calc(100dvh - 32px));
   padding: 8px 10px;
   overflow: auto;
   border: 1px solid var(--border, #2a2a2a);

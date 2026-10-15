@@ -365,6 +365,50 @@ describe('VirtualSubagentSessions', () => {
     });
     const iterator = stream![Symbol.asyncIterator]();
     expect((await iterator.next()).value?.type).toBe('replay_complete');
+    const nestedCall: ChatRecord = {
+      ...record('nested-call', 'two', 'assistant', ''),
+      message: {
+        role: 'model',
+        parts: [{ functionCall: { id: 'nested', name: 'agent', args: {} } }],
+      },
+    };
+    const nestedReadiness = (ready: boolean): ChatRecord => ({
+      ...record(
+        ready ? 'nested-ready' : 'nested-creating',
+        ready ? 'nested-creating' : 'nested-call',
+        'assistant',
+        '',
+      ),
+      type: 'system',
+      message: undefined,
+      subtype: 'agent_session_ready',
+      systemPayload: { callId: 'nested', subagentSessionReady: ready },
+    });
+    await fs.appendFile(
+      outputFile,
+      [nestedCall, nestedReadiness(false)]
+        .map((entry) => JSON.stringify(entry) + '\n')
+        .join(''),
+    );
+    await activeTarget(sessions).refreshLive();
+    expect(JSON.stringify((await iterator.next()).value)).toContain(
+      '"toolCallId":"nested"',
+    );
+    expect(JSON.stringify((await iterator.next()).value)).toContain(
+      '"subagentSessionReady":false',
+    );
+    await fs.appendFile(
+      outputFile,
+      JSON.stringify(nestedReadiness(true)) + '\n',
+    );
+    await activeTarget(sessions).refreshLive();
+    const readyUpdate = JSON.stringify((await iterator.next()).value);
+    expect(readyUpdate).toContain('"toolCallId":"nested"');
+    expect(readyUpdate).toContain('"subagentSessionReady":true');
+    const readyReload = await sessions.load(runtime, resolved!.sessionId);
+    expect(JSON.stringify(readyReload?.compactedReplay)).toContain(
+      '"subagentSessionReady":true',
+    );
     await fs.rm(`${outputFile}.stream`);
     await activeTarget(sessions).refreshLive();
     await fs.writeFile(

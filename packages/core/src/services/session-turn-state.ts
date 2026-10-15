@@ -5,6 +5,7 @@
  */
 
 import type { ChatRecord } from './chatRecordingService.js';
+import { readFileHistorySnapshotPayload } from './session-file-history-state.js';
 
 export interface SessionTurnState {
   initialTurn: number;
@@ -73,7 +74,9 @@ export function getSessionTurnRecordHint(
     record.subtype !== 'notification' &&
     record.subtype !== 'cron' &&
     record.subtype !== 'mid_turn_user_message' &&
-    record.subtype !== 'realtime_message'
+    record.subtype !== 'realtime_message' &&
+    record.subtype !== 'agent_mention' &&
+    record.subtype !== 'agent_message'
       ? (record.parentUuid ?? null)
       : undefined;
   const backgroundTask =
@@ -117,6 +120,14 @@ function getRecordPromptIds(record: ChatRecord): string[] {
   if (typeof recordPromptId === 'string') promptIds.push(recordPromptId);
   const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
   if (telemetryPromptId) promptIds.push(telemetryPromptId);
+  const snapshotPayload = readFileHistorySnapshotPayload(record);
+  if (snapshotPayload) {
+    for (const snapshot of snapshotPayload.snapshots) {
+      if (typeof snapshot?.promptId === 'string') {
+        promptIds.push(snapshot.promptId);
+      }
+    }
+  }
   return promptIds;
 }
 
@@ -139,11 +150,19 @@ function parseSessionPromptTurn(
   const promptIdPrefix = `${sessionId}########`;
   if (!promptId.startsWith(promptIdPrefix)) return undefined;
   const suffix = promptId.slice(promptIdPrefix.length);
-  return /^\d+$/.test(suffix) ? Number(suffix) : undefined;
+  if (!/^\d+$/.test(suffix)) return undefined;
+  const turn = Number(suffix);
+  return Number.isSafeInteger(turn + 1) ? turn : undefined;
 }
 
 function isUserPromptRecord(record: ChatRecord): boolean {
-  if (record.type !== 'user' || record.subtype === 'realtime_message') {
+  if (
+    record.type !== 'user' ||
+    record.subtype === 'realtime_message' ||
+    // Session multi-agent records never start a main-model turn.
+    record.subtype === 'agent_mention' ||
+    record.subtype === 'agent_message'
+  ) {
     return false;
   }
   return (
