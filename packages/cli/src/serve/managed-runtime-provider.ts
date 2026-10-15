@@ -238,8 +238,12 @@ function waitForLocalSession(
     return Promise.reject(abortError(signal, 'Runtime preparation aborted.'));
   }
   return new Promise((resolve, reject) => {
+    // Set only when the abort itself rejected this promise; an abort landing
+    // after the listener is removed leaves the settlement to the handler.
+    let settledByAbort = false;
     const onAbort = () => {
       if (signal.reason instanceof ManagedRuntimeReleaseAbortError) return;
+      settledByAbort = true;
       reject(abortError(signal, 'Runtime preparation aborted.'));
     };
     signal.addEventListener('abort', onAbort, { once: true });
@@ -276,13 +280,11 @@ function waitForLocalSession(
                 cleanup,
                 error,
               );
-              // When a non-release abort already settled this promise, the
-              // throw below lands on it as a no-op — so this log is the only
-              // surviving trace of the cleanup failure.
-              if (
-                signal.aborted &&
-                !(signal.reason instanceof ManagedRuntimeReleaseAbortError)
-              ) {
+              // The throw below reaches the caller unless the abort already
+              // rejected this promise. Only then is it a no-op, and the
+              // failure is recorded in the debug log alone — written only in
+              // debug mode, so otherwise it is dropped.
+              if (settledByAbort) {
                 debugLogger.error(
                   'Managed Runtime Session cleanup failed after abort.',
                   error,

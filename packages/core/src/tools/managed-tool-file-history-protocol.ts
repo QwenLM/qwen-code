@@ -8,10 +8,8 @@ import * as path from 'node:path';
 import { getMemoryBaseDir } from '../memory/paths.js';
 import type { Config } from '../config/config.js';
 import { normalizeQwenCustomIgnoreFileNames } from '../utils/qwenIgnoreParser.js';
-import {
-  MAX_SNAPSHOTS,
-  type SerializedFileHistorySnapshot,
-} from '../services/fileHistoryService.js';
+import { MAX_SNAPSHOTS } from '../services/file-history-limits.js';
+import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
 import type { ManagedToolFileHistoryState } from './managed-tool-file-history.js';
 import {
   managedToolDigest,
