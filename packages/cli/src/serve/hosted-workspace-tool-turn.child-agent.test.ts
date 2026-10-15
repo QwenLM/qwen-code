@@ -219,6 +219,16 @@ async function executeAgent(
   );
 }
 
+function cancelWhenChildWaits(abort: AbortController): void {
+  // Acceptance polling starts only after child admission has committed.
+  const readAcceptance = children.acceptance.bind(children);
+  vi.spyOn(children, 'acceptance').mockImplementationOnce((childRunId) => {
+    const acceptance = readAcceptance(childRunId);
+    abort.abort();
+    return acceptance;
+  });
+}
+
 beforeEach(async () => {
   vi.resetAllMocks();
   for (const method of [
@@ -1120,7 +1130,7 @@ it('a cancelled turn abandons the answer but never the committed child', async (
   const turn = createTurn();
   const abort = new AbortController();
   const childRunId = `prompt:call-1`;
-  setTimeout(() => abort.abort(), 200);
+  cancelWhenChildWaits(abort);
   const responses = await executeAgent(
     turn,
     call({
@@ -1143,7 +1153,7 @@ it('a cancelled turn abandons the answer but never the committed child', async (
 it('a cancelled turn never admits children queued behind its abandoned wait', async () => {
   const turn = createTurn();
   const abort = new AbortController();
-  setTimeout(() => abort.abort(), 200);
+  cancelWhenChildWaits(abort);
   const batch = await turn.execute(
     [
       call(
