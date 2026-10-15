@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher;
 import com.alibaba.qwen.code.managedagent.store.EventTransport;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
-import java.util.List;
 import jdk.jfr.Enabled;
 import jdk.jfr.Event;
 import jdk.jfr.EventType;
