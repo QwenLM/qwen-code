@@ -44,8 +44,10 @@ vi.mock('../../telemetry/gen-ai-request.js', () => ({
 
 const ROUTIFY = 'https://routify-pub.alibaba-inc.com/protocol/vertex';
 const GOOGLE_API = 'https://generativelanguage.googleapis.com';
+// #12928: temperature is no longer defaulted to 1 — the field is omitted
+// unless the caller supplied one, so the default-config assertion pins its
+// ABSENCE and a separate check pins the provider-default behavior.
 const DEFAULT_SENT_CONFIG = {
-  temperature: 1,
   topP: 0.95,
   thinkingConfig: {
     includeThoughts: true,
@@ -121,6 +123,8 @@ describe('LlmContentGenerator', () => {
         config: expect.objectContaining(DEFAULT_SENT_CONFIG),
       }),
     );
+    // #12928: no caller-supplied temperature means the field is omitted.
+    expect(method.mock.calls[0][0].config).not.toHaveProperty('temperature');
     expect(mockReportLlmRequest).toHaveBeenCalledWith(method.mock.calls[0][0]);
   }
 

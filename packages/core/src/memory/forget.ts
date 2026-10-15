@@ -339,9 +339,7 @@ async function selectByModel(
     abortSignal: callerAbortSignal
       ? AbortSignal.any([AbortSignal.timeout(8_000), callerAbortSignal])
       : AbortSignal.timeout(8_000),
-    config: {
-      temperature: 0,
-    },
+    config: { temperature: 0 },
     validate: (value) => {
       const candidateIds = new Set(candidates.map((c) => c.id));
       for (const id of value.selectedCandidateIds) {

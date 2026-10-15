@@ -305,6 +305,8 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         // /forget acts on the result without confirmation, so the selection
         // must run on the main model, never the runSideQuery fast default.
         model: 'main-model',
+        // Deterministic selection preserved (round-2 review on PR #12958).
+        config: { temperature: 0 },
       }),
     );
   });
