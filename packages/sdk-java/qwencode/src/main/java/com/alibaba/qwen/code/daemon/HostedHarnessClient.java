@@ -234,14 +234,19 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         ensureOpen();
         HarnessSessionRef session = requireSessionRef(request.getSession());
+        if (request.getModelSelection() != null
+                && !capabilities().getFeatures().contains("model-selection/1")) {
+            throw new DaemonException("Hosted model selection is unavailable");
+        }
         ActivePrompt candidate = new ActivePrompt(request.getPromptId(),
-                request.getPayloadDigest());
+                request.getPayloadDigest(), request.getModelSelection());
         ActivePrompt existing = activePrompts.putIfAbsent(
                 session.getHarnessSessionId(), candidate);
         if (existing != null
                 && (!existing.promptId.equals(candidate.promptId)
-                        || !existing.payloadDigest.equals(
-                                candidate.payloadDigest))) {
+                        || !existing.payloadDigest.equals(candidate.payloadDigest)
+                        || !java.util.Objects.equals(existing.modelSelection,
+                                candidate.modelSelection))) {
             throw new DaemonException(
                     "Hosted Harness session already has a running turn");
         }
@@ -1542,10 +1547,12 @@ public final class HostedHarnessClient implements AutoCloseable {
     private static final class ActivePrompt {
         private final String promptId;
         private final String payloadDigest;
+        private final Map<String, Object> modelSelection;
 
-        ActivePrompt(String promptId, String payloadDigest) {
+        ActivePrompt(String promptId, String payloadDigest, Map<String, Object> modelSelection) {
             this.promptId = promptId;
             this.payloadDigest = payloadDigest;
+            this.modelSelection = modelSelection;
         }
     }
 

@@ -121,6 +121,7 @@ qwen:
       provisioner: '${QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER:local-process}'
       v3-result-window: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW:30m}'
       workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
+      workspace-creation-root: '${QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT:}'
       workspace-generation: '${QWEN_MANAGED_AGENT_WORKSPACE_GENERATION:1}'
       workspace-cwd: '${QWEN_MANAGED_AGENT_WORKSPACE_CWD:}'
       isolation-class: '${QWEN_MANAGED_AGENT_RUNTIME_ISOLATION:session}'

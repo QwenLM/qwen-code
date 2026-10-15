@@ -5,6 +5,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -95,7 +97,15 @@ public final class ApiModels {
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
             boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
             boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange) {
+        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
+                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
+                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
+                Boolean foregroundShell) {
+            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive,
+                    sessionUnarchive, sessionDelete, cwdChange, foregroundShell, null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -234,8 +244,39 @@ public final class ApiModels {
             String environmentId, String title,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
-            JsonNode workspace) {
+            JsonNode workspace, String approvalMode) {
+        public WebShellCreateRequest(String requestId, String idempotencyKey,
+                String agentId, String environmentId, String title,
+                List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace) {
+            this(requestId, idempotencyKey, agentId, environmentId, title,
+                    input, metadata, workspace, null);
+        }
     }
+
+    public record WebShellSessionOptionsRequest(@NotBlank @Size(max = 128) String agentId) {
+    }
+
+    public record WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes) {
+    }
+
+    public record WebShellModelOption(String modelId, String label) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellModelSelection(String modelId, long revision) {}
+
+    public record WebShellSessionModelsRequest(@NotBlank @Size(max = 128) String sessionId) {}
+
+    public record WebShellSessionModels(List<WebShellModelOption> models,
+            WebShellModelSelection modelSelection, boolean supported) {}
+
+    public record WebShellChangeModelRequest(@Size(max = 128) String requestId,
+            @NotBlank @Size(max = 128) String sessionId,
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @NotBlank @Size(max = 512) String modelId,
+            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision) {}
+
+    public record WebShellModelChangeResult(String sessionId,
+            WebShellModelSelection modelSelection, boolean replayed) {}
 
     public record WebShellSubmitRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
@@ -355,11 +396,40 @@ public final class ApiModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellModelContext(String modelId, Long inputTokens,
+            Long contextWindowSize, long observedAt) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellSession(String sessionId, String title,
             String agentId, String status, long createdAt, long updatedAt,
             WebShellTurn activeTurn, Object environment, long lastSequence,
             WebShellWorkspace workspace,
-            WebShellSessionCapabilities capabilities) {
+            WebShellSessionCapabilities capabilities, String approvalMode,
+            WebShellModelContext modelContext, WebShellModelSelection modelSelection) {
+        public WebShellSession(String sessionId, String title, String agentId,
+                String status, long createdAt, long updatedAt, WebShellTurn activeTurn,
+                Object environment, long lastSequence, WebShellWorkspace workspace,
+                WebShellSessionCapabilities capabilities, String approvalMode,
+                WebShellModelContext modelContext) {
+            this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn,
+                    environment, lastSequence, workspace, capabilities, approvalMode, modelContext, null);
+        }
+        public WebShellSession(String sessionId, String title, String agentId,
+                String status, long createdAt, long updatedAt, WebShellTurn activeTurn,
+                Object environment, long lastSequence, WebShellWorkspace workspace,
+                WebShellSessionCapabilities capabilities, String approvalMode) {
+            this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn,
+                    environment, lastSequence, workspace, capabilities, approvalMode, null, null);
+        }
+
+        public WebShellSession(String sessionId, String title, String agentId,
+                String status, long createdAt, long updatedAt, WebShellTurn activeTurn,
+                Object environment, long lastSequence, WebShellWorkspace workspace,
+                WebShellSessionCapabilities capabilities) {
+            this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn,
+                    environment, lastSequence, workspace, capabilities, null, null, null);
+        }
     }
 
     /** H6b: the definition fields a create or revise request carries. */
