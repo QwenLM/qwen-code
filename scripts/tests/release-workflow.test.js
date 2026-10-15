@@ -290,7 +290,7 @@ describe('release workflow', () => {
     // it cannot be swapped for the hosted label because every pool-routed
     // runs-on expression names 'ubuntu-latest' as its fallback branch.
     const isPoolRouted = (job) =>
-      String(job['runs-on'] ?? '').includes('ecs-qwen-hk4-host');
+      /ecs-qwen-(?:hk4-host|release-host)/.test(String(job['runs-on'] ?? ''));
     const wipesWorkspace = (job) =>
       (job.steps ?? []).some(
         (step) => step.name === 'Restore workspace ownership',
@@ -351,12 +351,21 @@ describe('release workflow', () => {
     // without until a saturated instance died on ENOSPC mid-step — no log,
     // no annotation — and took the release with it (runs 34998771277 and
     // 35024357480). The gate fails the job fast instead, and a re-run lands
-    // on an instance with headroom. publish is hosted-only and stays ungated.
+    // on an instance with headroom. Jobs without a checkout are exempt: the
+    // gate rides a checkout, and the only such pool-routed job (quality) is
+    // a workspace-free three-second aggregation with nothing heavy to lose.
     const isPoolRouted = (job) =>
-      String(job['runs-on'] ?? '').includes('ecs-qwen-hk4-host');
+      /ecs-qwen-(?:hk4-host|release-host)/.test(String(job['runs-on'] ?? ''));
     const gated = [];
     for (const [id, job] of Object.entries(releaseYaml.jobs)) {
       if (!isPoolRouted(job)) continue;
+      if (
+        !(job.steps ?? []).some((step) =>
+          String(step.uses ?? '').includes('actions/checkout'),
+        )
+      ) {
+        continue;
+      }
       gated.push(id);
       const steps = job.steps ?? [];
       const gateIndex = steps.findIndex(
@@ -388,6 +397,7 @@ describe('release workflow', () => {
       'integration_docker',
       'integration_none',
       'prepare',
+      'publish',
       'quality_build',
       'quality_scripts',
       'quality_static',
@@ -533,7 +543,12 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
-    // 850, raised from 830 for the pool-wide disk-floor gate: one anchored
+    // 870, raised from 850 for moving publish/collect onto the opt-in
+    // ecs-qwen-release-host lane and quality onto the pool its checks already
+    // use: the added lines are two runs-on expressions, two anchored steps,
+    // and their comments — orchestration, not logic (2026-10-15 hosted-pool
+    // saturation queued publish for 64 minutes behind PR automation).
+    // 850 was raised from 830 for the pool-wide disk-floor gate: one anchored
     // step plus one alias per pool-routed job is still orchestration — the
     // gate's logic lives in .github/scripts/check-disk-floor.sh (#10035).
     // 830 was raised from 800 for the notify_failure fallback: that job may
@@ -541,7 +556,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(850);
+    expect(workflow.split('\n').length).toBeLessThan(870);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -1520,13 +1535,16 @@ describe('release workflow', () => {
     expect(quality.if).toBe(
       "${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}",
     );
-    expect(quality.steps[0].run).toContain(
-      'if [[ "${result}" != \'success\' ]]',
+    // The wipe anchor precedes the verify step once quality is pool-routed;
+    // locate the aggregation by name so the pool hygiene cannot shadow it.
+    const verify = quality.steps.find(
+      (step) => step.name === 'Verify quality results',
     );
+    expect(verify.run).toContain('if [[ "${result}" != \'success\' ]]');
     // Pin the full result mapping, not just the loop's shape: dropping one
     // loop entry or remapping an env var to another job's result must fail
     // here instead of letting a failed component publish.
-    expect(quality.steps[0].env).toEqual({
+    expect(verify.env).toEqual({
       STATIC_RESULT: '${{ needs.quality_static.result }}',
       BUILD_RESULT: '${{ needs.quality_build.result }}',
       TYPECHECK_RESULT: '${{ needs.quality_typecheck.result }}',
@@ -1540,7 +1558,7 @@ describe('release workflow', () => {
       'WORKSPACE_TEST_RESULT',
       'SCRIPT_TEST_RESULT',
     ]) {
-      expect(quality.steps[0].run, name).toContain('"${' + name + '}"');
+      expect(verify.run, name).toContain('"${' + name + '}"');
     }
     expect(releaseYaml.jobs.notify_failure.if).toContain(
       "needs.quality.result == 'failure'",
@@ -3344,11 +3362,27 @@ describe('release lane runner routing', () => {
     }
   });
 
-  it('keeps publishing and failure notification on hosted runners', () => {
-    expect(releaseYaml.jobs.quality['runs-on']).toBe('ubuntu-latest');
-    expect(releaseYaml.jobs.quality['runs-on']).not.toContain('ecs-qwen');
-    expect(releaseYaml.jobs.publish['runs-on']).toBe('ubuntu-latest');
-    expect(releaseYaml.jobs.publish['runs-on']).not.toContain('ecs-qwen');
+  it('keeps release credentials off PR-shared machines and failure reporting hosted', () => {
+    // quality aggregates five pool-routed checks, so it rides the same
+    // hk4-host pool they do; on 2026-10-15 it queued 53 minutes on the
+    // hosted pool while every machine it depended on sat idle.
+    expect(releaseYaml.jobs.quality['runs-on']).toContain('ecs-qwen-hk4-host');
+    expect(releaseYaml.jobs.quality['runs-on']).toContain('ubuntu-latest');
+    // publish carries CI_BOT_PAT and npm OIDC publishing. ecs-qwen-hk4-host
+    // machines are dual-labelled onto the ecs-qwen PR CI pool, so publish may
+    // only reach a release-only machine set — and only when explicitly
+    // opted in, which keeps the lane hosted until ops provisions it.
+    expect(releaseYaml.jobs.publish['runs-on']).toContain(
+      'ecs-qwen-release-host',
+    );
+    expect(releaseYaml.jobs.publish['runs-on']).not.toContain(
+      'ecs-qwen-hk4-host',
+    );
+    expect(releaseYaml.jobs.publish['runs-on']).toContain(
+      "vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true'",
+    );
+    expect(releaseYaml.jobs.publish['runs-on']).toContain('ubuntu-latest');
+    // Failure reporting must survive whatever broke the pool it reports on.
     expect(releaseYaml.jobs.notify_failure['runs-on']).toBe('ubuntu-latest');
     expect(releaseYaml.jobs.notify_failure['runs-on']).not.toContain(
       'ecs-qwen',
