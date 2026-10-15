@@ -467,3 +467,59 @@ it('shows execution status and outcome separately and copies metadata without ou
   await click(container, 'Metrics');
   expect(container.textContent).toContain('123ms');
 });
+
+it.each(['en', 'zh-CN'] as const)(
+  'keeps execution status tones across success and error updates in %s',
+  async (language) => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounts.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    for (const status of ['success', 'error'] as const) {
+      await act(async () =>
+        root.render(
+          <I18nProvider language={language}>
+            <TrajectoryInspector
+              execution={{
+                key: 'same-execution',
+                name: 'model',
+                status,
+                entry: {
+                  status,
+                  conflicted: false,
+                  event: {
+                    v: 1,
+                    kind: 'request',
+                    phase: 'ended',
+                    executionId: 'same-execution',
+                    sessionId: 's',
+                    promptId: 'p',
+                    model: 'model',
+                    startedAt: 10,
+                    endedAt: 20,
+                    durationMs: 10,
+                    outcome: status,
+                  },
+                },
+              }}
+              hiddenByRange={false}
+              hiddenByCollapse={false}
+              onReveal={() => {}}
+              onClearRange={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      const value = container.querySelector(`[data-tone="${status}"] pre`);
+      const labels =
+        language === 'en'
+          ? { success: 'Succeeded', error: 'Failed' }
+          : { success: '成功', error: '失败' };
+      expect(value?.textContent).toBe(labels[status]);
+    }
+  },
+);

@@ -452,6 +452,10 @@ export function TrajectoryPanel({
       : undefined;
   const [inspectorOpen, setInspectorOpen] = useState(false);
   useEffect(() => {
+    if (executionSelection && !selectedExecution)
+      setExecutionSelection(undefined);
+  }, [executionSelection, selectedExecution]);
+  useEffect(() => {
     setInspectorOpen(false);
     setInspectorSelection(undefined);
     setExecutionSelection(undefined);
@@ -1164,6 +1168,7 @@ export function TrajectoryPanel({
         outsideWindow={lifecycle.outsideWindow.length}
         selectedKey={selectedExecution?.key}
         onSelect={(key) => {
+          setSelectedKey(undefined);
           setInspectorOpen(false);
           setExecutionSelection({ loader: loadPage, key });
         }}
@@ -1742,11 +1747,13 @@ export function TrajectoryPanel({
           onClearRange={() => {}}
           onClose={() => {
             setExecutionSelection(undefined);
-            panelRef.current
-              ?.querySelector<HTMLElement>(
-                '[data-testid="trajectory-executions"] [role="grid"]',
-              )
-              ?.focus({ preventScroll: true });
+            const section = panelRef.current?.querySelector<HTMLElement>(
+              '[data-testid="trajectory-executions"]',
+            );
+            (
+              section?.querySelector<HTMLElement>('[role="grid"]') ??
+              section?.querySelector<HTMLButtonElement>('button')
+            )?.focus({ preventScroll: true });
           }}
           onLocateExecution={
             selectedExecution.historyRowKey

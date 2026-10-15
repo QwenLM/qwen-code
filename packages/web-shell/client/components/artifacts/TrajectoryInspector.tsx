@@ -340,10 +340,10 @@ export function TrajectoryInspector({
         formatted: formatValue(value),
         tone:
           label === t('trajectory.inspector.status')
-            ? statusTone(value)
+            ? statusTone(execution?.status ?? value)
             : undefined,
       })),
-    [fields, t],
+    [fields, t, execution?.status],
   );
   const limit = expanded ? EXPANDED_LENGTH : PREVIEW_LENGTH;
   const displayed = formattedFields.map(({ label, formatted, tone }) => {
