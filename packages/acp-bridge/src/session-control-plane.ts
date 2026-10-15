@@ -3009,10 +3009,10 @@ export function createSessionControlPlane(
   }
 
   /**
-   * The guards every automatic teardown shares, whichever policy decided it
-   * was time to look. Each caller adds its own policy on top (the reaper its
-   * TTL, the detach path its client bookkeeping) but none of them may skip
-   * these.
+   * The guards every conditional teardown shares. Automatic cleanup may close
+   * through a condemned owner after separately proving the entry settled;
+   * direct callers must retain because that owner cannot provide a trustworthy
+   * authorization.
    *
    * Note what is deliberately *not* here: `childWorkIsUnknown`. Unknown is not
    * a reason to skip, it is a reason to ask — the candidate goes on to
@@ -3020,8 +3020,9 @@ export function createSessionControlPlane(
    * close gate whether or not its snapshots are arriving. Skipping on unknown
    * instead would retain such a Session forever, with no path that ever
    * resolves it; asking costs one bounded round trip and still retains on any
-   * non-answer. Only *known* work — daemon-owned, or a fresh report of held
-   * work — blocks the attempt outright.
+   * non-answer. Daemon-owned work blocks every conditional attempt outright;
+   * a fresh report of held child work additionally blocks automatic cleanup,
+   * while a direct caller re-confirms it under the child's close gate.
    *
    * `activeWorkCloseInFlight` is in here because a conditional close is a
    * multi-step, awaited sequence: while one is outstanding this Session is
@@ -3029,10 +3030,12 @@ export function createSessionControlPlane(
    * evaluating it concurrently would either duplicate the round trip or race
    * its own guards against the first one's outcome.
    */
-  function entryIsAutoCloseCandidate(entry: SessionEntry): boolean {
+  function entryCanStartConditionalClose(
+    entry: SessionEntry,
+    allowCondemnedOwnerClose: boolean,
+  ): boolean {
     if (byId.get(entry.sessionId) !== entry) return false;
     if (isClosingOrAuthorizingClose(entry)) return false;
-    if (entry.events.subscriberCount > 0) return false;
     if (entryHasLocalWork(entry)) return false;
     // A restore in flight looks exactly like an abandoned Session and is the
     // opposite of one. `session/load` registers the entry before it awaits
@@ -3044,6 +3047,9 @@ export function createSessionControlPlane(
     // can elapse inside a slow restore too.
     const owner = channelInfoForEntry(entry);
     if (owner?.pendingRestoreIds.has(entry.sessionId)) return false;
+    if (owner && channelIsCondemned(owner) && !allowCondemnedOwnerClose) {
+      return false;
+    }
     // A child that negotiated active-work but cannot report every category
     // the daemon currently relies on must not authorize ordinary teardown.
     // This differs from a legacy child that never negotiated at all: legacy
@@ -3059,6 +3065,16 @@ export function createSessionControlPlane(
     ) {
       return false;
     }
+    return true;
+  }
+
+  /**
+   * The additional policy guards shared by automatic teardown paths.
+   */
+  function entryIsAutoCloseCandidate(entry: SessionEntry): boolean {
+    if (!entryCanStartConditionalClose(entry, true)) return false;
+    if (entry.events.subscriberCount > 0) return false;
+    const owner = channelInfoForEntry(entry);
     // A probe the child could not answer is retried on the next snapshot, but
     // not on every snapshot forever: a Session the child can never settle
     // would otherwise be re-probed at the report cadence for the lifetime of
@@ -3241,6 +3257,7 @@ export function createSessionControlPlane(
     await closeIfChildUnheld(entry, {
       trigger: reason,
       closeReason: 'last_client_detached',
+      allowCondemnedOwnerClose: true,
     });
   }
 
@@ -3259,12 +3276,23 @@ export function createSessionControlPlane(
    */
   async function closeIfChildUnheld(
     entry: SessionEntry,
-    opts: { trigger: string; closeReason: string },
+    opts: {
+      trigger: string;
+      closeReason: string;
+      allowCondemnedOwnerClose: boolean;
+      context?: BridgeClientRequestContext;
+      closeOpts?: CloseSessionOpts;
+    },
   ): Promise<void> {
     if (runtimeStop) return;
+    if (!entryCanStartConditionalClose(entry, opts.allowCondemnedOwnerClose)) {
+      return;
+    }
     entry.activeWorkCloseInFlight = true;
     try {
-      if (!(await confirmChildUnheld(entry))) return;
+      if (!(await confirmChildUnheld(entry, opts.allowCondemnedOwnerClose))) {
+        return;
+      }
       // Re-check identity, not just liveness. `closeSessionImpl` re-resolves
       // the target by raw id, and the id can be re-registered to a *different*
       // entry during the round trip — an explicit kill removes this one (kill
@@ -3283,7 +3311,9 @@ export function createSessionControlPlane(
         condemnedOwner !== undefined && channelIsCondemned(condemnedOwner)
           ? ACTIVE_WORK_CLOSE_TIMEOUT_MS
           : undefined;
-      await closeSessionImpl(entry.sessionId, undefined, {
+      await closeSessionImpl(entry.sessionId, opts.context, {
+        ...opts.closeOpts,
+        closeIfUnheld: false,
         reason: opts.closeReason,
         ...(agentCloseTimeoutMs !== undefined ? { agentCloseTimeoutMs } : {}),
       }).catch((err) => {
@@ -3319,20 +3349,20 @@ export function createSessionControlPlane(
    * retried here — the next snapshot resolves it, and a Session that is truly
    * gone will be reported with no holds in that snapshot.
    */
-  async function confirmChildUnheld(entry: SessionEntry): Promise<boolean> {
+  async function confirmChildUnheld(
+    entry: SessionEntry,
+    allowCondemnedOwnerClose: boolean,
+  ): Promise<boolean> {
     const info = channelInfoForEntry(entry);
     if (!info?.harness.activeWork) return true;
     if (info.harness.isDying) return false;
-    // A channel the session lifecycle has already condemned is waiting to be
-    // reaped as soon as its visible work drains — that teardown is the only
-    // thing that can release a non-cancellable request we have given up on.
-    // Deferring to the child here would make the drain depend on the very
-    // process we have declared unreliable, and a child wedged mid-request is
-    // precisely the one that cannot answer this round trip inside
-    // `ACTIVE_WORK_CLOSE_TIMEOUT_MS`. Nothing is attached to this session
-    // (`maybeCloseIdleSession` gates on that), so proceed to local teardown.
+    // Automatic cleanup may reach a channel the session lifecycle has already
+    // condemned after proving the entry settled. Its teardown is the only
+    // thing that can release a non-cancellable request we have given up on, so
+    // that internal path may authorize locally. A direct conditional close has
+    // no such proof and must retain instead of trusting an unavailable owner.
     if (channelIsCondemned(info)) {
-      return true;
+      return allowCondemnedOwnerClose;
     }
     try {
       const response = await withTimeout(
@@ -3867,6 +3897,7 @@ export function createSessionControlPlane(
       void closeIfChildUnheld(entry, {
         trigger: 'channel_quarantine',
         closeReason: 'channel_quarantined',
+        allowCondemnedOwnerClose: true,
       });
     }
     void harness.reapPendingEmptyChannel(ci.harness);
@@ -3897,12 +3928,13 @@ export function createSessionControlPlane(
   /**
    * Whether a conditional close on this channel has to ask the child at all.
    *
-   * The mirror of `confirmChildUnheld`'s two authorize-locally short-circuits:
-   * a channel that never negotiated active-work, and one the session lifecycle
-   * has condemned, are both closed locally with no round trip. Guards that back
-   * off a *probe* must consult this rather than re-derive the pair by hand, or
-   * they keep deferring an entry whose teardown needs nobody's permission — and
-   * for a condemned channel that teardown is the only thing that can release a
+   * The mirror of the automatic-cleanup form of `confirmChildUnheld`'s two
+   * authorize-locally short-circuits: a channel that never negotiated
+   * active-work, and a condemned channel whose entry was already proved
+   * settled, are both closed locally with no round trip. Guards that back off a
+   * *probe* must consult this rather than re-derive the pair by hand, or they
+   * keep deferring an entry whose teardown needs nobody's permission — and for
+   * a condemned channel that teardown is the only thing that can release a
    * request nobody is going to answer, while the retained Session is what keeps
    * the channel non-empty and its drain from ever completing.
    *
@@ -4267,6 +4299,7 @@ export function createSessionControlPlane(
         void closeIfChildUnheld(entry, {
           trigger: 'idle_timeout',
           closeReason: 'idle_timeout',
+          allowCondemnedOwnerClose: true,
         });
       }
     }, sessionReapIntervalMs);
@@ -9582,6 +9615,20 @@ export function createSessionControlPlane(
         'The session is already closing',
         'session_closing',
       );
+    }
+    if (closeOpts?.closeIfUnheld === true) {
+      if (context?.clientId !== undefined) {
+        resolveTrustedClientId(entry, context.clientId);
+      }
+      if (entry.activeWorkCloseInFlight) return;
+      await closeIfChildUnheld(entry, {
+        trigger: closeOpts.reason ?? 'conditional_close',
+        closeReason: closeOpts.reason ?? 'client_close',
+        allowCondemnedOwnerClose: false,
+        context,
+        closeOpts,
+      });
+      return;
     }
     let originatorClientId: string | undefined;
     if (context?.clientId !== undefined) {
