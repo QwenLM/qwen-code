@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelOutputSegmentContext } from '@qwen-code/channel-base';
-import type { DingtalkInteractiveCardClient } from './interactive-card-client.js';
+import {
+  DingtalkCardRequestError,
+  type DingtalkInteractiveCardClient,
+} from './interactive-card-client.js';
 import { StatusCardController } from './status-card-controller.js';
 
 type ExpectedCallbackResult =
@@ -42,9 +45,29 @@ function segment(
 
 const target = { chatId: 'cid-1', isGroup: true };
 
+function tracking(controller: StatusCardController) {
+  return controller as unknown as {
+    recordsBySegment: Map<string, unknown>;
+    recordsByOutTrack: Map<string, unknown>;
+    segmentIdsByRun: Map<string, Set<string>>;
+    terminalSegmentIds: Set<string>;
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function createHarness(
   options: {
     model?: string;
+    language?: string;
     onError?(operation: string, error: unknown): void;
   } = {},
 ) {
@@ -63,18 +86,99 @@ function createHarness(
 }
 
 describe('StatusCardController', () => {
+  it('delivers a standalone result as completed without live state or a stop action', async () => {
+    const { client, controller, cancelRun } = createHarness({
+      model: 'test-model',
+      language: 'zh-CN',
+    });
+    await expect(
+      controller.deliverCompletedResult(target, 'Follow-up result', 'task_*'),
+    ).resolves.toBe(true);
+    const request = vi.mocked(client.createAndDeliver).mock.calls[0]![0];
+    expect(request).toEqual(
+      expect.objectContaining({
+        target,
+        cardParamMap: {
+          blockList: JSON.stringify([
+            { type: 0, markdown: 'task\\_\\*\n\nFollow-up result' },
+          ]),
+          content: 'task\\_\\*\n\nFollow-up result',
+          copy_content: 'task\\_\\*\n\nFollow-up result',
+          flowStatus: 3,
+          statusLine: '已完成 · test-model',
+          hasAction: 'false',
+          stop_action: 'false',
+        },
+      }),
+    );
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+    expect(client.updateInstance).not.toHaveBeenCalled();
+    expect(tracking(controller).recordsBySegment.size).toBe(0);
+    expect(controller.claimStop(request.outTrackId, 'owner-1')).toEqual({
+      kind: 'ignored',
+      actorId: 'owner-1',
+    });
+    expect(cancelRun).not.toHaveBeenCalled();
+  });
+
+  it('leaves an oversized result intact for message fallback', async () => {
+    const { client, controller } = createHarness();
+    expect(
+      await controller.deliverCompletedResult(
+        target,
+        'x'.repeat(20_000),
+        'source',
+      ),
+    ).toBe(false);
+    expect(client.createAndDeliver).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['failed', false, '已失败'],
+    ['stopped', false, '已终止'],
+    ['cancelled', false, '已取消'],
+    ['running', true, '部分结果'],
+  ] as const)(
+    'localizes a %s standalone result',
+    async (status, partial, label) => {
+      const { client, controller } = createHarness({ language: 'zh-CN' });
+      await controller.deliverCompletedResult(target, 'Result', undefined, {
+        status,
+        partial,
+      });
+      expect(client.createAndDeliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            statusLine: label,
+            flowStatus: 3,
+            stop_action: 'false',
+          }),
+        }),
+      );
+    },
+  );
+
+  it('falls back when result-card delivery fails', async () => {
+    const { client, controller } = createHarness();
+    vi.mocked(client.createAndDeliver).mockRejectedValueOnce(
+      new Error('offline'),
+    );
+    expect(await controller.deliverCompletedResult(target, 'Result')).toBe(
+      false,
+    );
+    expect(tracking(controller).recordsBySegment.size).toBe(0);
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.useRealTimers();
   });
 
-  it('creates and opens a status card only after the first visible chunk', async () => {
+  it('creates and opens a status card on the first content snapshot', async () => {
     const { client, controller } = createHarness();
 
     expect(client.createAndDeliver).not.toHaveBeenCalled();
-    controller.append(segment(), target, '');
-    expect(client.createAndDeliver).not.toHaveBeenCalled();
-
-    controller.append(segment(), target, 'first');
+    controller.replace(segment(), target, 'first');
 
     await vi.waitFor(() =>
       expect(client.createAndDeliver).toHaveBeenCalledOnce(),
@@ -84,6 +188,8 @@ describe('StatusCardController', () => {
         outTrackId: expect.stringMatching(/^qwen-status-/),
         target: { chatId: 'cid-1', isGroup: true },
         cardParamMap: expect.objectContaining({
+          content: '🤔 Thinking\n\nfirst',
+          statusLine: '0s',
           hasAction: 'true',
           stop_action: 'true',
         }),
@@ -92,21 +198,101 @@ describe('StatusCardController', () => {
     await vi.waitFor(() =>
       expect(client.openOrUpdateStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: '',
+          content: '🤔 Thinking\n\nfirst',
           finalize: false,
         }),
       ),
     );
   });
 
-  it('coalesces bounded full snapshots with one write in flight', async () => {
+  it('projects localized granular phases without tool details', async () => {
     vi.useFakeTimers();
-    const { client, controller } = createHarness();
-    controller.append(segment(), target, 'a'.repeat(19_000));
+    const { client, controller } = createHarness({ language: 'zh-CN' });
+
+    controller.replace(segment(), target, 'answer');
     await vi.advanceTimersByTimeAsync(0);
     vi.mocked(client.openOrUpdateStream).mockClear();
 
-    controller.append(segment(), target, 'b'.repeat(2_000));
+    await controller.updateRunPhase('run-1', 'fetching');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: '🌐 获取中\n\nanswer',
+        finalize: false,
+      }),
+    );
+  });
+
+  it('localizes terminal status lines for a Chinese display language', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness({ language: 'zh-CN' });
+
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(
+      controller.complete('segment-1', 'final answer'),
+    ).resolves.toBe(true);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          flowStatus: 3,
+          statusLine: '已完成 · 0s',
+        }),
+      }),
+    );
+
+    controller.replace(segment('segment-2'), target, 'retry');
+    await vi.advanceTimersByTimeAsync(0);
+    controller.fail('segment-2', 'boom');
+    await vi.runAllTimersAsync();
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          flowStatus: 3,
+          statusLine: '已失败 · 0s',
+        }),
+      }),
+    );
+  });
+
+  it('includes replacement content in the initial card delivery', async () => {
+    const { client, controller } = createHarness();
+
+    controller.replace(segment(), target, '@Alice');
+
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: '🤔 Thinking\n\n@Alice',
+          }),
+        }),
+      ),
+    );
+    expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: '🤔 Thinking\n\n@Alice',
+        finalize: false,
+      }),
+    );
+  });
+
+  it('coalesces bounded full snapshots with one write in flight', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'a'.repeat(19_000));
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+
+    controller.replace(
+      segment(),
+      target,
+      'a'.repeat(19_000) + 'b'.repeat(2_000),
+    );
     await vi.advanceTimersByTimeAsync(499);
     expect(client.openOrUpdateStream).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
@@ -119,15 +305,82 @@ describe('StatusCardController', () => {
     expect(content.endsWith('b'.repeat(2_000))).toBe(true);
   });
 
-  it('hides streamed image paths across chunk boundaries', async () => {
+  it('does not rewind content after delayed card creation', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    const creationGate = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementationOnce(async () => {
+      await creationGate.promise;
+    });
+
+    controller.replace(segment(), target, 'initial');
+    controller.replace(segment(), target, 'queued');
+    await vi.advanceTimersByTimeAsync(500);
+    controller.replace(segment(), target, 'latest');
+
+    creationGate.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.map(([request]) => request.content),
+    ).toEqual(['🤔 Thinking\n\nlatest', '🤔 Thinking\n\nlatest']);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(controller.flushPending('segment-1')).resolves.toBe(true);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-arms a flush when content changes during a stream write', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+
+    const writeGate = deferred<void>();
+    vi.mocked(client.openOrUpdateStream).mockImplementationOnce(async () => {
+      await writeGate.promise;
+    });
+    controller.replace(segment(), target, 'second');
+    await vi.advanceTimersByTimeAsync(500);
+    controller.replace(segment(), target, 'third');
+
+    writeGate.resolve();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.map(([request]) => request.content),
+    ).toEqual(['🤔 Thinking\n\nsecond', '🤔 Thinking\n\nthird']);
+  });
+
+  it('does not re-arm a flush after writing the latest content', async () => {
+    vi.useFakeTimers();
+    const { controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+
+    controller.replace(segment(), target, 'second');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(
+      tracking(controller).recordsBySegment.get('segment-1'),
+    ).toMatchObject({
+      hasPendingWrite: false,
+      flushTimer: undefined,
+    });
+  });
+
+  it('hides streamed image paths in status snapshots', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();
 
-    controller.append(segment(), target, 'before [IMA');
-    controller.append(
+    controller.replace(
       segment(),
       target,
-      'GE: /Users/ben/private/image.png] after',
+      'before [IMAGE: /Users/ben/private/image.png] after',
     );
     await vi.advanceTimersByTimeAsync(500);
 
@@ -135,13 +388,15 @@ describe('StatusCardController', () => {
       .mocked(client.openOrUpdateStream)
       .mock.calls.map(([request]) => request.content);
     expect(streamContents.join('\n')).not.toContain('/Users/ben/private');
-    expect(streamContents.at(-1)).toBe('before [Image pending] after');
+    expect(streamContents.at(-1)).toBe(
+      '🤔 Thinking\n\nbefore [Image pending] after',
+    );
   });
 
   it('hides image paths when a streaming card is cancelled', async () => {
     const { client, controller } = createHarness();
 
-    controller.append(
+    controller.replace(
       segment(),
       target,
       'before [IMAGE: /Users/ben/private/image.png] after',
@@ -168,40 +423,190 @@ describe('StatusCardController', () => {
     expect(terminalPayload).not.toContain('/Users/ben/private');
   });
 
-  it('shows the configured model and refreshes elapsed time only on text flushes', async () => {
+  it('shows the configured model and refreshes elapsed time while idle', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const { client, controller } = createHarness({
       model: 'qwen3.7-max',
     });
 
-    controller.append(segment(), target, 'first');
+    controller.replace(segment(), target, 'first');
     await vi.advanceTimersByTimeAsync(0);
 
     expect(client.createAndDeliver).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          statusLine: 'Running · qwen3.7-max · 0s',
+          statusLine: 'qwen3.7-max · 0s',
         }),
       }),
     );
 
     vi.mocked(client.updateInstance).mockClear();
     vi.setSystemTime(1_200);
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1_000);
 
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · qwen3.7-max · 1s',
+          statusLine: 'qwen3.7-max · 2s',
         },
       }),
     );
 
     vi.mocked(client.updateInstance).mockClear();
-    vi.setSystemTime(10_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          statusLine: 'qwen3.7-max · 3s',
+        },
+      }),
+    );
+  });
+
+  it('periodically republishes the full content for reconnected clients', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockClear();
+
+    controller.replace(
+      segment(),
+      target,
+      'latest [IMAGE: /Users/ben/private/image.png]',
+    );
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(
+      vi
+        .mocked(client.updateInstance)
+        .mock.calls.filter(([request]) => request.cardParamMap.content),
+    ).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          content: '🤔 Thinking\n\nlatest [Image pending]',
+          statusLine: '5s',
+        },
+      }),
+    );
+
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          statusLine: '6s',
+        },
+      }),
+    );
+
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          content: '🤔 Thinking\n\nlatest [Image pending]',
+          statusLine: '10s',
+        },
+      }),
+    );
+  });
+
+  it('retries a failed full-content checkpoint on the next status update', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockClear();
+    controller.replace(segment(), target, 'latest');
+    let checkpointFailed = false;
+    vi.mocked(client.updateInstance).mockImplementation(async (request) => {
+      if (request.cardParamMap.content && !checkpointFailed) {
+        checkpointFailed = true;
+        throw new Error('checkpoint failed');
+      }
+    });
+
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(client.updateInstance).not.toHaveBeenCalled();
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          content: '🤔 Thinking\n\nlatest',
+          statusLine: '5s',
+        },
+      }),
+    );
+    expect(onError).toHaveBeenCalledWith(
+      'status card metadata',
+      expect.any(Error),
+    );
+
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          content: '🤔 Thinking\n\nlatest',
+          statusLine: '6s',
+        },
+      }),
+    );
+  });
+
+  it('writes terminal state after an in-flight full-content checkpoint', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    const checkpointStarted = deferred<void>();
+    const checkpointGate = deferred<void>();
+
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockClear();
+    vi.mocked(client.updateInstance).mockImplementation(async (request) => {
+      if (
+        request.cardParamMap.content &&
+        request.cardParamMap.flowStatus === undefined
+      ) {
+        checkpointStarted.resolve();
+        await checkpointGate.promise;
+      }
+    });
+
+    controller.replace(segment(), target, 'latest running');
+    await vi.advanceTimersByTimeAsync(5_000);
+    await checkpointStarted.promise;
+    const completion = controller.complete('segment-1', 'final answer');
+    let settled = false;
+    void completion.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+
+    checkpointGate.resolve();
+    await expect(completion).resolves.toBe(true);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'final answer',
+          flowStatus: 3,
+          statusLine: 'Completed · 5s',
+        }),
+      }),
+    );
+
+    const updateCount = vi.mocked(client.updateInstance).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(updateCount);
   });
 
   it('omits an unconfigured model from running status', async () => {
@@ -209,23 +614,23 @@ describe('StatusCardController', () => {
     vi.setSystemTime(0);
     const { client, controller } = createHarness();
 
-    controller.append(segment(), target, 'first');
+    controller.replace(segment(), target, 'first');
     await vi.advanceTimersByTimeAsync(0);
 
     expect(client.createAndDeliver).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          statusLine: 'Running · 0s',
+          statusLine: '0s',
         }),
       }),
     );
 
     vi.setSystemTime(1_200);
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · 1s',
+          statusLine: '2s',
         },
       }),
     );
@@ -239,29 +644,71 @@ describe('StatusCardController', () => {
       model: 'qwen3.7-max',
       onError,
     });
-    controller.append(segment(), target, 'first');
+    controller.replace(segment(), target, 'first');
     await vi.advanceTimersByTimeAsync(0);
 
     vi.mocked(client.updateInstance).mockRejectedValueOnce(
       new Error('metadata failed'),
     );
     vi.setSystemTime(1_200);
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(onError).toHaveBeenCalledWith(
       'status card metadata',
       expect.any(Error),
     );
 
     vi.mocked(client.openOrUpdateStream).mockClear();
-    controller.append(segment(), target, 'second');
+    controller.replace(segment(), target, 'firstsecond');
     vi.setSystemTime(2_200);
     await vi.advanceTimersByTimeAsync(500);
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: 'firstsecond',
+        content: '🤔 Thinking\n\nfirstsecond',
         finalize: false,
       }),
     );
+  });
+
+  it('stops status refreshes after repeated metadata failures', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata down'),
+    );
+
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+    expect(onError).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+  });
+
+  it('resumes status refreshes once metadata updates recover', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata down'),
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    vi.mocked(client.updateInstance).mockResolvedValue(undefined);
+    vi.mocked(client.updateInstance).mockClear();
+
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.updateInstance).toHaveBeenCalledTimes(1);
+
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.updateInstance).toHaveBeenCalled();
   });
 
   it('writes the exact elapsed second with a stopped terminal state', async () => {
@@ -270,7 +717,7 @@ describe('StatusCardController', () => {
     const { client, controller } = createHarness({
       model: 'qwen3.7-max',
     });
-    controller.append(segment(), target, 'answer');
+    controller.replace(segment(), target, 'answer');
     await vi.advanceTimersByTimeAsync(0);
 
     vi.setSystemTime(12_400);
@@ -288,8 +735,8 @@ describe('StatusCardController', () => {
 
   it('keeps two segments from the same run independent', async () => {
     const { client, controller } = createHarness();
-    controller.append(segment('segment-1'), target, 'first answer');
-    controller.append(segment('segment-2'), target, 'second answer');
+    controller.replace(segment('segment-1'), target, 'first answer');
+    controller.replace(segment('segment-2'), target, 'second answer');
 
     await vi.waitFor(() =>
       expect(client.createAndDeliver).toHaveBeenCalledTimes(2),
@@ -326,9 +773,9 @@ describe('StatusCardController', () => {
 
   it('cancels every live segment from the exact run only', async () => {
     const { client, controller } = createHarness();
-    controller.append(segment('segment-1'), target, 'one');
-    controller.append(segment('segment-2'), target, 'two');
-    controller.append(
+    controller.replace(segment('segment-1'), target, 'one');
+    controller.replace(segment('segment-2'), target, 'two');
+    controller.replace(
       segment('other-segment', {
         runId: 'run-2',
         sessionId: 'session-2',
@@ -363,9 +810,9 @@ describe('StatusCardController', () => {
     );
   });
 
-  it('commits final content through V2 instance fields and rejects late chunks', async () => {
+  it('commits final content through V2 instance fields and rejects late snapshots', async () => {
     const { client, controller } = createHarness();
-    controller.append(segment(), target, 'answer');
+    controller.replace(segment(), target, 'answer');
 
     await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
       true,
@@ -390,14 +837,14 @@ describe('StatusCardController', () => {
       }),
     );
 
-    controller.append(segment(), target, 'late');
+    controller.replace(segment(), target, 'late');
     expect(client.createAndDeliver).toHaveBeenCalledOnce();
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
   });
 
   it('retains streamed content when completion has no response body', async () => {
     const { client, controller } = createHarness();
-    controller.append(segment(), target, 'streamed answer');
+    controller.replace(segment(), target, 'streamed answer');
 
     await expect(controller.complete('segment-1', '')).resolves.toBe(true);
 
@@ -412,9 +859,52 @@ describe('StatusCardController', () => {
     );
   });
 
+  it('updates terminal fields when stream finalization fails', async () => {
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'answer');
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
+    );
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('stream finalize unavailable'),
+    );
+
+    await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
+      true,
+    );
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          flowStatus: 3,
+          hasAction: 'false',
+          stop_action: 'false',
+        }),
+      }),
+    );
+  });
+
+  it('does not retry a non-retryable terminal update', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new DingtalkCardRequestError('terminal rejected', false),
+    );
+
+    await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
+      false,
+    );
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+  });
+
   it('allows only the owner to stop the exact current run', async () => {
     const { client, cancelRun, controller } = createHarness();
-    controller.append(segment(), target, 'answer');
+    controller.replace(segment(), target, 'answer');
     await vi.waitFor(() =>
       expect(client.createAndDeliver).toHaveBeenCalledOnce(),
     );
@@ -443,9 +933,657 @@ describe('StatusCardController', () => {
     expect(cancelRun).toHaveBeenCalledWith('session-1', 'run-1');
   });
 
+  it('drains a snapshot queued while the boundary drain write is in flight', async () => {
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
+    );
+    const gate = deferred<void>();
+    vi.mocked(client.openOrUpdateStream).mockImplementation(async (request) => {
+      if (request.content.endsWith('first more')) await gate.promise;
+    });
+    controller.replace(segment(), target, 'first more');
+
+    const pending = controller.flushPending('segment-1');
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2),
+    );
+    controller.replace(segment(), target, 'first more second');
+    gate.resolve();
+
+    await expect(pending).resolves.toBe(true);
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.map(([request]) => request.content),
+    ).toContain('🤔 Thinking\n\nfirst more second');
+  });
+
+  it('awaits in-flight creation before reporting liveness', async () => {
+    const { client, controller } = createHarness();
+    const gate = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementationOnce(async () => {
+      await gate.promise;
+    });
+    controller.ensure(segment(), target);
+
+    const live = controller.isCardLive('segment-1');
+    let settled = false;
+    void live.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    gate.resolve();
+    await expect(live).resolves.toBe(true);
+  });
+
+  it('closes a card created while its segment is abandoned', async () => {
+    const { client, controller } = createHarness();
+    const creation = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementationOnce(
+      async () => creation.promise,
+    );
+    controller.replace(segment(), target, 'answer');
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+
+    controller.abandon('segment-1');
+    creation.resolve();
+
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: {
+            flowStatus: 3,
+            hasAction: 'false',
+            stop_action: 'false',
+          },
+        }),
+      ),
+    );
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+  });
+
+  it('does not retry or claim delivery after a non-retryable creation failure', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    vi.mocked(client.createAndDeliver).mockRejectedValueOnce(
+      new DingtalkCardRequestError('status template denied', false),
+    );
+    controller.ensure(segment(), target);
+
+    await expect(controller.flushPending('segment-1')).resolves.toBe(false);
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+  });
+
+  it('retries card creation after a transient failure and resumes streaming', async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    vi.mocked(client.createAndDeliver)
+      .mockRejectedValueOnce(new DingtalkCardRequestError('HTTP 503', true))
+      .mockRejectedValueOnce(new DingtalkCardRequestError('HTTP 503', true));
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(
+      'status card creation',
+      expect.any(Error),
+    );
+
+    // A boundary reached during the backoff falls back instead of waiting.
+    await expect(controller.isCardLive('segment-1')).resolves.toBe(false);
+    await expect(controller.flushPending('segment-1')).resolves.toBe(false);
+
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.createAndDeliver).toHaveBeenCalledTimes(2);
+    const firstCreate = vi.mocked(client.createAndDeliver).mock.calls[0]![0];
+    const secondCreate = vi.mocked(client.createAndDeliver).mock.calls[1]![0];
+    expect(secondCreate).toEqual(
+      expect.objectContaining({
+        outTrackId: firstCreate.outTrackId,
+        cardParamMap: expect.objectContaining({
+          content: '🤔 Thinking\n\nfirst more',
+        }),
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(client.createAndDeliver).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.createAndDeliver).toHaveBeenCalledTimes(3);
+    expect(
+      vi.mocked(client.createAndDeliver).mock.calls[2]![0].outTrackId,
+    ).toBe(firstCreate.outTrackId);
+    await expect(controller.isCardLive('segment-1')).resolves.toBe(true);
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        outTrackId: firstCreate.outTrackId,
+        content: '🤔 Thinking\n\nfirst more',
+        finalize: false,
+      }),
+    );
+  });
+
+  it('abandons a backing-off creation when disposed', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    vi.mocked(client.createAndDeliver).mockRejectedValueOnce(
+      new DingtalkCardRequestError('HTTP 503', true),
+    );
+    controller.ensure(segment(), target);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+
+    controller.dispose();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+  });
+
+  it('reports a card as not live as soon as its creation attempt fails', async () => {
+    const { client, controller } = createHarness();
+    const gate = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementationOnce(async () => {
+      await gate.promise;
+      throw new Error('HTTP 503');
+    });
+    controller.ensure(segment(), target);
+    const live = controller.isCardLive('segment-1');
+
+    gate.resolve();
+
+    await expect(live).resolves.toBe(false);
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
+
+  it('abandons a backing-off creation when the segment finalizes', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    vi.mocked(client.createAndDeliver).mockRejectedValueOnce(
+      new Error('HTTP 503'),
+    );
+    controller.replace(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
+      false,
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.updateInstance).not.toHaveBeenCalled();
+  });
+
+  it('drops a queued flush once the stream latches a permanent failure', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    const gate = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementationOnce(async () => {
+      await gate.promise;
+    });
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new DingtalkCardRequestError('stream rejected', false),
+    );
+    controller.replace(segment(), target, 'first');
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+
+    gate.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+    await expect(controller.isCardLive('segment-1')).resolves.toBe(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+  });
+
+  it('finalizes a delivered card when its initial stream fails', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('initial stream connection lost'),
+    );
+    controller.replace(segment(), target, 'final answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('terminal connection lost'),
+    );
+
+    await expect(
+      controller.complete('segment-1', 'final answer'),
+    ).resolves.toBe(true);
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.updateInstance).toHaveBeenCalledTimes(2);
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'final answer',
+          flowStatus: 3,
+          hasAction: 'false',
+          stop_action: 'false',
+        }),
+      }),
+    );
+  });
+
+  it('stops status refreshes after a non-retryable content failure', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    const gate = deferred<void>();
+    vi.mocked(client.openOrUpdateStream).mockImplementationOnce(async () => {
+      await gate.promise;
+      throw new DingtalkCardRequestError('stream rejected', false);
+    });
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    // The status timer fires while the failing write is still in flight and
+    // queues its refresh behind it.
+    await vi.advanceTimersByTimeAsync(500);
+    gate.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onError).toHaveBeenCalledWith(
+      'status card streaming',
+      expect.any(Error),
+    );
+    expect(client.updateInstance).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.updateInstance).not.toHaveBeenCalled();
+  });
+
+  it('retries the latest snapshot after a transient content failure', async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+    vi.mocked(client.openOrUpdateStream)
+      .mockRejectedValueOnce(new Error('stream died'))
+      .mockRejectedValueOnce(new Error('stream died again'));
+
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(onError).toHaveBeenCalledWith(
+      'status card streaming',
+      expect.any(Error),
+    );
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+
+    controller.replace(segment(), target, 'latest after recovery');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(3);
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: '🤔 Thinking\n\nlatest after recovery',
+        finalize: false,
+      }),
+    );
+    await expect(controller.isCardLive('segment-1')).resolves.toBe(true);
+    expect(onError).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not bypass stream retry backoff for a phase update', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('stream died'),
+    );
+
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+
+    await controller.updateRunPhase('run-1', 'fetching');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: '🌐 Fetching\n\nfirst more',
+        finalize: false,
+      }),
+    );
+  });
+
+  it('recovers terminal state after content and finalization failures', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+    vi.mocked(client.updateInstance).mockClear();
+
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('content connection lost'),
+    );
+    controller.replace(segment(), target, 'final answer');
+    await vi.advanceTimersByTimeAsync(500);
+
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('finalize connection lost'),
+    );
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('terminal connection lost'),
+    );
+    vi.setSystemTime(20_000);
+    await expect(
+      controller.complete('segment-1', 'final answer'),
+    ).resolves.toBe(true);
+
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.updateInstance).toHaveBeenCalledTimes(2);
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ finalize: true }),
+    );
+    // The elapsed time is the one at completion, not at the retry.
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'final answer',
+          flowStatus: 3,
+          statusLine: 'Completed · 20s',
+          hasAction: 'false',
+          stop_action: 'false',
+        }),
+      }),
+    );
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.filter(([request]) => !request.finalize),
+    ).toHaveLength(1);
+    expect(onError).toHaveBeenCalledTimes(3);
+  });
+
+  it('backs off exponentially and caps terminal retries at 30s', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockClear();
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('terminal connection lost'),
+    );
+
+    await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
+      true,
+    );
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+
+    const delays = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000];
+    for (const [index, delay] of delays.entries()) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(client.updateInstance).toHaveBeenCalledTimes(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.updateInstance).toHaveBeenCalledTimes(index + 2);
+    }
+  });
+
+  it('stops retrying after a failed boundary drain is abandoned', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    const drain = deferred<void>();
+    vi.mocked(client.openOrUpdateStream).mockImplementationOnce(
+      async () => drain.promise,
+    );
+    controller.replace(segment(), target, 'first more');
+
+    const flushed = controller.flushPending('segment-1');
+    await vi.advanceTimersByTimeAsync(1_000);
+    // Hold the heartbeat the status tick chained while the drain hung, so it
+    // is still in flight when abandon() detaches the record.
+    const heartbeat = deferred<void>();
+    vi.mocked(client.updateInstance).mockImplementation(async (request) => {
+      if (request.cardParamMap.flowStatus === undefined) {
+        await heartbeat.promise;
+      }
+    });
+    drain.reject(new Error('stream blip'));
+    await expect(flushed).resolves.toBe(false);
+    const updatesBeforeAbandon = vi.mocked(client.updateInstance).mock.calls
+      .length;
+    controller.abandon('segment-1');
+    heartbeat.resolve();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    expect(client.updateInstance).toHaveBeenCalledTimes(
+      updatesBeforeAbandon + 1,
+    );
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          flowStatus: 3,
+          hasAction: 'false',
+          stop_action: 'false',
+        },
+      }),
+    );
+  });
+
+  it('keeps a terminal retry when abandon races finalization', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('terminal connection lost'),
+    );
+
+    await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
+      true,
+    );
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+    controller.abandon('segment-1');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(2);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'answer',
+          flowStatus: 3,
+        }),
+      }),
+    );
+  });
+
+  it('re-arms flushes promptly after a boundary drain recovers a failed write', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('stream blip'),
+    );
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+
+    await expect(controller.flushPending('segment-1')).resolves.toBe(true);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(3);
+
+    controller.replace(segment(), target, 'first more second');
+    await vi.advanceTimersByTimeAsync(499);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(4);
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: '🤔 Thinking\n\nfirst more second',
+      }),
+    );
+  });
+
+  it('untracks records once they reach a terminal state', async () => {
+    const { client, controller } = createHarness();
+    const maps = tracking(controller);
+    controller.replace(segment('segment-1'), target, 'answer');
+    vi.mocked(client.createAndDeliver).mockRejectedValueOnce(
+      new DingtalkCardRequestError('status template denied', false),
+    );
+    controller.replace(segment('segment-2'), target, 'never ready');
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledTimes(2),
+    );
+    expect(maps.recordsBySegment.size).toBe(2);
+    expect(maps.recordsByOutTrack.size).toBe(2);
+    expect(maps.segmentIdsByRun.get('run-1')?.size).toBe(2);
+
+    await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
+      true,
+    );
+    await expect(controller.complete('segment-2', 'never ready')).resolves.toBe(
+      false,
+    );
+
+    expect(maps.recordsBySegment.size).toBe(0);
+    expect(maps.recordsByOutTrack.size).toBe(0);
+    expect(maps.segmentIdsByRun.size).toBe(0);
+    expect(maps.terminalSegmentIds).toEqual(
+      new Set(['segment-1', 'segment-2']),
+    );
+
+    controller.dispose();
+    expect(maps.terminalSegmentIds.size).toBe(0);
+  });
+
+  it('cancels pending recovery when disposed', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment('stream-segment'), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('content connection lost'),
+    );
+    controller.replace(segment('stream-segment'), target, 'updated');
+    await vi.advanceTimersByTimeAsync(500);
+
+    controller.replace(segment('terminal-segment'), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('terminal connection lost'),
+    );
+    await expect(
+      controller.complete('terminal-segment', 'answer'),
+    ).resolves.toBe(true);
+
+    const streamCalls = vi.mocked(client.openOrUpdateStream).mock.calls.length;
+    const updateCalls = vi.mocked(client.updateInstance).mock.calls.length;
+    const createCalls = vi.mocked(client.createAndDeliver).mock.calls.length;
+    controller.dispose();
+    controller.dispose();
+    controller.replace(segment('late-segment'), target, 'late');
+    controller.ensure(segment('post-dispose-segment'), target);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(streamCalls);
+    expect(client.updateInstance).toHaveBeenCalledTimes(updateCalls);
+    expect(client.createAndDeliver).toHaveBeenCalledTimes(createCalls);
+    await expect(
+      controller.complete('stream-segment', 'updated'),
+    ).resolves.toBe(false);
+  });
+
+  it('resets the status failure breaker after a successful push', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata down'),
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+
+    vi.mocked(client.updateInstance).mockResolvedValue(undefined);
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.updateInstance).toHaveBeenCalledTimes(4);
+
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata blip'),
+    );
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+  });
+
+  it('revives idle status refreshes via a probe after the breaker trips', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata down'),
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+
+    vi.mocked(client.updateInstance).mockResolvedValue(undefined);
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(client.updateInstance.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('does not let a completed historical card stop a later run', async () => {
     const { client, cancelRun, controller } = createHarness();
-    controller.append(segment(), target, 'answer');
+    controller.replace(segment(), target, 'answer');
     await vi.waitFor(() =>
       expect(client.createAndDeliver).toHaveBeenCalledOnce(),
     );

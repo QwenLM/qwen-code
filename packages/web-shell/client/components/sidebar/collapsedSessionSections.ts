@@ -4,8 +4,10 @@
  * key so preferences survive reload without competing overwrites.
  *
  * Id conventions:
- * - Primary catalog: `group:<id>`, `recent`, `color:<name>`
- * - Workspace-scoped: `ws:<workspaceId>|group:<id>`, `ws:<workspaceId>|ungrouped`
+ * - Primary catalog: `group:<id>`, `recent`, `color:<name>`,
+ *   `scheduled-task:<taskId>`, `channel-type:<type>`
+ * - Workspace-scoped: `ws:<workspaceId>|group:<id>` (including automatic
+ *   scheduled-task ids), `ws:<workspaceId>|ungrouped`
  */
 
 export const COLLAPSED_SESSION_SECTIONS_STORAGE_KEY =

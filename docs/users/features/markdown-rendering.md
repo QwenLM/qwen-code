@@ -38,6 +38,12 @@ To start Qwen Code in raw mode by default, set `ui.renderMode`:
 Accepted values are `"render"` and `"raw"`. The shortcut only changes the
 current session view; it does not rewrite your settings file.
 
+## Assistant and Tool Images
+
+Image parts use a separate TUI display path and behave the same in Markdown
+`render` and `raw` modes. See [Terminal Images](./terminal-images.md) for terminal
+support, fallbacks, limits, channel delivery, and session-history behavior.
+
 ## Mermaid
 
 Fenced `mermaid` code blocks render visually in `render` mode. The TUI uses a

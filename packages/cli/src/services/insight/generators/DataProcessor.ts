@@ -32,9 +32,11 @@ import type {
 import {
   getInsightPrompt,
   runSideQuery,
+  projectUserTranscriptForDisplay,
   type Config,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { dayKey, hourOfDay, parseDayKey, todayKey } from '../dates.js';
 
 const logger = createDebugLogger('DataProcessor');
@@ -217,10 +219,19 @@ export class DataProcessor {
 
     for (const record of records) {
       if (record.type === 'user') {
+        const projection = projectUserTranscriptForDisplay(record);
         const text =
-          record.message?.parts
-            ?.map((p) => ('text' in p ? p.text : ''))
-            .join('') || '';
+          projection.displayText ??
+          projection.parts
+            .map((part) =>
+              typeof part === 'object' &&
+              part !== null &&
+              'text' in part &&
+              typeof part.text === 'string'
+                ? part.text
+                : '',
+            )
+            .join('');
         output += `[User]: ${text}\n`;
       } else if (record.type === 'assistant') {
         if (record.message?.parts) {
@@ -986,7 +997,13 @@ None captured`;
           try {
             // Get all chat files in the chats directory
             const files = await fs.readdir(chatsDir);
-            const chatFiles = files.filter((file) => file.endsWith('.jsonl'));
+            // The prompt terminal ledger sidecar (<id>.ledger.jsonl) is not
+            // a transcript — only real session JSONL files carry chat
+            // records.
+            const chatFiles = files.filter(
+              (file) =>
+                file.endsWith('.jsonl') && !file.endsWith('.ledger.jsonl'),
+            );
 
             for (const file of chatFiles) {
               const filePath = path.join(chatsDir, file);
@@ -1099,9 +1116,13 @@ None captured`;
               }
             }
 
-            // Track lines and files from tool results
+            // Track lines and files from tool results. Internal Code Mode
+            // results belong to the outer exec call, which export file
+            // statistics already count, so counting them again here would
+            // report different totals for the same transcript.
             if (
               record.type === 'tool_result' &&
+              !isInternalCodeModeToolResult(record) &&
               record.toolCallResult?.resultDisplay
             ) {
               const display = record.toolCallResult.resultDisplay;

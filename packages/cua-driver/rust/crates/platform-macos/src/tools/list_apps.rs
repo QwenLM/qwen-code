@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use cua_driver_core::{protocol::ToolResult, tool::{Tool, ToolDef}};
+use cua_driver_core::{
+    protocol::ToolResult,
+    tool::{Tool, ToolDef},
+};
 use serde_json::Value;
 
 pub struct ListAppsTool;
@@ -26,10 +29,13 @@ fn def() -> &'static ToolDef {
             per-window state — on-screen, on-current-Space, minimized, \
             window titles — call list_windows instead. For just opening an \
             app — running or not — call launch_app({bundle_id: ...}) directly; \
-            list_apps is not a prerequisite.".into(),
+            list_apps is not a prerequisite."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "running_only": { "type": "boolean", "description": "Skip installed-app scanning when refreshing a bound app's process identity." }
+            },
             "additionalProperties": false
         }),
         read_only: true,
@@ -41,11 +47,24 @@ fn def() -> &'static ToolDef {
 
 #[async_trait]
 impl Tool for ListAppsTool {
-    fn def(&self) -> &ToolDef { def() }
+    fn def(&self) -> &ToolDef {
+        def()
+    }
 
-    async fn invoke(&self, _args: Value) -> ToolResult {
-        let apps = tokio::task::spawn_blocking(crate::apps::list_all_apps).await
-            .unwrap_or_default();
+    async fn invoke(&self, args: Value) -> ToolResult {
+        let running_only = args
+            .get("running_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let apps = tokio::task::spawn_blocking(move || {
+            if running_only {
+                crate::apps::list_running_apps()
+            } else {
+                crate::apps::list_all_apps()
+            }
+        })
+        .await
+        .unwrap_or_default();
         let text = crate::apps::format_app_list(&apps);
         // Single flat array. Each entry is the unified shape — existing
         // fields (`pid`, `name`, `bundle_id`, `running`, `active`) are

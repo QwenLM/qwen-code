@@ -8,10 +8,7 @@
 
 import { render } from 'ink-testing-library';
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import {
-  SuggestionsDisplay,
-  normalizeDescription,
-} from './SuggestionsDisplay.js';
+import { SuggestionsDisplay } from './SuggestionsDisplay.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 
 describe('SuggestionsDisplay', () => {
@@ -169,6 +166,41 @@ describe('SuggestionsDisplay', () => {
     expect(lines[0]).toMatch(/^ {2}pr/);
     expect(lines[1]).toMatch(/^> issue-to-pr/);
   });
+
+  it('keeps slash command names intact when argument hints overflow', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[
+          {
+            label: 'review',
+            value: 'review',
+            argumentHint:
+              '[pr-number|file-path] [--effort low|medium|high] [--comment] [--fix]',
+            sourceBadge: '[Skill]',
+            description: 'Review changed code.',
+          },
+          {
+            label: 'doctor',
+            value: 'doctor',
+            argumentHint:
+              '[memory|cpu-profile|rollback] [--sample] [--snapshot] [--duration]',
+            description: 'Diagnose Qwen Code environment.',
+          },
+        ]}
+        activeIndex={0}
+        isLoading={false}
+        width={120}
+        scrollOffset={0}
+        userInput="/rev"
+        mode="slash"
+      />,
+    );
+
+    const lines = (lastFrame() ?? '').split('\n');
+
+    expect(lines).toContainEqual(expect.stringMatching(/^> review(?: |$)/));
+    expect(lines).toContainEqual(expect.stringMatching(/^ {2}doctor(?: |$)/));
+  });
 });
 
 describe('SuggestionsDisplay tabs', () => {
@@ -228,11 +260,5 @@ describe('SuggestionsDisplay tabs', () => {
       />,
     );
     expect(lastFrame()).not.toContain('Files');
-  });
-});
-
-describe('normalizeDescription', () => {
-  it('collapses all whitespace runs into single spaces and trims', () => {
-    expect(normalizeDescription('  a\n\nb\t c  ')).toBe('a b c');
   });
 });

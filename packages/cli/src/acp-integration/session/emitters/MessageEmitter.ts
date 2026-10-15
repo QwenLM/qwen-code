@@ -5,18 +5,66 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
-import type { SubagentMeta } from '../types.js';
+import { hasFullSessionContext, type SubagentMeta } from '../types.js';
 import {
   createTranscriptMessageUpdate,
   createTranscriptUsageUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import {
   apiActivityTracker,
-  getActiveGoal,
-  type GoalTerminalEvent,
+  projectGoalCard,
+  type GoalRecord,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type ToolArtifact,
+  type VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import { BaseEmitter } from './base-emitter.js';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { HistoryItemGoalStatus } from '../../../ui/types.js';
+
+/**
+ * Build the `goalStatus` card without sending it.
+ *
+ * Split out of {@link MessageEmitter.emitGoalStatus} so the bulk load-replay
+ * path can place the card inside its `LOAD_REPLAY` envelope instead of
+ * streaming it. See `Session.renderRecoveredGoalUpdates`.
+ */
+export function buildGoalStatusUpdate(
+  status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
+): SessionUpdate {
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: {
+      goalStatus: status,
+    },
+  };
+}
+
+/**
+ * Build the `goalState` card without sending it.
+ *
+ * Split out of {@link MessageEmitter.emitGoalState}; see
+ * {@link buildGoalStatusUpdate} for why the render/send split exists.
+ */
+export function buildGoalStateUpdate(
+  snapshot: GoalSnapshotV2,
+  cause?: GoalStateCause,
+  previousGoal: GoalRecord | null = null,
+): SessionUpdate {
+  const goalStatus = cause
+    ? projectGoalCard({ v: 2, cause, snapshot }, previousGoal)
+    : undefined;
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: {
+      goalState: snapshot,
+      ...(goalStatus ? { goalStatus } : {}),
+    },
+  };
+}
 
 /**
  * Handles emission of text message chunks (user, agent, thought).
@@ -39,7 +87,6 @@ export class MessageEmitter extends BaseEmitter {
     reasons: string[],
     stopHookCount: number,
   ): Promise<void> {
-    const activeGoal = getActiveGoal(this.sessionId);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: '' },
@@ -48,41 +95,28 @@ export class MessageEmitter extends BaseEmitter {
           iterationCount,
           reasons,
           stopHookCount,
-          ...(activeGoal
-            ? {
-                goal: {
-                  condition: activeGoal.condition,
-                  iterations: activeGoal.iterations,
-                  setAt: activeGoal.setAt,
-                  lastReason: activeGoal.lastReason,
-                },
-              }
-            : {}),
         },
-      },
-    });
-  }
-
-  async emitGoalTerminal(event: GoalTerminalEvent): Promise<void> {
-    await this.sendUpdate({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: '' },
-      _meta: {
-        goalTerminal: event,
       },
     });
   }
 
   async emitGoalStatus(
     status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
+    goalState?: unknown,
   ): Promise<void> {
-    await this.sendUpdate({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: '' },
-      _meta: {
-        goalStatus: status,
-      },
-    });
+    const update = buildGoalStatusUpdate(status);
+    if (goalState) {
+      update._meta = { ...update._meta, goalState };
+    }
+    await this.sendUpdate(update);
+  }
+
+  async emitGoalState(
+    snapshot: GoalSnapshotV2,
+    cause?: GoalStateCause,
+    previousGoal: GoalRecord | null = null,
+  ): Promise<void> {
+    await this.sendUpdate(buildGoalStateUpdate(snapshot, cause, previousGoal));
   }
 
   /**
@@ -149,16 +183,57 @@ export class MessageEmitter extends BaseEmitter {
     );
   }
 
+  async emitVisionBridgeNotice(
+    text: string,
+    result: VisionBridgeResult,
+  ): Promise<void> {
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'assistant',
+        text,
+        extra: {
+          source: 'vision_bridge_notice',
+          qwenDiscreteMessage: true,
+          visionBridgeNotice: {
+            status: result.status,
+            convertedCount: result.convertedCount,
+            omittedCount: result.omittedCount,
+            ...(result.modelId
+              ? { modelName: result.modelId.replace(/^[^:]+:/, '') }
+              : {}),
+            ...(result.modelEndpoint
+              ? { modelEndpoint: result.modelEndpoint }
+              : {}),
+            egressOccurred: result.egressOccurred === true,
+          },
+        },
+      }),
+    );
+  }
+
   async emitSlashCommandOutput(
     text: string,
     timestamp?: string | number,
+    artifacts?: readonly ToolArtifact[],
+    /**
+     * Extra `_meta` keys for clients that render slash-command output
+     * themselves. Spread first, so a payload can never displace `source`, the
+     * typed `sessionArtifacts`, nor the `timestamp` this emitter adds when the
+     * caller supplied one.
+     */
+    extra?: Record<string, unknown>,
   ): Promise<void> {
     const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       _meta: {
+        ...extra,
         source: 'slash_command',
+        // Deliberately not `artifacts`: the bridge's sanitizer strips that key
+        // from every published frame and only ingests it on tool_call_update
+        // frames, so a slash-command payload under that name would be dropped.
+        ...(artifacts?.length ? { sessionArtifacts: artifacts } : {}),
         ...(epochMs != null ? { timestamp: epochMs } : {}),
       },
     });
@@ -234,6 +309,39 @@ export class MessageEmitter extends BaseEmitter {
         },
       }),
     );
+
+    // ACP clients such as JetBrains render context occupancy from the
+    // standard usage_update frame rather than Qwen's private `_meta.usage`.
+    // Emit it only for a live main-session model round: replay frames do not
+    // have a duration, and subagent usage describes a separate context window
+    // that must not replace the parent session's indicator.
+    if (
+      !Number.isFinite(durationMs) ||
+      subagentMeta ||
+      !hasFullSessionContext(this.ctx)
+    ) {
+      return;
+    }
+
+    const used =
+      usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
+    const size = this.ctx.config.getContentGeneratorConfig()?.contextWindowSize;
+    if (
+      typeof used !== 'number' ||
+      !Number.isSafeInteger(used) ||
+      used < 0 ||
+      typeof size !== 'number' ||
+      !Number.isSafeInteger(size) ||
+      size <= 0
+    ) {
+      return;
+    }
+
+    await this.sendUpdate({
+      sessionUpdate: 'usage_update',
+      used,
+      size,
+    });
   }
 
   /**

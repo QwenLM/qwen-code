@@ -11,41 +11,49 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
+  realpathSync,
   rmSync,
   existsSync,
   writeFileSync,
   mkdirSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitRawTolerateDiff, releaseWorktree } from './git.js';
+import {
+  gitOpt,
+  gitProbe,
+  gitRawTolerateDiff,
+  releaseWorktree,
+} from './git.js';
 import { NULL_DEVICE } from './diff-flags.js';
+import { isolateHostGitConfig } from './test-utils.js';
 
 let repo: string;
-let home: string;
 let cwd: string;
-let savedEnv: NodeJS.ProcessEnv;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
 }
 
+// Git prints worktree paths with forward slashes on Windows, while
+// `join`/`realpathSync` build backslash spellings there; compare both sides
+// slash-normalized (the identity on POSIX).
+const fwd = (value: string): string => value.replace(/\\/g, '/');
+
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'review-wt-'));
-  home = mkdtempSync(join(tmpdir(), 'review-wt-home-'));
-  writeFileSync(join(home, '.gitconfig'), '');
 
-  // Isolate the fixture from the developer's git environment. Without this,
+  // Isolate the fixture from the developer's git environment (shared
+  // helper — see isolateHostGitConfig for the incident class). Without it,
   // `git init` loads their templates and the commit below runs their
   // `core.hooksPath` hooks — a targeted run visibly executed configured
   // pre-commit, prepare-commit-msg, commit-msg, post-commit and post-checkout
-  // hooks — and a global `commit.gpgsign=true` fails the suite for want of a key.
-  // The wrappers under test read `process.env` per call, so setting it here
-  // reaches them.
-  savedEnv = { ...process.env };
-  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
-  process.env['GIT_CONFIG_GLOBAL'] = join(home, '.gitconfig');
-  process.env['HOME'] = home;
+  // hooks — and a global `commit.gpgsign=true` fails the suite for want of
+  // a key. The wrappers under test read `process.env` per call, so setting
+  // it here reaches them.
+  gitIsolation = isolateHostGitConfig();
 
   git('init', '-q', '--template=', '.');
   git('config', 'user.email', 'a@b');
@@ -61,9 +69,8 @@ beforeEach(() => {
 
 afterEach(() => {
   process.chdir(cwd);
-  process.env = savedEnv;
   rmSync(repo, { recursive: true, force: true });
-  rmSync(home, { recursive: true, force: true });
+  gitIsolation.dispose();
 });
 
 describe('releaseWorktree', () => {
@@ -78,7 +85,7 @@ describe('releaseWorktree', () => {
 
     expect(existsSync(join(repo, 'wt'))).toBe(false);
     // Not `.not.toContain('wt')` — the fixture's own path holds that substring.
-    expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+    expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
   });
 
   it('removes an unregistered non-empty leftover git no longer tracks', () => {
@@ -89,7 +96,7 @@ describe('releaseWorktree', () => {
     mkdirSync(join(repo, 'wt', 'junk'), { recursive: true });
     writeFileSync(join(repo, 'wt', 'junk', 'f'), 'x');
     // Negative control: it is not a registered worktree.
-    expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+    expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
 
     expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
       existed: true,
@@ -150,6 +157,331 @@ describe('releaseWorktree', () => {
     process.chdir(tmpdir()); // not a repo
     expect(() => releaseWorktree('/nonexistent/wt')).not.toThrow();
   });
+
+  it('unlinks a symlink at the path instead of releasing the worktree it points at', () => {
+    // `existsSync` follows a LIVE link and `git worktree remove --force`
+    // resolves it — together they delete whichever registered worktree the
+    // link names (the user's own, another review's live tree) while
+    // reporting this path as swept. `cleanStale` releases with no guard of
+    // its own, so the guard lives at this choke point.
+    git('worktree', 'add', '-q', 'victim', '-b', 'victim-topic');
+    writeFileSync(join(repo, 'victim', 'keep.txt'), 'must survive\n');
+    symlinkSync(join(repo, 'victim'), join(repo, 'wt-link'));
+
+    expect(releaseWorktree(join(repo, 'wt-link'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
+
+    expect(existsSync(join(repo, 'wt-link'))).toBe(false);
+    // The victim is still registered AND still on disk. `realpathSync`,
+    // because git prints the CANONICAL path and `tmpdir()` is a symlink on
+    // macOS (`/var` → `/private/var`): the raw spelling passes there only by
+    // accident — the canonical path happens to contain it as a substring —
+    // and would not on a Linux fixture reached through a symlinked ancestor.
+    expect(fwd(git('worktree', 'list'))).toContain(
+      fwd(join(realpathSync(repo), 'victim')),
+    );
+    expect(existsSync(join(repo, 'victim', 'keep.txt'))).toBe(true);
+  });
+
+  it('refuses to release through an ANCESTOR symlink, which lstat cannot see', () => {
+    // `lstatSync` dereferences every component except the last, so the leaf
+    // guard below is blind one level up: a link at `.qwen/tmp` leaves every
+    // path under it looking like an ordinary directory while
+    // `git worktree remove --force` and the `rmSync` fallback both land in
+    // whatever checkout it names. `runCleanup` refuses its whole sweep on
+    // this; `cleanStale` releases with no guard of its own, so the refusal
+    // belongs here where every caller inherits it.
+    mkdirSync(join(repo, 'real'));
+    git('worktree', 'add', '-q', join('real', 'victim'), '-b', 'victim-topic');
+    writeFileSync(join(repo, 'real', 'victim', 'keep.txt'), 'must survive\n');
+    symlinkSync(join(repo, 'real'), join(repo, 'link'));
+
+    const got = releaseWorktree(join(repo, 'link', 'victim'));
+
+    expect(got.freed).toBe(false);
+    expect(got.reason).toContain('symlink');
+    // Registered and on disk, both.
+    expect(fwd(git('worktree', 'list'))).toContain(
+      fwd(join(realpathSync(repo), 'real', 'victim')),
+    );
+    expect(existsSync(join(repo, 'real', 'victim', 'keep.txt'))).toBe(true);
+  });
+
+  it('unlinks a DANGLING symlink, which existsSync cannot see', () => {
+    // `existsSync` reports a dangling link as never existed, so the removal
+    // skips it — while the link still wedges the next `worktree add` at the
+    // path with `already exists`.
+    symlinkSync(join(repo, 'never-existed'), join(repo, 'wt-link'));
+
+    expect(releaseWorktree(join(repo, 'wt-link'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
+
+    expect(existsSync(join(repo, 'wt-link'))).toBe(false);
+    // The path is reusable — the wedge is gone.
+    expect(() =>
+      git('worktree', 'add', '-q', 'wt-link', '-b', 'topic2'),
+    ).not.toThrow();
+  });
+
+  it('reports the symlink arm could not even ASK git to prune', () => {
+    // The symlink arm has the same hole the main arm had: `prune` never
+    // asked (spawn ENOENT, the timeout kill) used to read as "no objection"
+    // while the link was unlinked and reported removed — `freed: true` over
+    // a surviving registration. The tree is registered BEFORE the link is
+    // stood in for it, and the prune that could not run is the one that
+    // clears it.
+    git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+    const adminEntry = join(repo, '.git', 'worktrees', 'wt');
+    rmSync(join(repo, 'wt'), { recursive: true, force: true });
+    symlinkSync(join(repo, 'wt'), join(repo, 'wt'));
+
+    const savedPath = process.env['PATH'];
+    let got: ReturnType<typeof releaseWorktree> | undefined;
+    try {
+      process.env['PATH'] = join(repo, 'no-such-bin');
+      got = releaseWorktree(join(repo, 'wt'));
+    } finally {
+      process.env['PATH'] = savedPath;
+    }
+
+    // The link is unlinked (the path is clear), but the registration
+    // survived a prune that never ran — so freed is false with a reason.
+    expect(got).toMatchObject({ existed: true, freed: false });
+    expect(got?.reason).toContain('could not be run at all');
+    expect(existsSync(join(adminEntry, 'gitdir'))).toBe(true);
+    // Restored, a real prune clears it and the path is reusable.
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: false,
+      freed: false,
+    });
+    expect(existsSync(join(adminEntry, 'gitdir'))).toBe(false);
+    expect(() =>
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic2'),
+    ).not.toThrow();
+  });
+
+  it('reports the release it could not even ASK git to make', () => {
+    // `{status: null, refusal: null}` is the probe's third shape: spawn
+    // ENOENT or the timeout kill — git was never asked. Keying "not freed"
+    // on the refusal alone read that as "no objection", while the rmSync
+    // fallback cleared the DIRECTORY anyway, so the result certified
+    // `freed: true` over a registration and branch that both survived — and
+    // the next `worktree add` met "missing but already registered". Driven
+    // with a stripped PATH, the pattern this file's gitProbe block uses.
+    git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+    const savedPath = process.env['PATH'];
+    let got: ReturnType<typeof releaseWorktree> | undefined;
+    try {
+      process.env['PATH'] = join(repo, 'no-such-bin');
+      got = releaseWorktree(join(repo, 'wt'));
+    } finally {
+      process.env['PATH'] = savedPath;
+    }
+
+    expect(got).toMatchObject({ existed: true, freed: false });
+    // `reason` set whenever `existed && !freed` — cleanup prints it.
+    expect(got?.reason).toBeTruthy();
+    // The directory IS gone (rmSync is not git); the registration survived.
+    expect(existsSync(join(repo, 'wt'))).toBe(false);
+    expect(fwd(git('worktree', 'list'))).toContain(
+      fwd(join(realpathSync(repo), 'wt')),
+    );
+    // Restored, a real prune clears the registration and the path is
+    // reusable — the wedge the false `freed` would have hidden.
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: false,
+      freed: false,
+    });
+    expect(() =>
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic2'),
+    ).not.toThrow();
+  });
+
+  // The two arms below steer ONE probe each to a null status with a shim
+  // `git` that kills itself for the chosen subcommand — the same
+  // `{status: null}` shape the timeout kill leaves. `sh` is the fixture's
+  // interpreter, so neither arm exists on Windows.
+  const itWhereShExists = it.skipIf(process.platform === 'win32');
+  const shimKilling = (sub: string, arg: string): string => {
+    const dir = join(repo, `git-shim-${sub}`);
+    mkdirSync(dir, { recursive: true });
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(
+      join(dir, 'git'),
+      `#!/bin/sh\nif [ "$1" = ${sub} ] && [ "$2" = ${arg} ]; then kill -TERM $$; fi\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+    return dir;
+  };
+
+  itWhereShExists(
+    'reports freed when the remove never answered but the prune after it ran (R31-1)',
+    () => {
+      // The alarm used to OR the REMOVE probe's null status into a verdict
+      // whose reason text is about the PRUNE — so a killed `worktree remove`
+      // followed by a healthy prune reported `freed: false`, "not pruned",
+      // over a release that had actually completed, and cleanup withheld the
+      // lease on it. The registration is cleared by EITHER arm — a
+      // successful remove, or a prune over the rmSync'd path — so only a
+      // prune that never answered is "not freed".
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+      const shim = shimKilling('worktree', 'remove');
+      const savedPath = process.env['PATH'];
+      let got: ReturnType<typeof releaseWorktree> | undefined;
+      try {
+        process.env['PATH'] = `${shim}:${savedPath}`;
+        got = releaseWorktree(join(repo, 'wt'));
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+
+      expect(got).toEqual({ existed: true, freed: true, reason: undefined });
+      // Ground truth, not the verdict's word: the registration is gone and
+      // the branch deletable — the release the old disjunction misreported.
+      expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
+      expect(() => git('branch', '-D', 'topic')).not.toThrow();
+    },
+  );
+
+  itWhereShExists(
+    'reports freed when the remove succeeded and only the follow-up prune never answered (R28-11)',
+    () => {
+      // The mirror arm of the same miskeying: `worktree remove --force`
+      // SUCCEEDED — directory and registration both cleared — and only the
+      // trailing prune (a no-op in that state) could not be spawned, yet the
+      // verdict read `freed: false` with a reason asserting the registration
+      // and branch survived; cleanup turned that into failedDestruction and
+      // skipped the lease release, wedging the PR for every later review.
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+      const shim = shimKilling('worktree', 'prune');
+      const savedPath = process.env['PATH'];
+      let got: ReturnType<typeof releaseWorktree> | undefined;
+      try {
+        process.env['PATH'] = `${shim}:${savedPath}`;
+        got = releaseWorktree(join(repo, 'wt'));
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+
+      expect(got).toEqual({ existed: true, freed: true, reason: undefined });
+      expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
+      expect(() => git('branch', '-D', 'topic')).not.toThrow();
+    },
+  );
+
+  itWhereShExists(
+    'reports freed when the remove answered 0 and only the prune was REFUSED (R32-2)',
+    () => {
+      // The refusal arm of the miskeying the two cases above pin for the
+      // null-status arm. Each probe re-asks `launchDirRefusal()` from
+      // scratch, so the two can disagree — and the disjunct that forced
+      // `freed: false` on `removed?.refusal ?? pruned.refusal` was NOT gated
+      // on "neither arm cleared the registration", while `couldNotRun`
+      // beside it was. So a refusal landing on either probe negated a
+      // release the other had completed.
+      //
+      // Staged with real git and no mocks: the launch directory is inside a
+      // `.qwen/tmp` spelling, so the gate consults the kernel; the shim
+      // renames that directory out from under the process AFTER the remove
+      // has answered 0, which splits the cached spelling from the kernel's
+      // and refuses the prune alone. The mirror direction (a refused remove
+      // whose follow-up prune clears the registration) is the same
+      // expression with the arms swapped.
+      // The launch directory is a LINKED worktree under the marker, which
+      // is the geometry the gate is written for: a plain directory in the
+      // main checkout is refused outright by the common-dir question, so the
+      // remove would never reach git at all.
+      const launch = join(repo, '.qwen', 'tmp', 'launch-wt');
+      git('worktree', 'add', '-q', '--detach', launch, 'HEAD');
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+
+      const shimDir = join(repo, 'git-shim-rename');
+      mkdirSync(shimDir, { recursive: true });
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shimDir, 'git'),
+        `#!/bin/sh\n` +
+          `if [ "$1" = worktree ] && [ "$2" = remove ]; then\n` +
+          `  ${realGit} "$@"; st=$?\n` +
+          `  mv "${launch}" "${join(repo, '.qwen', 'tmp', 'renamed')}"\n` +
+          `  exit $st\n` +
+          `fi\n` +
+          `exec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+
+      const savedPath = process.env['PATH'];
+      let got: ReturnType<typeof releaseWorktree> | undefined;
+      process.chdir(launch);
+      try {
+        process.env['PATH'] = `${shimDir}:${savedPath}`;
+        got = releaseWorktree(join(repo, 'wt'));
+      } finally {
+        process.env['PATH'] = savedPath;
+        process.chdir(repo);
+      }
+
+      // The premise, pinned rather than assumed: the prune really was
+      // REFUSED (a launch-dir verdict), not merely unable to run — otherwise
+      // this case would be re-testing the null-status arm above.
+      process.chdir(join(repo, '.qwen', 'tmp', 'renamed'));
+      try {
+        expect(gitProbe('worktree', 'prune').refusal).toBeTruthy();
+      } finally {
+        process.chdir(repo);
+      }
+
+      expect(got).toEqual({ existed: true, freed: true, reason: undefined });
+      // Ground truth, not the verdict's word: `remove` cleared the
+      // registration itself, so the release the refusal used to negate had
+      // in fact completed.
+      expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
+      expect(() => git('branch', '-D', 'topic')).not.toThrow();
+    },
+  );
+
+  it('degrades through the result — never throws — when the cwd is deleted mid-release', (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
+    // The never-throws contract starts before the first git call: `resolve`
+    // of the RELATIVE path production callers pass reads the cwd, and so does
+    // `redirectedAncestor`'s default `stopAt = process.cwd()` — both threw
+    // `uv_cwd` ENOENT here once the directory was gone, ahead of every
+    // degradation the probe carries.
+    git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+    const gone = join(repo, 'gone');
+    mkdirSync(gone);
+    process.chdir(gone);
+    let got: ReturnType<typeof releaseWorktree> | undefined;
+    try {
+      rmSync(gone, { recursive: true, force: true });
+      // The precondition, asserted rather than assumed.
+      expect(process.cwd).toThrow(/uv_cwd/);
+      expect(() => {
+        got = releaseWorktree('wt');
+      }).not.toThrow();
+    } finally {
+      process.chdir(repo);
+    }
+    expect(got).toMatchObject({ existed: true, freed: false });
+    expect(got?.reason).toBeTruthy();
+    // Nothing was removed — and the release retried from a live cwd completes.
+    expect(existsSync(join(repo, 'wt'))).toBe(true);
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
+  });
 });
 
 describe('gitRawTolerateDiff', () => {
@@ -190,5 +522,150 @@ describe('gitRawTolerateDiff', () => {
         'subdir',
       ),
     ).toThrow();
+  });
+});
+
+describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
+  // Every fetch-pr test mocks this module, so nothing else consumes the real
+  // `status`. A rewrite returning `{status: 1}` for every failure, or
+  // dropping the field, would reclassify every deterministic anchor refusal
+  // as retryable infrastructure (and vice versa) with the whole suite green.
+  it('reports 0, the predicate NO, and an error apart from each other', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gitprobe-'));
+    try {
+      execFileSync('git', ['init', '-q', repo], { stdio: 'pipe' });
+      execFileSync('git', ['-C', repo, 'config', 'user.email', 'a@b.c']);
+      execFileSync('git', ['-C', repo, 'config', 'user.name', 'a']);
+      writeFileSync(join(repo, 'f.txt'), 'x\n');
+      execFileSync('git', ['-C', repo, 'add', 'f.txt'], { stdio: 'pipe' });
+      execFileSync('git', ['-C', repo, 'commit', '-qm', 'one'], {
+        stdio: 'pipe',
+      });
+      const head = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      }).trim();
+
+      // 0: the object is here.
+      expect(gitProbe('-C', repo, 'cat-file', '-e', head).status).toBe(0);
+      // 1: a well-formed FULL sha this history does not hold — the
+      // definitive no.
+      expect(
+        gitProbe('-C', repo, 'cat-file', '-e', '0'.repeat(40)).status,
+      ).toBe(1);
+      // 128: not a valid object NAME — what git says for an abbreviation
+      // that resolves to nothing. Deterministic too, which is why
+      // `commitExists` treats it as absence rather than as a failure.
+      expect(gitProbe('-C', repo, 'cat-file', '-e', '0000000').status).toBe(
+        128,
+      );
+      // The predicate's own yes, its no, and its error — all three, from
+      // real git. `--is-ancestor` is the one probe whose three answers the
+      // reason taxonomy splits three ways, and this describe is the only
+      // consumer of a REAL status anywhere (every fetch-pr test mocks
+      // `./lib/git.js`), so a wrapper change that surfaced the predicate's
+      // NO as an error status would rename every deterministic
+      // `not-an-ancestor` refusal to the retryable `capture-failed` with
+      // nothing red.
+      writeFileSync(join(repo, 'f.txt'), 'y\n');
+      execFileSync('git', ['-C', repo, 'add', 'f.txt'], { stdio: 'pipe' });
+      execFileSync('git', ['-C', repo, 'commit', '-qm', 'two'], {
+        stdio: 'pipe',
+      });
+      const newer = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      }).trim();
+
+      // 0: yes — a commit is its own ancestor, and the older is the newer's.
+      expect(
+        gitProbe('-C', repo, 'merge-base', '--is-ancestor', head, head).status,
+      ).toBe(0);
+      expect(
+        gitProbe('-C', repo, 'merge-base', '--is-ancestor', head, newer).status,
+      ).toBe(0);
+      // 1: no — the newer commit is not an ancestor of the older.
+      expect(
+        gitProbe('-C', repo, 'merge-base', '--is-ancestor', newer, head).status,
+      ).toBe(1);
+      // 128: not a valid object name — an ERROR, not a no. This is the
+      // status `commitExists`/`resolveCommit` must settle before ancestry is
+      // ever asked, since the predicate cannot answer it.
+      expect(
+        gitProbe(
+          '-C',
+          repo,
+          'merge-base',
+          '--is-ancestor',
+          '0'.repeat(40),
+          head,
+        ).status,
+      ).toBe(128);
+
+      // The `out` half, from real git. `resolveCommit` returns this value
+      // verbatim as the anchor's `diffBase`, so the trim is load-bearing: a
+      // refactor dropping it makes `resolved === fetchedSha` false and
+      // `merge-base --is-ancestor "<sha>\n" <head>` exit 128 → the anchor is
+      // called `capture-failed` and retried forever. On Windows, where
+      // rev-parse output carries CRLF, that is the DEFAULT shape, not a mutant.
+      expect(gitProbe('-C', repo, 'rev-parse', `${head}^{commit}`).out).toBe(
+        head,
+      );
+
+      // `status: null` — no exit code at all, which is what a spawn failure
+      // or a timeout kill leaves. It is the whole reason the probe returns a
+      // nullable status instead of a number: this is the retryable half of
+      // the split, and every fetch-pr test mocks `./lib/git.js`, so nothing
+      // else exercises the real catch. A mutant returning a number here reads
+      // a killed probe as the predicate's answer and permanently retires a
+      // valid anchor on a transient fault.
+      const savedPath = process.env['PATH'];
+      try {
+        process.env['PATH'] = join(repo, 'no-such-bin');
+        expect(gitProbe('-C', repo, 'rev-parse', 'HEAD')).toEqual({
+          out: null,
+          status: null,
+          refusal: null,
+        });
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('answers "could not be run" when the process cwd no longer exists', (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
+    // The launch-dir pre-check reads `process.cwd()`, which throws ENOENT once
+    // the directory is gone. Left outside the try it took the whole probe with
+    // it — and `releaseWorktree`'s documented never-throws contract, cleanup's
+    // `report()` and fetch-pr's `cleanStale` all call this with no catch of
+    // their own, so a review whose worktree was swept out from under it (the
+    // nested geometry, an operator `rm -rf` mid-run) aborted the sweep before
+    // the branch delete and the lease release, leaving the stale lease that
+    // refuses every later cleanup of that target. The pre-gate spawn degraded
+    // here instead of throwing: its own ENOENT landed in the catch.
+    const gone = join(repo, 'deleted-out-from-under');
+    mkdirSync(gone, { recursive: true });
+    process.chdir(gone);
+    try {
+      rmSync(gone, { recursive: true, force: true });
+      // The precondition, asserted rather than assumed: this is the throw the
+      // pre-check used to let escape.
+      expect(process.cwd).toThrow(/uv_cwd/);
+
+      expect(gitProbe('worktree', 'prune')).toEqual({
+        out: null,
+        status: null,
+        refusal: null,
+      });
+      // `gitOpt` and `refExists` delegate here, and every degradation route
+      // reads their null rather than catching a throw.
+      expect(gitOpt('worktree', 'prune')).toBeNull();
+    } finally {
+      process.chdir(cwd);
+    }
   });
 });

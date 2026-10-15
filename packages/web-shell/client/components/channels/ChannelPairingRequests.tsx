@@ -19,6 +19,7 @@ import type {
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequest,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
@@ -51,13 +52,31 @@ export interface ChannelPairingRequestsProps {
   ) => Promise<DaemonChannelPairingApprovalsSnapshot>;
   revokeApproval: (
     name: string,
-    senderId: string,
+    request: DaemonChannelPairingRevocationRequest,
   ) => Promise<DaemonChannelPairingRevocationResult>;
   staticAllowedUsers?: readonly string[];
 }
 
+type PairingApprovalTarget =
+  | { type: 'user'; id: string }
+  | { type: 'group'; id: string };
+
 function senderLabel(request: DaemonChannelPairingRequest): string {
   return request.senderName.trim() || request.senderId;
+}
+
+function requestSubject(request: DaemonChannelPairingRequest) {
+  return (
+    request.subject ?? {
+      type: 'user' as const,
+      id: request.senderId,
+      name: request.senderName,
+    }
+  );
+}
+
+function targetKey(target: PairingApprovalTarget): string {
+  return `${target.type}:${target.id}`;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -101,12 +120,23 @@ export function ChannelPairingRequests({
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
   const [approvedSenderIds, setApprovedSenderIds] = useState<string[]>([]);
+  const [approvedGroupIds, setApprovedGroupIds] = useState<string[]>([]);
   const [approvalsLoading, setApprovalsLoading] = useState(true);
   const [approvalsReloadToken, setApprovalsReloadToken] = useState(0);
   const [approvalsError, setApprovalsError] = useState<string>();
   const [revokeSuccess, setRevokeSuccess] = useState<string>();
-  const [revokeTarget, setRevokeTarget] = useState<string>();
-  const [revokingSenderId, setRevokingSenderId] = useState<string>();
+  const [revokeTarget, setRevokeTarget] = useState<PairingApprovalTarget>();
+  const [revokingTarget, setRevokingTarget] = useState<string>();
+
+  const approvalLabel = (target: PairingApprovalTarget) =>
+    target.type === 'group'
+      ? t('channels.editor.pairing.subject.group', { name: target.id })
+      : target.id;
+
+  const approvedTargets: PairingApprovalTarget[] = [
+    ...approvedSenderIds.map((id) => ({ type: 'user' as const, id })),
+    ...approvedGroupIds.map((id) => ({ type: 'group' as const, id })),
+  ];
 
   useEffect(() => {
     mounted.current = true;
@@ -148,14 +178,16 @@ export function ChannelPairingRequests({
     let active = true;
     setApprovalsLoading(true);
     setApprovedSenderIds([]);
+    setApprovedGroupIds([]);
     setApprovalsError(undefined);
     setRevokeSuccess(undefined);
     setRevokeTarget(undefined);
-    setRevokingSenderId(undefined);
+    setRevokingTarget(undefined);
     void listApprovals(channelName).then(
       (snapshot) => {
         if (!active) return;
         setApprovedSenderIds(snapshot.senderIds);
+        setApprovedGroupIds(snapshot.groupIds ?? []);
         setApprovalsLoading(false);
       },
       (loadError: unknown) => {
@@ -187,9 +219,15 @@ export function ChannelPairingRequests({
         return;
       }
       setRequests(result.requests);
+      const subject = requestSubject(result.approved);
       setSuccess(
         t('channels.editor.pairing.approved', {
-          sender: senderLabel(result.approved),
+          sender:
+            subject.type === 'group'
+              ? t('channels.editor.pairing.subject.group', {
+                  name: subject.name.trim() || subject.id,
+                })
+              : subject.name.trim() || subject.id,
         }),
       );
       setApprovalsReloadToken((current) => current + 1);
@@ -237,22 +275,30 @@ export function ChannelPairingRequests({
     }
   };
 
-  const revoke = async (senderId: string) => {
-    if (revokingSenderId) return;
+  const revoke = async (target: PairingApprovalTarget) => {
+    if (revokingTarget) return;
     const revokeChannel = channelName;
+    const key = targetKey(target);
+    const label = approvalLabel(target);
     setRevokeTarget(undefined);
-    setRevokingSenderId(senderId);
+    setRevokingTarget(key);
     setApprovalsError(undefined);
     setRevokeSuccess(undefined);
     setSuccess(undefined);
     try {
-      const result = await revokeApproval(channelName, senderId);
+      const result = await revokeApproval(
+        channelName,
+        target.type === 'group'
+          ? { groupId: target.id }
+          : { senderId: target.id },
+      );
       if (!mounted.current || currentChannelName.current !== revokeChannel) {
         return;
       }
       setApprovedSenderIds(result.senderIds);
+      setApprovedGroupIds(result.groupIds ?? []);
       setRevokeSuccess(
-        t('channels.editor.pairing.approvals.revoked', { senderId }),
+        t('channels.editor.pairing.approvals.revoked', { senderId: label }),
       );
     } catch (revokeError) {
       if (!mounted.current || currentChannelName.current !== revokeChannel) {
@@ -263,6 +309,7 @@ export function ChannelPairingRequests({
           const snapshot = await listApprovals(revokeChannel);
           if (mounted.current && currentChannelName.current === revokeChannel) {
             setApprovedSenderIds(snapshot.senderIds);
+            setApprovedGroupIds(snapshot.groupIds ?? []);
           }
           return;
         } catch (refreshError) {
@@ -288,7 +335,7 @@ export function ChannelPairingRequests({
       );
     } finally {
       if (mounted.current && currentChannelName.current === revokeChannel) {
-        setRevokingSenderId(undefined);
+        setRevokingTarget(undefined);
       }
     }
   };
@@ -364,13 +411,26 @@ export function ChannelPairingRequests({
       {requests.length > 0 ? (
         <ul className={styles.list}>
           {requests.map((request) => {
-            const label = senderLabel(request);
+            const subject = requestSubject(request);
+            const label =
+              subject.type === 'group'
+                ? t('channels.editor.pairing.subject.group', {
+                    name: subject.name.trim() || subject.id,
+                  })
+                : subject.name.trim() || subject.id;
             return (
               <li key={request.code} className={styles.request}>
                 <div className={styles.requestIdentity}>
                   <span className={styles.senderName}>{label}</span>
-                  {label !== request.senderId ? (
-                    <span className={styles.senderId}>{request.senderId}</span>
+                  {label !== subject.id ? (
+                    <span className={styles.senderId}>{subject.id}</span>
+                  ) : null}
+                  {subject.type === 'group' ? (
+                    <span className={styles.senderId}>
+                      {t('channels.editor.pairing.requestedBy', {
+                        sender: senderLabel(request),
+                      })}
+                    </span>
                   ) : null}
                   <span className={styles.requestTime}>
                     {formatRelativeTime(
@@ -383,7 +443,7 @@ export function ChannelPairingRequests({
                 <Button
                   type="button"
                   size="sm"
-                  disabled={Boolean(approvingCode) || Boolean(revokingSenderId)}
+                  disabled={Boolean(approvingCode) || Boolean(revokingTarget)}
                   aria-label={t('channels.editor.pairing.approveFor', {
                     sender: label,
                     code: request.code,
@@ -412,12 +472,12 @@ export function ChannelPairingRequests({
             </p>
           </div>
           <div className={styles.headerActions}>
-            <Badge variant="outline">{approvedSenderIds.length}</Badge>
+            <Badge variant="outline">{approvedTargets.length}</Badge>
             <Button
               type="button"
               size="icon-sm"
               variant="ghost"
-              disabled={approvalsLoading || Boolean(revokingSenderId)}
+              disabled={approvalsLoading || Boolean(revokingTarget)}
               aria-label={t('channels.editor.pairing.approvals.refresh')}
               onClick={() => {
                 setRevokeSuccess(undefined);
@@ -458,7 +518,7 @@ export function ChannelPairingRequests({
 
         {!approvalsLoading &&
         !approvalsError &&
-        approvedSenderIds.length === 0 ? (
+        approvedTargets.length === 0 ? (
           <div className={styles.empty}>
             <ShieldCheckIcon aria-hidden="true" />
             <div>
@@ -472,29 +532,34 @@ export function ChannelPairingRequests({
           </div>
         ) : null}
 
-        {approvedSenderIds.length > 0 ? (
+        {approvedTargets.length > 0 ? (
           <ul className={styles.list}>
-            {approvedSenderIds.map((senderId) => (
-              <li key={senderId} className={styles.approval}>
-                <div className={styles.approvalIdentity}>
-                  <ShieldCheckIcon aria-hidden="true" />
-                  <code className={styles.approvalSenderId}>{senderId}</code>
-                </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="destructive"
-                  disabled={Boolean(revokingSenderId) || Boolean(approvingCode)}
-                  aria-label={t('channels.editor.pairing.approvals.revokeFor', {
-                    senderId,
-                  })}
-                  onClick={() => setRevokeTarget(senderId)}
-                >
-                  {revokingSenderId === senderId ? <Spinner /> : <Trash2Icon />}
-                  {t('channels.editor.pairing.approvals.revoke')}
-                </Button>
-              </li>
-            ))}
+            {approvedTargets.map((target) => {
+              const label = approvalLabel(target);
+              const key = targetKey(target);
+              return (
+                <li key={key} className={styles.approval}>
+                  <div className={styles.approvalIdentity}>
+                    <ShieldCheckIcon aria-hidden="true" />
+                    <code className={styles.approvalSenderId}>{label}</code>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="destructive"
+                    disabled={Boolean(revokingTarget) || Boolean(approvingCode)}
+                    aria-label={t(
+                      'channels.editor.pairing.approvals.revokeFor',
+                      { senderId: label },
+                    )}
+                    onClick={() => setRevokeTarget(target)}
+                  >
+                    {revokingTarget === key ? <Spinner /> : <Trash2Icon />}
+                    {t('channels.editor.pairing.approvals.revoke')}
+                  </Button>
+                </li>
+              );
+            })}
           </ul>
         ) : null}
 
@@ -524,7 +589,7 @@ export function ChannelPairingRequests({
           <AlertDialogHeader>
             <AlertDialogTitle>
               {t('channels.editor.pairing.approvals.confirm.title', {
-                senderId: revokeTarget ?? '',
+                senderId: revokeTarget ? approvalLabel(revokeTarget) : '',
               })}
             </AlertDialogTitle>
             <AlertDialogDescription>

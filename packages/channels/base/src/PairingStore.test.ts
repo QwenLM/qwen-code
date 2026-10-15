@@ -1,9 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PairingStore } from './PairingStore.js';
+import type { CreatePairingRequestResult } from './PairingStore.js';
 import { getWorkspaceScopeDirName } from './paths.js';
+
+function codeOf(result: CreatePairingRequestResult): string {
+  if ('code' in result) return result.code;
+  throw new Error(
+    `expected a pairing code, got rejection "${result.rejected}"`,
+  );
+}
 
 describe('PairingStore workspace scoping (#7017)', () => {
   let qwenHome: string;
@@ -36,8 +44,8 @@ describe('PairingStore workspace scoping (#7017)', () => {
     const storeA = new PairingStore('support-bot', workspaceA);
     const storeB = new PairingStore('support-bot', workspaceB);
 
-    const code = storeA.createRequest('sender-1', 'Sender One');
-    expect(code).toBeTruthy();
+    const result = storeA.createRequest('sender-1', 'Sender One');
+    expect(result).toEqual({ code: expect.any(String) });
 
     expect(storeA.listPending()).toHaveLength(1);
     expect(storeB.listPending()).toHaveLength(0);
@@ -47,7 +55,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
     const storeA = new PairingStore('support-bot', workspaceA);
     const storeB = new PairingStore('support-bot', workspaceB);
 
-    const code = storeA.createRequest('sender-1', 'Sender One')!;
+    const code = codeOf(storeA.createRequest('sender-1', 'Sender One'));
     const approved = storeA.approve(code);
     expect(approved?.senderId).toBe('sender-1');
 
@@ -55,12 +63,164 @@ describe('PairingStore workspace scoping (#7017)', () => {
     expect(storeB.isApproved('sender-1')).toBe(false);
   });
 
+  it('approves a group without approving the member who requested it', () => {
+    const store = new PairingStore('support-bot', workspaceA);
+    const result = store.createGroupRequest(
+      'group-1',
+      'Release Team',
+      'sender-1',
+      'Alice',
+    );
+
+    expect(result).toEqual({ code: expect.any(String) });
+    expect(store.listPending()).toEqual([
+      expect.objectContaining({
+        senderId: 'sender-1',
+        senderName: 'Alice',
+        subject: {
+          type: 'group',
+          id: 'group-1',
+          name: 'Release Team',
+        },
+      }),
+    ]);
+
+    store.approve(codeOf(result));
+
+    expect(store.isGroupApproved('group-1')).toBe(true);
+    expect(store.isApproved('group-1')).toBe(false);
+    expect(store.revoke('group-1')).toBe(false);
+    expect(store.isApproved('sender-1')).toBe(false);
+  });
+
+  it('reuses one pending request per group regardless of the initiating sender', () => {
+    const store = new PairingStore('support-bot', workspaceA);
+
+    const first = store.createGroupRequest(
+      'group-1',
+      'Release Team',
+      'alice',
+      'Alice',
+    );
+    const second = store.createGroupRequest(
+      'group-1',
+      'Release Team',
+      'bob',
+      'Bob',
+    );
+
+    expect(first).toEqual({ code: expect.any(String) });
+    expect(second).toEqual(first);
+    expect(store.listPending()).toEqual([
+      expect.objectContaining({
+        senderId: 'alice',
+        senderName: 'Alice',
+        subject: { type: 'group', id: 'group-1', name: 'Release Team' },
+        code: codeOf(first),
+      }),
+    ]);
+  });
+
+  it('limits each sender to one pending request across subjects', () => {
+    const store = new PairingStore('support-bot', workspaceA);
+
+    const first = store.createGroupRequest(
+      'group-1',
+      'Release Team',
+      'alice',
+      'Alice',
+    );
+    expect(first).toEqual({ code: expect.any(String) });
+
+    // Same sender, different subjects: no additional slots.
+    expect(
+      store.createGroupRequest('group-2', 'Platform Team', 'alice', 'Alice'),
+    ).toEqual({ rejected: 'sender_pending' });
+    expect(store.createRequest('alice', 'Alice')).toEqual({
+      rejected: 'sender_pending',
+    });
+
+    // Re-mentioning the same subject still returns its existing code.
+    expect(
+      store.createGroupRequest('group-1', 'Release Team', 'alice', 'Alice'),
+    ).toEqual(first);
+
+    // Other senders are unaffected until the shared cap (3) is reached.
+    expect(
+      store.createGroupRequest('group-2', 'Platform Team', 'bob', 'Bob'),
+    ).toEqual({ code: expect.any(String) });
+    expect(store.createRequest('carol', 'Carol')).toEqual({
+      code: expect.any(String),
+    });
+    expect(store.createRequest('dave', 'Dave')).toEqual({
+      rejected: 'cap_reached',
+    });
+  });
+
+  it('frees the sender slot once their pending request is approved', () => {
+    const store = new PairingStore('support-bot', workspaceA);
+    const code = codeOf(
+      store.createGroupRequest('group-1', 'Release Team', 'alice', 'Alice'),
+    );
+
+    expect(store.createRequest('alice', 'Alice')).toEqual({
+      rejected: 'sender_pending',
+    });
+
+    store.approve(code);
+
+    expect(store.createRequest('alice', 'Alice')).toEqual({
+      code: expect.any(String),
+    });
+  });
+
+  it('isolates group approvals and revocation by workspace', () => {
+    const storeA = new PairingStore('support-bot', workspaceA);
+    const storeB = new PairingStore('support-bot', workspaceB);
+
+    for (const store of [storeA, storeB]) {
+      const code = codeOf(
+        store.createGroupRequest(
+          'group-1',
+          'Release Team',
+          'sender-1',
+          'Alice',
+        ),
+      );
+      store.approve(code);
+    }
+
+    expect(storeA.revokeGroup('group-1')).toBe(true);
+    expect(storeA.isGroupApproved('group-1')).toBe(false);
+    expect(storeB.isGroupApproved('group-1')).toBe(true);
+  });
+
+  it('keeps group approvals separate from similarly named channel user approvals', () => {
+    const groupStore = new PairingStore('support', workspaceA);
+    const userStore = new PairingStore('support-group', workspaceA);
+    const code = codeOf(
+      groupStore.createGroupRequest(
+        'shared-id',
+        'Release Team',
+        'sender-1',
+        'Alice',
+      ),
+    );
+
+    groupStore.approve(code);
+
+    expect(groupStore.isGroupApproved('shared-id')).toBe(true);
+    expect(userStore.isApproved('shared-id')).toBe(false);
+    expect(userStore.revoke('shared-id')).toBe(false);
+    expect(groupStore.isGroupApproved('shared-id')).toBe(true);
+  });
+
   it('revokes an approved sender only from the selected workspace', () => {
     const storeA = new PairingStore('support-bot', workspaceA);
     const storeB = new PairingStore('support-bot', workspaceB);
 
     for (const store of [storeA, storeB]) {
-      const code = store.createRequest('sender-1', 'Sender One')!;
+      const code = codeOf(store.createRequest('sender-1', 'Sender One'));
       store.approve(code);
     }
 
@@ -74,7 +234,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
     // `../support` climbs out of the scope directory and both workspaces
     // share one file at the channels root — silently undoing the isolation.
     const storeA = new PairingStore('../support', workspaceA);
-    const code = storeA.createRequest('mallory', 'Mallory')!;
+    const code = codeOf(storeA.createRequest('mallory', 'Mallory'));
     storeA.approve(code);
 
     const storeB = new PairingStore('../support', workspaceB);
@@ -94,8 +254,8 @@ describe('PairingStore workspace scoping (#7017)', () => {
       path.join(workspaceA, 'sub', '..'),
     );
 
-    const code = store.createRequest('sender-1', 'Sender One');
-    expect(code).toBeTruthy();
+    const result = store.createRequest('sender-1', 'Sender One');
+    expect(result).toEqual({ code: expect.any(String) });
     expect(sameViaRelativeHop.listPending()).toHaveLength(1);
   });
 
@@ -117,7 +277,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
 
   it('keeps the legacy global layout when no workspace is given', () => {
     const store = new PairingStore('support-bot');
-    const code = store.createRequest('sender-1', 'Sender One')!;
+    const code = codeOf(store.createRequest('sender-1', 'Sender One'));
     store.approve(code);
 
     expect(
@@ -145,6 +305,17 @@ describe('PairingStore workspace scoping (#7017)', () => {
       );
     };
 
+    it('copies the legacy group allowlist into the scoped store', () => {
+      fs.mkdirSync(channelsRoot(), { recursive: true });
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'support-bot-groups.json'),
+        JSON.stringify(['legacy-group']),
+      );
+      const store = new PairingStore('support-bot', workspaceA);
+
+      expect(store.isGroupApproved('legacy-group')).toBe(true);
+    });
+
     it('copies legacy global state into the scoped store once', () => {
       seedLegacy();
       const store = new PairingStore('support-bot', workspaceA);
@@ -153,6 +324,21 @@ describe('PairingStore workspace scoping (#7017)', () => {
       expect(store.listPending().map((r) => r.senderId)).toEqual([
         'pending-sender',
       ]);
+    });
+
+    it('approves a legacy pending request as a user request', () => {
+      seedLegacy();
+      const store = new PairingStore('support-bot', workspaceA);
+
+      const approved = store.approve('ABCDEFGH');
+
+      expect(approved?.subject).toEqual({
+        type: 'user',
+        id: 'pending-sender',
+        name: 'Pending',
+      });
+      expect(store.isApproved('pending-sender')).toBe(true);
+      expect(store.getGroupAllowlist()).toEqual([]);
     });
 
     it('lets every workspace grandfather the same legacy baseline (copy, not move)', () => {
@@ -172,7 +358,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
       const storeA = new PairingStore('support-bot', workspaceA);
       const storeB = new PairingStore('support-bot', workspaceB);
 
-      const code = storeA.createRequest('new-sender', 'New Sender')!;
+      const code = codeOf(storeA.createRequest('new-sender', 'New Sender'));
       storeA.approve(code);
 
       expect(storeA.isApproved('new-sender')).toBe(true);
@@ -274,8 +460,8 @@ describe('PairingStore workspace scoping (#7017)', () => {
       });
       const store = new PairingStore('support-bot', workspaceA);
       expect(store.isApproved('anyone')).toBe(false);
-      const code = store.createRequest('new-sender', 'New')!;
-      expect(typeof code).toBe('string');
+      const result = store.createRequest('new-sender', 'New');
+      expect(result).toEqual({ code: expect.any(String) });
     });
 
     it('migrates every channel of a workspace, not only the first one constructed', () => {
@@ -379,7 +565,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
 
     it('never overwrites existing scoped state with legacy content', () => {
       const store = new PairingStore('support-bot', workspaceA);
-      const code = store.createRequest('scoped-sender', 'Scoped')!;
+      const code = codeOf(store.createRequest('scoped-sender', 'Scoped'));
       store.approve(code);
 
       seedLegacy();
@@ -387,6 +573,95 @@ describe('PairingStore workspace scoping (#7017)', () => {
       expect(reopened.isApproved('scoped-sender')).toBe(true);
       expect(reopened.isApproved('legacy-sender')).toBe(false);
     });
+  });
+});
+
+describe('group allowlist durability', () => {
+  let qwenHome: string;
+  let workspace: string;
+  let prevQwenHome: string | undefined;
+
+  beforeEach(() => {
+    qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pairing-home-'));
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'pairing-ws-'));
+    prevQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+  });
+
+  afterEach(() => {
+    if (prevQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = prevQwenHome;
+    }
+    for (const dir of [qwenHome, workspace]) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  const groupsPath = () =>
+    path.join(
+      qwenHome,
+      'channels',
+      getWorkspaceScopeDirName(workspace),
+      'support-bot-groups.json',
+    );
+
+  it('refuses to rebuild an unreadable group allowlist on approve', () => {
+    const store = new PairingStore('support-bot', workspace);
+    const code = codeOf(
+      store.createGroupRequest('group-a', 'Group A', 'sender-1', 'Alice'),
+    );
+    fs.mkdirSync(path.dirname(groupsPath()), { recursive: true });
+    fs.writeFileSync(groupsPath(), '["group-b", "group-c"'); // torn JSON
+
+    expect(() => store.approve(code)).toThrow(/unreadable group allowlist/);
+
+    // The pending request must survive the failed approve so the code stays
+    // usable, and the corrupt file must be left untouched for the operator.
+    expect(store.listPending()).toHaveLength(1);
+    expect(fs.readFileSync(groupsPath(), 'utf-8')).toBe(
+      '["group-b", "group-c"',
+    );
+  });
+
+  it('fails closed and logs when the group allowlist is unreadable', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const store = new PairingStore('support-bot', workspace);
+      fs.mkdirSync(path.dirname(groupsPath()), { recursive: true });
+      fs.writeFileSync(groupsPath(), 'not json');
+
+      expect(store.isGroupApproved('group-b')).toBe(false);
+      expect(store.getGroupAllowlist()).toEqual([]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('group allowlist'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('keeps stored approvals when approving into an existing allowlist', () => {
+    const store = new PairingStore('support-bot', workspace);
+    fs.mkdirSync(path.dirname(groupsPath()), { recursive: true });
+    fs.writeFileSync(groupsPath(), JSON.stringify(['group-b'], null, 2));
+    const code = codeOf(
+      store.createGroupRequest('group-a', 'Group A', 'sender-1', 'Alice'),
+    );
+
+    const approved = store.approve(code);
+
+    expect(approved?.subject.id).toBe('group-a');
+    expect(store.getGroupAllowlist()).toEqual(['group-b', 'group-a']);
+    // The atomic write must not leave a temp file behind.
+    expect(
+      fs
+        .readdirSync(path.dirname(groupsPath()))
+        .filter((name) => name.includes('.tmp')),
+    ).toEqual([]);
   });
 });
 

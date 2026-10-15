@@ -1,0 +1,17 @@
+name: 'Self-hosted Node.js preflight'
+description: 'Preflight for self-hosted runners that reuse their pre-installed Node.js instead of downloading one on ECS, where nodejs.org may be unreachable through the egress proxy: fails the job when Node is missing and warns when the major version is not 22.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Use pre-installed Node.js'
+      shell: 'bash'
+      run: |-
+        if ! command -v node >/dev/null 2>&1; then
+          echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route this gate back to hosted runners."
+          exit 1
+        fi
+        echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+        if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
+          echo "::warning::Expected Node 22.x but found $(node -v); tests will run against the runner's Node."
+        fi

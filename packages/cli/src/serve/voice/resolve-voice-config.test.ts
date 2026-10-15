@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, type ModelsConfig } from '@qwen-code/qwen-code-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -40,6 +40,28 @@ describe('loadDaemonVoiceContext', () => {
     }
     vi.resetModules();
     vi.resetAllMocks();
+  });
+
+  it('uses the resolved API auth type instead of the raw OpenAI selection', async () => {
+    mocks.loadSettings.mockReturnValue({
+      merged: { voiceModel: 'qwen3-asr-flash', modelProviders: {} },
+    });
+    mocks.getAuthTypeFromEnv.mockReturnValue(AuthType.USE_OPENAI);
+    mocks.resolveCliGenerationConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      generationConfig: {},
+      sources: {},
+    });
+    const { loadDaemonVoiceContext } = await import(
+      './resolve-voice-config.js'
+    );
+    const context = loadDaemonVoiceContext('/work/voice', {
+      env: {},
+      workspaceTrusted: true,
+    });
+    expect((context.models as ModelsConfig).getCurrentAuthType()).toBe(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
   });
 
   it('uses the injected runtime env for voice auth and model config resolution', async () => {
@@ -92,6 +114,44 @@ describe('loadDaemonVoiceContext', () => {
       skipWorkspaceSettings: false,
       workspaceTrusted: true,
     });
+  });
+
+  it('resolves providerProtocol-mapped custom provider groups for voice', async () => {
+    // Managed deployments can place a gateway under a custom provider-group
+    // id; the daemon's ModelsConfig must thread providerProtocol through so
+    // the voice resolver sees the same configured models the CLI would.
+    mocks.loadSettings.mockReturnValue({
+      merged: {
+        voiceModel: 'qwen3-asr-flash',
+        modelProviders: {
+          'internal-asr': [
+            {
+              id: 'qwen3-asr-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+        providerProtocol: { 'internal-asr': 'openai' },
+      },
+    });
+    mocks.getAuthTypeFromEnv.mockReturnValue(AuthType.USE_OPENAI);
+    mocks.resolveCliGenerationConfig.mockReturnValue({
+      generationConfig: {},
+      sources: {},
+    });
+    mocks.isStreamingVoiceModel.mockReturnValue(false);
+
+    const { loadDaemonVoiceContext } = await import(
+      './resolve-voice-config.js'
+    );
+    loadDaemonVoiceContext('/work/voice', { env: {}, workspaceTrusted: true });
+
+    const modelsArg = mocks.resolveVoiceTranscriptionConfig.mock.calls[0][0]
+      .config as { getAllConfiguredModels(): Array<{ id: string }> };
+    expect(
+      modelsArg.getAllConfiguredModels().map((model) => model.id),
+    ).toContain('qwen3-asr-flash');
   });
 
   it('skips workspace settings when the runtime is untrusted', async () => {

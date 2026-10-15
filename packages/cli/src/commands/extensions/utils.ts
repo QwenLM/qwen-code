@@ -9,6 +9,8 @@ import {
   redactUrlCredentials,
   getExtensionDisplayName,
   getExtensionDescription,
+  resolveExtensionTelemetryProxy,
+  resolveUsageStatisticsEnabled,
   type Extension,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
@@ -25,6 +27,7 @@ import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 export async function getExtensionManager(): Promise<ExtensionManager> {
   const workspaceDir = process.cwd();
+  const settings = loadSettings(workspaceDir).merged;
   const extensionManager = new ExtensionManager({
     workspaceDir,
     locale: getCurrentLanguage(),
@@ -33,8 +36,11 @@ export async function getExtensionManager(): Promise<ExtensionManager> {
       requestConsentNonInteractive,
     ),
     requestChoicePlugin: requestChoicePluginNonInteractive,
-    isWorkspaceTrusted:
-      isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
+    isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted ?? true,
+    usageStatisticsEnabled: resolveUsageStatisticsEnabled(
+      settings.privacy?.usageStatisticsEnabled,
+    ),
+    proxy: resolveExtensionTelemetryProxy(settings.proxy),
   });
   await extensionManager.refreshCache();
   return extensionManager;
@@ -96,6 +102,9 @@ export function extensionToOutputString(
   output += `\n ${t('Path:')} ${extension.path}`;
   if (extension.installMetadata) {
     output += `\n ${t('Source:')} ${redactUrlCredentials(extension.installMetadata.source)} (${t('Type:')} ${extension.installMetadata.type})`;
+    if (extension.installMetadata.originSource) {
+      output += `\n ${t('Origin:')} ${extension.installMetadata.originSource}`;
+    }
     if (extension.installMetadata.ref) {
       output += `\n ${t('Ref:')} ${extension.installMetadata.ref}`;
     }
@@ -127,6 +136,12 @@ export function extensionToOutputString(
     output += `\n ${t('Agents:')}`;
     extension.agents.forEach((agent) => {
       output += `\n  ${agent.name}`;
+    });
+  }
+  if (extension.workflows && extension.workflows.length > 0) {
+    output += `\n ${t('Workflows:')}`;
+    extension.workflows.forEach((workflow) => {
+      output += `\n  /${workflow.name}`;
     });
   }
   if (extension.config.mcpServers) {

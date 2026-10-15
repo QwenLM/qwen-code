@@ -57,6 +57,7 @@ export const rememberCommand: SlashCommand = {
     return {
       type: 'submit_prompt',
       content: buildBareRememberPrompt(fact),
+      refreshContextFilesOnWrite: true,
     };
   },
 };

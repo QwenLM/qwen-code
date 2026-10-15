@@ -6,6 +6,7 @@
 
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { resolveChannelCwd } from '../commands/channel/channel-cwd.js';
+import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { ServeChannelSelection } from './types.js';
 
 /**
@@ -16,6 +17,7 @@ export interface ChannelWorkspaceInput {
   readonly workspaceCwd: string;
   readonly primary: boolean;
   readonly trusted: boolean;
+  readonly provenance?: WorkspaceRuntimeProvenance;
 }
 
 /** A channel selection scoped to a single owning workspace. */
@@ -36,8 +38,22 @@ export interface ChannelWorkspaceGroupingError {
   readonly channel?: string;
 }
 
+/**
+ * A per-channel resolution failure that `tolerant` downgraded to a skip
+ * instead of failing the whole selection.
+ */
+export interface ChannelWorkspaceGroupingSkip
+  extends ChannelWorkspaceGroupingError {
+  readonly channel: string;
+}
+
 export type ChannelWorkspaceGroupingResult =
-  | { readonly ok: true; readonly groups: readonly ChannelWorkspaceGroup[] }
+  | {
+      readonly ok: true;
+      readonly groups: readonly ChannelWorkspaceGroup[];
+      /** Present only when `tolerant` actually skipped a name. */
+      readonly skipped?: readonly ChannelWorkspaceGroupingSkip[];
+    }
   | { readonly ok: false; readonly error: ChannelWorkspaceGroupingError };
 
 export interface ResolveChannelWorkspaceGroupsInput {
@@ -50,6 +66,27 @@ export interface ResolveChannelWorkspaceGroupsInput {
   readonly loadChannelsConfig: (
     workspaceCwd: string,
   ) => Record<string, unknown>;
+  /**
+   * Maps a selected channel name to the workspace that asked for it, used only
+   * to break an otherwise ambiguous ownership tie: when several workspaces own
+   * the name, the hinted one wins instead of `ambiguous_channel_workspace`.
+   * The hint only selects among owners the predicate already accepted, so it
+   * can never hand a channel to a workspace that does not own it, and the
+   * owner's trust check still applies afterwards.
+   *
+   * Callers must not register a hint for a name that more than one workspace
+   * claims: a map can hold only one owner per name, so a silently overwritten
+   * hint would pick a claimant arbitrarily. Drop the hint instead and let the
+   * ambiguity surface.
+   */
+  readonly preferredOwners?: ReadonlyMap<string, string>;
+  /**
+   * Names whose resolution failure must not fail the whole selection. A
+   * tolerated name that cannot be resolved is dropped and reported in
+   * `skipped`, leaving every other name grouped as usual. Names outside this
+   * set stay fail-fast, which is what an explicit `--channel` selection needs.
+   */
+  readonly tolerant?: ReadonlySet<string>;
 }
 
 /**
@@ -79,13 +116,22 @@ function rawChannelCwd(entry: unknown): string | undefined {
  * reads merged settings (system + user + workspace scopes), a user/system-scope
  * channel with no `cwd` matches every workspace and is reported as ambiguous.
  *
+ * `preferredOwners` breaks that ambiguity for a caller that knows which
+ * workspace asked for the name — a workspace listing it in its own
+ * `serve.channels` — and `tolerant` turns a single name's failure into a
+ * `skipped` entry so one workspace's bad entry cannot strand every other
+ * workspace's channels.
+ *
  * `--channel all` stays primary-only in v1 to avoid implicit cross-workspace
  * process fan-out.
  */
 export function resolveChannelWorkspaceGroups(
   input: ResolveChannelWorkspaceGroupsInput,
 ): ChannelWorkspaceGroupingResult {
-  const { workspaces, selection, loadChannelsConfig } = input;
+  const { selection, loadChannelsConfig } = input;
+  const workspaces = input.workspaces.filter(
+    (workspace) => workspace.provenance !== 'live-conversation',
+  );
   const primary = workspaces.find((workspace) => workspace.primary);
   if (!primary) {
     return {
@@ -126,6 +172,21 @@ export function resolveChannelWorkspaceGroups(
   }
 
   const namesByWorkspace = new Map<string, string[]>();
+  const skipped: ChannelWorkspaceGroupingSkip[] = [];
+  const { preferredOwners, tolerant } = input;
+  // A tolerated name is dropped with its diagnostic; every other name keeps
+  // failing the whole selection.
+  const reject = (
+    name: string,
+    code: ChannelWorkspaceGroupingErrorCode,
+    message: string,
+  ): ChannelWorkspaceGroupingResult | undefined => {
+    if (!tolerant?.has(name)) {
+      return { ok: false, error: { code, channel: name, message } };
+    }
+    skipped.push({ code, channel: name, message });
+    return undefined;
+  };
   for (const name of selection.names) {
     const owners: ChannelWorkspaceInput[] = [];
     for (const workspace of workspaces) {
@@ -151,39 +212,44 @@ export function resolveChannelWorkspaceGroups(
     }
 
     if (owners.length === 0) {
-      return {
-        ok: false,
-        error: {
-          code: 'channel_workspace_mismatch',
-          channel: name,
-          message: `Channel "${name}" is not configured in any registered workspace, or its "cwd" points outside them.`,
-        },
-      };
+      const rejected = reject(
+        name,
+        'channel_workspace_mismatch',
+        `Channel "${name}" is not configured in any registered workspace, or its "cwd" points outside them.`,
+      );
+      if (rejected) return rejected;
+      continue;
     }
+    let owner = owners[0]!;
     if (owners.length > 1) {
-      return {
-        ok: false,
-        error: {
-          code: 'ambiguous_channel_workspace',
-          channel: name,
-          message: `Channel "${name}" is configured in multiple registered workspaces (${owners
-            .map((owner) => owner.workspaceCwd)
+      const preferred = preferredOwners?.get(name);
+      const hinted =
+        preferred === undefined
+          ? undefined
+          : owners.find((candidate) => candidate.workspaceCwd === preferred);
+      if (!hinted) {
+        const rejected = reject(
+          name,
+          'ambiguous_channel_workspace',
+          `Channel "${name}" is configured in multiple registered workspaces (${owners
+            .map((candidate) => candidate.workspaceCwd)
             .join(
               ', ',
             )}). Define it in one workspace's settings or set an explicit "cwd".`,
-        },
-      };
+        );
+        if (rejected) return rejected;
+        continue;
+      }
+      owner = hinted;
     }
-    const owner = owners[0]!;
     if (!owner.trusted) {
-      return {
-        ok: false,
-        error: {
-          code: 'untrusted_workspace',
-          channel: name,
-          message: `Channel "${name}" targets untrusted workspace "${owner.workspaceCwd}".`,
-        },
-      };
+      const rejected = reject(
+        name,
+        'untrusted_workspace',
+        `Channel "${name}" targets untrusted workspace "${owner.workspaceCwd}".`,
+      );
+      if (rejected) return rejected;
+      continue;
     }
     const names = namesByWorkspace.get(owner.workspaceCwd) ?? [];
     names.push(name);
@@ -196,5 +262,8 @@ export function resolveChannelWorkspaceGroups(
       workspaceCwd,
       selection: { mode: 'names', names },
     })),
+    // Omitted when nothing was skipped so a caller that never passes
+    // `tolerant` keeps seeing the exact result shape it saw before.
+    ...(skipped.length > 0 ? { skipped } : {}),
   };
 }

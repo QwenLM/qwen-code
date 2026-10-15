@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VoiceButton } from './VoiceButton';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import type {
   UseVoiceCaptureOptions,
   UseVoiceCaptureReturn,
@@ -46,7 +47,7 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => mocks.connection,
   useWorkspace: () => mocks.workspace,
   useWorkspaceEventSignals: () => ({
@@ -136,12 +137,16 @@ const pointer = (
   type: 'pointerdown' | 'pointerup' | 'pointercancel',
   pointerId = 1,
   mouseButton = 0,
+  timeStamp?: number,
 ) => {
   const event = new MouseEvent(type, {
     bubbles: true,
     button: mouseButton,
   });
   Object.defineProperty(event, 'pointerId', { value: pointerId });
+  if (timeStamp !== undefined) {
+    Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+  }
   act(() => {
     button.dispatchEvent(event);
   });
@@ -188,6 +193,121 @@ afterEach(() => {
 });
 
 describe('VoiceButton', () => {
+  const localizedVoice = (language: WebShellLanguage, disabled = false) => (
+    <I18nProvider language={language}>
+      <VoiceButton
+        disabled={disabled}
+        onInsert={() => {}}
+        target={legacyTarget}
+      />
+    </I18nProvider>
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
+    'localizes error feedback and restores the microphone on dismissal in %s',
+    async (language) => {
+      const { root, container } = mount(true);
+      await flush();
+      mocks.capture.status = 'error';
+      mocks.capture.errorMessage =
+        'No voice model is configured for this workspace.';
+      act(() => root.render(localizedVoice(language, true)));
+      await flush();
+      const message =
+        language === 'en'
+          ? 'No voice model is configured for this workspace.'
+          : '当前工作区未配置语音模型。';
+      const microphone = container.querySelector('button')!;
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        message,
+      );
+      expect(microphone.title).toBe(message);
+      expect(microphone.getAttribute('aria-label')).toContain(message);
+      expect(microphone.className).toContain('error');
+
+      const dismiss = container.querySelector<HTMLButtonElement>(
+        '[data-slot="button"]',
+      )!;
+      expect(dismiss.getAttribute('aria-label')).toBe(
+        language === 'en' ? 'Dismiss voice message' : '关闭语音提示',
+      );
+      expect(dismiss.disabled).toBe(false);
+      mocks.capture.abort.mockImplementation(() => {
+        mocks.capture.status = 'idle';
+        mocks.capture.errorMessage = undefined;
+        root.render(localizedVoice(language, true));
+      });
+      click(dismiss);
+
+      expect(mocks.capture.abort).toHaveBeenCalledOnce();
+      expect(mocks.capture.start).not.toHaveBeenCalled();
+      expect(container.querySelector('[role="status"]')).toBeNull();
+      expect(microphone.className).not.toContain('error');
+      expect(microphone.title).toBe(
+        language === 'en' ? 'Start voice dictation' : '开始语音输入',
+      );
+    },
+  );
+
+  it('updates a visible error in all three presentation sites when language changes', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    mocks.capture.status = 'error';
+    mocks.capture.errorMessage = 'Transcription timed out.';
+    act(() => root.render(localizedVoice('en')));
+    await flush();
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'Transcription timed out.',
+    );
+
+    act(() => root.render(localizedVoice('zh-CN')));
+    const microphone = container.querySelector('button')!;
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      '语音转写超时，请重试。',
+    );
+    expect(microphone.title).toBe('语音转写超时，请重试。');
+    expect(microphone.getAttribute('aria-label')).toBe(
+      '语音错误 — 点击重试：语音转写超时，请重试。',
+    );
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+  });
+
+  it('updates a visible no-speech notice on language change and dismisses without aborting', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    act(() => root.render(localizedVoice('en')));
+    await flush();
+    act(() => mocks.onFinal?.(''));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'No speech detected.',
+    );
+
+    act(() => root.render(localizedVoice('zh-CN')));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      '未检测到语音。',
+    );
+    expect(container.querySelector('button')?.title).toBe('未检测到语音。');
+    click(container.querySelector<HTMLButtonElement>('[data-slot="button"]')!);
+
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.querySelector('button')?.title).toBe('开始语音输入');
+    expect(document.activeElement).toBe(container.querySelector('button'));
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+    expect(mocks.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps live interim transcripts as recording content', async () => {
+    mocks.capture.status = 'recording';
+    mocks.capture.interimText = 'Dictated words';
+    const { container } = mount(false);
+    await flush();
+
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'Dictated words',
+    );
+    expect(container.querySelector('[data-slot="button"]')).toBeNull();
+  });
+
   it('renders only when workspace voice is enabled', async () => {
     expect(await render(false)).not.toBeNull();
 
@@ -637,7 +757,7 @@ describe('VoiceButton', () => {
     if (!button) throw new Error('VoiceButton did not render');
     const heldButton = button;
 
-    pointer(button, 'pointerdown');
+    pointer(button, 'pointerdown', 1, 0, 1_000);
     expect(mocks.capture.start).toHaveBeenCalledOnce();
 
     mocks.capture.status = 'recording';
@@ -656,19 +776,19 @@ describe('VoiceButton', () => {
     // capture set on pointerdown survives the status change and the release
     // still lands on this element.
     expect(button).toBe(heldButton);
-    pointer(button, 'pointerup');
+    pointer(button, 'pointerup', 1, 0, 1_500);
     click(button);
 
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 
-  it('stops a hold that is released while connecting', async () => {
+  it('keeps the hold click suppressed after a rejected pointerdown', async () => {
     const { root, container } = mount(false);
     await flush();
     let button = container.querySelector('button');
     if (!button) throw new Error('VoiceButton did not render');
-    pointer(button, 'pointerdown');
 
+    pointer(button, 'pointerdown', 1, 0, 1_000);
     mocks.capture.status = 'connecting';
     act(() => {
       root.render(
@@ -681,8 +801,73 @@ describe('VoiceButton', () => {
     });
     button = container.querySelector('button');
     if (!button) throw new Error('VoiceButton did not render');
-    pointer(button, 'pointerup');
+    pointer(button, 'pointerdown', 2, 0, 1_100);
+    pointer(button, 'pointerup', 1, 0, 1_500);
+    click(button);
 
+    expect(mocks.capture.stop).toHaveBeenCalledOnce();
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+  });
+
+  it('keeps a quick hold active as a tap', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1, 0, 1_000);
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerup', 1, 0, 1_100);
+    click(button);
+
+    expect(mocks.capture.stop).not.toHaveBeenCalled();
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+    click(button);
+    expect(mocks.capture.stop).toHaveBeenCalledOnce();
+  });
+
+  it('honours a stop click after a quick hold released outside', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1, 0, 1_000);
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    // Release outside: pointer capture delivers pointerup to the button, but
+    // the trailing click lands elsewhere — ignoreNextClickRef leaks.
+    mocks.capture.stop.mockClear();
+    pointer(button, 'pointerup', 1, 0, 1_100);
+    const outside = document.createElement('button');
+    click(outside);
+
+    // A real click on the button must still stop the recording.
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1, 0, 2_000);
+    click(button);
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 

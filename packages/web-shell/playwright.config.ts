@@ -39,6 +39,12 @@ export default defineConfig({
       testIgnore: ['**/visuals/**', '**/*.mobile.spec.ts'],
     },
     {
+      name: 'mobile-webkit',
+      grep: /@smoke/,
+      use: { ...devices['iPhone 13'] },
+      testMatch: '**/*.mobile.spec.ts',
+    },
+    {
       // Touch-device emulation for the mobile composer backend (#5958):
       // coarse pointer + no hover + touch points, which flips the composer
       // to the plain-textarea path.

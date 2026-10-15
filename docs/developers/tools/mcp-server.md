@@ -116,6 +116,7 @@ Each server configuration supports the following properties:
 - **`env`** (object): Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax
 - **`cwd`** (string): Working directory for Stdio transport
 - **`timeout`** (number): Request timeout in milliseconds (default: 600,000ms = 10 minutes)
+- **`versionNegotiation`** (`"auto" | "legacy"`, default: `"legacy"`): For Stdio servers, `"auto"` opts into the `server/discover` probe on a disposable sibling process.
 - **`trust`** (boolean): When `true`, bypasses tool call confirmations for this server in a trusted workspace (default: `false`)
 - **`includeTools`** (string[]): List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.
 - **`excludeTools`** (string[]): List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server. **Note:** `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded.

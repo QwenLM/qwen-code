@@ -40,9 +40,11 @@ export const pairingListCommand: CommandModule<
     writeStdoutLine(`Pending pairing requests for "${argv.name}":\n`);
     for (const req of pending) {
       const ago = Math.round((Date.now() - req.createdAt) / 60000);
-      writeStdoutLine(
-        `  Code: ${req.code}  Sender: ${req.senderName} (${req.senderId})  ${ago}m ago`,
-      );
+      const subject =
+        req.subject.type === 'group'
+          ? `Group: ${req.subject.name} (${req.subject.id})  Requested by: ${req.senderName} (${req.senderId})`
+          : `Sender: ${req.subject.name} (${req.subject.id})`;
+      writeStdoutLine(`  Code: ${req.code}  ${subject}  ${ago}m ago`);
     }
   },
 };
@@ -78,8 +80,12 @@ export const pairingApproveCommand: CommandModule<
       return; // process.exit is mocked in tests; never fall through
     }
 
+    const approved =
+      request.subject.type === 'group'
+        ? `group ${request.subject.name} (${request.subject.id})`
+        : `${request.subject.name} (${request.subject.id})`;
     writeStdoutLine(
-      `Approved: ${request.senderName} (${request.senderId}) can now use channel "${argv.name}".`,
+      `Approved: ${approved} can now use channel "${argv.name}".`,
     );
   },
 };

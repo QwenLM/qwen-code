@@ -116,6 +116,23 @@ describe('ci failure patrol workflow', () => {
     expect(JSON.stringify(yml.jobs.act)).toContain('CI_BOT_PAT');
   });
 
+  it('passes `settings:` pinning the sandbox and the two-tool allowlist', () => {
+    // Unknown `with:` keys (like the old `settings_json`) are dropped by the
+    // action without error, which would silently strip the patrol agent's
+    // sandbox and two-tool allowlist.
+    const classifier = yml.jobs.classify.steps.find((step) =>
+      step.uses?.includes('qwen-code-action'),
+    );
+    expect(typeof classifier.with.settings).toBe('string');
+    expect(classifier.with.settings_json).toBeUndefined();
+    const settings = JSON.parse(classifier.with.settings);
+    for (const key of ['coreTools', 'maxSessionTurns', 'sandbox']) {
+      expect(settings[key]).toBeUndefined();
+    }
+    expect(settings.tools?.sandbox).toBe(true);
+    expect(settings.tools?.core).toEqual(['read_file', 'write_file']);
+  });
+
   it('passes a decision batch through a trusted act job and always resets', () => {
     expect(yml.jobs.classify.outputs).toHaveProperty('bot_login');
     expect(workflow).toContain('ci-flaky-decisions.json');

@@ -1,6 +1,6 @@
 import type { WebShellSlashCommandHandler } from '../App';
 
-export const SLASH_COMMAND_PATTERN = /^\/([\w-]+)(?=\s|$)/;
+export const SLASH_COMMAND_PATTERN = /^\/([^\s/]+)(?=\s|$)/;
 
 export function invokeSlashCommandHandler(
   input: string,

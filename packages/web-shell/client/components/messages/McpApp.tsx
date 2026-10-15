@@ -1,0 +1,436 @@
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AppBridge,
+  PostMessageTransport,
+} from '@modelcontextprotocol/ext-apps/app-bridge';
+import {
+  McpAppHostContext,
+  McpAppMessagesContext,
+  McpAppSessionContext,
+  McpAppToolsContext,
+} from '../../mcpAppHostContext';
+import { useTheme } from '../../themeContext';
+import styles from './McpApp.module.css';
+
+type SandboxResource = Parameters<AppBridge['sendSandboxResourceReady']>[0];
+type AppToolResult = Parameters<AppBridge['sendToolResult']>[0];
+
+export interface McpAppDisplay {
+  type: 'mcp_app';
+  serverName: string;
+  resourceUri: string;
+  html: string;
+  toolResult: AppToolResult;
+  toolArguments: Record<string, unknown>;
+  fallbackText: string;
+  csp?: SandboxResource['csp'];
+  permissions?: SandboxResource['permissions'];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function getMcpAppDisplay(value: unknown): McpAppDisplay | undefined {
+  if (!isRecord(value) || value['type'] !== 'mcp_app') return undefined;
+  if (
+    typeof value['serverName'] !== 'string' ||
+    typeof value['resourceUri'] !== 'string' ||
+    typeof value['html'] !== 'string' ||
+    typeof value['fallbackText'] !== 'string' ||
+    !isRecord(value['toolResult']) ||
+    !isRecord(value['toolArguments'])
+  ) {
+    return undefined;
+  }
+  return value as unknown as McpAppDisplay;
+}
+
+// Must stay under Node's default 16 KiB HTTP request-line limit.
+const MAX_SANDBOX_QUERY_LENGTH = 8192;
+
+function isLoopbackHostname(hostname: string): boolean {
+  const octets = hostname.split('.');
+  const isIpv4Loopback =
+    octets.length === 4 &&
+    octets[0] === '127' &&
+    octets.slice(1).every((octet) => {
+      if (!/^\d+$/.test(octet)) return false;
+      const value = Number(octet);
+      return value >= 0 && value <= 255;
+    });
+  return hostname === 'localhost' || hostname === '[::1]' || isIpv4Loopback;
+}
+
+function loopbackCrossOriginHostname(hostname: string): string | undefined {
+  if (hostname === '127.0.0.1' || hostname === '[::1]') return 'localhost';
+  return undefined;
+}
+
+export function resolveMcpAppSandboxUrl(
+  daemonBaseUrl: string,
+  hostUrl: string,
+  dataMode = false,
+): string | undefined {
+  try {
+    const host = new URL(hostUrl);
+    const sandbox = new URL(daemonBaseUrl, host);
+    if (
+      !['http:', 'https:'].includes(host.protocol) ||
+      !['http:', 'https:'].includes(sandbox.protocol) ||
+      sandbox.username ||
+      sandbox.password
+    )
+      return undefined;
+    dataMode ||=
+      host.protocol === 'https:' ||
+      !isLoopbackHostname(host.hostname) ||
+      !isLoopbackHostname(sandbox.hostname);
+    if (!dataMode) {
+      // The dedicated HTTP listener uses localhost, including for IPv6 binds.
+      if (sandbox.hostname === '[::1]') sandbox.hostname = 'localhost';
+      if (sandbox.origin === host.origin) {
+        const alias = loopbackCrossOriginHostname(sandbox.hostname);
+        if (alias) sandbox.hostname = alias;
+      }
+    }
+    sandbox.pathname = `${sandbox.pathname.replace(/\/$/, '')}/mcp-app-sandbox`;
+    sandbox.search = '';
+    sandbox.hash = '';
+    sandbox.searchParams.set('hostOrigin', host.origin);
+    if (dataMode) sandbox.searchParams.set('mode', 'data');
+    return sandbox.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+export function applySandboxCspQuery(
+  sandboxUrl: string,
+  cspJson: string,
+): string {
+  if (!cspJson) return sandboxUrl;
+  const url = new URL(sandboxUrl);
+  url.searchParams.set('csp', cspJson);
+  return url.search.length <= MAX_SANDBOX_QUERY_LENGTH
+    ? url.toString()
+    : sandboxUrl;
+}
+
+function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {
+  return {
+    theme,
+    platform: 'web' as const,
+    displayMode: 'inline' as const,
+    availableDisplayModes: ['inline' as const],
+    containerDimensions: { maxHeight: 640 },
+  };
+}
+
+// Share the limit across cards so App requests leave HTTP/1.1 connections for
+// session events and approval requests. Hold the slot until the request settles.
+let activeAppToolCalls = 0;
+const waitingAppToolCalls = new Set<() => void>();
+
+function acquireAppToolSlot(signal: AbortSignal): Promise<() => void> {
+  return new Promise((resolve, reject) => {
+    const cancel = () => {
+      waitingAppToolCalls.delete(start);
+      reject(signal.reason);
+    };
+    const start = () => {
+      signal.removeEventListener('abort', cancel);
+      activeAppToolCalls += 1;
+      resolve(() => {
+        activeAppToolCalls -= 1;
+        const next = waitingAppToolCalls.values().next().value;
+        if (next) {
+          waitingAppToolCalls.delete(next);
+          next();
+        }
+      });
+    };
+    if (signal.aborted) reject(signal.reason);
+    else if (activeAppToolCalls < 2) start();
+    else {
+      waitingAppToolCalls.add(start);
+      signal.addEventListener('abort', cancel, { once: true });
+    }
+  });
+}
+
+export function McpApp({ display }: { display: McpAppDisplay }) {
+  const daemonBaseUrl = useContext(McpAppHostContext);
+  const sessionId = useContext(McpAppSessionContext);
+  const tools = useContext(McpAppToolsContext);
+  const messages = useContext(McpAppMessagesContext);
+  const messageHost =
+    sessionId && messages?.sessionId === sessionId ? messages : undefined;
+  const requestMessage =
+    import.meta.env.MODE === 'transcript'
+      ? undefined
+      : messageHost?.requestMessage;
+  const callTool =
+    sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
+  const theme = useTheme();
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const bridgeRef = useRef<AppBridge | null>(null);
+  const mountGenerationRef = useRef(0);
+  const displayRef = useRef(display);
+  const themeRef = useRef(theme);
+  displayRef.current = display;
+  themeRef.current = theme;
+  const [height, setHeight] = useState(260);
+  const [error, setError] = useState<string>();
+  const [dataSandbox, setDataSandbox] = useState(false);
+  const cspKey = display.csp ? JSON.stringify(display.csp) : '';
+  const toolArgumentsKey = JSON.stringify(display.toolArguments);
+  const toolResultKey = JSON.stringify(display.toolResult);
+  const sandboxUrl = useMemo(() => {
+    if (!daemonBaseUrl || typeof window === 'undefined') return undefined;
+    const resolved = resolveMcpAppSandboxUrl(
+      daemonBaseUrl,
+      window.location.href,
+      dataSandbox,
+    );
+    if (!resolved) return undefined;
+    return applySandboxCspQuery(resolved, cspKey);
+  }, [daemonBaseUrl, cspKey, dataSandbox]);
+
+  useEffect(() => {
+    setError(undefined);
+    const iframe = iframeRef.current;
+    if (!iframe || !sandboxUrl) return;
+    const generation = ++mountGenerationRef.current;
+    let initialized = false;
+    let active = true;
+    let ready = false;
+    const current = displayRef.current;
+    const bridge = new AppBridge(
+      null,
+      { name: 'qwen-code-web-shell', version: '0.0.1' },
+      {
+        ...(callTool ? { serverTools: {} } : {}),
+        ...(requestMessage ? { message: { text: {} } } : {}),
+        sandbox: {
+          ...(current.csp ? { csp: current.csp } : {}),
+        },
+      },
+      { hostContext: mcpAppHostContext(themeRef.current) },
+    );
+    bridgeRef.current = bridge;
+    const appAbort = new AbortController();
+    let messagePending = false;
+    if (requestMessage) {
+      bridge.onmessage = async (params, extra) => {
+        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
+        const content = params.content;
+        if (
+          signal.aborted ||
+          messagePending ||
+          params.role !== 'user' ||
+          content.length !== 1 ||
+          content[0]?.type !== 'text' ||
+          content[0].text.length > 16 * 1024 ||
+          !content[0].text.trim() ||
+          new TextEncoder().encode(content[0].text).byteLength > 16 * 1024
+        ) {
+          return { isError: true };
+        }
+        messagePending = true;
+        try {
+          return await requestMessage({
+            serverName: current.serverName,
+            resourceUri: current.resourceUri,
+            text: content[0].text,
+            signal,
+          });
+        } catch {
+          return { isError: true };
+        } finally {
+          messagePending = false;
+        }
+      };
+    }
+    if (callTool) {
+      bridge.oncalltool = async (params, extra) => {
+        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
+        let progress = 0;
+        const progressToken = params._meta?.progressToken;
+        // ext-apps omits the base MCP progress notification from its union.
+        const sendProgress =
+          extra.sendNotification as unknown as (notification: {
+            method: 'notifications/progress';
+            params: { progressToken: string | number; progress: number };
+          }) => Promise<void>;
+        const heartbeat =
+          signal.aborted ||
+          (typeof progressToken !== 'string' &&
+            typeof progressToken !== 'number')
+            ? undefined
+            : setInterval(() => {
+                void sendProgress({
+                  method: 'notifications/progress',
+                  params: { progressToken, progress: ++progress },
+                }).catch(() => {});
+              }, 30_000);
+        const stopHeartbeat = () => clearInterval(heartbeat);
+        signal.addEventListener('abort', stopHeartbeat, { once: true });
+        let releaseSlot: (() => void) | undefined;
+        try {
+          releaseSlot = await acquireAppToolSlot(signal);
+          signal.throwIfAborted();
+          const result = await callTool(
+            {
+              serverName: current.serverName,
+              resourceUri: current.resourceUri,
+              name: params.name,
+              arguments: params.arguments ?? {},
+            },
+            signal,
+          );
+          return result as AppToolResult;
+        } finally {
+          releaseSlot?.();
+          stopHeartbeat();
+          signal.removeEventListener('abort', stopHeartbeat);
+        }
+      };
+    }
+
+    const failInitialization = () => {
+      if (!active || mountGenerationRef.current !== generation) return;
+      active = false;
+      clearTimeout(readyTimeout);
+      bridge.oncalltool = undefined;
+      bridge.onmessage = undefined;
+      appAbort.abort();
+      iframe.removeAttribute('src');
+      bridgeRef.current = null;
+      void bridge.close().catch(() => {});
+      setError('sandbox-load-failed');
+    };
+    let readyTimeout = setTimeout(() => {
+      if (!active) return;
+      if (new URL(sandboxUrl).searchParams.get('mode') !== 'data') {
+        setDataSandbox(true);
+      } else failInitialization();
+    }, 10_000);
+    bridge.onsandboxready = () => {
+      if (!active || ready) return;
+      ready = true;
+      clearTimeout(readyTimeout);
+      readyTimeout = setTimeout(() => {
+        if (active && !initialized) failInitialization();
+      }, 30_000);
+      const resource = displayRef.current;
+      void bridge
+        .sendSandboxResourceReady({
+          html: resource.html,
+          ...(resource.csp ? { csp: resource.csp } : {}),
+        })
+        .catch(failInitialization);
+    };
+    bridge.oninitialized = () => {
+      if (!active) return;
+      initialized = true;
+      clearTimeout(readyTimeout);
+      const resource = displayRef.current;
+      void bridge
+        .sendToolInput({ arguments: resource.toolArguments })
+        .then(() => {
+          if (active) return bridge.sendToolResult(resource.toolResult);
+        })
+        .catch(failInitialization);
+    };
+    bridge.onsizechange = ({ height: requestedHeight }) => {
+      if (
+        typeof requestedHeight === 'number' &&
+        Number.isFinite(requestedHeight)
+      ) {
+        setHeight(Math.min(640, Math.max(120, Math.ceil(requestedHeight))));
+      }
+    };
+
+    void bridge
+      .connect(
+        new PostMessageTransport(
+          iframe.contentWindow ?? undefined,
+          iframe.contentWindow!,
+        ),
+      )
+      .then(() => {
+        if (active) iframe.src = sandboxUrl;
+      })
+      .catch(failInitialization);
+
+    return () => {
+      active = false;
+      clearTimeout(readyTimeout);
+      bridge.oncalltool = undefined;
+      bridge.onmessage = undefined;
+      appAbort.abort();
+      bridgeRef.current = null;
+      const unload = () => {
+        // Compare against later effect runs so a superseded teardown
+        // does not blank the iframe the next mount already owns.
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- live generation, not a stale copy
+        if (mountGenerationRef.current === generation) {
+          iframe.removeAttribute('src');
+        }
+        void bridge.close().catch(() => {});
+      };
+      if (initialized) {
+        void bridge
+          .teardownResource({}, { timeout: 500 })
+          .catch(() => {})
+          .finally(unload);
+        return;
+      }
+      unload();
+    };
+  }, [
+    sandboxUrl,
+    dataSandbox,
+    callTool,
+    requestMessage,
+    sessionId,
+    display.serverName,
+    display.resourceUri,
+    display.html,
+    cspKey,
+    toolArgumentsKey,
+    toolResultKey,
+  ]);
+
+  useEffect(() => {
+    bridgeRef.current?.setHostContext(mcpAppHostContext(theme));
+  }, [theme]);
+
+  if (!display.html || !sandboxUrl) {
+    return <div className={styles.fallback}>{display.fallbackText}</div>;
+  }
+
+  return (
+    <div className={styles.card} data-testid="mcp-app">
+      <div className={styles.header}>
+        <span>MCP App</span>
+        <span className={styles.server}>{display.serverName}</span>
+      </div>
+      {error ? (
+        <div className={styles.fallback}>
+          {display.fallbackText || 'MCP App could not initialize.'}
+        </div>
+      ) : null}
+      <iframe
+        ref={iframeRef}
+        title={`${display.serverName} MCP App`}
+        className={styles.frame}
+        style={{ height, display: error ? 'none' : undefined }}
+        sandbox="allow-scripts allow-forms allow-same-origin"
+        referrerPolicy="origin"
+        onError={() => setError('sandbox-load-failed')}
+      />
+    </div>
+  );
+}

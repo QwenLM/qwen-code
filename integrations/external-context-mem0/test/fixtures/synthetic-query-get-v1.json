@@ -1,0 +1,57 @@
+{
+  "instance": {
+    "schemaVersion": 2,
+    "dialectPath": "/administrator/synthetic-query-get-v1.dialect.json",
+    "endpoint": {
+      "origin": "http://memory.internal:8080",
+      "allowInsecureHttp": true
+    },
+    "credentialEnv": "SYNTHETIC_MEMORY_TOKEN",
+    "scope": {
+      "appId": "shared-repository"
+    },
+    "timeoutMs": 3000
+  },
+  "dialect": {
+    "dialectVersion": 1,
+    "id": "synthetic-query-get-v1",
+    "auth": "x-api-key",
+    "search": {
+      "method": "GET",
+      "path": "/memories/search",
+      "queryLocation": "query",
+      "userIdLocation": "omit",
+      "agentIdLocation": "omit",
+      "appIdLocation": "query",
+      "limitField": "top_k"
+    },
+    "response": {
+      "collection": "root-array",
+      "idField": "memory_id",
+      "contentField": "text",
+      "titleField": "omit",
+      "uriField": "omit",
+      "scoreField": "omit",
+      "updatedAtField": "omit"
+    }
+  },
+  "credential": "fixture-api-key",
+  "query": "team conventions",
+  "providerResponse": [
+    {
+      "memory_id": "memory-2",
+      "text": "Follow the shared team conventions."
+    }
+  ],
+  "expectedRequest": {
+    "url": "http://memory.internal:8080/memories/search?query=team+conventions&app_id=shared-repository&top_k=5",
+    "method": "GET",
+    "xApiKey": "fixture-api-key"
+  },
+  "expectedItems": [
+    {
+      "id": "memory-2",
+      "content": "Follow the shared team conventions."
+    }
+  ]
+}

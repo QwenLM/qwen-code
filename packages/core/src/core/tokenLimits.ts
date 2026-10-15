@@ -1,3 +1,8 @@
+import {
+  lookupModelCatalog,
+  versionSpellingAlias,
+} from '../models/model-catalog.js';
+
 type Model = string;
 type TokenCount = number;
 
@@ -10,6 +15,11 @@ export type TokenLimitType = 'input' | 'output';
 
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 200_000; // 200K tokens
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
+
+// Below this window, the 85% auto-compaction threshold can leave less than
+// the 4K minimum output budget. Keep those catalog values from becoming
+// automatic defaults; existing family tables remain the fallback.
+export const MIN_AUTO_DETECTED_CONTEXT_WINDOW: TokenCount = 32_000;
 
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
 
@@ -28,9 +38,14 @@ export const OUTPUT_TOKEN_CEILING: TokenCount = ESCALATED_MAX_TOKENS;
  * prompt has (nearly) filled the window, still ask for at least this much
  * rather than max_tokens <= 0 — compaction/hard-rescue owns that regime. An
  * explicit user ceiling below this floor is still respected (the floor
- * bounds the room, not the ceiling). Must stay below ~5K so that
- * `margin + MIN_CLAMPED_OUTPUT_TOKENS` fits inside the headroom compaction
- * leaves free (15% of a 100K window); see the window-clamp design doc.
+ * bounds the room, not the ceiling), and a window too small to hold the
+ * floor wins the same way: `clampOutputTokensToWindow` caps it by
+ * `window − prompt`. Must stay below ~5K so that
+ * `margin + MIN_CLAMPED_OUTPUT_TOKENS` fits
+ * inside the headroom compaction leaves free (15% of a 100K window); see the
+ * window-clamp design doc. That derivation is large-window-only — below
+ * ≈26.7K the margin's own 10K floor plus this one exceed the whole window,
+ * which is why the cap exists (#13252).
  */
 export const MIN_CLAMPED_OUTPUT_TOKENS: TokenCount = 4_000;
 
@@ -48,10 +63,14 @@ export function outputClampMargin(contextWindowSize: number): TokenCount {
 /**
  * Size an output request to the room actually left in the context window:
  * `min(ceiling, window − prompt − margin)`, floored at
- * MIN_CLAMPED_OUTPUT_TOKENS. Makes `prompt + max_tokens ≤ window` an
- * invariant on every main-turn request (issue #5950 becomes structurally
+ * `min(MIN_CLAMPED_OUTPUT_TOKENS, window − prompt)`. Makes
+ * `prompt + max_tokens ≤ window` an invariant on every main-turn request
+ * whose prompt still fits the window (issue #5950 becomes structurally
  * impossible), which is what lets compaction thresholds run against the
- * full window with no output reservation.
+ * full window with no output reservation. Once the prompt alone reaches the
+ * window that inequality is unsatisfiable for any provider-valid
+ * `max_tokens`, so the result bottoms out at 1 and compaction/hard-rescue
+ * owns the recovery — same shape as `computeCompactionOutputBudget`.
  *
  * @param outputCeiling - Upper bound on the request: the user's explicit
  *   max_tokens when set, else `min(tokenLimit(model,'output'),
@@ -68,11 +87,22 @@ export function clampOutputTokensToWindow(
 ): TokenCount {
   const room =
     contextWindowSize - promptTokens - outputClampMargin(contextWindowSize);
+  // Cap the floor by the room the window actually has left for output, so it
+  // can never push `prompt + max_tokens` past `contextWindowSize`. Uncapped,
+  // the 4K floor does exactly that on a user-configured small window: at
+  // window 8192 / prompt 5000 the 10K margin floor drives room to −6808 and
+  // the request goes out at 4000, i.e. 9000 > 8192 (#13252). Still ≥ 1 so
+  // `max_tokens` stays provider-valid when the prompt already fills the
+  // window.
+  const floor = Math.max(
+    1,
+    Math.min(MIN_CLAMPED_OUTPUT_TOKENS, contextWindowSize - promptTokens),
+  );
   // Floor the ROOM, then cap by the ceiling — never the other way around: an
-  // explicit ceiling below MIN_CLAMPED_OUTPUT_TOKENS (e.g.
+  // explicit ceiling below the floor (e.g.
   // QWEN_CODE_MAX_OUTPUT_TOKENS=2000 on a capacity-constrained backend) must
   // be respected, not inflated to the floor.
-  return Math.min(outputCeiling, Math.max(MIN_CLAMPED_OUTPUT_TOKENS, room));
+  return Math.min(outputCeiling, Math.max(floor, room));
 }
 
 export function parsePositiveIntegerEnvValue(
@@ -141,15 +171,38 @@ export function normalize(model: string): string {
   // collapse whitespace to single hyphen
   s = s.replace(/\s+/g, '-');
 
+  // Anthropic Claude Model Group aliases from LiteLLM / Vertex / Bedrock-style
+  // proxies frequently use a dotted minor version (`claude-opus-4.8`) rather
+  // than the canonical hyphenated form (`claude-opus-4-8`). The trailing-
+  // suffix strip below treats `-4.8` as a dashed-word version tag and eats
+  // it, collapsing the id to `claude-opus` which then falls through to the
+  // generic Claude fallback (200K input / 64K output) and defeats the 1M /
+  // 128K carve-outs for Opus 4.6+. Rewrite the dotted minor to hyphenated
+  // up front so every downstream regex sees the canonical form regardless
+  // of which alias the proxy exposed.
+  //
+  // Runs AFTER the whitespace collapse so space-separated display names
+  // (`Claude Opus 4.8`) reach it hyphenated. The family segment is matched
+  // as `[a-z]+` rather than an enumerated list so it can't drift from
+  // anthropicContentGenerator.ts's CLAUDE_MODEL_FAMILIES; this is safe
+  // because the rewrite only has observable effect via the family-specific
+  // downstream patterns. An already-hyphenated minor plus any further dotted
+  // components (`claude-opus-4-8.0`, `claude-opus-4.8.0`) is folded too so
+  // the version parser and the limit tables agree on every alias shape.
+  s = s.replace(/^(claude-[a-z]+-\d+(?:-\d+)?)\.(\d+)(?:\.\d+)*/, '$1-$2');
+
   // remove trailing build / date / revision suffixes:
   // - dates (e.g., -20250219), -v1, version numbers, 'latest', 'preview' etc.
   s = s.replace(/-preview/g, '');
   // Special handling for model names that include date/version as part of the model identifier
   // - Qwen models: qwen-plus-latest, qwen-flash-latest, qwen-vl-max-latest
   // - Kimi models: kimi-k2-0905, kimi-k2-0711, etc. (keep date for version distinction)
+  // - DeepSeek V4: the trailing -v4 IS the generation the limit tables key
+  //   on; stripping it drops the bare alias onto the generic ^deepseek row
   if (
     !s.match(/^qwen-(?:plus|flash|vl-max)-latest$/) &&
-    !s.match(/^kimi-k2-\d{4}$/)
+    !s.match(/^kimi-k2-\d{4}$/) &&
+    !s.match(/^deepseek-v4/)
   ) {
     // Regex breakdown:
     // -(?:...)$ - Non-capturing group for suffixes at the end of the string
@@ -173,6 +226,15 @@ export function normalize(model: string): string {
   return s;
 }
 
+/**
+ * Opus tiers that get the extended 1M input / 128K output window (Opus
+ * 4.6-4.8 and every 5.x). One pattern feeds the input table, the output
+ * table, and defaultOutputCeiling's ceiling exemption so a future tier bump
+ * can't update one site and silently leave another clamping the same model.
+ * No `g`/`y` flag, so sharing the instance across `.test()` sites is safe.
+ */
+const CLAUDE_OPUS_EXTENDED = /^claude-opus-(?:4-(?:6|7|8)|5)/;
+
 /** Ordered regex patterns: most specific -> most general (first match wins). */
 const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
@@ -191,7 +253,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Anthropic Claude
   // -------------------
-  [/^claude-opus-4-(?:6|7|8)/, LIMITS['1m']], // Opus 4.6-4.8: 1M
+  [CLAUDE_OPUS_EXTENDED, LIMITS['1m']], // Opus 4.6-4.8, Opus 5.x: 1M
   [/^claude-/, LIMITS['200k']], // All Claude models: 200K
 
   // -------------------
@@ -214,7 +276,10 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // DeepSeek
   // -------------------
-  [/^deepseek-v4/, LIMITS['1m']], // DeepSeek V4 (flash, pro): 1M
+  // The official DeepSeek API serves V4 flash as `deepseek-flash` (the
+  // `deepseek-v4.1-flash` spelling is DashScope's); both V4 names carry the
+  // 1M window, so flash must not fall through to the 128K family rule.
+  [/^deepseek-(?:v4|flash)/, LIMITS['1m']], // DeepSeek V4 (flash, pro): 1M
   [/^deepseek/, LIMITS['128k']],
 
   // -------------------
@@ -262,7 +327,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
   // Anthropic Claude
-  [/^claude-opus-4-(?:6|7|8)/, 128_000 as TokenCount], // Opus 4.6-4.8: 128K
+  [CLAUDE_OPUS_EXTENDED, 128_000 as TokenCount], // Opus 4.6-4.8, Opus 5.x: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
@@ -272,7 +337,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
 
   // DeepSeek
-  [/^deepseek-v4/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
+  [/^deepseek-(?:v4|flash)/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
   [/^deepseek-reasoner/, LIMITS['64k']],
   [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
@@ -289,14 +354,48 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
 
+/**
+ * The curated output limit for a normalized id, from its own spelling or from
+ * the other spelling of the same version. OUTPUT_PATTERNS is written against
+ * one spelling while the catalog commits both, so a spelling no row names
+ * would fall through to models.dev's unadjusted `output` and outrank the pin
+ * on its own twin (`glm-4-7` sized requests at 131,072 while `/^glm-4\.7/`
+ * caps `glm-4.7` at 16,384). The id's own row wins, so the twin only reaches
+ * ids the alias pass added. `hasExplicitOutputLimit` reads the same rule, so a
+ * curated limit is never served without also clamping an explicit request.
+ */
+function curatedOutputLimit(norm: string): TokenCount | undefined {
+  const twin = versionSpellingAlias(norm);
+  for (const spelling of twin === undefined ? [norm] : [norm, twin]) {
+    for (const [regex, limit] of OUTPUT_PATTERNS) {
+      if (regex.test(spelling)) {
+        return limit;
+      }
+    }
+  }
+  return undefined;
+}
+
 function findTokenLimit(
   model: Model,
   type: TokenLimitType = 'input',
 ): TokenCount | undefined {
   const norm = normalize(model);
-  const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
+  const catalog = lookupModelCatalog(norm);
+  const fromCatalog = type === 'output' ? catalog?.output : catalog?.context;
+  const usableCatalogContext =
+    type === 'input' &&
+    fromCatalog !== undefined &&
+    fromCatalog >= MIN_AUTO_DETECTED_CONTEXT_WINDOW;
+  if (usableCatalogContext) {
+    return fromCatalog;
+  }
 
-  for (const [regex, limit] of patterns) {
+  if (type === 'output') {
+    return curatedOutputLimit(norm) ?? fromCatalog;
+  }
+
+  for (const [regex, limit] of PATTERNS) {
     if (regex.test(norm)) {
       return limit;
     }
@@ -306,16 +405,11 @@ function findTokenLimit(
 }
 
 /**
- * Check if a model has an explicitly defined output token limit.
- * This distinguishes between models with known limits in OUTPUT_PATTERNS
- * and unknown models that would fallback to DEFAULT_OUTPUT_TOKEN_LIMIT.
- *
- * @param model - The model name to check
- * @returns true if the model has an explicit output limit definition, false if it uses the default fallback
+ * Whether a curated output limit caps explicit requests. Catalog-only limits
+ * supply defaults, but must not clamp a user's endpoint-specific override.
  */
 export function hasExplicitOutputLimit(model: Model): boolean {
-  const norm = normalize(model);
-  return OUTPUT_PATTERNS.some(([regex]) => regex.test(norm));
+  return curatedOutputLimit(normalize(model)) !== undefined;
 }
 
 export function knownTokenLimit(
@@ -358,7 +452,7 @@ export function tokenLimit(
  */
 export function defaultOutputCeiling(model: Model): TokenCount {
   const outputLimit = tokenLimit(model, 'output');
-  if (/^claude-opus-4-(?:6|7|8)/.test(normalize(model))) {
+  if (CLAUDE_OPUS_EXTENDED.test(normalize(model))) {
     return outputLimit;
   }
   return Math.min(outputLimit, OUTPUT_TOKEN_CEILING);

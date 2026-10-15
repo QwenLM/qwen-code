@@ -117,11 +117,10 @@ export default {
   'Search:': 'Suche:',
   'type to filter…': 'Tippen zum Filtern…',
   'No skills are currently available.': 'Derzeit sind keine Skills verfügbar.',
-  'All available skills are locked at a higher scope (see below).':
-    'Alle verfügbaren Skills sind in einer höheren Ebene gesperrt (siehe unten).',
   'No skills match the search.': 'Keine Skills passen zur Suche.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Gesperrt durch Einstellungen einer höheren Ebene (kann hier nicht umgeschaltet werden):',
+  'Locked by settings entries you cannot toggle here:':
+    'Gesperrt durch Einstellungseinträge, die hier nicht umgeschaltet werden können:',
+  '{{count}} locked not shown': '{{count}} gesperrte Skills nicht angezeigt',
   'higher scope': 'höhere Ebene',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [gesperrt: {{scope}}]',
@@ -170,6 +169,8 @@ export default {
     'Das Zurückspulen wirkt sich nicht auf Dateien aus, die manuell oder per Shell-Befehl geändert wurden.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Zu einem komprimierten Turn kann nicht zurückgespult werden. Bitte einen aktuelleren Turn versuchen.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Die Unterhaltung kann nicht zu diesem Turn zurückgespult werden: Er passt nicht mehr zum Modellverlauf (z. B. nach einem erneuten Versuch). Bitte einen aktuelleren Turn versuchen.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'Datei-Wiederherstellung ist für diesen Turn nicht verfügbar (keine erfassten Dateiänderungen, oder dieser Turn liegt vor der aktuellen Sitzung).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -409,6 +410,7 @@ export default {
   'Hide Window Title': 'Fenstertitel ausblenden',
   'Show Status in Title': 'Status im Titel anzeigen',
   'Hide Tips': 'Tipps ausblenden',
+  'Show Tool Call Arguments': 'Tool-Aufrufargumente anzeigen',
   'Show Line Numbers in Code': 'Zeilennummern im Code anzeigen',
   'Show Citations': 'Quellenangaben anzeigen',
   'Custom Witty Phrases': 'Benutzerdefinierte Witzige Sprüche',
@@ -444,6 +446,7 @@ export default {
   'Tool Output Truncation Lines': 'Zeilen für Werkzeugausgabe-Kürzung',
   'Folder Trust': 'Ordnervertrauen',
   'Tool Schema Compliance': 'Tool Schema-Konformität',
+  Unset: 'Nicht festgelegt',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
   'Auto (follow user input)': 'Automatisch (Benutzereingabe folgen)',
@@ -555,6 +558,10 @@ export default {
     'Diese Erweiterung wird folgende Fähigkeiten installieren:',
   'This extension will install the following subagents:':
     'Diese Erweiterung wird folgende Unteragenten installieren:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Diese Erweiterung wird folgende Workflows installieren (JavaScript-Skripte, die Unteragenten starten können):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Diese Workflow-Skripte wurden seit der installierten Version geändert: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Installation von "{{name}}" abgebrochen.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -723,6 +730,12 @@ export default {
   '{{count}} hooks configured': '{{count}} Hooks konfiguriert',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Dieses Menü ist schreibgeschützt. Um Hooks hinzuzufügen oder zu ändern, bearbeiten Sie settings.json direkt oder fragen Sie Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Öffnen Sie dieses Menü erneut, um Hook-Definitionen neu zu laden.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook-Steuerungsoptionen und HTTP-Sicherheitseinstellungen erfordern einen Neustart.',
+  'Failed to reload hook definitions: {{error}}':
+    'Hook-Definitionen konnten nicht neu geladen werden: {{error}}',
   'Enter to select · Esc to cancel': 'Enter zum Auswählen · Esc zum Abbrechen',
   // Hooks - Detail Step
   'Exit codes:': 'Exit-Codes:',
@@ -796,8 +809,8 @@ export default {
     'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input, tool_use_id, error, error_type, is_interrupt und is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Die Eingabe für den Befehl ist JSON mit "prompt" (dem aktuellen modellgebundenen Prompt) und optional "submitted_prompt" (der Textprojektion der unterstützten interaktiven TUI).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Die Eingabe für den Befehl ist JSON mit "prompt" (dem aktuellen modellgebundenen Prompt) und optional "submitted_prompt" (der an einer unterstützten Übermittlungsgrenze erfassten Textprojektion).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Die Eingabe an den Befehl ist JSON mit command_name, command_args und erweitertem Prompt-Text.',
   'Input to command is JSON with session start source.':
@@ -1056,6 +1069,12 @@ export default {
     'Chatverlauf-Komprimierung hat die Größe nicht reduziert. Dies kann auf Probleme mit dem Komprimierungs-Prompt hindeuten.',
   'Could not compress chat history due to a token counting error.':
     'Chatverlauf konnte aufgrund eines Token-Zählfehlers nicht komprimiert werden.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung leer war.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung abgeschnitten wurde.',
+  'Could not compress chat history due to an API error.':
+    'Chatverlauf konnte aufgrund eines API-Fehlers nicht komprimiert werden.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1121,6 +1140,13 @@ export default {
   'Clear Authentication': 'Authentifizierung löschen',
   disabled: 'deaktiviert',
   enabled: 'aktiviert',
+  'disabled (bare mode)': 'deaktiviert (Bare-Modus)',
+  'disabled (safe mode)': 'deaktiviert (Sicherheitsmodus)',
+  'disabled (disableAllHooks)': 'deaktiviert (disableAllHooks)',
+  'disabled (folder not trusted)':
+    'deaktiviert (Ordner nicht vertrauenswürdig)',
+  'disabled (turned off for this session)':
+    'deaktiviert (für diese Sitzung ausgeschaltet)',
   'Server:': 'Server:',
   Reconnect: 'Neu verbinden',
   'View tools': 'Werkzeuge anzeigen',
@@ -1526,13 +1552,28 @@ export default {
   'No tasks currently running': 'Derzeit laufen keine Aufgaben',
   'No entry to show.': 'Kein Eintrag zum Anzeigen.',
   'needs approval': 'wartet auf Genehmigung',
+  'Large workflow': 'Großer Workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Großer Workflow: {{agents}} Agenten eingeplant (Warnschwelle {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Großer Workflow: ~{{tokens}} Ausgabe-Tokens erwartet (Warnschwelle {{cap}}).',
   'rejected — edit config to re-approve':
     'abgelehnt — Konfiguration bearbeiten, um erneut zu genehmigen',
   'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
+  'from nested agent': 'von verschachteltem Agent',
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',
   Running: 'Läuft',
+  Pausing: 'Wird pausiert',
   Paused: 'Pausiert',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Das Pausieren ist kooperativ; laufende Arbeiten werden möglicherweise abgeschlossen, bevor der Workflow pausiert ist. Ein Agentenaufruf, der auf eine Tool-Genehmigung wartet, hält den Lauf in diesem Zustand und zählt weiter gegen das Aktive-Zeit-Limit, bis die Genehmigung beantwortet wird.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Pausiert: Es werden keine neuen Agenten gestartet; Skriptcode zwischen Agentenaufrufen läuft weiter. Drücke p, um fortzufahren. /clear, /branch und ein Sitzungswechsel beenden pausierte Läufe.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Pausieren/Fortsetzen wurde abgelehnt; der Workflow-Status hat sich geändert. Versuche es erneut.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tipp: Verwende `/workflows p <runId>` oder Hintergrundaufgaben + p, um einen Lauf kooperativ zu pausieren/fortzusetzen; mit `/workflows <runId>` siehst du Details.',
   Completed: 'Abgeschlossen',
   Failed: 'Fehlgeschlagen',
   Stopped: 'Gestoppt',
@@ -1812,13 +1853,17 @@ export default {
     'Kontext überschreitet Limit! Verwenden Sie /compress oder /clear zum Reduzieren.',
   'No API response yet. Send a message to see actual usage.':
     'Noch keine API-Antwort. Senden Sie eine Nachricht, um die tatsächliche Nutzung anzuzeigen.',
+  'Estimated usage, including the conversation':
+    'Geschätzte Nutzung inkl. Unterhaltung',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Noch keine Nutzungsdaten vom Anbieter. Dies sind lokale Schätzungen einschließlich der Unterhaltung.',
   'Estimated pre-conversation overhead':
     'Geschätzte Vorabkosten vor der Unterhaltung',
   'Context window': 'Kontextfenster',
   tokens: 'Tokens',
   Used: 'Verwendet',
   Free: 'Frei',
-  'Autocompact buffer': 'Autokomprimierungs-Puffer',
+  'Autocompact buffer': 'Komprimierungspuffer',
   'Usage by category': 'Verwendung nach Kategorie',
   'System prompt': 'System-Prompt',
   'Built-in tools': 'Integrierte Tools',
@@ -1826,6 +1871,9 @@ export default {
   'Memory files': 'Speicherdateien',
   Skills: 'Fähigkeiten',
   Messages: 'Nachrichten',
+  'Startup context': 'Startkontext',
+  Unattributed: 'Nicht zugeordnet',
+  'Cached prefix': 'Cache-Präfix',
   'Run /context detail for per-item breakdown.':
     'Führen Sie /context detail für eine Aufschlüsselung nach Elementen aus.',
   active: 'aktiv',
@@ -1989,6 +2037,18 @@ export default {
   'not updatable': 'nicht aktualisierbar',
   'Ask a quick side question without affecting the main conversation':
     'Eine kurze Nebenfrage stellen, ohne die Hauptunterhaltung zu beeinflussen',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Eine zweite Meinung zur aktuellen Unterhaltung von einem Prüfmodell einholen',
+  'Consulting advisor...': 'Berater wird konsultiert...',
+  'Advisor review failed: {{error}}':
+    'Berater-Überprüfung fehlgeschlagen: {{error}}',
+  'No conversation context available for /advisor':
+    'Kein Gesprächskontext für /advisor verfügbar',
+  'Focus too long (max {{max}} chars)': 'Fokus zu lang (max. {{max}} Zeichen)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Ein anderer Vorgang läuft gerade. Warten Sie, bis er abgeschlossen ist, bevor Sie /advisor ausführen',
+  'No response received.': 'Keine Antwort erhalten.',
+  'No model configured.': 'Kein Modell konfiguriert.',
   'Manage Arena sessions': 'Arena-Sitzungen verwalten',
   'Start an Arena session with multiple models competing on the same task':
     'Eine Arena-Sitzung starten, in der mehrere Modelle dieselbe Aufgabe bearbeiten',
@@ -2105,6 +2165,7 @@ export default {
 
   // === Same-as-English optimization ===
   'Agents:': 'Agenten:',
+  'Workflows:': 'Workflows:',
   Prompt: 'Eingabe',
   'Prompts:': 'Eingaben:',
   'Resources:': 'Ressourcen:',
@@ -2224,6 +2285,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
@@ -2307,4 +2370,5 @@ export default {
     'Änderungen durch den Auto-Skill-Kurator sind im Sicherheitsmodus deaktiviert.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Änderungen durch den Auto-Skill-Kurator sind nur in vertrauenswürdigen Arbeitsbereichen verfügbar. Stufen Sie diesen Ordner mit `/trust` als vertrauenswürdig ein und versuchen Sie es erneut.',
+  'Kept model as {{model}}': 'Modell als {{model}} beibehalten',
 };

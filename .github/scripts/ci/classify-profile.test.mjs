@@ -19,8 +19,20 @@ test('uses docs_only for markdown-only changes', () => {
 
 test('uses docs_only for uppercase and extensionless docs', () => {
   assert.equal(
-    classifyChangedFiles(['README.MD', 'docs/guide.MDX', 'LICENSE', 'README']),
+    classifyChangedFiles(['README.MD', 'docs/guide.MD', 'LICENSE', 'README']),
     'docs_only',
+  );
+});
+
+test('MDX is executable content, never docs_only', () => {
+  // MDX pages can import components and carry expressions — a runtime/build
+  // failure surface the docs-only downgrade must not skip over.
+  assert.equal(classifyChangedFiles(['docs/guide.mdx']), 'full');
+  assert.equal(classifyChangedFiles(['docs/guide.MDX']), 'full');
+  assert.equal(classifyChangedFiles(['README.mdx']), 'full');
+  assert.equal(
+    classifyChangedFiles(['docs/usage.md', 'docs/guide.mdx']),
+    'full',
   );
 });
 
@@ -40,6 +52,18 @@ test('uses github_ci_only for each allowed GitHub CI helper file', () => {
   for (const file of GITHUB_CI_ONLY_FILES) {
     assert.equal(classifyChangedFiles([file]), 'github_ci_only');
   }
+});
+
+test('keeps yaml-dependent helper suites on the full profile', () => {
+  // web-shell-visuals-publish.test.mjs statically imports `yaml`, so the
+  // dependency-free github_ci_only lane can never execute it; downgrading a
+  // PR that only edits that suite would green-light it without running it.
+  assert.equal(
+    classifyChangedFiles([
+      '.github/scripts/web-shell-visuals-publish.test.mjs',
+    ]),
+    'full',
+  );
 });
 
 test('falls back to full for case-mismatched GitHub CI helper paths', () => {
@@ -113,4 +137,15 @@ test('falls back to full for runtime markdown assets and instruction files', () 
     'full',
   );
   assert.equal(classifyChangedFiles(['AGENTS.md']), 'full');
+});
+
+test('reserved prose basenames classify docs_only only with inert extensions', () => {
+  assert.equal(classifyChangedFiles(['README.md']), 'docs_only');
+  assert.equal(classifyChangedFiles(['LICENSE']), 'docs_only');
+  assert.equal(classifyChangedFiles(['SECURITY.txt']), 'docs_only');
+  // Executable files named after reserved basenames must never downgrade a
+  // review: the open-extension form classified all of these as docs.
+  assert.equal(classifyChangedFiles(['README.js']), 'full');
+  assert.equal(classifyChangedFiles(['SECURITY.ts']), 'full');
+  assert.equal(classifyChangedFiles(['LICENSE.sh']), 'full');
 });

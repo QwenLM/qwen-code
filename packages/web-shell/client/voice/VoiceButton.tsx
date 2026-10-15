@@ -6,14 +6,17 @@
 
 import type React from 'react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { XIcon } from 'lucide-react';
 import type { DaemonVoiceMode } from '@qwen-code/sdk';
 import {
   useConnection,
   useWorkspace,
   useWorkspaceEventSignals,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
+import { Button } from '../components/ui/button';
 import { useVoiceCapture } from './useVoiceCapture';
+import { formatVoiceError } from './voice-error';
 import {
   loadVoiceStatus,
   supportsVoiceCapture,
@@ -25,6 +28,7 @@ import styles from './VoiceButton.module.css';
 /** Live waveform bar count in the recording pill. */
 const BAR_COUNT = 16;
 const NOTICE_TIMEOUT_MS = 2_000;
+const HOLD_THRESHOLD_MS = 250;
 
 export interface VoiceButtonProps {
   /** Insert the final transcript into the composer (user reviews, then sends). */
@@ -118,6 +122,9 @@ export function VoiceButton({
     mode: 'hold',
   }));
   const holdPointerIdRef = useRef<number | null>(null);
+  const controlRef = useRef<HTMLButtonElement>(null);
+  const holdStartedAtRef = useRef(0);
+  const ignoreNextClickRef = useRef(false);
   const targetRef = useRef(target);
   targetRef.current = target;
   const requestGenerationRef = useRef(0);
@@ -175,17 +182,16 @@ export function VoiceButton({
     voiceGate.queryKey === queryKey &&
     voiceGate.enabled;
   // Surfaced when a recording finalizes with no transcript (e.g. silence).
-  const [noticeMessage, setNoticeMessage] = useState<string | undefined>(
-    undefined,
-  );
+  const [hasNoSpeech, setHasNoSpeech] = useState(false);
+  const noticeMessage = hasNoSpeech ? t('voice.noSpeech') : undefined;
   useEffect(() => {
-    if (!noticeMessage) return undefined;
+    if (!hasNoSpeech) return undefined;
     const timer = window.setTimeout(
-      () => setNoticeMessage(undefined),
+      () => setHasNoSpeech(false),
       NOTICE_TIMEOUT_MS,
     );
     return () => window.clearTimeout(timer);
-  }, [noticeMessage]);
+  }, [hasNoSpeech]);
 
   const { status, interimText, audioLevel, errorMessage, start, stop, abort } =
     useVoiceCapture({
@@ -197,10 +203,10 @@ export function VoiceButton({
       onFinal: (text) => {
         const trimmed = text.trim();
         if (trimmed) {
-          setNoticeMessage(undefined);
+          setHasNoSpeech(false);
           onInsert(trimmed);
         } else {
-          setNoticeMessage(t('voice.noSpeech'));
+          setHasNoSpeech(true);
         }
       },
       onUnexpectedClose: ({ code }) => {
@@ -295,7 +301,7 @@ export function VoiceButton({
     if (previousOwnerRef.current === target?.ownerKey) return;
     previousOwnerRef.current = target?.ownerKey;
     capabilityRefreshGenerationRef.current += 1;
-    setNoticeMessage(undefined);
+    setHasNoSpeech(false);
     setCapabilityRefreshFailed(false);
   }, [target?.ownerKey]);
 
@@ -304,24 +310,36 @@ export function VoiceButton({
   const isConnecting = status === 'connecting';
   const isTranscribing = status === 'transcribing';
   const isError = status === 'error';
+  const localizedError = isError
+    ? formatVoiceError(errorMessage, t)
+    : undefined;
   const isNotice = Boolean(noticeMessage) && !isError;
   // Stopping/aborting an in-progress capture must stay available even when the
   // composer is disabled (e.g. mid-turn) — only starting a new one is blocked.
   const canCancel = isRecording || isConnecting;
 
   const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    if (voiceGate.mode === 'hold' && event.detail !== 0) return;
+    if (voiceGate.mode === 'hold') {
+      const ignore = event.detail !== 0 && ignoreNextClickRef.current;
+      ignoreNextClickRef.current = false;
+      if (ignore || (event.detail !== 0 && !isRecording && !isConnecting)) {
+        return;
+      }
+    }
     if (isRecording) {
       stop();
     } else if (isConnecting) {
       abort();
     } else if (!disabled) {
-      setNoticeMessage(undefined);
+      setHasNoSpeech(false);
       start();
     }
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (voiceGate.mode === 'hold' && holdPointerIdRef.current === null) {
+      ignoreNextClickRef.current = false;
+    }
     if (
       voiceGate.mode !== 'hold' ||
       event.button !== 0 ||
@@ -333,12 +351,14 @@ export function VoiceButton({
     }
     event.preventDefault();
     holdPointerIdRef.current = event.pointerId;
+    holdStartedAtRef.current = event.timeStamp;
+    ignoreNextClickRef.current = true;
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
       // Pointer capture is best-effort; release on the button still works.
     }
-    setNoticeMessage(undefined);
+    setHasNoSpeech(false);
     start();
   };
 
@@ -350,7 +370,12 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
-    if (isConnecting || isRecording) stop();
+    if (
+      event.timeStamp - holdStartedAtRef.current >= HOLD_THRESHOLD_MS &&
+      (isConnecting || isRecording)
+    ) {
+      stop();
+    }
   };
 
   const handlePointerCancel = (
@@ -363,7 +388,8 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
-    if (isConnecting || isRecording) abort();
+    ignoreNextClickRef.current = false;
+    abort();
   };
 
   const label = isRecording
@@ -373,7 +399,7 @@ export function VoiceButton({
       : isConnecting
         ? t('voice.starting')
         : isError
-          ? t('voice.errorRetry', { message: errorMessage ?? '' })
+          ? t('voice.errorRetry', { message: localizedError ?? '' })
           : isNotice
             ? t('voice.noSpeechRetry')
             : t('voice.startDictation');
@@ -382,6 +408,7 @@ export function VoiceButton({
   if (isRecording) {
     control = (
       <button
+        ref={controlRef}
         type="button"
         className={styles.pill}
         onClick={handleClick}
@@ -429,6 +456,7 @@ export function VoiceButton({
       .join(' ');
     control = (
       <button
+        ref={controlRef}
         type="button"
         className={iconClass}
         onClick={handleClick}
@@ -437,7 +465,7 @@ export function VoiceButton({
         onPointerCancel={handlePointerCancel}
         disabled={Boolean(disabled) && !canCancel}
         aria-label={label}
-        title={errorMessage ?? noticeMessage ?? label}
+        title={localizedError ?? noticeMessage ?? label}
       >
         <MicIcon />
       </button>
@@ -451,15 +479,28 @@ export function VoiceButton({
       {control}
       {showInterim && (
         <span
-          role="status"
-          aria-live="polite"
-          className={`${styles.interim}${isError ? ` ${styles.error}` : ''}`}
+          className={`${styles.interim}${isError ? ` ${styles.error}` : ''}${isError || isNotice ? ` ${styles.feedback}` : ''}`}
         >
-          {isError
-            ? errorMessage || t('voice.error')
-            : isNotice
-              ? noticeMessage
-              : interimText}
+          <span role="status" aria-live="polite">
+            {isError ? localizedError : isNotice ? noticeMessage : interimText}
+          </span>
+          {(isError || isNotice) && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              className={styles.dismiss}
+              aria-label={t('voice.dismissFeedback')}
+              title={t('voice.dismissFeedback')}
+              onClick={() => {
+                setHasNoSpeech(false);
+                if (isError) abort();
+                controlRef.current?.focus();
+              }}
+            >
+              <XIcon aria-hidden="true" />
+            </Button>
+          )}
         </span>
       )}
     </span>

@@ -12,7 +12,7 @@ import {
   V1_TO_V2_PRESERVE_DISABLE_MAP,
   V2_CONTAINER_KEYS,
 } from './v1-to-v2-shared.js';
-import { setNestedPropertySafe } from '../../../utils/settingsUtils.js';
+import { setNestedPropertySafe } from '../../settingsUtils.js';
 
 /**
  * Heuristic indicators for deciding whether an object is "V1-like".

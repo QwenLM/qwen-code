@@ -33,3 +33,19 @@ updates:
     reviewers:
       - 'google-gemini/gemini-cli-askmode-approvers'
     open-pull-requests-limit: 0
+
+  - package-ecosystem: 'maven'
+    directories:
+      - '/packages/sdk-java/qwencode'
+      - '/packages/sdk-java/runtime-broker'
+      - '/packages/sdk-java/managed-agent-server'
+      - '/packages/sdk-java/client'
+    schedule:
+      interval: 'daily'
+    target-branch: 'main'
+    commit-message:
+      prefix: 'chore(deps)'
+      include: 'scope'
+    reviewers:
+      - 'google-gemini/gemini-cli-askmode-approvers'
+    open-pull-requests-limit: 0

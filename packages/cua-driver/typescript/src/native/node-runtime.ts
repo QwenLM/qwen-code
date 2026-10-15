@@ -1,0 +1,49 @@
+import { createRequire } from "node:module"
+import {
+  resolveCuaSdkLibraryPath,
+  resolveCuaSdkRuntimePath,
+} from "../native-assets.js"
+
+const FfiType = {
+  UInt8: { tag: "UInt8" },
+  Int8: { tag: "Int8" },
+  UInt16: { tag: "UInt16" },
+  Int16: { tag: "Int16" },
+  UInt32: { tag: "UInt32" },
+  Int32: { tag: "Int32" },
+  UInt64: { tag: "UInt64" },
+  Int64: { tag: "Int64" },
+  Float32: { tag: "Float32" },
+  Float64: { tag: "Float64" },
+  Handle: { tag: "Handle" },
+  RustBuffer: { tag: "RustBuffer" },
+  ForeignBytes: { tag: "ForeignBytes" },
+  RustCallStatus: { tag: "RustCallStatus" },
+  VoidPointer: { tag: "VoidPointer" },
+  Void: { tag: "Void" },
+  Callback: (name: string) => ({ tag: "Callback", name }),
+  Struct: (name: string) => ({ tag: "Struct", name }),
+  Reference: (inner: unknown) => ({ tag: "Reference", inner }),
+  MutReference: (inner: unknown) => ({ tag: "MutReference", inner }),
+}
+
+const sdkLibrary = resolveCuaSdkLibraryPath()
+const runtimePath = resolveCuaSdkRuntimePath()
+const resolveLibPath = () => sdkLibrary
+const require = createRequire(import.meta.url)
+const { UniffiNativeModule, pumpMainRunLoop } = require(runtimePath) as {
+  UniffiNativeModule: unknown
+  pumpMainRunLoop: () => void
+}
+
+export async function withMainRunLoop<T>(operation: () => Promise<T>): Promise<T> {
+  pumpMainRunLoop()
+  const timer = setInterval(pumpMainRunLoop, 10)
+  try {
+    return await operation()
+  } finally {
+    clearInterval(timer)
+  }
+}
+
+export default { FfiType, resolveLibPath, UniffiNativeModule }

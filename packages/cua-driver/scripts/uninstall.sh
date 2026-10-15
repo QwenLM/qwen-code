@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cua-driver uninstaller (Rust implementation only). Mirrors uninstall.ps1 on
+# qwen-cua-driver uninstaller (Rust implementation only). Mirrors uninstall.ps1 on
 # Windows: one canonical script per shell, no private `_uninstall-rust.sh`
 # helper.
 #
@@ -12,50 +12,56 @@
 #   - ~/.local/bin/qwen-cua-driver symlink (+ legacy /usr/local/bin/qwen-cua-driver)
 #   - /Applications/QwenCuaDriver.app bundle
 #   - ~/.cua-driver/ (telemetry id + install marker)
-#   - ~/Library/Application Support/Cua Driver/ (config.json)
-#   - ~/Library/Caches/cua-driver/ (daemon/cache state)
+#   - ~/Library/Application Support/Qwen Cua Driver/ (config.json)
+#   - ~/Library/Caches/qwen-cua-driver/ (daemon/cache state)
 #   - Skill symlinks under ~/.claude/skills/cua-driver, ~/.agents/skills/
 #     cua-driver, ~/.openclaw/skills/cua-driver, ~/.config/opencode/
 #     skills/cua-driver (only when they point at our app bundle)
-#   - Claude MCP registrations in ~/.claude.json (cua-driver / cua-computer-use)
+#   - Claude MCP registrations in ~/.claude.json (qwen-cua-driver / cua-computer-use)
 #
 # Rust uninstall removes:
 #   Linux:
 #     - ~/.local/bin/qwen-cua-driver symlink (only when it resolves to a
 #       qwen-cua-driver path — a Swift-driver symlink is left in place)
-#     - ~/.cua-driver/ (current package home) + legacy ~/.cua-driver-rs/
-#       (telemetry id, config.json, versioned releases, current symlink)
-#     - ~/.config/systemd/user/cua-driver-rs.service (if --autostart
-#       was used via install-local.sh — stop + disable + remove)
+#     - versioned packages/current symlink under ~/.cua-driver/
+#     - telemetry id, preference, and registration markers are preserved by
+#       default so a reinstall remains the same pseudonymous installation
+#     - ~/.config/systemd/user/qwen-cua-driver.service (if --autostart
+#       was used via install-local.sh — stop + disable + remove), plus the
+#       legacy qwen-cua-driver-rs.service unit
 #     - Skill symlinks under ~/.claude/skills/cua-driver(-rs), ~/.agents/
 #       skills/…, ~/.openclaw/skills/…, ~/.config/opencode/skills/…
 #   macOS:
-#     - /Applications/QwenCuaDriver.app bundle (+ legacy CuaDriverRs.app)
+#     - /Applications/QwenCuaDriver.app bundle (+ legacy QwenCuaDriverRs.app)
 #     - ~/.local/bin/qwen-cua-driver symlink (only when it resolves into
 #       /Applications/QwenCuaDriver.app)
-#     - ~/.cua-driver/ (current package home) + legacy ~/.cua-driver-rs/
-#     - ~/Library/LaunchAgents/com.trycua.cua-driver-rs.plist (if
-#       --autostart was used via install-local.sh — unload + remove)
+#     - runtime payloads under ~/.cua-driver/ and legacy ~/.cua-driver-rs/;
+#       telemetry state remains unless --purge is passed
+#     - ~/Library/LaunchAgents/com.qwencode.qwen-cua-driver.plist (if --autostart
+#       was used via install-local.sh — unload + remove), plus the legacy
+#       com.qwencode.qwen-cua-driver-rs.plist LaunchAgent
 #     - Skill symlinks under ~/.claude/skills/cua-driver(-rs), etc.
 #
 # Shared-path safety: /Applications/QwenCuaDriver.app + its ~/.local/bin
-# symlink use the same bundle id (com.qwencode.cua-driver) as the Swift driver,
-# so they're only removed when an unambiguous Rust marker is on disk
-# (~/.cua-driver/packages/, legacy ~/.cua-driver-rs/, CuaDriverRs.app,
-# or the LaunchAgent/systemd unit).
+# symlink and bundle id are Qwen-owned and distinct from upstream CuaDriver,
+# so this uninstaller never targets an upstream installation.
+# (~/.cua-driver/packages/, legacy ~/.cua-driver-rs/, QwenCuaDriverRs.app,
+# the LaunchAgent/systemd unit, or current Rust telemetry state).
 #
 # Also scrubs Claude MCP registrations in ~/.claude.json that match
 # the active backend.
 #
-# Does NOT revoke TCC grants on macOS (Accessibility + Screen Recording).
-# The closing message points at the tccutil commands for a clean
-# re-install flow.
+# Revokes TCC grants on macOS by default (Accessibility + Screen Recording)
+# so the next install prompts cleanly under the new signing identity. Pass
+# --keep-tcc to preserve grants across uninstall/reinstall.
 #
 # Usage:
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.sh)"
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.sh)" -- --purge
 #
 # Env overrides (mirror install side):
-#   CUA_DRIVER_RS_HOME    Rust package home to remove (default ~/.cua-driver-rs)
+#   CUA_DRIVER_HOME       Rust package home to remove (default ~/.cua-driver)
+#   CUA_DRIVER_RS_HOME    Legacy alias for CUA_DRIVER_HOME
 set -euo pipefail
 
 # ----------------------------------------------------------------------
@@ -64,7 +70,8 @@ set -euo pipefail
 # flag flows through without edits.
 # ----------------------------------------------------------------------
 USE_RUST_BACKEND=1
-RESET_TCC=0
+RESET_TCC=1
+PURGE_DATA=0
 FORWARDED_ARGS=()
 PASSTHROUGH=0
 while [[ $# -gt 0 ]]; do
@@ -75,7 +82,9 @@ while [[ $# -gt 0 ]]; do
         --experimental-rust) shift ;;  # legacy alias for default Rust path
         --backend=rust)      shift ;;
         --backend=swift)     shift ;;  # retired Swift (no-op)
-        --reset-tcc)         RESET_TCC=1; shift ;;  # also revoke TCC grants (opt-in)
+        --reset-tcc)         RESET_TCC=1; shift ;;  # legacy/explicit default: revoke TCC grants
+        --keep-tcc)          RESET_TCC=0; shift ;;  # preserve TCC grants across reinstall
+        --purge)             PURGE_DATA=1; shift ;;  # also delete pseudonymous identity + preference
         --backend=*)
             printf 'error: unknown backend %q; supported: rust\n' "${1#*=}" >&2
             exit 2
@@ -89,9 +98,9 @@ done
 OS="$(uname -s 2>/dev/null || echo unknown)"
 if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     if [[ "$OS" != "Darwin" ]]; then
-        printf 'note: detected non-macOS host (%s); uninstalling cua-driver via the Rust implementation.\n' "$OS" >&2
+        printf 'note: detected non-macOS host (%s); uninstalling qwen-cua-driver via the Rust implementation.\n' "$OS" >&2
     else
-        printf 'note: uninstalling cua-driver via the Rust implementation.\n' >&2
+        printf 'note: uninstalling qwen-cua-driver via the Rust implementation.\n' >&2
     fi
 fi
 
@@ -100,25 +109,37 @@ fi
 # ----------------------------------------------------------------------
 log() { printf '==> %s\n' "$*"; }
 
-# Opt-in TCC revocation (`--reset-tcc`). Off by default: the bundle id
-# com.qwencode.cua-driver is shared with the retired Swift driver, and keeping
-# grants across a reinstall avoids a re-prompt — so wiping privacy state
-# is a deliberate, explicit choice, not a side effect of uninstall.
-# When the flag is set, revoke Accessibility + Screen-Recording +
-# Automation for com.qwencode.cua-driver. macOS-only; no-op elsewhere.
+# TCC revocation is on by default so uninstall leaves the next macOS install
+# in a clean promptable state. `--keep-tcc` remains available for users who
+# intentionally want Qwen grants to survive uninstall/reinstall.
+# When enabled, revoke Accessibility + Screen-Recording + Automation for
+# com.qwencode.cua-driver. macOS-only; no-op elsewhere.
 maybe_reset_tcc() {
     [[ "$RESET_TCC" == "1" ]] || return 0
     if [[ "$OS" != "Darwin" ]]; then
-        log "--reset-tcc is macOS-only; nothing to revoke on $OS"
+        log "TCC reset is macOS-only; nothing to revoke on $OS"
         return 0
     fi
     if ! command -v tccutil >/dev/null 2>&1; then
-        log "--reset-tcc: tccutil not found; skipping"
+        log "TCC reset: tccutil not found; skipping"
         return 0
     fi
-    log "revoking TCC grants for com.qwencode.cua-driver (--reset-tcc)"
-    log "  note: com.qwencode.cua-driver is shared with the retired Swift driver;"
-    log "  this clears grants for both. The next launch will re-prompt."
+    # `tccutil reset <svc> com.qwencode.cua-driver` resolves the bundle id through
+    # LaunchServices. If the bundle isn't registered — or this runs AFTER the
+    # app was removed — tccutil fails with -10814 and the grant silently
+    # survives. This MUST run while /Applications/QwenCuaDriver.app still exists;
+    # force a synchronous LaunchServices registration first so a present-but-
+    # not-yet-registered bundle (fresh install race) still resolves.
+    local app_bundle="/Applications/QwenCuaDriver.app"
+    if [[ -d "$app_bundle" ]]; then
+        local lsregister="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+        if [[ -x "$lsregister" ]]; then
+            "$lsregister" -f "$app_bundle" >/dev/null 2>&1 || true
+        fi
+    else
+        log "  warning: QwenCuaDriver.app already removed; TCC reset may not resolve the bundle id"
+    fi
+    log "revoking TCC grants for com.qwencode.cua-driver"
     for SVC in Accessibility ScreenCapture AppleEvents; do
         if tccutil reset "$SVC" com.qwencode.cua-driver >/dev/null 2>&1; then
             log "  reset $SVC"
@@ -154,13 +175,12 @@ resolve_link() {
 # ----------------------------------------------------------------------
 if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     USER_BIN_LINK="$HOME/.local/bin/qwen-cua-driver"
-    # Canonical bundle path for this vendored fork (distinct bundle id
-    # `com.qwencode.cua-driver` so it coexists with any upstream trycua
-    # install rather than sharing its path/identity).
+    # Canonical bundle path (post-rename — shares bundle id
+    # `com.qwencode.cua-driver`). It is distinct from upstream CuaDriver.
     APP_BUNDLE="/Applications/QwenCuaDriver.app"
     # Legacy bundle path from earlier Rust releases that coexisted with
     # Swift under a separate name. Cleaned up if found.
-    LEGACY_APP_BUNDLE="/Applications/CuaDriverRs.app"
+    LEGACY_APP_BUNDLE="/Applications/QwenCuaDriverRs.app"
     # Canonical package home is ~/.cua-driver (renamed from ~/.cua-driver-rs
     # in v0.2.16 / PR #1644). The old name is swept too — uninstall.sh
     # was missed in that rename and kept defaulting to the stale dir, so a
@@ -172,8 +192,10 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     # one unambiguous on-disk Rust discriminator now that the .app bundle +
     # bundle id are shared with Swift.
     PACKAGES_DIR="$HOME_DIR/packages"
-    LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/com.trycua.cua-driver-rs.plist"
-    SYSTEMD_USER_UNIT="$HOME/.config/systemd/user/cua-driver-rs.service"
+    LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/com.qwencode.qwen-cua-driver.plist"
+    LEGACY_LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/com.qwencode.qwen-cua-driver-rs.plist"
+    SYSTEMD_USER_UNIT="$HOME/.config/systemd/user/qwen-cua-driver.service"
+    LEGACY_SYSTEMD_USER_UNIT="$HOME/.config/systemd/user/qwen-cua-driver-rs.service"
     SKILL_PACK_NAME="cua-driver"
     # Pre-rename skill pack name — swept alongside the current one so
     # users who installed under the legacy name end up clean after
@@ -181,34 +203,34 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     LEGACY_SKILL_PACK_NAME="cua-driver-rs"
 
     # Rust-install marker. The Rust bundle path `/Applications/QwenCuaDriver.app`
-    # is shared with the Swift driver (same bundle id `com.qwencode.cua-driver`),
-    # so we can't use that path alone as a discriminator — a Swift-only Mac
-    # that runs `uninstall.sh --backend=rust` by mistake would lose its
-    # Swift bundle, symlink, and Claude MCP registrations. This marker says
+    # is Qwen-owned. This marker says
     # "there's at least one unambiguously-Rust artifact on disk." We gate
     # every shared-path removal below on it.
     #
     # Markers (any one suffices):
     #   - ~/.cua-driver/packages/ exists (Rust install-local / updater store)
     #   - ~/.cua-driver-rs/ exists (legacy Rust state dir, pre-rename)
-    #   - /Applications/CuaDriverRs.app exists (legacy bundle, pre-rename)
-    #   - LaunchAgent plist / systemd unit exists (autostart was used)
+    #   - /Applications/QwenCuaDriverRs.app exists (legacy bundle, pre-rename)
+    #   - current or legacy LaunchAgent plist / systemd unit exists
+    #     (autostart was used)
+    #   - current telemetry identity/registration marker exists (release
+    #     installs on macOS live in /Applications and have no packages dir)
     RUST_INSTALL_PRESENT=0
-    if [[ -d "$PACKAGES_DIR" || -d "$LEGACY_HOME_DIR" || -d "$LEGACY_APP_BUNDLE" || -f "$LAUNCHAGENT_PLIST" || -f "$SYSTEMD_USER_UNIT" ]]; then
+    if [[ -d "$PACKAGES_DIR" || -d "$LEGACY_HOME_DIR" || -d "$LEGACY_APP_BUNDLE" || -f "$LAUNCHAGENT_PLIST" || -f "$LEGACY_LAUNCHAGENT_PLIST" || -f "$SYSTEMD_USER_UNIT" || -f "$LEGACY_SYSTEMD_USER_UNIT" || -f "$HOME_DIR/.telemetry_id" || -f "$HOME_DIR/.installation_recorded" ]]; then
         RUST_INSTALL_PRESENT=1
     fi
 
     # --- CLI symlink ---
     # Only remove ~/.local/bin/qwen-cua-driver when it resolves into a
     # cua-driver-rs install. Pre-rename installs at
-    # /Applications/CuaDriverRs.app are unambiguously Rust and always
+    # /Applications/QwenCuaDriverRs.app are unambiguously Rust and always
     # removed. Post-rename, the Rust install lives at
     # /Applications/QwenCuaDriver.app — the SAME path the Swift driver
     # uses — so we only remove that link when $RUST_INSTALL_PRESENT.
     if [[ -L "$USER_BIN_LINK" ]]; then
         RESOLVED="$(resolve_link "$USER_BIN_LINK")"
         case "$RESOLVED" in
-            *"CuaDriverRs.app"*|*"$HOME_DIR"*|*".cua-driver-rs"*)
+            *"QwenCuaDriverRs.app"*|*"$HOME_DIR"*|*".cua-driver-rs"*)
                 # Unambiguous Rust paths.
                 rm -f "$USER_BIN_LINK"
                 log "removed $USER_BIN_LINK -> $RESOLVED"
@@ -223,7 +245,7 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
                 fi
                 ;;
             *)
-                log "$USER_BIN_LINK resolves to $RESOLVED (not a cua-driver-rs path; skipping)"
+                log "$USER_BIN_LINK resolves to $RESOLVED (not a Qwen driver path; skipping)"
                 ;;
         esac
     elif [[ -e "$USER_BIN_LINK" ]]; then
@@ -234,41 +256,64 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
 
     # --- Autostart (Linux systemd --user) ---
     # install-local.sh --autostart registers
-    # ~/.config/systemd/user/cua-driver-rs.service. Stop + disable +
-    # remove if present so the daemon doesn't come back at next logon.
+    # ~/.config/systemd/user/qwen-cua-driver.service. Stop + disable + remove it,
+    # plus the pre-rename qwen-cua-driver-rs.service when present, so neither daemon
+    # comes back at next logon.
     # systemctl --user no-ops gracefully on a non-systemd host.
-    if [[ "$OS" == "Linux" && -f "$SYSTEMD_USER_UNIT" ]]; then
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl --user stop    cua-driver-rs.service 2>/dev/null || true
-            systemctl --user disable cua-driver-rs.service 2>/dev/null || true
-            log "stopped + disabled systemd --user unit cua-driver-rs.service"
-        fi
-        rm -f "$SYSTEMD_USER_UNIT"
-        log "removed $SYSTEMD_USER_UNIT"
-        if command -v systemctl >/dev/null 2>&1; then
+    if [[ "$OS" == "Linux" ]]; then
+        FOUND_SYSTEMD_USER_UNIT=0
+        for SYSTEMD_USER_UNIT_PATH in "$SYSTEMD_USER_UNIT" "$LEGACY_SYSTEMD_USER_UNIT"; do
+            if [[ -f "$SYSTEMD_USER_UNIT_PATH" ]]; then
+                FOUND_SYSTEMD_USER_UNIT=1
+                SYSTEMD_USER_UNIT_NAME="${SYSTEMD_USER_UNIT_PATH##*/}"
+                if command -v systemctl >/dev/null 2>&1; then
+                    systemctl --user stop "$SYSTEMD_USER_UNIT_NAME" 2>/dev/null || true
+                    systemctl --user disable "$SYSTEMD_USER_UNIT_NAME" 2>/dev/null || true
+                    log "stopped + disabled systemd --user unit $SYSTEMD_USER_UNIT_NAME"
+                fi
+                rm -f "$SYSTEMD_USER_UNIT_PATH"
+                log "removed $SYSTEMD_USER_UNIT_PATH"
+            fi
+        done
+        if [[ "$FOUND_SYSTEMD_USER_UNIT" == "0" ]]; then
+            log "no current or legacy systemd --user unit found (skipping)"
+        elif command -v systemctl >/dev/null 2>&1; then
             systemctl --user daemon-reload 2>/dev/null || true
         fi
-    elif [[ "$OS" == "Linux" ]]; then
-        log "no systemd --user unit at $SYSTEMD_USER_UNIT (skipping)"
     fi
 
     # --- Autostart (macOS LaunchAgent) ---
     # install-local.sh --autostart on macOS registers
-    # ~/Library/LaunchAgents/com.trycua.cua-driver-rs.plist. Unload (so
-    # the running daemon stops) + remove the plist.
-    if [[ "$OS" == "Darwin" && -f "$LAUNCHAGENT_PLIST" ]]; then
-        launchctl unload "$LAUNCHAGENT_PLIST" 2>/dev/null || true
-        rm -f "$LAUNCHAGENT_PLIST"
-        log "removed LaunchAgent $LAUNCHAGENT_PLIST"
-    elif [[ "$OS" == "Darwin" ]]; then
-        log "no LaunchAgent at $LAUNCHAGENT_PLIST (skipping)"
+    # ~/Library/LaunchAgents/com.qwencode.qwen-cua-driver.plist. Unload (so the
+    # running daemon stops) + remove it, plus the pre-rename
+    # com.qwencode.qwen-cua-driver-rs.plist when present.
+    if [[ "$OS" == "Darwin" ]]; then
+        FOUND_LAUNCHAGENT_PLIST=0
+        for LAUNCHAGENT_PLIST_PATH in "$LAUNCHAGENT_PLIST" "$LEGACY_LAUNCHAGENT_PLIST"; do
+            if [[ -f "$LAUNCHAGENT_PLIST_PATH" ]]; then
+                FOUND_LAUNCHAGENT_PLIST=1
+                launchctl unload "$LAUNCHAGENT_PLIST_PATH" 2>/dev/null || true
+                rm -f "$LAUNCHAGENT_PLIST_PATH"
+                log "removed LaunchAgent $LAUNCHAGENT_PLIST_PATH"
+            fi
+        done
+        if [[ "$FOUND_LAUNCHAGENT_PLIST" == "0" ]]; then
+            log "no current or legacy LaunchAgent found (skipping)"
+        fi
     fi
 
+    # --- Revoke TCC grants BEFORE removing the app ---
+    # tccutil resolves com.qwencode.cua-driver through LaunchServices, so the reset
+    # only works while /Applications/QwenCuaDriver.app is still installed. Running
+    # it here (not at the closing message) is what makes the revoke actually
+    # take — otherwise it fails with -10814 and the grant silently survives.
+    maybe_reset_tcc
+
     # --- .app bundle (macOS only) ---
-    # Legacy /Applications/CuaDriverRs.app is unambiguously Rust and
+    # Legacy /Applications/QwenCuaDriverRs.app is unambiguously Rust and
     # always removed when present. /Applications/QwenCuaDriver.app is the
     # current canonical Rust path BUT also where the Swift driver
-    # lives (same bundle id `com.qwencode.cua-driver`), so we only remove
+    # lives (bundle id `com.qwencode.cua-driver`), so we only remove
     # it when $RUST_INSTALL_PRESENT — protects a Swift-only Mac from
     # losing its bundle if `uninstall.sh --experimental-rust` is run
     # by mistake.
@@ -292,7 +337,7 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
                 $SUDO rm -rf "$APP_BUNDLE"
                 log "removed $APP_BUNDLE"
             else
-                log "$APP_BUNDLE exists but no Rust marker on disk (~/.cua-driver/packages/, ~/.cua-driver-rs/, CuaDriverRs.app, LaunchAgent, systemd unit); leaving it (looks like a Swift-only install)"
+                log "$APP_BUNDLE exists but no Rust marker on disk (~/.cua-driver/packages/, ~/.cua-driver-rs/, QwenCuaDriverRs.app, current/legacy LaunchAgent or systemd unit); leaving it (looks like a Swift-only install)"
             fi
         else
             log "no app bundle at $APP_BUNDLE (skipping)"
@@ -300,25 +345,49 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     fi
 
     # --- Package home ---
-    # Everything under $HOME_DIR (default ~/.cua-driver): telemetry id,
-    # config.json, versioned releases, current symlink, local skill copy,
-    # version_check.json cache. This is the live runtime home now (post
-    # v0.2.16 rename), so gate its removal on the Rust marker — don't nuke
-    # a Swift-only Mac's ~/.cua-driver/config.json on a mistaken run.
+    # A normal uninstall deliberately keeps the pseudonymous installation ID,
+    # persisted telemetry preference, and install/release markers. This lets a
+    # later reinstall be counted as a returning installation without sending
+    # any events while disabled. `--purge` is the explicit identity reset.
+    # All removal remains gated on the Rust marker so a mistaken invocation
+    # cannot damage a Swift-only Mac's shared ~/.cua-driver state.
     if [[ -d "$HOME_DIR" ]]; then
-        if [[ "$RUST_INSTALL_PRESENT" == "1" ]]; then
-            rm -rf "$HOME_DIR"
-            log "removed $HOME_DIR"
+        if [[ "$RUST_INSTALL_PRESENT" == "1" || "$PURGE_DATA" == "1" ]]; then
+            if [[ "$PURGE_DATA" == "1" ]]; then
+                rm -rf "$HOME_DIR"
+                log "purged $HOME_DIR (including telemetry identity and preference)"
+            else
+                # Remove only installer/runtime-owned payloads. Unknown files
+                # and all telemetry state remain untouched.
+                rm -rf "$HOME_DIR/packages" "$HOME_DIR/skills"
+                rm -f \
+                    "$HOME_DIR/.tcc-signing-identity" \
+                    "$HOME_DIR/serve.out.log" \
+                    "$HOME_DIR/serve.err.log"
+                log "removed runtime payloads from $HOME_DIR"
+                log "preserved telemetry identity, preference, and registration markers"
+            fi
         else
             log "$HOME_DIR exists but no Rust marker on disk; leaving it (looks like a Swift-only / shared config dir)"
         fi
     else
         log "no package home at $HOME_DIR (skipping)"
     fi
-    # Legacy pre-rename home is unambiguously Rust — always sweep it.
+    # Preserve legacy telemetry state during a normal uninstall so the
+    # runtime's existing one-shot migration can carry the same identity into
+    # ~/.cua-driver on reinstall.
     if [[ -d "$LEGACY_HOME_DIR" ]]; then
-        rm -rf "$LEGACY_HOME_DIR"
-        log "removed legacy package home $LEGACY_HOME_DIR"
+        if [[ "$PURGE_DATA" == "1" ]]; then
+            rm -rf "$LEGACY_HOME_DIR"
+            log "purged legacy package home $LEGACY_HOME_DIR"
+        else
+            rm -rf "$LEGACY_HOME_DIR/packages" "$LEGACY_HOME_DIR/skills"
+            rm -f \
+                "$LEGACY_HOME_DIR/.tcc-signing-identity" \
+                "$LEGACY_HOME_DIR/serve.out.log" \
+                "$LEGACY_HOME_DIR/serve.err.log"
+            log "removed legacy runtime payloads and preserved legacy telemetry state"
+        fi
     fi
 
     # --- Swift-era macOS data dirs (leave nothing behind) ---
@@ -331,8 +400,8 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     # the default uninstall by mistake keeps its data.
     if [[ "$OS" == "Darwin" && "$RUST_INSTALL_PRESENT" == "1" ]]; then
         for SWIFT_DATA_DIR in \
-            "$HOME/Library/Application Support/Cua Driver" \
-            "$HOME/Library/Caches/cua-driver"; do
+            "$HOME/Library/Application Support/Qwen Cua Driver" \
+            "$HOME/Library/Caches/qwen-cua-driver"; do
             if [[ -d "$SWIFT_DATA_DIR" ]]; then
                 rm -rf "$SWIFT_DATA_DIR"
                 log "removed $SWIFT_DATA_DIR"
@@ -343,10 +412,8 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     # --- Agent skill symlinks ---
     # Only remove when the link is a symlink — never clobber a real
     # directory (a dev user with a hand-managed skills dir is safe).
-    # We don't check the target here because `cua-driver skills install`
-    # writes platform-dependent targets (the local copy under $HOME_DIR/
-    # skills/cua-driver-rs/). The [[ -L ]] check is the load-bearing
-    # safety bar.
+    # The public skill name is shared with upstream Cua, so only remove links
+    # whose raw target is inside a Qwen-owned package home.
     if [[ "$RUST_INSTALL_PRESENT" == "1" ]]; then
         for SKILL_LINK in \
             "$HOME/.claude/skills/$SKILL_PACK_NAME" \
@@ -362,8 +429,16 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
             "$HOME/.gemini/skills/$LEGACY_SKILL_PACK_NAME" \
             "$HOME/.hermes/skills/$LEGACY_SKILL_PACK_NAME"; do
             if [[ -L "$SKILL_LINK" ]]; then
-                rm -f "$SKILL_LINK"
-                log "removed skill symlink $SKILL_LINK"
+                SKILL_TARGET="$(readlink "$SKILL_LINK")"
+                case "$SKILL_TARGET" in
+                    "$HOME_DIR"/skills/*|"$LEGACY_HOME_DIR"/skills/*)
+                        rm -f "$SKILL_LINK"
+                        log "removed skill symlink $SKILL_LINK"
+                        ;;
+                    *)
+                        log "$SKILL_LINK points outside Qwen-owned skill homes (skipping)"
+                        ;;
+                esac
             elif [[ -d "$SKILL_LINK" ]]; then
                 log "$SKILL_LINK is a real directory, not a symlink (skipping)"
             else
@@ -417,22 +492,22 @@ def invokes_cua_driver_rs(server):
     parts.extend(text_parts(server.get("args")))
     joined = " ".join(parts)
     # Match the Rust-port-specific anchors: bundle name, package home,
-    # explicit ".cua-driver-rs" segment. Plain "cua-driver" alone is
-    # ambiguous (the Swift binary uses the same filename). The
-    # /Applications/QwenCuaDriver.app path is this fork's bundle (distinct
-    # id) — only count it as Rust when a Rust install marker is on disk;
-    # otherwise it is almost certainly an unrelated registration we
-    # should not scrub.
+    # explicit ".cua-driver-rs" segment. Plain "qwen-cua-driver" alone is
+    # ambiguous (the Swift binary uses the same filename). The shared
+    # /Applications/QwenCuaDriver.app path is ALSO ambiguous (Rust took
+    # over the Swift bundle id) — only count it as Rust when a Rust
+    # install marker is on disk; otherwise it is almost certainly a
+    # Swift registration we should not scrub.
     if home_dir and home_dir in joined:
         return True
-    if "CuaDriverRs.app" in joined or ".cua-driver-rs" in joined or "cua-driver-rs" in joined:
+    if "QwenCuaDriverRs.app" in joined or ".cua-driver-rs" in joined or "qwen-cua-driver-rs" in joined:
         return True
     if rust_install_present and "/Applications/QwenCuaDriver.app" in joined:
         return True
     return False
 
 def should_remove(name, server):
-    return name in {"cua-driver-rs"} or invokes_cua_driver_rs(server)
+    return name in {"qwen-cua-driver-rs"} or invokes_cua_driver_rs(server)
 
 def scrub_servers(servers, scope):
     if not isinstance(servers, dict):
@@ -506,16 +581,26 @@ PY
     fi
 
     # --- Closing message ---
-    maybe_reset_tcc
+    # TCC grants were already revoked above, before the app was removed, so
+    # the reset could still resolve the bundle id through LaunchServices.
     if [[ "$OS" == "Darwin" ]]; then
         echo ""
-        echo "cua-driver uninstalled."
+        echo "qwen-cua-driver uninstalled."
+        if [[ "$PURGE_DATA" == "0" ]]; then
+            cat << 'TELEMETRYUNMSG'
+
+Telemetry identity and preference were preserved for a future reinstall.
+To delete them too, re-run with --purge:
+
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.sh)" -- --purge
+TELEMETRYUNMSG
+        fi
         if [[ "$RESET_TCC" != "1" ]]; then
             cat << 'FINALUNMSG'
 
 TCC grants (Accessibility + Screen Recording) remain in System
-Settings > Privacy & Security. Reset them explicitly — or re-run with
---reset-tcc — if you want a clean re-install flow:
+Settings > Privacy & Security because uninstall was run with --keep-tcc.
+Reset them explicitly if you want a clean re-install flow:
 
   tccutil reset Accessibility com.qwencode.cua-driver
   tccutil reset ScreenCapture com.qwencode.cua-driver
@@ -524,8 +609,17 @@ FINALUNMSG
     else
         cat << 'FINALUNMSG'
 
-cua-driver uninstalled.
+qwen-cua-driver uninstalled.
 FINALUNMSG
+        if [[ "$PURGE_DATA" == "0" ]]; then
+            cat << 'TELEMETRYUNMSG'
+
+Telemetry identity and preference were preserved for a future reinstall.
+To delete them too, re-run with --purge:
+
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.sh)" -- --purge
+TELEMETRYUNMSG
+        fi
     fi
     exit 0
 fi
@@ -534,11 +628,11 @@ USER_BIN_LINK="$HOME/.local/bin/qwen-cua-driver"
 SYSTEM_BIN_LINK="/usr/local/bin/qwen-cua-driver"
 APP_BUNDLE="/Applications/QwenCuaDriver.app"
 USER_DATA="$HOME/.cua-driver"
-CONFIG_DIR="$HOME/Library/Application Support/Cua Driver"
-CACHE_DIR="$HOME/Library/Caches/cua-driver"
+CONFIG_DIR="$HOME/Library/Application Support/Qwen Cua Driver"
+CACHE_DIR="$HOME/Library/Caches/qwen-cua-driver"
 # Legacy — remove if present from older installs.
-LEGACY_UPDATE_SCRIPT="/usr/local/bin/cua-driver-update"
-LEGACY_UPDATER_PLIST="$HOME/Library/LaunchAgents/com.trycua.cua_driver_updater.plist"
+LEGACY_UPDATE_SCRIPT="/usr/local/bin/qwen-cua-driver-update"
+LEGACY_UPDATER_PLIST="$HOME/Library/LaunchAgents/com.qwencode.qwen_cua_driver_updater.plist"
 
 # CLI symlinks. Try the user-bin first (no sudo), then the legacy
 # /usr/local/bin path (needs sudo on default macOS).
@@ -621,8 +715,8 @@ done
 # Claude Code MCP registrations. `claude mcp remove` only removes from
 # the current project / user scopes, while ~/.claude.json can also
 # contain stale project entries for other directories. Scrub only
-# registrations explicitly named cua-driver or whose command points at
-# a cua-driver binary, so unrelated servers named "computer-use" are
+# registrations explicitly named qwen-cua-driver or whose command points at
+# a qwen-cua-driver binary, so unrelated servers named "computer-use" are
 # left alone.
 CLAUDE_JSON="$HOME/.claude.json"
 if [[ -f "$CLAUDE_JSON" ]] && command -v python3 >/dev/null 2>&1; then
@@ -660,10 +754,10 @@ def invokes_cua_driver(server):
     parts.extend(text_parts(server.get("command")))
     parts.extend(text_parts(server.get("args")))
     joined = " ".join(parts)
-    return "cua-driver" in joined or "QwenCuaDriver.app" in joined
+    return "qwen-cua-driver" in joined or "QwenCuaDriver.app" in joined
 
 def should_remove(name, server):
-    return name in {"cua-driver", "cua-computer-use"} or invokes_cua_driver(server)
+    return name == "qwen-cua-driver" or invokes_cua_driver(server)
 
 def scrub_servers(servers, scope):
     if not isinstance(servers, dict):
@@ -715,7 +809,7 @@ PY
             log "$line"
         done <<< "$PY_OUTPUT"
     else
-        log "no Claude MCP registrations for cua-driver found in $CLAUDE_JSON"
+        log "no Claude MCP registrations for qwen-cua-driver found in $CLAUDE_JSON"
     fi
 else
     log "no Claude config cleanup via python3 (missing $CLAUDE_JSON or python3)"
@@ -725,7 +819,7 @@ fi
 # .mcp.json / current-working-directory scopes when present and is
 # harmless when the entries were already removed above.
 if command -v claude >/dev/null 2>&1; then
-    for SERVER in cua-driver cua-computer-use; do
+    for SERVER in qwen-cua-driver cua-computer-use; do
         for SCOPE in local project user; do
             if claude mcp remove "$SERVER" -s "$SCOPE" >/dev/null 2>&1; then
                 log "removed Claude MCP server $SERVER from $SCOPE scope"
@@ -739,13 +833,13 @@ fi
 maybe_reset_tcc
 
 echo ""
-echo "cua-driver uninstalled."
+echo "qwen-cua-driver uninstalled."
 if [[ "$RESET_TCC" != "1" ]]; then
     cat << 'FINALUNMSG'
 
 TCC grants (Accessibility + Screen Recording) remain in System
-Settings > Privacy & Security. Reset them explicitly — or re-run with
---reset-tcc — if you want a clean re-install flow:
+Settings > Privacy & Security because uninstall was run with --keep-tcc.
+Reset them explicitly if you want a clean re-install flow:
 
   tccutil reset Accessibility com.qwencode.cua-driver
   tccutil reset ScreenCapture com.qwencode.cua-driver

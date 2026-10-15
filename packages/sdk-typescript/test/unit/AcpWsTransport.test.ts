@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { AcpWsTransport } from '../../src/daemon/AcpWsTransport.js';
+import { DaemonClient } from '../../src/daemon/DaemonClient.js';
 import { DaemonTransportClosedError } from '../../src/daemon/DaemonTransport.js';
 import {
   matchRoute,
@@ -56,6 +57,274 @@ describe('AcpWsTransport', () => {
       expect(t2.type).toBe('acp-ws');
       t2.dispose();
     });
+
+    it('uses REST capabilities instead of the ACP initialize envelope', async () => {
+      const originalWebSocket = globalThis.WebSocket;
+      const originalFetch = Object.getOwnPropertyDescriptor(
+        globalThis,
+        'fetch',
+      );
+      class FakeWebSocket {
+        onopen: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+
+        constructor() {
+          queueMicrotask(() => this.onopen?.());
+        }
+
+        send(payload: string) {
+          const request = JSON.parse(payload) as { id: number };
+          queueMicrotask(() =>
+            this.onmessage?.({
+              data: JSON.stringify({
+                jsonrpc: '2.0',
+                id: request.id,
+                result: { protocolVersion: 1, agentCapabilities: {} },
+              }),
+            }),
+          );
+        }
+
+        close() {
+          this.onclose?.();
+        }
+      }
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: FakeWebSocket,
+      });
+      const restFetch = vi.fn(async () =>
+        synthesizeResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_id_override'],
+          transports: ['acp-ws'],
+        }),
+      );
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        value: restFetch,
+      });
+      const transport = new AcpWsTransport('ws://daemon/acp');
+
+      try {
+        const response = await transport.fetch('http://daemon/capabilities', {
+          method: 'GET',
+        });
+        await expect(response.json()).resolves.toMatchObject({
+          features: ['session_id_override'],
+        });
+        expect(restFetch).toHaveBeenCalledOnce();
+      } finally {
+        transport.dispose();
+        Object.defineProperty(globalThis, 'WebSocket', {
+          configurable: true,
+          value: originalWebSocket,
+        });
+        if (originalFetch) {
+          Object.defineProperty(globalThis, 'fetch', originalFetch);
+        } else {
+          Reflect.deleteProperty(globalThis, 'fetch');
+        }
+      }
+    });
+
+    it('constructs when globalThis.fetch is undefined', () => {
+      const originalFetch = Object.getOwnPropertyDescriptor(
+        globalThis,
+        'fetch',
+      );
+      Reflect.deleteProperty(globalThis, 'fetch');
+      try {
+        expect(() => new AcpWsTransport('ws://host/acp')).not.toThrow();
+      } finally {
+        if (originalFetch) {
+          Object.defineProperty(globalThis, 'fetch', originalFetch);
+        }
+      }
+    });
+
+    it('falls back for a malformed 200 and preserves REST errors', async () => {
+      const originalWebSocket = globalThis.WebSocket;
+      const originalFetch = Object.getOwnPropertyDescriptor(
+        globalThis,
+        'fetch',
+      );
+      class FakeWebSocket {
+        onopen: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+
+        constructor() {
+          queueMicrotask(() => this.onopen?.());
+        }
+
+        send(payload: string) {
+          const request = JSON.parse(payload) as { id: number };
+          queueMicrotask(() =>
+            this.onmessage?.({
+              data: JSON.stringify({
+                jsonrpc: '2.0',
+                id: request.id,
+                result: { protocolVersion: 1, agentCapabilities: {} },
+              }),
+            }),
+          );
+        }
+
+        close() {
+          this.onclose?.();
+        }
+      }
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: FakeWebSocket,
+      });
+      // A reverse proxy / SPA answering 200 with a body that is not the
+      // daemon capabilities envelope must not be accepted as one.
+      const restFetch = vi
+        .fn<typeof globalThis.fetch>()
+        .mockResolvedValueOnce(
+          synthesizeResponse(200, { index: 'spa fallback, no features' }),
+        )
+        .mockResolvedValueOnce(
+          synthesizeResponse(401, { error: 'unauthorized' }),
+        );
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        value: restFetch,
+      });
+      const transport = new AcpWsTransport('ws://daemon/acp');
+
+      try {
+        const response = await transport.fetch('http://daemon/capabilities', {
+          method: 'GET',
+        });
+        await expect(response.json()).resolves.toMatchObject({
+          protocolVersion: 1,
+          features: [],
+        });
+        const unauthorized = await transport.fetch(
+          'http://daemon/capabilities',
+          { method: 'GET' },
+        );
+        expect(unauthorized.status).toBe(401);
+        expect(restFetch).toHaveBeenCalledTimes(2);
+      } finally {
+        transport.dispose();
+        Object.defineProperty(globalThis, 'WebSocket', {
+          configurable: true,
+          value: originalWebSocket,
+        });
+        if (originalFetch) {
+          Object.defineProperty(globalThis, 'fetch', originalFetch);
+        } else {
+          Reflect.deleteProperty(globalThis, 'fetch');
+        }
+      }
+    });
+  });
+
+  describe('request cancellation', () => {
+    let original: PropertyDescriptor | undefined;
+    let frames: Array<Record<string, unknown>>;
+    let transport: AcpWsTransport;
+
+    beforeEach(() => {
+      original = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
+      frames = [];
+      class FakeWebSocket {
+        static readonly OPEN = 1;
+        readonly readyState = 1;
+        onopen: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        constructor() {
+          queueMicrotask(() => this.onopen?.());
+        }
+        send(payload: string) {
+          const frame = JSON.parse(payload) as Record<string, unknown>;
+          frames.push(frame);
+          if (frame['method'] === 'initialize')
+            queueMicrotask(() =>
+              this.onmessage?.({
+                data: JSON.stringify({
+                  jsonrpc: '2.0',
+                  id: frame['id'],
+                  result: { protocolVersion: 1, agentCapabilities: {} },
+                }),
+              }),
+            );
+        }
+        close() {
+          this.onclose?.();
+        }
+      }
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: FakeWebSocket,
+      });
+      transport = new AcpWsTransport('ws://daemon/acp');
+    });
+
+    afterEach(() => {
+      transport.dispose();
+      if (original) Object.defineProperty(globalThis, 'WebSocket', original);
+      else Reflect.deleteProperty(globalThis, 'WebSocket');
+    });
+
+    it('preserves both explicit cancellation reason and header client identity', async () => {
+      const client = new DaemonClient({ baseUrl: 'http://daemon', transport });
+      await client.cancel('s-1', 'client-1', { cancelReason: 'interrupted' });
+      expect(
+        frames.filter((frame) => frame['method'] === 'session/cancel'),
+      ).toEqual([
+        expect.objectContaining({
+          params: {
+            sessionId: 's-1',
+            _meta: {
+              'qwen.cancelReason': 'interrupted',
+              clientId: 'client-1',
+            },
+          },
+        }),
+      ]);
+    });
+
+    it.each([
+      [undefined, 'interrupted'],
+      ['caller stopped', 'interrupted'],
+    ] as const)(
+      'forwards an abort as %s cancellation',
+      async (reason, expected) => {
+        const controller = new AbortController();
+        const request = transport.fetch('http://daemon/session/s1/prompt', {
+          method: 'POST',
+          body: '{}',
+          signal: controller.signal,
+        });
+        await vi.waitFor(() =>
+          expect(
+            frames.some((frame) => frame['method'] === 'session/prompt'),
+          ).toBe(true),
+        );
+        controller.abort(reason);
+        await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+        expect(frames).toContainEqual(
+          expect.objectContaining({
+            method: 'session/cancel',
+            params: {
+              sessionId: 's1',
+              _meta: { 'qwen.cancelReason': expected },
+            },
+          }),
+        );
+      },
+    );
   });
 
   // ---- dispose() --------------------------------------------------------

@@ -162,8 +162,11 @@ describe('runExtractStep', () => {
     expect(script).not.toContain('precheck-arm');
     expect(meta.index).toBe(1);
     expect(meta.workingDirectory).toBe('scripts');
-    // Executable, with the runner's default shell recorded.
-    expect(statSync(meta.scriptPath).mode & 0o111).not.toBe(0);
+    // Executable, with the runner's default shell recorded. Windows has no
+    // POSIX mode bits; stat reports 0o666.
+    if (process.platform !== 'win32') {
+      expect(statSync(meta.scriptPath).mode & 0o111).not.toBe(0);
+    }
     expect(meta.shell).toBe('bash');
   });
 

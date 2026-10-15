@@ -5,8 +5,8 @@
  */
 
 import os from 'node:os';
-import type { Stats } from 'node:fs';
-import type { FileHandle } from 'node:fs/promises';
+import { constants, type Stats } from 'node:fs';
+import { open, stat, type FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -24,6 +24,12 @@ import type {
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
+import type { ToolWriteOrigin } from './tool-write-origin.js';
+import {
+  FileReadOpenError,
+  type FileReadRequest,
+  type FileReadSource,
+} from '../utils/file-read-source.js';
 
 export type LineEnding = 'crlf' | 'lf';
 
@@ -53,6 +59,17 @@ export type CoreReadTextFileRequest = Omit<
   maxOutputBytes?: number;
   signal?: AbortSignal;
   stats?: Stats;
+};
+
+export type CoreWriteTextFileRequest = Omit<
+  WriteTextFileRequest,
+  'sessionId'
+> & {
+  /**
+   * Internal core provenance for a final built-in tool write. This is not part
+   * of any tool schema and is serialized only at the ACP boundary.
+   */
+  toolWriteOrigin?: ToolWriteOrigin;
 };
 
 /**
@@ -115,7 +132,31 @@ export type FileEncodingType = (typeof FileEncoding)[keyof typeof FileEncoding];
 /**
  * Interface for file system operations that may be delegated to different implementations
  */
+export type TextFileObservation =
+  | { kind: 'missing' }
+  | { kind: 'file'; response: ReadTextFileResponse; stats: Stats };
+
+export interface TextFileMutation {
+  readonly original: TextFileObservation;
+  write(params: CoreWriteTextFileRequest): Promise<Stats>;
+}
+
+export interface TextFileIo {
+  inspect(path: string, signal?: AbortSignal): Promise<TextFileObservation>;
+  withMutation<T>(
+    path: string,
+    signal: AbortSignal,
+    operation: (mutation: TextFileMutation) => Promise<T>,
+  ): Promise<T>;
+}
+
 export interface FileSystemService {
+  readonly textFileIo?: TextFileIo;
+  withReadFile?<T>(
+    request: FileReadRequest,
+    operation: (source: FileReadSource) => Promise<T>,
+  ): Promise<T>;
+
   readTextFile(params: CoreReadTextFileRequest): Promise<ReadTextFileResponse>;
 
   readTextFileFromHandle?(
@@ -123,7 +164,7 @@ export interface FileSystemService {
   ): Promise<ReadTextFileResponse>;
 
   writeTextFile(
-    params: Omit<WriteTextFileRequest, 'sessionId'>,
+    params: CoreWriteTextFileRequest,
   ): Promise<WriteTextFileResponse>;
 
   /**
@@ -353,6 +394,55 @@ export async function encodeTextFileContentAsync(
  * Standard file system implementation
  */
 export class StandardFileSystemService implements FileSystemService {
+  async withReadFile<T>(
+    request: FileReadRequest,
+    operation: (source: FileReadSource) => Promise<T>,
+  ): Promise<T> {
+    request.signal?.throwIfAborted();
+    if (
+      !['linux', 'darwin'].includes(os.platform()) ||
+      request.mediaDelivery === 'omni'
+    ) {
+      return operation({ kind: 'path', path: request.path });
+    }
+    // Classify before open. Opening a fifo, tty, or device is the side
+    // effect (rendezvous, controlling terminal, HUPCL), and st_size 0 is
+    // not an empty extent for procfs/sysfs. Pathname admission here is
+    // not a retry after a failed descriptor owner.
+    let admission: Stats;
+    try {
+      admission = await stat(request.path);
+    } catch (error) {
+      throw new FileReadOpenError(error);
+    }
+    if (!admission.isFile() || admission.size === 0) {
+      return operation({ kind: 'path', path: request.path });
+    }
+    let fileHandle: FileHandle;
+    try {
+      fileHandle = await open(
+        request.path,
+        constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY,
+      );
+    } catch (error) {
+      throw new FileReadOpenError(error);
+    }
+    try {
+      let stats: Stats;
+      try {
+        stats = await fileHandle.stat();
+      } catch (error) {
+        throw new FileReadOpenError(error);
+      }
+      if (!stats.isFile() || stats.size === 0) {
+        return await operation({ kind: 'path', path: request.path });
+      }
+      return await operation({ kind: 'descriptor', fileHandle, stats });
+    } finally {
+      await fileHandle.close();
+    }
+  }
+
   async readTextFile(
     params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
@@ -445,7 +535,7 @@ export class StandardFileSystemService implements FileSystemService {
   }
 
   async writeTextFile(
-    params: Omit<WriteTextFileRequest, 'sessionId'>,
+    params: CoreWriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
     const { path: filePath, _meta } = params;
     const prepared = await prepareTextFileContentAsync(

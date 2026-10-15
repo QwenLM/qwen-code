@@ -51,7 +51,11 @@ a known idle state.
 
 ## Scope
 
-This does not persist runtime state across daemon restarts, add a new endpoint,
-or replace SSE for detailed event consumption. The existing
+This does not persist runtime state across daemon restarts by default, add a
+new endpoint, or replace SSE for detailed event consumption. The existing
 `POST /session/:id/permission/:requestId` vote route resolves a pending item;
-question answers use its existing `answers` extension.
+question answers use its existing `answers` extension. When
+`--restore-ask-user-question` is on, `session/load` and `session/resume`
+re-hang a trailing unanswered `ask_user_question` (new `requestId`; timeout
+clock resets) instead of synthesizing a failed tool result. See
+[daemon-ask-user-question-restore.md](daemon-ask-user-question-restore.md).

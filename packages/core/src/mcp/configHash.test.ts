@@ -108,6 +108,15 @@ describe('hashMcpServerConfig', () => {
       expect(hashMcpServerConfig({ ...base, trust: true })).not.toBe(baseHash);
     });
 
+    it('version negotiation policy', () => {
+      expect(
+        hashMcpServerConfig({
+          ...base,
+          versionNegotiation: 'auto',
+        }),
+      ).not.toBe(baseHash);
+    });
+
     it('remote url', () => {
       expect(hashMcpServerConfig({ url: 'https://a.example' })).not.toBe(
         hashMcpServerConfig({ url: 'https://b.example' }),

@@ -5,7 +5,7 @@
  */
 
 import type { Part, PartListUnion } from '@google/genai';
-import { VISION_BRIDGE_MAX_IMAGE_BASE64_BYTES } from './vision-bridge-constants.js';
+import { VISION_BRIDGE_MAX_IMAGE_BASE64_BYTES } from '../../utils/vision-bridge-constants.js';
 
 /**
  * Normalize a {@link PartListUnion} into a flat array of {@link Part} objects.

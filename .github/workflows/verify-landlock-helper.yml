@@ -1,0 +1,250 @@
+name: 'Verify Landlock helper'
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/verify-landlock-helper.yml'
+      - 'packages/core/vendor/landlock-run/**'
+      - 'scripts/build_landlock_run.mjs'
+      - 'scripts/tests/stdio-relay.test.py'
+      - 'scripts/tests/sandbox-stdio.test.py'
+      - 'scripts/tests/native-sandbox-cli.mjs'
+      - 'packages/core/src/sandbox/**'
+      - 'packages/cli/src/commands/sandbox*'
+      - 'packages/cli/src/config/**'
+      - 'packages/cli/src/utils/write-with-backup*'
+      - 'packages/cli/src/utils/flush-output*'
+      - 'integration-tests/fake-openai-server.ts'
+      - 'packages/core/src/services/shellExecutionService.ts'
+      - 'packages/core/src/tools/shell.ts'
+      - 'packages/cli/src/nonInteractive/io/BaseJsonOutputAdapter.ts'
+      - 'esbuild.config.js'
+      - 'scripts/copy_bundle_assets.js'
+      - 'scripts/prepare.js'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+  push:
+    branches:
+      - 'main'
+    paths:
+      - '.github/workflows/verify-landlock-helper.yml'
+      - 'packages/core/vendor/landlock-run/**'
+      - 'scripts/build_landlock_run.mjs'
+      - 'scripts/tests/stdio-relay.test.py'
+      - 'scripts/tests/sandbox-stdio.test.py'
+      - 'scripts/tests/native-sandbox-cli.mjs'
+      - 'packages/core/src/sandbox/**'
+      - 'packages/cli/src/commands/sandbox*'
+      - 'packages/cli/src/config/**'
+      - 'packages/cli/src/utils/write-with-backup*'
+      - 'packages/cli/src/utils/flush-output*'
+      - 'integration-tests/fake-openai-server.ts'
+      - 'packages/core/src/services/shellExecutionService.ts'
+      - 'packages/core/src/tools/shell.ts'
+      - 'packages/cli/src/nonInteractive/io/BaseJsonOutputAdapter.ts'
+      - 'esbuild.config.js'
+      - 'scripts/copy_bundle_assets.js'
+      - 'scripts/prepare.js'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+jobs:
+  cli:
+    name: 'Native Linux CLI boundary'
+    runs-on: 'ubuntu-24.04'
+    timeout-minutes: 30
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          package-manager-cache: false
+      - name: 'Enable runner user namespaces'
+        run: |-
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: 'Build CLI'
+        run: 'corepack pnpm install --frozen-lockfile'
+      - name: 'Verify stdin transport ownership'
+        working-directory: 'packages/core'
+        run: 'npx vitest run src/sandbox/bwrap-relay.test.ts'
+      - name: 'Verify public CLI and ordinary agent tool boundaries'
+        run: 'node --import tsx/esm scripts/tests/native-sandbox-cli.mjs --linux'
+      - name: 'Upload native CLI evidence'
+        if: 'always()'
+        uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'native-sandbox-cli'
+          path: '.qwen/e2e-tests/issue-12417-native-cli-linux.json'
+          if-no-files-found: 'ignore'
+          include-hidden-files: true
+
+  windows:
+    name: 'Native Windows settings and streams'
+    runs-on: 'windows-2022'
+    timeout-minutes: 30
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          package-manager-cache: false
+      - name: 'Build workspace prerequisites'
+        run: 'corepack pnpm install --frozen-lockfile'
+      - name: 'Verify native settings publication and real output pipes'
+        working-directory: 'packages/cli'
+        run: 'npx vitest run src/utils/write-with-backup.windows.test.ts src/utils/flush-output.test.ts'
+
+  verify:
+    name: '${{ matrix.arch }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: 'x64'
+            runner: 'ubuntu-24.04'
+            zig_target: 'x86_64'
+            zig_sha256: '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
+          - arch: 'arm64'
+            runner: 'ubuntu-24.04-arm'
+            zig_target: 'aarch64'
+            zig_sha256: 'ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17'
+    runs-on: '${{ matrix.runner }}'
+    timeout-minutes: 10
+    steps:
+      - uses: 'actions/checkout@v4'
+
+      - name: 'Install pinned Zig compiler'
+        env:
+          ZIG_SHA256: '${{ matrix.zig_sha256 }}'
+          ZIG_TARGET: '${{ matrix.zig_target }}'
+          ZIG_VERSION: '0.16.0'
+        run: |-
+          archive="zig-${ZIG_TARGET}-linux-${ZIG_VERSION}.tar.xz"
+          curl --fail --location --silent --show-error --output "${RUNNER_TEMP}/${archive}" "https://ziglang.org/download/${ZIG_VERSION}/${archive}"
+          echo "${ZIG_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar --extract --xz --file "${RUNNER_TEMP}/${archive}" --directory "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/zig-${ZIG_TARGET}-linux-${ZIG_VERSION}" >> "${GITHUB_PATH}"
+
+      - name: 'Rebuild committed helper'
+        env:
+          CC: 'zig'
+        run: |-
+          committed="packages/core/vendor/landlock-run/${{ matrix.arch }}-linux/qwen-landlock-run"
+          cp "${committed}" "${RUNNER_TEMP}/committed-helper"
+          node scripts/build_landlock_run.mjs '${{ matrix.arch }}'
+          cmp "${RUNNER_TEMP}/committed-helper" "${committed}"
+          file "${committed}"
+
+      - name: 'Verify real stdin consumption and FIFO shutdown'
+        run: |-
+          python3 scripts/tests/stdio-relay.test.py packages/core/vendor/landlock-run/${{ matrix.arch }}-linux/qwen-landlock-run
+
+      - name: 'Verify standard streams inside a closed-network sandbox'
+        env:
+          QWEN_TEST_BWRAP: 'sudo bwrap'
+        run: |-
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          python3 scripts/tests/sandbox-stdio.test.py packages/core/vendor/landlock-run/${{ matrix.arch }}-linux/qwen-landlock-run
+
+      - name: 'Verify kernel enforcement and inheritance'
+        env:
+          ARCH: '${{ matrix.arch }}'
+        run: |-
+          helper="packages/core/vendor/landlock-run/${ARCH}-linux/qwen-landlock-run"
+          root="$(mktemp -d)"
+          trap 'rm -rf "${root}"' EXIT
+          workspace="${root}/workspace"
+          scratch="${root}/scratch"
+          outside="${root}/outside"
+          mkdir -p "${workspace}" "${scratch}" "${outside}"
+          printf 'unchanged\n' > "${outside}/marker"
+
+          "${helper}" --probe | grep -E '^\{"abi":([3-9]|[1-9][0-9]+),"enforcement":"partial"\}$'
+          # shellcheck disable=SC2016
+          "${helper}" --ro / --rw /dev/null --rw "${scratch}" --rw "${workspace}" -- /bin/sh -c 'printf allowed > "$1"' sh "${workspace}/created"
+          test "$(cat "${workspace}/created")" = 'allowed'
+
+          # shellcheck disable=SC2016
+          if "${helper}" --ro / --rw /dev/null --rw "${scratch}" --rw "${workspace}" -- /bin/sh -c 'printf denied > "$1"' sh "${outside}/marker"; then
+            echo 'outside write unexpectedly succeeded' >&2
+            exit 1
+          fi
+          test "$(cat "${outside}/marker")" = 'unchanged'
+
+          # shellcheck disable=SC2016
+          if "${helper}" --ro / --rw /dev/null --rw "${scratch}" -- /bin/sh -c 'printf denied > "$1"' sh "${workspace}/read-only"; then
+            echo 'read-only workspace write unexpectedly succeeded' >&2
+            exit 1
+          fi
+
+          cat > "${workspace}/descendant.sh" <<'EOF'
+          #!/bin/sh
+          printf denied > "$1"
+          EOF
+          chmod 755 "${workspace}/descendant.sh"
+          # shellcheck disable=SC2016
+          if "${helper}" --ro / --rw /dev/null --rw "${scratch}" --rw "${workspace}" -- /bin/sh -c '"$1" "$2"' sh "${workspace}/descendant.sh" "${outside}/descendant"; then
+            echo 'descendant outside write unexpectedly succeeded' >&2
+            exit 1
+          fi
+          test ! -e "${outside}/descendant"
+
+          set +e
+          diagnostic="$(${helper} --ro / -- /does/not/exist 2>&1)"
+          status=$?
+          set -e
+          test "${status}" -eq 125
+          case "${diagnostic}" in
+            qwen-landlock-run:\ exec\ failed:*) ;;
+            *) echo "unexpected launcher diagnostic: ${diagnostic}" >&2; exit 1 ;;
+          esac
+
+          status_wire="${root}/status-wire"
+          "${helper}" --status-fd 3 --ro / -- /bin/true 3> "${status_wire}"
+          grep -E '^\{"state":"prepared","abi":([3-9]|[1-9][0-9]+)\}$' "${status_wire}"
+          set +e
+          "${helper}" --status-fd 3 --ro / -- /does/not/exist 3> "${status_wire}" 2> /dev/null
+          status=$?
+          set -e
+          test "${status}" -eq 125
+          test "$(grep -c '^{' "${status_wire}")" -eq 2
+          tail -n 1 "${status_wire}" | grep -E '^\{"state":"exec-failed","abi":([3-9]|[1-9][0-9]+)\}$'
+
+      - name: 'Verify inherited nonblocking standard streams'
+        env:
+          ARCH: '${{ matrix.arch }}'
+        run: |-
+          python3 - <<'PYTHON'
+          import os
+          import subprocess
+          import sys
+
+          helper = f"packages/core/vendor/landlock-run/{os.environ['ARCH']}-linux/qwen-landlock-run"
+          def nonblocking_stdio():
+              for fd in range(3):
+                  os.set_blocking(fd, False)
+
+          program = """
+          import os, sys
+          assert all(os.get_blocking(fd) for fd in range(3))
+          data = sys.stdin.buffer.read()
+          sys.stdout.buffer.write(data)
+          sys.stderr.buffer.write(data)
+          """
+          payload = bytes(range(256)) * 4096
+          result = subprocess.run(
+              [helper, '--ro', '/', '--', sys.executable, '-c', program],
+              input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+              preexec_fn=nonblocking_stdio, timeout=30,
+          )
+          assert result.returncode == 0, (result.returncode, result.stderr[-500:])
+          assert result.stdout == payload
+          assert result.stderr == payload
+          PYTHON

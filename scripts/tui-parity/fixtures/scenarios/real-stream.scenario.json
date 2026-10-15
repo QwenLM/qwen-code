@@ -1,0 +1,38 @@
+{
+  "id": "real-stream",
+  "description": "Real model stream via existing qwen-code config: fixed (OpenTUI) must stream with no full-screen clears / duplicate live-output vs base (Ink).",
+  "proves": "with the user's real config, fixed side streams with <= base full-screen clears and duplicate live-output, balanced DEC 2026.",
+  "doesNotProve": "visual identity; model correctness.",
+  "terminal": {
+    "rows": 30,
+    "columns": 100
+  },
+  "timeoutMs": 60000,
+  "input": [
+    {
+      "data": "用一句话介绍你自己",
+      "delayMs": 2000
+    },
+    {
+      "data": "\r",
+      "delayMs": 2000
+    }
+  ],
+  "env": {
+    "TERM": "xterm-256color"
+  },
+  "compareParams": [],
+  "commands": {
+    "base": {
+      "argv": ["node", "packages/cli/dist/index.js"]
+    },
+    "fixed": {
+      "argv": ["node", "packages/cli/dist/index.js"]
+    }
+  },
+  "thresholds": {
+    "maxFullScreenClears": 2,
+    "maxDuplicateEvents": 3,
+    "maxDec2026Unbalanced": 0
+  }
+}

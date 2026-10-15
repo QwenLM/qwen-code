@@ -42,6 +42,13 @@ describe('auth command', () => {
     expect(notice).toContain('BAILIAN_CODING_PLAN_API_KEY');
     expect(notice).toContain('https://coding.dashscope.aliyuncs.com/v1');
     expect(notice).toContain('https://coding-intl.dashscope.aliyuncs.com/v1');
+    expect(notice).toContain('BAILIAN_TOKEN_PLAN_API_KEY');
+    expect(notice).toContain(
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    );
+    expect(notice).toContain(
+      'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    );
     expect(notice).toContain('OPENROUTER_API_KEY');
     expect(notice).not.toContain('\x1b[');
     expect(notice).not.toContain('v0.15.8');

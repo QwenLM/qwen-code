@@ -34,14 +34,17 @@ describe('token plan provider', () => {
       modelIds: getDefaultModelIds(tokenPlanProvider),
     });
 
+    expect(tokenPlanProvider.supportsModelDiscovery).toBe(true);
+
     expect(template.map((model) => model.id)).toEqual([
       'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
+      'qwen3.8-max',
       'qwen3.8-max-preview',
       'qwen3.6-flash',
       'deepseek-v4-pro',
-      'deepseek-v4-flash',
+      'deepseek-v4-flash-0731',
       'deepseek-v3.2',
       'kimi-k2.7-code',
       'kimi-k2.6',
@@ -50,6 +53,8 @@ describe('token plan provider', () => {
       'glm-5.1',
       'glm-5',
       'MiniMax-M2.5',
+      'qwen3.8-flash',
+      'deepseek-v4-pro-0813',
     ]);
     expect(
       template.find((model) => model.id === 'deepseek-v4-pro')
@@ -72,6 +77,14 @@ describe('token plan provider', () => {
       template.find((model) => model.id === 'qwen3.6-plus')?.generationConfig
         ?.modalities,
     ).toEqual({ image: true, video: true });
+    expect(
+      template.find((model) => model.id === 'qwen3.8-max')?.generationConfig,
+    ).toEqual({
+      extra_body: { enable_thinking: true },
+      thinkingMandatory: true,
+      contextWindowSize: 1000000,
+      modalities: { image: true, video: true },
+    });
     expect(
       template.find((model) => model.id === 'qwen3.8-max-preview')
         ?.generationConfig?.modalities,
@@ -208,5 +221,9 @@ describe('token plan provider', () => {
         envKey: 'SOME_OTHER_API_KEY',
       }),
     ).toBe(false);
+  });
+
+  it('declares the built-in web search backend', () => {
+    expect(tokenPlanProvider.webSearch).toEqual({ backend: 'dashscope' });
   });
 });

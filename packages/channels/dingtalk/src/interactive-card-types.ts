@@ -2,6 +2,7 @@ export interface DingtalkInteractiveCardConfig {
   enabled: boolean;
   statusCard: { enabled: boolean };
   questionCard: { enabled: boolean; timeoutMs: number };
+  permissionCard: { enabled: boolean; timeoutMs: number };
 }
 
 export interface DingtalkCardCallback {
@@ -22,6 +23,10 @@ export type DingtalkCardCallbackResult =
     }
   | { kind: 'ignored'; actorId?: string };
 
+export const DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM = 0;
+// Node clamps setTimeout delays above 2^31 - 1 ms to 1 ms, which would
+// expire cards instantly; cap parsed timeouts at that maximum instead.
+export const DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS = 2_147_483_647;
 const DEFAULT_QUESTION_TIMEOUT_MS = 270_000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -69,6 +74,7 @@ export function parseDingtalkInteractiveCardConfig(
   const root = asRecord(value) ?? {};
   const status = asRecord(root['statusCard']);
   const question = asRecord(root['questionCard']);
+  const permission = asRecord(root['permissionCard']);
   if (root['statusCard'] !== undefined && !status) {
     throw new Error('DingTalk interactiveCards.statusCard must be an object.');
   }
@@ -77,17 +83,35 @@ export function parseDingtalkInteractiveCardConfig(
       'DingTalk interactiveCards.questionCard must be an object.',
     );
   }
-  const timeoutMs =
+  if (root['permissionCard'] !== undefined && !permission) {
+    throw new Error(
+      'DingTalk interactiveCards.permissionCard must be an object.',
+    );
+  }
+  const questionTimeoutMs =
     question?.['timeoutMs'] === undefined
       ? DEFAULT_QUESTION_TIMEOUT_MS
       : question['timeoutMs'];
   if (
-    typeof timeoutMs !== 'number' ||
-    !Number.isFinite(timeoutMs) ||
-    timeoutMs <= 0
+    typeof questionTimeoutMs !== 'number' ||
+    !Number.isFinite(questionTimeoutMs) ||
+    questionTimeoutMs <= DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM
   ) {
     throw new Error(
       'DingTalk interactiveCards.questionCard.timeoutMs must be a finite positive number.',
+    );
+  }
+  const permissionTimeoutMs =
+    permission?.['timeoutMs'] === undefined
+      ? DEFAULT_QUESTION_TIMEOUT_MS
+      : permission['timeoutMs'];
+  if (
+    typeof permissionTimeoutMs !== 'number' ||
+    !Number.isFinite(permissionTimeoutMs) ||
+    permissionTimeoutMs <= DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM
+  ) {
+    throw new Error(
+      'DingTalk interactiveCards.permissionCard.timeoutMs must be a finite positive number.',
     );
   }
   return {
@@ -101,7 +125,21 @@ export function parseDingtalkInteractiveCardConfig(
         'questionCard.enabled',
         true,
       ),
-      timeoutMs,
+      timeoutMs: Math.min(
+        questionTimeoutMs,
+        DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS,
+      ),
+    },
+    permissionCard: {
+      enabled: optionalBoolean(
+        permission?.['enabled'],
+        'permissionCard.enabled',
+        true,
+      ),
+      timeoutMs: Math.min(
+        permissionTimeoutMs,
+        DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS,
+      ),
     },
   };
 }

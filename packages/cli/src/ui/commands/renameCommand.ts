@@ -180,9 +180,19 @@ export const renameCommand: SlashCommand = {
       // future regressions don't leak an interval timer).
       let outcome: Awaited<ReturnType<typeof tryGenerateSessionTitle>>;
       try {
+        const userDisplayTexts =
+          config.getChatRecordingService()?.getUserDisplayTextsForTitle?.() ??
+          [];
+        const lastDisplayText = userDisplayTexts.at(-1)?.trim();
+        const titleDisplayTexts = lastDisplayText?.match(
+          /^\/(?:rename|tag)(?:\s+--auto)?$/i,
+        )
+          ? userDisplayTexts.slice(0, -1)
+          : userDisplayTexts;
         outcome = await tryGenerateSessionTitle(
           config,
           context.abortSignal ?? new AbortController().signal,
+          titleDisplayTexts,
         );
       } finally {
         clearInterval(timer);

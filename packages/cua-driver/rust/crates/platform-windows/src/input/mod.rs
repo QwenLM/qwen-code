@@ -9,26 +9,34 @@
 //! For clicks, coordinates are window-client-relative (ScreenToClient applied
 //! if screen coords are given). We pack with MAKELPARAM(x,y).
 
-pub mod mouse;
-pub mod keyboard;
 pub mod delivery;
 pub mod inject;
+pub mod keyboard;
+pub mod mouse;
 
-pub use inject::{inject_click_screen, point_in_window_bounds, NoActivateGuard};
-pub use mouse::{is_chromium_target_window, post_click, post_click_screen, send_click_synthesized, send_click_synthesized_mods, send_wheel_synthesized};
+pub(crate) use inject::{force_foreground_assisted, force_foreground_attached};
+pub use inject::{
+    inject_click_screen, point_in_window_bounds, point_on_virtual_desktop, window_is_iconic,
+    ForegroundLockGuard, NoActivateGuard,
+};
 pub use keyboard::{
     is_xaml_host_hwnd, post_char, post_key, post_type_text, post_type_text_with_delay,
-    send_key_synthesized, send_text_synthesized,
+    send_key_synthesized, send_key_synthesized_after_focus, send_text_synthesized,
+    send_text_synthesized_after_focus, wait_for_focused_descendant,
+};
+pub use mouse::{
+    has_chromium_descendant, is_chromium_target_window, post_click, post_click_screen,
+    send_click_synthesized, send_click_synthesized_active_mods, send_click_synthesized_mods,
+    send_wheel_synthesized,
 };
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Security::{
-    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
-    TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
@@ -36,24 +44,42 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 /// https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control
 #[allow(dead_code)]
 mod il {
-    pub const UNTRUSTED: u32   = 0x0000;
-    pub const LOW: u32         = 0x1000;
-    pub const MEDIUM: u32      = 0x2000;
+    pub const UNTRUSTED: u32 = 0x0000;
+    pub const LOW: u32 = 0x1000;
+    pub const MEDIUM: u32 = 0x2000;
     pub const MEDIUM_PLUS: u32 = 0x2100;
-    pub const HIGH: u32        = 0x3000;
-    pub const SYSTEM: u32      = 0x4000;
+    pub const HIGH: u32 = 0x3000;
+    pub const SYSTEM: u32 = 0x4000;
 }
 
 fn il_name(rid: u32) -> &'static str {
     match rid {
-        il::UNTRUSTED   => "Untrusted",
-        il::LOW         => "Low",
-        il::MEDIUM      => "Medium",
+        il::UNTRUSTED => "Untrusted",
+        il::LOW => "Low",
+        il::MEDIUM => "Medium",
         il::MEDIUM_PLUS => "Medium+",
-        il::HIGH        => "High",
-        il::SYSTEM      => "System",
+        il::HIGH => "High",
+        il::SYSTEM => "System",
         _ => "unknown",
     }
+}
+
+fn uipi_blocked_message(hwnd: u64, pid: u32, target: u32, own: u32) -> String {
+    format!(
+        "UIPI: target hwnd 0x{hwnd:x} (pid {pid}) is at {} integrity; \
+         cua-driver is at {} integrity. Windows blocks input from a \
+         lower-integrity process to a higher-integrity window. This \
+         applies to both background PostMessage and foreground SendInput; \
+         this error does not mean background delivery was selected. \
+         Common cause: \
+         a Win32 app whose application manifest requests \
+         `requireAdministrator` (most Program-Files installs of Notepad++, \
+         VS Code system-scope, etc. land at High integrity). Run the \
+         daemon elevated to drive these, or use a non-elevated copy of \
+         the target. See https://learn.microsoft.com/en-us/windows/win32/winauto/uipi",
+        il_name(target),
+        il_name(own),
+    )
 }
 
 /// Read the mandatory integrity level (the last sub-authority of the
@@ -102,9 +128,9 @@ unsafe fn process_integrity_rid(process: HANDLE) -> Option<u32> {
     Some(*rid_ptr)
 }
 
-/// If posting messages from the current process to `hwnd` would be silently
-/// blocked by UIPI (User Interface Privilege Isolation), return a diagnostic
-/// string the caller should surface as an actionable error. Otherwise `None`.
+/// If input from the current process to `hwnd` would be blocked by UIPI (User
+/// Interface Privilege Isolation), return a diagnostic string the caller
+/// should surface as an actionable error. Otherwise `None`.
 ///
 /// UIPI blocks `PostMessage` / `SendMessage` of input-class messages
 /// (`WM_KEYDOWN`, `WM_KEYUP`, `WM_CHAR`, `WM_LBUTTONDOWN`, etc.) from a
@@ -115,10 +141,9 @@ unsafe fn process_integrity_rid(process: HANDLE) -> Option<u32> {
 /// without an explicit check upstream, `type_text` / `hotkey` / `click`
 /// silently no-op against elevated apps.
 ///
-/// Returning a diagnostic string before the `PostMessage` call is the
-/// minimum honest behavior: the caller learns it can't drive this target
-/// and why. Long-term fix is to route through `SendInput` (system input
-/// queue, UIPI-permitted) from the UIAccess'd worker — out of scope here.
+/// This check is shared by background `PostMessage` and foreground `SendInput`
+/// paths. Returning a diagnostic before either attempt is the minimum honest
+/// behavior: the caller learns it can't drive this target and why.
 pub fn post_message_blocked_by_uipi(hwnd: u64) -> Option<String> {
     let h = HWND(hwnd as *mut _);
     let mut pid: u32 = 0;
@@ -126,25 +151,27 @@ pub fn post_message_blocked_by_uipi(hwnd: u64) -> Option<String> {
         return None;
     }
     let own = unsafe { process_integrity_rid(GetCurrentProcess()) }?;
-    let target_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let target_handle =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
     let target = unsafe { process_integrity_rid(target_handle) };
     let _ = unsafe { CloseHandle(target_handle) };
     let target = target?;
     if target > own {
-        Some(format!(
-            "UIPI: target hwnd 0x{hwnd:x} (pid {pid}) is at {} integrity; \
-             cua-driver is at {} integrity. PostMessage to a higher-integrity \
-             window is silently dropped by the target's message pump — the \
-             call would return success but no input would land. Common cause: \
-             a Win32 app whose application manifest requests \
-             `requireAdministrator` (most Program-Files installs of Notepad++, \
-             VS Code system-scope, etc. land at High integrity). Run the \
-             daemon elevated to drive these, or use a non-elevated copy of \
-             the target. See https://learn.microsoft.com/en-us/windows/win32/winauto/uipi",
-            il_name(target),
-            il_name(own),
-        ))
+        Some(uipi_blocked_message(hwnd, pid, target, own))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{il, uipi_blocked_message};
+
+    #[test]
+    fn uipi_diagnostic_does_not_imply_background_delivery() {
+        let message = uipi_blocked_message(0x1234, 42, il::HIGH, il::MEDIUM);
+
+        assert!(message.contains("background PostMessage and foreground SendInput"));
+        assert!(message.contains("does not mean background delivery was selected"));
     }
 }

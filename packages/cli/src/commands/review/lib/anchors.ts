@@ -50,7 +50,13 @@ export type MatchTier =
   | 'exact-context'
   /** Matched only after normalising indentation. */
   | 'loose-added'
-  | 'loose-context';
+  | 'loose-context'
+  /**
+   * Matched as a fragment INSIDE a longer hunk line, not as the whole line —
+   * the shape a file whose paragraphs are single multi-KB lines produces.
+   */
+  | 'substring-added'
+  | 'substring-context';
 
 export interface AnchorResolution {
   status: 'resolved' | 'unmatched';
@@ -324,6 +330,151 @@ function pick(cands: Candidate[], claimedLine?: number): Candidate | null {
 }
 
 /**
+ * Short fragments sit inside half the lines a diff renders — `}`, `return;` —
+ * so the containment tiers take only snippets long enough that a hit says
+ * something: past the one-token class, where a match starts to name a place.
+ */
+const MIN_SUBSTRING_LENGTH = 12;
+
+/** Whitespace runs collapsed to one space — the loose reading of containment. */
+function normalizeCollapsed(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The last tier: a single-line snippet matched as a fragment INSIDE a hunk
+ * line, reported at the containing line. A file whose paragraphs are single
+ * multi-KB lines — SKILL.md is one — defeats every whole-line tier above,
+ * because the quote is in the diff, just not the WHOLE of any line; there the
+ * natural anchor is a mid-line fragment, and containment is what places it.
+ *
+ * A multi-line snippet cannot sit inside one line. With `midLineOnly`, a
+ * candidate whose line equals the fragment modulo surrounding whitespace is
+ * dropped: that shape is an indentation guess stacked on a marker guess, the
+ * stack the whole-line tiers refuse. `resolveAnchor` sets it when retrying
+ * the marker-stripped reading. Same safety shape as the whole-line
+ * tiers — a hit on several lines is decided by the claimed line or refused,
+ * and the whitespace-collapsed reading earns its place only when it is the
+ * ONLY place the fragment could go. A resolved fragment sits inside a hunk by
+ * construction, exactly like a whole-line resolution, so it is a valid GitHub
+ * anchor; it is weaker evidence about WHICH line, and the tier says so.
+ */
+function substringResolution(
+  hay: NewSideLine[],
+  needleLines: string[],
+  claimedLine?: number,
+  midLineOnly = false,
+): AnchorResolution | null {
+  if (needleLines.length !== 1) return null;
+  const needle = normalizeExact(needleLines[0]);
+  const collapsed = normalizeCollapsed(needle);
+  // A marker-stripped reading can reduce to nothing — a bare `+` quoting an
+  // added blank line. `''.includes('')` is true of every line, so an empty
+  // needle would "sit inside" every hunk and prescribe a longer stretch of a
+  // line it does not sit in; report nothing and let the caller fall through
+  // to the honest absence reason.
+  if (collapsed.length === 0) return null;
+
+  const sitsInside = (l: NewSideLine): boolean =>
+    l.text.includes(needle) || normalizeCollapsed(l.text).includes(collapsed);
+  // A containing line that EQUALS the fragment modulo whitespace is not
+  // mid-line containment — it is the indentation guess stacked on the marker
+  // guess the whole-line tiers refuse. With `midLineOnly`, every reading
+  // below drops such a line.
+  const lineGuess = (l: NewSideLine): boolean =>
+    midLineOnly && normalizeCollapsed(l.text) === collapsed;
+  // When that filter — not absence — is what refused the reading, say so:
+  // the quote IS in the hunk, and the generic absence reason would claim
+  // otherwise and key the recovery to re-attribution.
+  const indentationRefusal: AnchorResolution | null = hay.some(lineGuess)
+    ? {
+        status: 'unmatched',
+        reason:
+          'the marker-stripped reading matches a hunk line only after its ' +
+          'indentation is normalised — quote the line verbatim, with its ' +
+          'indentation',
+      }
+    : null;
+  // A containing line equal to the fragment modulo whitespace keeps the
+  // equal-line reading alive — the agent may have meant THAT line and dropped
+  // its indentation. Resolving to a different containment line while it is a
+  // candidate would choose between the two readings with nothing to choose:
+  // the confident misplacement this tier exists to refuse. The refusal
+  // outranks any remaining containment candidate.
+  if (indentationRefusal) return indentationRefusal;
+
+  // The floor measures what the collapsed matching pass actually runs on: a
+  // padded quote is longer than its collapsed core, and the core is what
+  // that weakest reading matches with.
+  if (collapsed.length < MIN_SUBSTRING_LENGTH) {
+    // Too short to place — but when it IS inside a hunk line, say so: the
+    // generic absence reason would claim the quote appears nowhere (false
+    // here) and key the recovery to re-attribution, when the only remedy is
+    // a longer fragment.
+    if (hay.some((l) => !lineGuess(l) && sitsInside(l))) {
+      return {
+        status: 'unmatched',
+        reason:
+          'the snippet sits inside a hunk line but is shorter than ' +
+          `${MIN_SUBSTRING_LENGTH} characters — too short to place a line ` +
+          'reliably; quote a longer stretch of the line it sits in',
+      };
+    }
+    return indentationRefusal;
+  }
+
+  const norms: Array<[boolean, (s: string) => string]> = [
+    [true, (s) => s],
+    [false, normalizeCollapsed],
+  ];
+  for (const [exact, norm] of norms) {
+    const normNeedle = norm(needle);
+    // One candidate per LINE: a fragment repeated inside one line places the
+    // comment on that line either way, and counting the repetitions would
+    // report an ambiguity the resolver does not actually have.
+    const cands: Candidate[] = hay
+      .filter((l) => norm(l.text).includes(normNeedle))
+      .filter((l) => !lineGuess(l))
+      .map((l) => ({ startLine: l.newLine, line: l.newLine, added: l.added }));
+    if (cands.length === 0) continue;
+
+    if (!exact && cands.length > 1) {
+      return {
+        status: 'unmatched',
+        reason:
+          'the snippet sits inside more than one hunk line only after its ' +
+          'whitespace is normalised — quote a longer fragment so the line is ' +
+          'unambiguous',
+      };
+    }
+
+    const best = pick(cands, claimedLine);
+    if (!best) {
+      return {
+        status: 'unmatched',
+        reason:
+          'the snippet sits inside more than one hunk line and nothing ' +
+          'distinguishes them — quote a longer fragment so it is unique, or ' +
+          'give the line number you mean so the nearest match can be chosen',
+      };
+    }
+
+    return {
+      status: 'resolved',
+      line: best.line,
+      startLine: best.startLine,
+      matchCount: cands.length,
+      tier: best.added ? 'substring-added' : 'substring-context',
+      ambiguous: cands.length > 1,
+      ...(claimedLine !== undefined
+        ? { drift: Math.abs(best.startLine - claimedLine) }
+        : {}),
+    };
+  }
+  return indentationRefusal;
+}
+
+/**
  * Resolve one anchor snippet to a line range in the post-change file.
  *
  * `claimedLine` is the number the agent reported. It is never trusted as the
@@ -414,12 +565,36 @@ export function resolveAnchor(
     }
   }
 
+  // Nothing matched as whole lines. Before giving up, try the snippet as a
+  // fragment inside a hunk line — the tier KB-long Markdown lines need. A
+  // whole-line reading that found candidates but could not choose is already
+  // returned above as THE answer; this fires only when no whole-line reading
+  // found anything at all.
+  const fragment = substringResolution(newSideLines, variants[0], claimedLine);
+  if (fragment) return fragment;
+
+  // The faithful reading found nothing even as a fragment. If the quote was
+  // copied with its `+` marker column — the mistake the whole-line tiers
+  // forgive — offer the marker-stripped reading to the containment tier too,
+  // mid-line only: a containing line equal to the fragment modulo whitespace
+  // is the stacked indentation guess the tiers above refuse.
+  if (variants.length > 1) {
+    const stripped = substringResolution(
+      newSideLines,
+      variants[1],
+      claimedLine,
+      true,
+    );
+    if (stripped) return stripped;
+  }
+
   return {
     status: 'unmatched',
     reason:
-      'snippet does not appear in any hunk of this file — it may be quoted ' +
-      'from unchanged code outside the diff, paraphrased rather than copied, ' +
-      'or attributed to the wrong file',
+      'snippet does not appear in any hunk of this file — neither as whole ' +
+      'lines nor as a fragment inside one. It may be quoted from unchanged ' +
+      'code outside the diff, paraphrased rather than copied, or attributed ' +
+      'to the wrong file',
   };
 }
 
@@ -446,6 +621,125 @@ export interface AnchorRequest {
 export type AnchorResult = Omit<AnchorRequest, 'line'> & {
   claimedLine?: number;
 } & AnchorResolution;
+
+/**
+ * One inline anchor as the posting boundary must vouch for it. `side` /
+ * `startSide` are the payload's declared sides (GitHub's spelling); a
+ * missing side defaults to RIGHT, which is the only side an Aone anchor
+ * can express. Both fields admit `null` because that is the shape a
+ * model-written payload uses for an ABSENT optional field — it reads
+ * exactly like `undefined` (default RIGHT), never like a declared side.
+ */
+export interface NewSideAnchorCheck {
+  path: string;
+  line: number;
+  startLine?: number;
+  side?: string | null;
+  startSide?: string | null;
+}
+
+export interface NewSideAnchorVerdict {
+  valid: boolean;
+  /** When invalid — the terminal-facing reason. */
+  reason?: string;
+}
+
+/**
+ * A postable line — a positive whole number. This boundary vouches for
+ * hand-typed numbers, so it rejects the input domain itself before the
+ * hunk scan: a fraction inside a hunk's span, or a reversed range whose
+ * `lo > hi` degenerates the containment test, would otherwise certify an
+ * anchor the platform (which validates nothing) then posts silently wrong.
+ */
+function isWholeLine(n: number): boolean {
+  return Number.isSafeInteger(n) && n > 0;
+}
+
+/**
+ * Validate hand-typed line anchors against a captured diff's NEW side —
+ * the check GitHub performs server-side (and answers with an
+ * all-or-nothing 422), performed client-side for the Aone write path,
+ * which the platform performs NONE of (probed 2026-08-21 on scratch MR
+ * 29427547 of base-biz/sqlt, a1 v0.2.51: any positive integer posts —
+ * an old-side number silently becomes the same-numbered new-side line,
+ * a beyond-EOF number posts `outdated`). See
+ * docs/design/2026-08-21-review-aone-removed-line-anchoring.md.
+ *
+ * The rules are the GitHub recovery's: an anchor is valid iff its line
+ * sits inside a new-side hunk of its file; a multi-line range must sit
+ * in ONE hunk. A pure-deletion hunk (`newCount === 0`) occupies no
+ * new-side line and validates nothing. A declared non-RIGHT side is
+ * unanchorable by construction — the old side does not exist on the
+ * target platform. The module's header invariant has its converse here:
+ * a snippet-resolved anchor is valid by construction; a hand-typed
+ * number must pass this to be believed.
+ */
+export function validateNewSideAnchors(
+  diffText: string,
+  checks: NewSideAnchorCheck[],
+): NewSideAnchorVerdict[] {
+  const { files } = parseDiff(diffText);
+  const byPath = new Map<string, DiffFile>(files.map((f) => [f.path, f]));
+
+  return checks.map((check) => {
+    if (
+      !isWholeLine(check.line) ||
+      (check.startLine !== undefined && !isWholeLine(check.startLine))
+    ) {
+      return {
+        valid: false,
+        reason: 'line is not a positive whole number',
+      };
+    }
+    if (check.startLine !== undefined && check.startLine > check.line) {
+      return {
+        valid: false,
+        reason: 'the range ends before it begins',
+      };
+    }
+    // A `null` side is the model's idiom for an ABSENT optional field
+    // (a documented recurring shape in this pipeline — JSON `null`, not a
+    // declaration). Treat it exactly like `undefined`: defaulting to
+    // RIGHT, per the contract above. Only a PRESENT, non-RIGHT value is a
+    // declared old-side anchor.
+    const sideDeclared = check.side !== undefined && check.side !== null;
+    const startSideDeclared =
+      check.startSide !== undefined && check.startSide !== null;
+    if (
+      (sideDeclared && check.side !== 'RIGHT') ||
+      (startSideDeclared && check.startSide !== 'RIGHT')
+    ) {
+      return {
+        valid: false,
+        reason:
+          'declares a non-RIGHT side — Aone Code anchors the new side ' +
+          'only; the old side cannot be anchored',
+      };
+    }
+    const file = byPath.get(check.path);
+    if (!file) {
+      return {
+        valid: false,
+        reason: `file is not in the diff (${files.length} file(s) changed)`,
+      };
+    }
+    const lo = check.startLine ?? check.line;
+    const hi = check.line;
+    const inside = file.hunks.some(
+      (h) => h.newCount > 0 && h.newStart <= lo && hi <= h.newEnd,
+    );
+    return inside
+      ? { valid: true }
+      : {
+          valid: false,
+          reason:
+            check.startLine !== undefined
+              ? `the range ${check.startLine}-${check.line} sits in no ` +
+                `single new-side hunk of this file`
+              : `line ${check.line} sits in no new-side hunk of this file`,
+        };
+  });
+}
 
 /**
  * Resolve a batch of anchors against a captured diff.

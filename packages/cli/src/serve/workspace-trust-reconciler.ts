@@ -243,11 +243,12 @@ export function createWorkspaceTrustReconciler(
     snapshot: DaemonTrustPolicySnapshot,
   ): Promise<void> => {
     const planned: PlannedReplacement[] = [];
-    for (const entry of options.registry.listEntries()) {
+    for (const entry of options.registry.listAllEntries()) {
       const current = entry.current;
       if (
         entry.state === 'active' &&
-        current?.runtime.provenance === 'managed-scratch'
+        (current?.runtime.provenance === 'managed-scratch' ||
+          current?.runtime.provenance === 'live-conversation')
       ) {
         options.registry.advancePolicyRevision(entry, snapshot.revision);
         continue;

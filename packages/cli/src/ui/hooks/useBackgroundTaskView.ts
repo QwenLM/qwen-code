@@ -16,7 +16,7 @@
  * per-UserQuery extract notifies that have no dialog surface.
  *
  * Surfaces that only care about live work (the footer pill, the
- * composer's Down-arrow route) filter for `running` themselves.
+ * composer's Down-arrow route) filter for active states themselves.
  *
  * Intentionally ignores activity updates (appendActivity). Tool-call
  * traffic from a running background agent would otherwise churn the
@@ -117,7 +117,7 @@ export interface UseBackgroundTaskViewResult {
  * — the user opens the dialog wanting to check the running work, and finds
  * it buried under noise.
  *
- *   bucket 1 — active (running + paused), sorted by startTime DESC so the
+ *   bucket 1 — active (running + pausing + paused), sorted by startTime DESC so the
  *              most recent launch sits at the very top.
  *   bucket 2 — terminal (completed / failed / cancelled), sorted by
  *              endTime DESC so the most recently FINISHED entry is the
@@ -134,8 +134,10 @@ export function compareActiveThenTerminal(
   a: { status: string; startTime: number; endTime?: number },
   b: { status: string; startTime: number; endTime?: number },
 ): number {
-  const aActive = a.status === 'running' || a.status === 'paused';
-  const bActive = b.status === 'running' || b.status === 'paused';
+  const aActive =
+    a.status === 'running' || a.status === 'pausing' || a.status === 'paused';
+  const bActive =
+    b.status === 'running' || b.status === 'pausing' || b.status === 'paused';
   if (aActive !== bActive) return aActive ? -1 : 1;
   if (aActive) return b.startTime - a.startTime;
   // Terminal bucket: fall back to startTime when an entry has no endTime
@@ -192,6 +194,14 @@ export function useBackgroundTaskView(
     // call to refresh between the two `const` bindings.
     const computeDreamSig = (dreams: readonly MemoryTaskRecord[]): string =>
       dreams.map((t) => `${t.id}:${t.status}:${t.updatedAt}`).join('|');
+    const listVisibleDreams = (): MemoryTaskRecord[] =>
+      memoryManager
+        .listTasksByType('dream')
+        .filter(
+          (task) =>
+            task.projectRoot === projectRoot ||
+            task.metadata?.['scope'] === 'user',
+        );
 
     // refresh accepts a pre-fetched dream snapshot so the memory
     // listener can reuse the same array it computed for its dedup
@@ -213,7 +223,7 @@ export function useBackgroundTaskView(
       // touching the task map.) Extract tasks also intentionally
       // stay out of this view — they fire on every UserQuery and
       // their completion is already covered by the `memory_saved`
-      // toast in useGeminiStream.
+      // toast in useLlmStream.
       //
       // Cap retained terminal entries — MemoryManager.tasks Map has no
       // eviction path, so completed/failed dreams accumulate forever
@@ -221,8 +231,7 @@ export function useBackgroundTaskView(
       // cap the dialog would grow unbounded; with it the user sees all
       // running dreams plus the most recent few terminal results
       // (mirrors MonitorRegistry.MAX_RETAINED_TERMINAL_MONITORS).
-      const allDreams =
-        dreamSnapshot ?? memoryManager.listTasksByType('dream', projectRoot);
+      const allDreams = dreamSnapshot ?? listVisibleDreams();
       const runningDreams = allDreams.filter((t) => t.status === 'running');
       const terminalDreams = allDreams
         .filter(
@@ -320,7 +329,7 @@ export function useBackgroundTaskView(
     // same status). The fetched snapshot is forwarded to refresh so
     // both the gate and the rendered dreamEntries come from one read.
     const memoryListener = () => {
-      const dreams = memoryManager.listTasksByType('dream', projectRoot);
+      const dreams = listVisibleDreams();
       const sig = computeDreamSig(dreams);
       if (sig === lastDreamSig) return;
       refresh(dreams);

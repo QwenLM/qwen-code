@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { render, cleanup, act } from '@testing-library/react';
 import process from 'node:process';
@@ -60,6 +61,8 @@ const renderComponent = (
     ...(settingsValue ?? {}),
   } as unknown as LoadedSettings;
 
+  const recordSlashCommand = vi.fn();
+
   const mockConfig = {
     // --- Functions used by ModelDialog ---
     getModel: vi.fn(() => DEFAULT_QWEN_MODEL),
@@ -78,6 +81,9 @@ const renderComponent = (
       getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
     })),
     getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+    getAdvisorModel: vi.fn(() => undefined),
+    setAdvisorModel: vi.fn().mockResolvedValue(undefined),
+    getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
 
     // --- Functions used by ClearcutLogger ---
     getUsageStatisticsEnabled: vi.fn(() => true),
@@ -118,6 +124,7 @@ const renderComponent = (
     mockConfig,
     mockSettings,
     mockHistoryManager,
+    recordSlashCommand,
   };
 };
 
@@ -149,6 +156,313 @@ describe('<ModelDialog />', () => {
       `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
+  });
+
+  it('can turn Advisor off when no models are available', async () => {
+    const { mockSettings, mockConfig, props } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: () => AuthType.USE_OPENAI,
+        getAdvisorModel: () => 'unavailable-advisor',
+        getAllConfiguredModels: () => [],
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+    expect(select.items.map(({ value }) => value)).toEqual(['$advisor-off']);
+    await act(async () => {
+      await select.onSelect('$advisor-off');
+    });
+    expect(mockConfig.setAdvisorModel).toHaveBeenCalledWith(undefined);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      '',
+    );
+    expect(mockConfig.switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it('persists and highlights the selected Advisor registry endpoint', async () => {
+    const endpoint = 'https://advisor.example/v1';
+    const selector = `openai:advisor\0${endpoint}`;
+    const { mockSettings, mockConfig } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: () => AuthType.USE_OPENAI,
+        getAdvisorModel: () => selector,
+        getAllConfiguredModels: () => [
+          {
+            id: 'advisor',
+            label: 'Default endpoint',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: endpoint,
+          },
+          {
+            id: 'advisor',
+            label: 'Explicit endpoint',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: endpoint,
+            registryBaseUrl: endpoint,
+          },
+        ],
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+    const selectedKey = `openai::advisor\0${endpoint}`;
+    expect(select.items.map(({ value }) => value)).toEqual([
+      '$advisor-off',
+      'openai::advisor',
+      selectedKey,
+    ]);
+    expect(select.initialIndex).toBe(2);
+    await act(async () => {
+      await select.onSelect(selectedKey);
+    });
+    expect(mockConfig.setAdvisorModel).toHaveBeenCalledWith(selector);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      selector,
+    );
+  });
+
+  it('lists Off and persists an Advisor model without switching the executor', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const switchModel = vi.fn();
+    const { mockSettings, props } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'executor-model'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'advisor-model',
+            label: 'Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'vision-only',
+            label: 'Vision Only',
+            authType: AuthType.USE_OPENAI,
+            visionOnly: true,
+          },
+        ]),
+        setAdvisorModel,
+        switchModel,
+      },
+      { merged: {} },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::advisor-model`,
+    ]);
+    await select.onSelect(`${AuthType.USE_OPENAI}::advisor-model`);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      `${AuthType.USE_OPENAI}:advisor-model\0`,
+    );
+    expect(setAdvisorModel).toHaveBeenCalledWith(
+      `${AuthType.USE_OPENAI}:advisor-model\0`,
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it('does not persist an Advisor model when the tool is disabled', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(false);
+    const { mockSettings, props } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'executor-model'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'advisor-model',
+            label: 'Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorModel,
+      },
+      { merged: {} },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    await select.onSelect(`${AuthType.USE_OPENAI}::advisor-model`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('does not default to Off when the configured Advisor model is unavailable', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const { mockSettings } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'stale-advisor-model'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'available-advisor-model',
+            label: 'Available Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorModel,
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.initialIndex).toBe(1);
+    await select.onSelect(select.items[1]!.value);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      `${AuthType.USE_OPENAI}:available-advisor-model\0`,
+    );
+    expect(setAdvisorModel).toHaveBeenCalledWith(
+      `${AuthType.USE_OPENAI}:available-advisor-model\0`,
+    );
+  });
+
+  it('shows and selects the fast-only model configured as Advisor fast', () => {
+    renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'fast'),
+        getFastModel: vi.fn(() => `${AuthType.USE_OPENAI}:fast-advisor-model`),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'fast-advisor-model',
+            label: 'Fast Advisor Model',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::fast-advisor-model`,
+    ]);
+    expect(select.initialIndex).toBe(1);
+  });
+
+  it('shows the active runtime model in Advisor mode', () => {
+    renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'runtime-advisor'),
+        getModel: vi.fn(() => 'runtime-advisor'),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'runtime-advisor',
+        })),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'runtime-advisor',
+            label: 'Runtime Advisor',
+            authType: AuthType.USE_OPENAI,
+            isRuntimeModel: true,
+            runtimeSnapshotId: '$runtime|openai|runtime-advisor',
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      '$runtime|openai|runtime-advisor',
+    ]);
+    expect(select.initialIndex).toBe(1);
+  });
+
+  it('keeps the persisted fast-only Advisor model listed and highlighted', () => {
+    renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(
+          () => `${AuthType.USE_OPENAI}:fast-advisor-model`,
+        ),
+        getFastModel: vi.fn(() => `${AuthType.USE_OPENAI}:fast-advisor-model`),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'fast-advisor-model',
+            label: 'Fast Advisor Model',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+          {
+            id: 'regular-advisor-model',
+            label: 'Regular Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::fast-advisor-model`,
+      `${AuthType.USE_OPENAI}::regular-advisor-model`,
+    ]);
+    expect(select.initialIndex).toBe(1);
+  });
+
+  it('does not list or persist other fast-only models in Advisor mode', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const { mockSettings } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'fast'),
+        getFastModel: vi.fn(() => `${AuthType.USE_OPENAI}:fast-flash`),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'fast-flash',
+            label: 'Fast Flash',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+          {
+            id: 'fast-mini',
+            label: 'Fast Mini',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+          {
+            id: 'regular-advisor-model',
+            label: 'Regular Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorModel,
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::fast-flash`,
+      `${AuthType.USE_OPENAI}::regular-advisor-model`,
+    ]);
+
+    await select.onSelect(`${AuthType.USE_OPENAI}::fast-mini`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(setAdvisorModel).not.toHaveBeenCalled();
   });
 
   it('caps visible model options to the available dialog height', () => {
@@ -688,27 +1002,30 @@ describe('<ModelDialog />', () => {
 
   it('stores authType-qualified selectors in fast model mode', async () => {
     const setFastModel = vi.fn();
-    const { props, mockSettings } = renderComponent({ isFastModelMode: true }, {
-      getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
-      getModel: vi.fn(() => 'claude-opus-4-7'),
-      getAllConfiguredModels: vi.fn(() => [
-        {
-          id: 'deepseek-v4-flash',
-          label: 'deepseek-v4-flash',
-          authType: AuthType.USE_OPENAI,
-        },
-        {
-          id: 'claude-opus-4-7',
-          label: 'claude-opus-4-7',
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
+      { isFastModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+        getModel: vi.fn(() => 'claude-opus-4-7'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'deepseek-v4-flash',
+            label: 'deepseek-v4-flash',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'claude-opus-4-7',
+            label: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
           authType: AuthType.USE_ANTHROPIC,
-        },
-      ]),
-      getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.USE_ANTHROPIC,
-        model: 'claude-opus-4-7',
-      })),
-      setFastModel,
-    } as unknown as Partial<Config>);
+          model: 'claude-opus-4-7',
+        })),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     await childOnSelect(`${AuthType.USE_OPENAI}::deepseek-v4-flash`);
@@ -719,13 +1036,72 @@ describe('<ModelDialog />', () => {
       'openai:deepseek-v4-flash',
     );
     expect(setFastModel).toHaveBeenCalledWith('openai:deepseek-v4-flash');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Fast Model: openai:deepseek-v4-flash' },
+      ],
+    });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the endpoint disambiguator when storing the fast model (#12760)', async () => {
+    const setFastModel = vi.fn();
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
+      { isFastModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'shared-fast',
+            label: 'shared-fast (token plan)',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://exhausted-plan.example.com/v1',
+          },
+          {
+            id: 'shared-fast',
+            label: 'shared-fast (free quota)',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://free-quota.example.com/v1',
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+        })),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::shared-fast\0https://free-quota.example.com/v1`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'fastModel',
+      'openai:shared-fast\0https://free-quota.example.com/v1',
+    );
+    expect(setFastModel).toHaveBeenCalledWith(
+      'openai:shared-fast\0https://free-quota.example.com/v1',
+    );
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Fast Model: openai:shared-fast' },
+      ],
+    });
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
   it('stores authType-qualified selectors in vision model mode without switching models', async () => {
     const switchModel = vi.fn();
     const setVisionModel = vi.fn();
-    const { props, mockSettings } = renderComponent(
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
       { isVisionModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
@@ -762,6 +1138,13 @@ describe('<ModelDialog />', () => {
       'openai:qwen-vl-max',
     );
     expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-vl-max');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Vision Model: openai:qwen-vl-max' },
+      ],
+    });
     expect(switchModel).not.toHaveBeenCalled();
     expect(mockSettings.setValue).not.toHaveBeenCalledWith(
       SettingScope.User,
@@ -774,7 +1157,7 @@ describe('<ModelDialog />', () => {
   it('stores compaction model selector without switching models', async () => {
     const switchModel = vi.fn();
     const setCompactionModel = vi.fn();
-    const { props, mockSettings } = renderComponent(
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
       { isCompactionModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
@@ -811,6 +1194,16 @@ describe('<ModelDialog />', () => {
       'openai:compaction-model',
     );
     expect(setCompactionModel).toHaveBeenCalledWith('openai:compaction-model');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        {
+          type: 'success',
+          text: 'Compaction Model: openai:compaction-model',
+        },
+      ],
+    });
     expect(switchModel).not.toHaveBeenCalled();
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
@@ -818,10 +1211,9 @@ describe('<ModelDialog />', () => {
   it('shows only image-generation models and stores the exact provider route', async () => {
     const setImageModel = vi.fn().mockResolvedValue(undefined);
     const baseUrl = 'https://images.example.com/api/v1';
-    const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
-    const { props, mockSettings, getByText } = renderComponent(
-      { isImageModelMode: true },
-      {
+    const persisted = `openai:dual-role-model\0${baseUrl}`;
+    const { props, mockSettings, getByText, recordSlashCommand } =
+      renderComponent({ isImageModelMode: true }, {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
         getAllConfiguredModels: vi.fn(() => [
           {
@@ -830,11 +1222,28 @@ describe('<ModelDialog />', () => {
             authType: AuthType.USE_OPENAI,
           },
           {
-            id: 'qwen-image-2.0',
-            label: 'Qwen Image 2.0',
+            id: 'dual-role-model',
+            label: 'Dual-role model',
             authType: AuthType.USE_OPENAI,
             baseUrl,
             envKey: 'IMAGE_API_KEY',
+            supportsImageGeneration: true,
+          },
+          {
+            id: 'qwen-image-2.0',
+            label: 'Qwen Image 2.0',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://legacy-images.example.com/api/v1',
+            envKey: 'IMAGE_API_KEY',
+            imageOnly: true,
+          },
+          {
+            id: 'vision-only-model',
+            label: 'Vision-only model',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://vision.example.com/api/v1',
+            envKey: 'IMAGE_API_KEY',
+            visionOnly: true,
             imageOnly: true,
           },
           {
@@ -845,24 +1254,45 @@ describe('<ModelDialog />', () => {
             imageOnly: true,
           },
         ]),
-        resolveImageGenerationModel: vi.fn((selector: string) =>
-          selector === persisted
-            ? {
-                model: 'qwen-image-2.0',
-                baseUrl,
-                apiKeyEnv: 'IMAGE_API_KEY',
-              }
-            : undefined,
-        ),
+        resolveImageGenerationModel: vi.fn((selector: string) => {
+          if (selector === persisted) {
+            return {
+              model: 'dual-role-model',
+              baseUrl,
+              apiKeyEnv: 'IMAGE_API_KEY',
+            };
+          }
+          if (selector.includes('qwen-image-2.0')) {
+            return {
+              model: 'qwen-image-2.0',
+              baseUrl: 'https://legacy-images.example.com/api/v1',
+              apiKeyEnv: 'IMAGE_API_KEY',
+            };
+          }
+          if (selector.includes('vision-only-model')) {
+            return {
+              model: 'vision-only-model',
+              baseUrl: 'https://vision.example.com/api/v1',
+              apiKeyEnv: 'IMAGE_API_KEY',
+            };
+          }
+          return undefined;
+        }),
         setImageModel,
-      } as unknown as Partial<Config>,
-    );
+      } as unknown as Partial<Config>);
 
     expect(getByText('Select Image Model')).toBeDefined();
     const selectProps = mockedSelect.mock.calls[0][0];
-    expect(selectProps.items).toHaveLength(1);
+    expect(selectProps.items).toHaveLength(3);
+    expect(selectProps.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: expect.stringContaining('vision-only-model'),
+        }),
+      ]),
+    );
     await selectProps.onSelect(
-      `${AuthType.USE_OPENAI}::qwen-image-2.0\0${baseUrl}`,
+      `${AuthType.USE_OPENAI}::dual-role-model\0${baseUrl}`,
     );
 
     expect(mockSettings.setValue).toHaveBeenCalledWith(
@@ -871,13 +1301,145 @@ describe('<ModelDialog />', () => {
       persisted,
     );
     expect(setImageModel).toHaveBeenCalledWith(persisted);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Image Model: openai:dual-role-model' },
+      ],
+    });
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps dual-role models in the main dialog and excludes legacy image-only models', () => {
+    renderComponent({}, {
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'dual-role-model',
+          label: 'Dual-role model',
+          authType: AuthType.USE_OPENAI,
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'qwen-image-2.0',
+          label: 'Qwen Image 2.0',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::dual-role-model`);
+  });
+
+  it.each([
+    ['fast', { isFastModelMode: true }],
+    ['voice', { isVoiceModelMode: true }],
+    ['vision', { isVisionModelMode: true }],
+    ['compaction', { isCompactionModelMode: true }],
+  ] as const)('keeps dual-role models in the %s dialog', (_mode, modeProps) => {
+    renderComponent(modeProps, {
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'dual-role-model',
+          label: 'Dual-role model',
+          authType: AuthType.USE_OPENAI,
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'qwen-image-2.0',
+          label: 'Qwen Image 2.0',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::dual-role-model`);
+  });
+
+  it('ignores duplicate input while an image model selection is in flight', async () => {
+    let resolveSetImageModel: (() => void) | undefined;
+    const setImageModel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSetImageModel = resolve;
+        }),
+    );
+    const baseUrl = 'https://images.example.com/api/v1';
+    const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
+    const { props, mockSettings, mockHistoryManager, recordSlashCommand } =
+      renderComponent({ isImageModelMode: true }, {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen-image-2.0',
+            label: 'Qwen Image 2.0',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            envKey: 'IMAGE_API_KEY',
+            imageOnly: true,
+          },
+        ]),
+        resolveImageGenerationModel: vi.fn(() => ({
+          model: 'qwen-image-2.0',
+          baseUrl,
+          apiKeyEnv: 'IMAGE_API_KEY',
+        })),
+        setImageModel,
+      } as unknown as Partial<Config>);
+
+    const onSelect = mockedSelect.mock.calls[0][0].onSelect;
+    const selection = onSelect(
+      `${AuthType.USE_OPENAI}::qwen-image-2.0\0${baseUrl}`,
+    );
+    await onSelect(`${AuthType.USE_OPENAI}::qwen-image-2.0\0${baseUrl}`);
+    mockedUseKeypress.mock.calls[0][0]({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(setImageModel).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValue).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    resolveSetImageModel?.();
+    await selection;
+
+    expect(setImageModel).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValue).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'imageModel',
+      persisted,
+    );
   });
 
   it('keeps the selected baseUrl for same-provider duplicate vision model ids', async () => {
     const switchModel = vi.fn();
     const setVisionModel = vi.fn();
-    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    // Credential-bearing on purpose. This dialog's `encodeVisionModelSelector`
+    // is a private twin of the OpenTUI one, so no unit test can import it: the
+    // only row that can pin its registry-exact persist is this one, and it can
+    // only do so if the fixture carries a userinfo suffix. Re-adding a
+    // write-path strip here (as this PR briefly did, then reverted in
+    // `03ee72d7d7`) must red the assertions below.
+    const selectedBaseUrl = 'https://user:sk-secret@token-plan.example.com/v1';
     const { props, mockSettings } = renderComponent(
       { isVisionModelMode: true },
       {
@@ -968,7 +1530,7 @@ describe('<ModelDialog />', () => {
   it('stores the plain model id in voice model mode without switching models', async () => {
     const switchModel = vi.fn();
     const setFastModel = vi.fn();
-    const { props, mockSettings } = renderComponent(
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
       { isVoiceModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
@@ -1005,6 +1567,13 @@ describe('<ModelDialog />', () => {
     );
     expect(switchModel).not.toHaveBeenCalled();
     expect(setFastModel).not.toHaveBeenCalled();
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Voice Model: qwen3-asr-flash' },
+      ],
+    });
     expect(mockSettings.setValue).not.toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
@@ -1246,6 +1815,222 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);
   });
 
+  it.each(['fast', 'compaction', 'vision', 'image'] as const)(
+    'highlights the matching baseUrl for duplicate %s-model settings',
+    (mode) => {
+      const selectedBaseUrl = 'https://token-plan.example.com/v1';
+      const allModels = [
+        {
+          id: 'shared-fast',
+          label: '[Free Quota] shared-fast',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://free-quota.example.com/v1',
+          // Image mode lists only rows with image-generation capability.
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'shared-fast',
+          label: '[Token Plan] shared-fast',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: selectedBaseUrl,
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
+        },
+      ];
+
+      renderComponent(
+        {
+          isFastModelMode: mode === 'fast',
+          isCompactionModelMode: mode === 'compaction',
+          isVisionModelMode: mode === 'vision',
+          isImageModelMode: mode === 'image',
+        },
+        {
+          getModel: () => 'qwen3.7-max',
+          getAuthType: () => AuthType.USE_OPENAI,
+          getAllConfiguredModels: () => allModels,
+          getContentGeneratorConfig: () => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'qwen3.7-max',
+            baseUrl: 'https://free-quota.example.com/v1',
+          }),
+          resolveImageGenerationModel: (selector: string) => ({
+            model: selector,
+            baseUrl: 'https://images.example.com/v1',
+            apiKeyEnv: 'IMAGE_API_KEY',
+          }),
+        } as unknown as Partial<Config>,
+        {
+          merged: {
+            [`${mode}Model`]: `openai:shared-fast\0${selectedBaseUrl}`,
+          },
+        } as unknown as Partial<LoadedSettings>,
+      );
+
+      const select = mockedSelect.mock.calls[0][0];
+      const selectedIndex = select.items.findIndex(
+        (item) =>
+          String(item.value).includes('shared-fast') &&
+          String(item.value).includes(selectedBaseUrl),
+      );
+      expect(selectedIndex).toBeGreaterThan(0);
+      expect(select.initialIndex).toBe(selectedIndex);
+    },
+  );
+
+  it('highlights the pinned row for a whitespace-padded compaction setting (#12760)', () => {
+    // Hand-edited or CRLF-synced settings can carry trailing whitespace; core
+    // trims before routing, so the dialog must trim before matching or it
+    // highlights a different provider than the one in use.
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    const allModels = [
+      {
+        id: 'shared-fast',
+        label: '[Free Quota] shared-fast',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://free-quota.example.com/v1',
+      },
+      {
+        id: 'shared-fast',
+        label: '[Token Plan] shared-fast',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: selectedBaseUrl,
+      },
+    ];
+
+    renderComponent(
+      { isCompactionModelMode: true },
+      {
+        getModel: () => 'qwen3.7-max',
+        getAuthType: () => AuthType.USE_OPENAI,
+        getAllConfiguredModels: () => allModels,
+        getContentGeneratorConfig: () => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          baseUrl: 'https://free-quota.example.com/v1',
+        }),
+      } as unknown as Partial<Config>,
+      {
+        merged: {
+          compactionModel: `openai:shared-fast\0${selectedBaseUrl} `,
+        },
+      } as unknown as Partial<LoadedSettings>,
+    );
+
+    const select = mockedSelect.mock.calls[0][0];
+    const selectedIndex = select.items.findIndex(
+      (item) =>
+        String(item.value).includes('shared-fast') &&
+        String(item.value).includes(selectedBaseUrl),
+    );
+    expect(selectedIndex).toBeGreaterThan(0);
+    expect(select.initialIndex).toBe(selectedIndex);
+  });
+
+  it.each(['fast', 'compaction', 'vision', 'image'] as const)(
+    'falls back to the same-id row when the pinned endpoint matches none (%s, #12760)',
+    (mode) => {
+      // A project that declares its own `modelProviders` replaces the user's, so
+      // a globally pinned endpoint can match no row here. Without a same-id
+      // fallback the dialog highlights the current auth's first row and Enter
+      // silently overwrites the setting.
+      const mockSettings = {
+        isTrusted: true,
+        user: { settings: {} },
+        workspace: { settings: {} },
+        merged: {
+          [`${mode}Model`]:
+            'openai:shared-fast\0https://removed-provider.example.com/v1',
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      const allModels = [
+        {
+          id: 'qwen3.7-max',
+          label: 'qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://free-quota.example.com/v1',
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'shared-fast',
+          label: '[Free Quota] shared-fast',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://free-quota.example.com/v1',
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'shared-fast',
+          label: '[Token Plan] shared-fast',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
+        },
+      ];
+
+      render(
+        <SettingsContext.Provider value={mockSettings}>
+          <ConfigContext.Provider
+            value={
+              {
+                getModel: vi.fn(() => 'qwen3.7-max'),
+                getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+                getAllConfiguredModels: vi.fn(() => allModels),
+                getContentGeneratorConfig: vi.fn(() => ({
+                  authType: AuthType.USE_OPENAI,
+                  model: 'qwen3.7-max',
+                  // The primary's own endpoint owns no same-id row, so the
+                  // documented fall-through key cannot resolve either.
+                  baseUrl: 'https://primary-endpoint.example.com/v1',
+                })),
+                getModelsConfig: vi.fn(() => ({
+                  getGenerationConfig: vi.fn(() => ({
+                    baseUrl: 'https://primary-endpoint.example.com/v1',
+                  })),
+                })),
+                // Image mode lists only rows with a resolvable image route.
+                resolveImageGenerationModel: vi.fn((selector: string) => ({
+                  model: selector,
+                  baseUrl: 'https://images.example.com/v1',
+                  apiKeyEnv: 'IMAGE_API_KEY',
+                })),
+                getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+                getUsageStatisticsEnabled: vi.fn(() => false),
+                getSessionId: vi.fn(() => 'session'),
+                getDebugMode: vi.fn(() => false),
+                getUseModelRouter: vi.fn(() => false),
+                getProxy: vi.fn(() => undefined),
+              } as unknown as Config
+            }
+          >
+            <ModelDialog
+              onClose={vi.fn()}
+              isFastModelMode={mode === 'fast'}
+              isCompactionModelMode={mode === 'compaction'}
+              isVisionModelMode={mode === 'vision'}
+              isImageModelMode={mode === 'image'}
+            />
+          </ConfigContext.Provider>
+        </SettingsContext.Provider>,
+      );
+
+      const items = mockedSelect.mock.calls[0][0].items;
+      const sameIdIndex = items.findIndex((item) =>
+        String(item.value).includes('shared-fast'),
+      );
+      expect(sameIdIndex).toBeGreaterThan(0);
+      expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(sameIdIndex);
+    },
+  );
+
   it('passes onHighlight to DescriptiveRadioButtonSelect', () => {
     renderComponent();
 
@@ -1254,8 +2039,8 @@ describe('<ModelDialog />', () => {
     expect(typeof childOnHighlight).toBe('function');
   });
 
-  it('calls onClose prop when "escape" key is pressed', () => {
-    const { props } = renderComponent();
+  it('reports the unchanged model when "escape" closes the primary picker', () => {
+    const { props, mockHistoryManager } = renderComponent();
 
     expect(mockedUseKeypress).toHaveBeenCalled();
 
@@ -1272,6 +2057,25 @@ describe('<ModelDialog />', () => {
       paste: false,
       sequence: '',
     });
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: `Kept model as ${DEFAULT_QWEN_MODEL}`,
+      },
+      expect.any(Number),
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+
+    // A second Escape byte in the same stdin chunk must not double-report.
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
     expect(props.onClose).toHaveBeenCalledTimes(1);
 
     keyPressHandler({
@@ -1282,6 +2086,376 @@ describe('<ModelDialog />', () => {
       paste: false,
       sequence: '',
     });
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('records dismissal feedback for resumed history', () => {
+    const recordSlashCommand = vi.fn();
+    const { mockHistoryManager } = renderComponent({}, {
+      getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'info', text: `Kept model as ${DEFAULT_QWEN_MODEL}` },
+      ],
+    });
+  });
+
+  it('does not close the primary picker on "left"', () => {
+    const { props, mockHistoryManager } = renderComponent();
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'left',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ isFastModelMode: true }, 'escape'],
+    [{ isVoiceModelMode: true }, 'escape'],
+    [{ isVisionModelMode: true }, 'escape'],
+    [{ isCompactionModelMode: true }, 'escape'],
+    [{ isImageModelMode: true }, 'escape'],
+    [{ isFastModelMode: true }, 'left'],
+    [{ isVoiceModelMode: true }, 'left'],
+    [{ isVisionModelMode: true }, 'left'],
+    [{ isCompactionModelMode: true }, 'left'],
+    [{ isImageModelMode: true }, 'left'],
+  ])(
+    'does not report the primary model when closing an auxiliary picker (%j, %s)',
+    (modeProps, keyName) => {
+      const { props, mockHistoryManager } = renderComponent(modeProps);
+
+      const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+      keyPressHandler({
+        name: keyName,
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+      });
+
+      expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('reports the active runtime model when closing the primary picker', () => {
+    const { mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'configured-model'),
+      getActiveRuntimeModelSnapshot: vi.fn(() => ({
+        id: '$runtime|qwen-oauth|runtime-model',
+        authType: AuthType.QWEN_OAUTH,
+        modelId: 'runtime-model',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      { type: 'info', text: 'Kept model as runtime-model' },
+      expect.any(Number),
+    );
+  });
+
+  it('does not report the unchanged model when a selection is made', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Kept model as'),
+      }),
+      expect.any(Number),
+    );
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('records successful model-switch feedback for resumed history', async () => {
+    const recordSlashCommand = vi.fn();
+    const { mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel: vi.fn().mockResolvedValue(undefined),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+      getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
+    } as unknown as Partial<Config>);
+
+    await act(async () => {
+      await mockedSelect.mock.calls[0][0].onSelect(
+        `${AuthType.USE_OPENAI}::gpt-4`,
+      );
+    });
+
+    const feedbackItem = vi.mocked(mockHistoryManager.addItem).mock.calls[0][0];
+    expect(feedbackItem.text).toContain('Using model: gpt-4');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [feedbackItem],
+    });
+  });
+
+  it('remains dismissible after a failed model switch', async () => {
+    const { props, mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel: vi.fn().mockRejectedValue(new Error('network down')),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    await act(async () => {
+      await mockedSelect.mock.calls[0][0].onSelect(
+        `${AuthType.USE_OPENAI}::gpt-4`,
+      );
+    });
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    mockedUseKeypress.mock.calls[0][0]({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      { type: 'info', text: 'Kept model as gpt-4' },
+      expect.any(Number),
+    );
+  });
+
+  it('ignores escape while a model selection is in flight', async () => {
+    let resolveSwitch: (() => void) | undefined;
+    const switchModel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+    const { props, mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const selection = mockedSelect.mock.calls[0][0].onSelect(
+      `${AuthType.USE_OPENAI}::gpt-4`,
+    );
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Kept model as'),
+      }),
+      expect.any(Number),
+    );
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    resolveSwitch?.();
+    await selection;
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a second selection while a model switch is in flight', async () => {
+    let resolveSwitch: (() => void) | undefined;
+    const switchModel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+    const { props, mockHistoryManager, recordSlashCommand } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'gpt-4'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            description: 'GPT-4 model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+        })),
+      } as unknown as Partial<Config>,
+    );
+
+    const onSelect = mockedSelect.mock.calls[0][0].onSelect;
+    const firstSelection = onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+    await onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+
+    expect(switchModel).toHaveBeenCalledTimes(1);
+
+    resolveSwitch?.();
+    await firstSelection;
+
+    expect(switchModel).toHaveBeenCalledTimes(1);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry or report an unchanged model after persistence fails', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const setValue = vi.fn(() => {
+      const error = new Error('settings are read-only');
+      Object.assign(error, { code: 'EACCES' });
+      throw error;
+    });
+    const { props, getByText, mockHistoryManager, recordSlashCommand } =
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'old-model'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          switchModel,
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'gpt-4',
+              label: 'GPT-4',
+              description: 'GPT-4 model',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-4',
+          })),
+        } as unknown as Partial<Config>,
+        { setValue },
+      );
+
+    const onSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await act(async () => {
+      await onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+    });
+
+    expect(
+      getByText((text) =>
+        text.includes('Model switched, but the selection could not be saved.'),
+      ),
+    ).toBeDefined();
+
+    await onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+    mockedUseKeypress.mock.calls[0][0]({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(switchModel).toHaveBeenCalledTimes(1);
+    expect(setValue).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -1365,10 +2539,13 @@ describe('<ModelDialog />', () => {
 });
 
 describe('encodeAuxModelSelector', () => {
-  it('encodes the "authType::modelId" key, dropping the baseUrl', () => {
+  it('encodes the "authType::modelId" key, keeping the baseUrl disambiguator', () => {
+    // Same-id endpoints under one authType are distinct registry entries; the
+    // persisted selector must carry the endpoint or resolution falls back to
+    // a first-match scan that can bind the wrong provider's key (#12760).
     expect(
       encodeAuxModelSelector('openai::gpt-4o\0https://api.example.com'),
-    ).toBe('openai:gpt-4o');
+    ).toBe('openai:gpt-4o\0https://api.example.com');
     expect(encodeAuxModelSelector('openai::gpt-4o')).toBe('openai:gpt-4o');
   });
 

@@ -1,4 +1,4 @@
-﻿# qwen-cua-driver uninstaller (Windows) — removes everything install.ps1
+﻿# cua-driver-rs uninstaller (Windows) — removes the runtime installed by install.ps1
 # laid down: the Scheduled Task autostart entry, running daemon
 # processes, the directory junctions wiring the visible bin dir back to
 # a per-version release dir, the entire package home tree, and any skill
@@ -24,13 +24,11 @@
 #     `qwen-cua-driver autostart enable` or install.ps1 -AutoStart)
 #   - Any running qwen-cua-driver.exe processes (so file handles don't pin
 #     the binary directory open during the delete pass)
-#   - <visibleBinDir>     = %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin  (directory junction)
-#   - <currentDir>        = %USERPROFILE%\.qwen-cua-driver\packages\current  (directory junction)
-#   - <packageHome>       = %USERPROFILE%\.qwen-cua-driver\                  (entire tree:
-#                                                                              releases, lockfile,
-#                                                                              telemetry id,
-#                                                                              install marker,
-#                                                                              version_check.json)
+#   - <visibleBinDir>     = %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin
+#   - <currentDir>        = %USERPROFILE%\.cua-driver\packages\current  (directory junction)
+#   - <packageHome>\packages and runtime artifacts. The pseudonymous telemetry
+#     id, preference, and registration markers are preserved unless purge is
+#     explicitly requested.
 #   - Skill junctions under:
 #       %USERPROFILE%\.claude\skills\cua-driver-rs
 #       %USERPROFILE%\.agents\skills\cua-driver-rs
@@ -41,15 +39,15 @@
 # Conservative on Claude MCP cleanup: we DON'T auto-edit %USERPROFILE%\
 # .claude.json on Windows (mirrors the macOS uninstall.sh's stance for
 # environments without python3). The closing message prints the
-# `claude mcp remove cua-driver-rs` command for the user to run.
+# `claude mcp remove qwen-cua-driver` command for the user to run.
 #
 # Env overrides (mirror install.ps1's variable names):
 #   $env:CUA_DRIVER_RS_INSTALL_DIR   visible bin dir to remove
 #                                    (default %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin;
-#                                     v0.2.13 and earlier used Programs\trycua\cua-driver-rs\bin
+#                                     earlier Qwen prereleases used qwen-cua-driver-rs\bin
 #                                     — that legacy path is always cleaned up too)
 #   $env:CUA_DRIVER_RS_HOME          package home to remove
-#                                    (default %USERPROFILE%\.qwen-cua-driver;
+#                                    (default %USERPROFILE%\.cua-driver;
 #                                     v0.2.13 and earlier used .cua-driver-rs —
 #                                     that legacy path is always cleaned up too)
 #
@@ -61,6 +59,10 @@
 #               working install. Inherited automatically by the elevated
 #               re-exec child (see Elevation below).
 #
+# Env (purge identity + preference):
+#   $env:CUA_DRIVER_RS_UNINSTALL_PURGE = '1'
+#               also delete the package home after removing the runtime.
+#
 # Elevation:
 #   `install.ps1 -AutoStart` (and `qwen-cua-driver autostart enable`) register
 #   the `qwen-cua-driver-serve` Scheduled Task at RunLevel=Highest — the
@@ -69,7 +71,7 @@
 #   autostart.rs:127). Side-effect: a non-elevated process (even the same
 #   user that installed it) can NOT terminate the daemon or delete the
 #   task — both fail with Access Denied, and the binary stays locked
-#   under ~\.qwen-cua-driver\... . If we detect either condition at startup
+#   under ~\.cua-driver\... . If we detect either condition at startup
 #   we self-elevate via UAC; otherwise we run in-place. Mirrors the
 #   install side's elevation pattern in autostart.rs:215-223.
 
@@ -85,6 +87,7 @@ $ProgressPreference = "SilentlyContinue"
 # Env var also inherits across the self-elevation re-exec automatically,
 # so we don't need to plumb -Force through -ArgumentList.
 $Force = [bool]$env:CUA_DRIVER_RS_UNINSTALL_FORCE
+$Purge = $env:CUA_DRIVER_RS_UNINSTALL_PURGE -match '^(1|true|yes|on)$'
 
 # ---------- Elevation pre-check -------------------------------------------
 
@@ -114,7 +117,7 @@ function Test-NeedsElevation {
 }
 
 if (-not (Test-IsElevated) -and (Test-NeedsElevation)) {
-    Write-Host "==> qwen-cua-driver uninstaller: detected -AutoStart install state" -ForegroundColor Cyan
+    Write-Host "==> cua-driver-rs uninstaller: detected -AutoStart install state" -ForegroundColor Cyan
     Write-Host "    (the 'qwen-cua-driver-serve' task is RunLevel=Highest and/or a daemon is"
     Write-Host "    running at High IL). Removing them needs admin — triggering UAC prompt."
 
@@ -129,7 +132,7 @@ if (-not (Test-IsElevated) -and (Test-NeedsElevation)) {
 
     $scriptPath = $MyInvocation.MyCommand.Path
     if (-not $scriptPath) {
-        $tmp = Join-Path $env:TEMP ("qwen-cua-driver-uninstall-" + [Guid]::NewGuid().ToString('N') + ".ps1")
+        $tmp = Join-Path $env:TEMP ("cua-driver-uninstall-" + [Guid]::NewGuid().ToString('N') + ".ps1")
         $body = $MyInvocation.MyCommand.Definition
         Set-Content -LiteralPath $tmp -Value $body -Encoding UTF8
         $scriptPath = $tmp
@@ -158,14 +161,14 @@ if ($env:CUA_DRIVER_RS_INSTALL_DIR) {
 
 # Legacy bin dir from v0.2.13 and earlier. We also clean these up so a
 # fresh uninstall after upgrading leaves nothing behind. Empty-vendor-dir
-# (Programs\trycua\) gets pruned if no other apps live under it.
-$LegacyVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\trycua\cua-driver-rs\bin"
-$LegacyVendorDir     = Join-Path $env:LOCALAPPDATA "Programs\trycua"
+# The legacy Qwen namespace is pruned if no other apps live under it.
+$LegacyVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver-rs\bin"
+$LegacyVendorDir     = Join-Path $env:LOCALAPPDATA "Programs\Qwen"
 
 if ($env:CUA_DRIVER_RS_HOME) {
     $HomeDir = $env:CUA_DRIVER_RS_HOME
 } else {
-    $HomeDir = Join-Path $env:USERPROFILE ".qwen-cua-driver"
+    $HomeDir = Join-Path $env:USERPROFILE ".cua-driver"
 }
 
 # Legacy package home from v0.2.13 and earlier.
@@ -224,6 +227,34 @@ function Test-IsReparsePoint([string]$path) {
         return $false
     }
     return (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
+function Test-IsQwenSkillReparsePoint([string]$path) {
+    if (-not (Test-IsReparsePoint $path)) { return $false }
+    try {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        $ownedRoots = @(
+            (Join-Path $HomeDir "skills"),
+            (Join-Path $LegacyHomeDir "skills")
+        ) | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') }
+        foreach ($target in @($item.Target)) {
+            if (-not $target) { continue }
+            $resolvedTarget = if ([System.IO.Path]::IsPathRooted($target)) {
+                [System.IO.Path]::GetFullPath($target)
+            } else {
+                [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $path) $target))
+            }
+            foreach ($root in $ownedRoots) {
+                if ($resolvedTarget.Equals($root, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $resolvedTarget.StartsWith("$root\", [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $true
+                }
+            }
+        }
+    } catch {
+        return $false
+    }
+    return $false
 }
 
 # ---------- Confirmation prompt -------------------------------------------
@@ -289,7 +320,7 @@ if ($taskExitCode -eq 0 -and $taskQuery) {
 }
 
 # 2. Running qwen-cua-driver.exe processes. The serve daemon and any active
-#    `qwen-cua-driver` invocation hold file handles to the binary, which
+#    `cua-driver` invocation hold file handles to the binary, which
 #    pin the directory junction's target open and make Remove-Item
 #    fail with "in use". Stop them up front so subsequent deletes
 #    aren't racy.
@@ -345,31 +376,48 @@ if (Test-Path -LiteralPath $CurrentDir) {
     }
 }
 
-# 5. Entire package home ($HomeDir). Contains releases\, lockfile,
-#    telemetry id, install marker, version_check.json, and the now-
-#    removed current\ junction.
+# 5. Package home. A normal uninstall removes runtime-owned payloads while
+#    preserving the pseudonymous installation id, persisted preference, and
+#    install/release markers. Purge is the explicit identity reset.
 if (Test-Path -LiteralPath $HomeDir) {
-    if (Confirm-Remove "package home tree $HomeDir (releases, lockfile, telemetry id, install marker)") {
-        # -Recurse -Force walks into every subdir and clears read-only
-        # bits. ErrorAction SilentlyContinue tolerates leftover handles
-        # (rare after step 2's process kill); we log a follow-up if
-        # anything survived.
-        Remove-Item -LiteralPath $HomeDir -Force -Recurse -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $HomeDir) {
-            Write-WarningStep "$HomeDir was not fully removed — some files may still be locked."
-            Write-WarningStep "  Close any open qwen-cua-driver processes / shells with cwd inside the tree and re-run."
+    $removalLabel = if ($Purge) {
+        "package home tree $HomeDir (including telemetry identity and preference)"
+    } else {
+        "runtime packages under $HomeDir (preserve telemetry identity and preference)"
+    }
+    if (Confirm-Remove $removalLabel) {
+        if ($Purge) {
+            Remove-Item -LiteralPath $HomeDir -Force -Recurse -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $HomeDir) {
+                Write-WarningStep "$HomeDir was not fully removed — some files may still be locked."
+                Write-WarningStep "  Close any open qwen-cua-driver processes / shells with cwd inside the tree and re-run."
+            } else {
+                Write-Step "purged $HomeDir (including telemetry identity and preference)"
+            }
         } else {
-            Write-Step "removed $HomeDir"
+            foreach ($runtimePath in @(
+                $PackagesDir,
+                (Join-Path $HomeDir "skills"),
+                (Join-Path $HomeDir ".tcc-signing-identity"),
+                (Join-Path $HomeDir "serve.out.log"),
+                (Join-Path $HomeDir "serve.err.log")
+            )) {
+                if (Test-Path -LiteralPath $runtimePath) {
+                    Remove-Item -LiteralPath $runtimePath -Force -Recurse -ErrorAction SilentlyContinue
+                }
+            }
+            Write-Step "removed runtime payloads from $HomeDir"
+            Write-Step "preserved telemetry identity, preference, and registration markers"
         }
     } else {
-        Write-Step "skipped $HomeDir (user declined)"
+        Write-Step "skipped package-home cleanup (user declined)"
     }
 } else {
     Write-Step "no package home at $HomeDir (skipping)"
 }
 
 # 6. Legacy install layout from v0.2.13 and earlier
-#    (`Programs\trycua\cua-driver-rs\` + `.cua-driver-rs\`). We always
+#    (`Programs\Qwen\qwen-cua-driver-rs\` + `.cua-driver-rs\`). We always
 #    sweep these so a fresh uninstall after upgrading via install.ps1
 #    leaves nothing behind. Skip silently when the legacy paths don't
 #    exist — common case post-v0.2.14.
@@ -388,29 +436,46 @@ if ((Test-Path -LiteralPath $legacyParent) -and -not (Get-ChildItem -LiteralPath
     Remove-Item -LiteralPath $legacyParent -Force -ErrorAction SilentlyContinue
     Write-Step "removed empty legacy parent $legacyParent"
 }
-# Empty trycua vendor dir
+# Empty Qwen vendor dir
 if ((Test-Path -LiteralPath $LegacyVendorDir) -and -not (Get-ChildItem -LiteralPath $LegacyVendorDir -Force -ErrorAction SilentlyContinue)) {
     Remove-Item -LiteralPath $LegacyVendorDir -Force -ErrorAction SilentlyContinue
     Write-Step "removed empty legacy vendor dir $LegacyVendorDir"
 }
-# Legacy package home
+# Legacy package home. Preserve telemetry state on a normal uninstall so a
+# future runtime can migrate the same pseudonymous identity to ~/.cua-driver.
 if (Test-Path -LiteralPath $LegacyHomeDir) {
-    Remove-Item -LiteralPath $LegacyHomeDir -Force -Recurse -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $LegacyHomeDir) {
-        Write-WarningStep "$LegacyHomeDir was not fully removed — some files may still be locked."
+    if ($Purge) {
+        Remove-Item -LiteralPath $LegacyHomeDir -Force -Recurse -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $LegacyHomeDir) {
+            Write-WarningStep "$LegacyHomeDir was not fully removed — some files may still be locked."
+        } else {
+            Write-Step "purged legacy package home $LegacyHomeDir"
+        }
     } else {
-        Write-Step "removed legacy package home $LegacyHomeDir"
+        foreach ($legacyRuntimePath in @(
+            (Join-Path $LegacyHomeDir "packages"),
+            (Join-Path $LegacyHomeDir "skills"),
+            (Join-Path $LegacyHomeDir ".tcc-signing-identity"),
+            (Join-Path $LegacyHomeDir "serve.out.log"),
+            (Join-Path $LegacyHomeDir "serve.err.log")
+        )) {
+            if (Test-Path -LiteralPath $legacyRuntimePath) {
+                Remove-Item -LiteralPath $legacyRuntimePath -Force -Recurse -ErrorAction SilentlyContinue
+            }
+        }
+        Write-Step "removed legacy runtime payloads and preserved legacy telemetry state"
     }
 }
 
-# 7. Skill junctions. Only remove reparse points — leave a real dir
-#    in place (a user with a hand-managed cua-driver-rs skill dir
-#    gets to keep it). Same defensive shape as Linux/macOS.
+# 7. Skill junctions. The public skill name is shared with upstream Cua,
+#    so remove only reparse points that target a Qwen-owned package home.
 foreach ($skillLink in $SkillJunctions) {
     if (Test-Path -LiteralPath $skillLink) {
-        if (Test-IsReparsePoint $skillLink) {
+        if (Test-IsQwenSkillReparsePoint $skillLink) {
             Remove-Item -LiteralPath $skillLink -Force -Recurse -ErrorAction SilentlyContinue
             Write-Step "removed skill junction $skillLink"
+        } elseif (Test-IsReparsePoint $skillLink) {
+            Write-Step "$skillLink targets a non-Qwen skill pack — skipping"
         } else {
             Write-Step "$skillLink is a real directory (not a reparse point) — skipping"
         }
@@ -422,17 +487,25 @@ foreach ($skillLink in $SkillJunctions) {
 # ---------- Closing message -----------------------------------------------
 
 Write-Host ""
-Write-Host "cua-driver-rs uninstalled." -ForegroundColor Green
+Write-Host "qwen-cua-driver uninstalled." -ForegroundColor Green
 Write-Host ""
+if (-not $Purge) {
+    Write-Host "Telemetry identity and preference were preserved for a future reinstall." -ForegroundColor Cyan
+    Write-Host "To delete them too, re-run with:"
+    Write-Host ""
+    Write-Host "  `$env:CUA_DRIVER_RS_UNINSTALL_PURGE = '1'"
+    Write-Host "  irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.ps1 | iex"
+    Write-Host ""
+}
 Write-Host "Claude Code MCP registrations:" -ForegroundColor Yellow
-Write-Host "  We don't auto-edit ~/.claude.json on Windows. If you registered cua-driver-rs"
+Write-Host "  We don't auto-edit ~/.claude.json on Windows. If you registered qwen-cua-driver"
 Write-Host "  with Claude Code, remove it manually:"
 Write-Host ""
-Write-Host "    claude mcp remove cua-driver-rs"
+Write-Host "    claude mcp remove qwen-cua-driver"
 Write-Host ""
 Write-Host "  Or edit ~/.claude.json directly and delete entries whose 'command' points at"
 Write-Host "  qwen-cua-driver.exe under %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin\"
-Write-Host "  (or the legacy %LOCALAPPDATA%\Programs\trycua\cua-driver-rs\bin\ from v0.2.13 and earlier)."
+Write-Host "  (or the legacy %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver-rs\bin\)."
 Write-Host ""
 Write-Host "PATH:"
 Write-Host "  If you added $VisibleBinDir to your User PATH after the install, remove it:"

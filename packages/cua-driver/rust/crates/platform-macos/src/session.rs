@@ -2,7 +2,7 @@
 //!
 //! AppKit's `+[NSApplication sharedApplication]` registers the process with
 //! the Window Server (`_RegisterApplication`). When the calling process has
-//! no graphic-session access — `cua-driver mcp` spawned as a stdio child from
+//! no graphic-session access — `qwen-cua-driver mcp` spawned as a stdio child from
 //! an SSH session, a `LaunchDaemon`, or a headless CI runner — that
 //! registration **aborts the whole process with SIGABRT** before any error
 //! reaches the caller (issue #1724).

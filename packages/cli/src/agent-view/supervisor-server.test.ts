@@ -68,6 +68,64 @@ describe('Agent View supervisor server', () => {
     }
   });
 
+  it('drains active operations before shutdown and rejects new mutations', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    let releaseDispatch = () => {};
+    const dispatchBlocked = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const handler = {
+      status: vi.fn(() => ({ state: 'ok' })),
+      list: vi.fn(() => []),
+      dispatch: vi.fn(async () => {
+        await dispatchBlocked;
+        return { sessionId: 'session-1' };
+      }),
+      send: vi.fn(() => ({ sent: true })),
+      workerControl: vi.fn(() => ({ events: [] })),
+      shutdown: vi.fn(() => ({ shuttingDown: true })),
+    };
+    const server = createAgentViewSupervisorServer(handler, {
+      socketPath,
+      authorizeSideband: () => true,
+    });
+
+    await server.listen();
+    try {
+      const dispatch = callAgentViewSupervisor(socketPath, 'dispatch', {
+        prompt: 'task',
+        cwd: dir,
+      });
+      await waitFor(() => handler.dispatch.mock.calls.length === 1);
+      const shutdown = callAgentViewSupervisor(socketPath, 'shutdown');
+      await Promise.resolve();
+      const repeatedShutdown = callAgentViewSupervisor(socketPath, 'shutdown');
+
+      await expect(
+        callAgentViewSupervisor(socketPath, 'send', {
+          sessionId: 'session-1',
+          text: 'next',
+        }),
+      ).rejects.toThrow('is shutting down');
+      await expect(
+        callAgentViewSupervisor(socketPath, 'workerControl', {
+          sessionId: 'session-1',
+          token: 'token-1',
+        }),
+      ).resolves.toEqual({ events: [] });
+      expect(handler.shutdown).not.toHaveBeenCalled();
+
+      releaseDispatch();
+      await expect(dispatch).resolves.toEqual({ sessionId: 'session-1' });
+      await expect(shutdown).resolves.toEqual({ shuttingDown: true });
+      await expect(repeatedShutdown).resolves.toEqual({ shuttingDown: true });
+      expect(handler.shutdown).toHaveBeenCalledOnce();
+    } finally {
+      await server.close();
+    }
+  });
+
   it('requires the supervisor auth token when configured', async () => {
     const { dir, socketPath } = await makeSocketPath();
     cleanupPaths.push(dir);

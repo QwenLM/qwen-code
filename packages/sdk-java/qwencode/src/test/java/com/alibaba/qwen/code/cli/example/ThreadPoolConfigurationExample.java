@@ -11,6 +11,12 @@ import java.util.concurrent.TimeUnit;
 
 public class ThreadPoolConfigurationExample {
     private static final Logger logger = LoggerFactory.getLogger(ThreadPoolConfigurationExample.class);
+    private static final ThreadPoolExecutor CUSTOM_EXECUTOR =
+            (ThreadPoolExecutor) Executors.newFixedThreadPool(20, runnable -> {
+                Thread thread = Executors.defaultThreadFactory().newThread(runnable);
+                thread.setDaemon(true);
+                return thread;
+            });
 
     public static void main(String[] args) {
         runModifyDefaultExample();
@@ -22,7 +28,7 @@ public class ThreadPoolConfigurationExample {
      */
     public static void runCustomSupplierExample() {
         // Set a custom thread pool supplier
-        ThreadPoolConfig.setExecutorSupplier(() -> (ThreadPoolExecutor) Executors.newFixedThreadPool(20));
+        ThreadPoolConfig.setExecutorSupplier(() -> CUSTOM_EXECUTOR);
         logger.info("Custom thread pool supplier set");
     }
 

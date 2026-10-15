@@ -23,10 +23,45 @@
  * httpAcpBridge.ts re-export shim.
  */
 
+import { RequestError } from '@agentclientprotocol/sdk';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
   'Not currently generating' as const;
+
+export interface AcpChildCapacity {
+  code: 'acp_child_capacity_exhausted';
+  maxConcurrentChildren: number;
+  committedAcpChildren: number;
+}
+
+export class AcpChildCapacityExceededError
+  extends Error
+  implements AcpChildCapacity
+{
+  override readonly name = 'AcpChildCapacityExceededError';
+  readonly code = 'acp_child_capacity_exhausted' as const;
+
+  constructor(
+    readonly maxConcurrentChildren: number,
+    readonly committedAcpChildren: number,
+  ) {
+    super(
+      'The service has reached its concurrent process limit. Try again later or cancel this operation.',
+    );
+  }
+}
+
+export class StandaloneSessionSpawnError extends Error {
+  override readonly name = 'StandaloneSessionSpawnError';
+
+  constructor(
+    readonly dispatched: boolean,
+    cause: unknown,
+  ) {
+    super('Daemon-owned standalone session creation failed', { cause });
+  }
+}
 
 /**
  * ACP idle-cancel compatibility contract.
@@ -57,9 +92,53 @@ function isNotCurrentlyGeneratingText(value: unknown): boolean {
 
 export class SessionNotFoundError extends Error {
   readonly sessionId: string;
-  constructor(sessionId: string, extra?: string) {
+  readonly code: 'session_not_found' | 'session_closing';
+  constructor(
+    sessionId: string,
+    extra?: string,
+    code: 'session_not_found' | 'session_closing' = 'session_not_found',
+  ) {
     super(`No session with id "${sessionId}"` + (extra ? `. ${extra}` : ''));
     this.name = 'SessionNotFoundError';
+    this.sessionId = sessionId;
+    this.code = code;
+  }
+}
+
+/**
+ * A caller-supplied session ID that a paired Bridge rejects before dispatch.
+ * Direct ACP callers still see invalid params (-32602); hosts map `errorKind`
+ * to 400 `invalid_session_id` or 409 `session_id_conflict`. An invalid ID is
+ * not echoed back.
+ */
+export class RequestedSessionIdRejectedError extends RequestError {
+  override readonly name = 'RequestedSessionIdRejectedError';
+
+  constructor(
+    readonly errorKind: 'invalid_session_id' | 'session_id_conflict',
+    readonly sessionId?: string,
+  ) {
+    super(
+      -32602,
+      errorKind === 'invalid_session_id'
+        ? 'Invalid params: Requested session ID is invalid'
+        : `Invalid params: Session ${sessionId} is already live`,
+      errorKind === 'invalid_session_id'
+        ? { errorKind }
+        : { errorKind, sessionId },
+    );
+  }
+}
+
+/** Managed sessions cannot be branched or forked into side tasks. */
+export class ManagedSessionBranchUnsupportedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} runs on the Managed execution engine, which does not support branching`,
+    );
+    this.name = 'ManagedSessionBranchUnsupportedError';
     this.sessionId = sessionId;
   }
 }
@@ -117,23 +196,66 @@ export class SessionArchivingError extends Error {
   }
 }
 
+/**
+ * Why a restore of this id is fenced.
+ *
+ * `restore_in_progress` is the ordinary case: a restore is running and the
+ * caller can retry shortly. `awaiting_abandoned_cleanup` means the public
+ * caller already received a timeout or registration failure, but registration
+ * or cleanup has not settled yet. Its conservative backoff is not an estimate
+ * of when cleanup will complete.
+ */
+export type RestoreInProgressReason =
+  | 'restore_in_progress'
+  | 'awaiting_abandoned_cleanup';
+
+/** Fallback retry hint, in seconds, for an ordinary in-flight restore. */
+export const RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * A session-id registration operation. `requestedAction` is the caller's
+ * operation; `activeAction` is the operation that already owns the id.
+ * `spawn` means a fresh `POST /session` carrying a caller-supplied id.
+ */
+export type RestoreBlockedAction = 'load' | 'resume' | 'spawn';
+
 export class RestoreInProgressError extends Error {
   readonly sessionId: string;
-  readonly activeAction: 'load' | 'resume';
-  readonly requestedAction: 'load' | 'resume';
+  readonly activeAction: RestoreBlockedAction;
+  readonly requestedAction: RestoreBlockedAction;
+  readonly reason: RestoreInProgressReason;
+  readonly retryAfterSeconds: number;
 
   constructor(
     sessionId: string,
-    activeAction: 'load' | 'resume',
-    requestedAction: 'load' | 'resume',
+    activeAction: RestoreBlockedAction,
+    requestedAction: RestoreBlockedAction,
+    opts?: {
+      reason?: RestoreInProgressReason;
+      retryAfterSeconds?: number;
+    },
   ) {
+    const reason = opts?.reason ?? 'restore_in_progress';
+    const retryTarget =
+      requestedAction === 'spawn' ? 'the spawn' : `session/${requestedAction}`;
+    const activeTarget =
+      activeAction === 'spawn'
+        ? 'a caller-supplied-id spawn'
+        : `session/${activeAction}`;
     super(
-      `Session "${sessionId}" is already being restored via session/${activeAction}; retry session/${requestedAction} after it completes`,
+      reason === 'awaiting_abandoned_cleanup'
+        ? `Session "${sessionId}" has an abandoned registration from ${activeTarget} whose cleanup has not settled yet; retry ${retryTarget} once cleanup completes`
+        : activeAction === 'spawn'
+          ? `Session "${sessionId}" is already being registered by ${activeTarget}; retry ${retryTarget} after it completes`
+          : `Session "${sessionId}" is already being restored via ${activeTarget}; retry ${retryTarget} after it completes`,
     );
     this.name = 'RestoreInProgressError';
     this.sessionId = sessionId;
     this.activeAction = activeAction;
     this.requestedAction = requestedAction;
+    this.reason = reason;
+    this.retryAfterSeconds =
+      opts?.retryAfterSeconds ?? RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS;
   }
 }
 
@@ -288,7 +410,7 @@ export class SessionShellDisabledError extends Error {
 
 /**
  * Thrown when a direct daemon shell command has no client id bound to the
- * addressed session. The bearer token authenticates the caller to the daemon;
+ * addressed session. Deployment policy authorizes the caller to the daemon;
  * this error means the caller has not proven ownership of the session.
  */
 export class SessionShellClientRequiredError extends Error {
@@ -563,10 +685,107 @@ export class SessionBusyError extends Error {
 export class WorkspaceDrainingError extends Error {
   readonly code = 'workspace_draining';
   readonly workspaceCwd: string;
-  constructor(workspaceCwd: string) {
+  override readonly cause: unknown;
+  constructor(workspaceCwd: string, cause?: unknown) {
     super(`Workspace ${JSON.stringify(workspaceCwd)} is being removed`);
     this.name = 'WorkspaceDrainingError';
     this.workspaceCwd = workspaceCwd;
+    this.cause = cause;
+  }
+}
+
+/**
+ * Why a channel is closed to new session work. Cleanup failures mean the
+ * child's state is unknown; settlement-overdue states mean the child still
+ * holds work the bridge can neither cancel nor account for. Existing sessions
+ * remain usable. Cleanup-failed states last until channel recycle;
+ * settlement-overdue states may clear when the abandoned request settles. On a
+ * paired Bridge any of them quarantines the channel: its sessions get no new
+ * work either, and the refusal lasts until the channel is gone, unless a late
+ * acknowledgement ends a workspace-change quarantine first.
+ */
+export type BridgeChannelUnavailableReason =
+  | 'restore_cleanup_failed'
+  | 'restore_settlement_overdue'
+  | 'new_session_cleanup_failed'
+  | 'new_session_settlement_overdue'
+  /**
+   * A paired Bridge terminated a quarantined channel but cannot confirm that
+   * its process tree is gone; the engine stays closed until it can, which may
+   * need an operator.
+   */
+  | 'channel_exit_unverified'
+  /**
+   * The channel of another engine did not acknowledge a session-affecting
+   * workspace change. A late acknowledgement of every missing change may end
+   * the quarantine before its drain deadline.
+   */
+  | 'workspace_change_unacknowledged';
+
+export class BridgeChannelQuarantinedError extends Error {
+  readonly reason: BridgeChannelUnavailableReason;
+  /**
+   * How long the caller should wait before retrying fresh session work. The
+   * operation-budget-derived hint avoids polling these longer-lived states at
+   * the ordinary 5-second cadence.
+   */
+  readonly retryAfterSeconds: number;
+
+  constructor(
+    reason: BridgeChannelUnavailableReason = 'restore_cleanup_failed',
+    retryAfterSeconds: number = RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS,
+    work: 'sessions' | 'prompts' = 'sessions',
+  ) {
+    super(
+      `The ACP channel is unavailable for new ${work} ` +
+        (reason === 'restore_settlement_overdue'
+          ? 'because an abandoned session restore did not settle in time'
+          : reason === 'new_session_settlement_overdue'
+            ? 'because an abandoned session initialization did not settle in time'
+            : reason === 'new_session_cleanup_failed'
+              ? 'while timed-out session initialization cleanup is pending'
+              : reason === 'channel_exit_unverified'
+                ? 'until its terminated process tree is confirmed gone; operator action may be required'
+                : reason === 'workspace_change_unacknowledged'
+                  ? 'because it did not acknowledge a workspace change'
+                  : 'while timed-out restore cleanup is pending'),
+    );
+    this.name = 'BridgeChannelQuarantinedError';
+    this.reason = reason;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/**
+ * Another live engine did not acknowledge a session-affecting workspace
+ * change, so its channel is quarantined. A change the workspace-control engine
+ * saved must still not be reported as applied.
+ */
+export class WorkspaceChangePartiallyAppliedError extends Error {
+  readonly revision: number;
+  readonly kind: string;
+  /** Channels that did not acknowledge the change. */
+  readonly unacknowledgedChannelIds: readonly string[];
+  /** The workspace-control engine's answer, when it applied the change. */
+  readonly result: unknown;
+
+  constructor(
+    revision: number,
+    kind: string,
+    unacknowledgedChannelIds: readonly string[],
+    result?: unknown,
+    /** The workspace-control engine's own failure, if it had one. */
+    cause?: unknown,
+  ) {
+    super(
+      `Workspace change ${revision} (${kind}) was not acknowledged by every live ACP channel`,
+    );
+    this.name = 'WorkspaceChangePartiallyAppliedError';
+    this.revision = revision;
+    this.kind = kind;
+    this.unacknowledgedChannelIds = unacknowledgedChannelIds;
+    this.result = result;
+    if (cause !== undefined) this.cause = cause;
   }
 }
 
@@ -599,5 +818,46 @@ export class CdWhilePromptActiveError extends Error {
     );
     this.name = 'CdWhilePromptActiveError';
     this.sessionId = sessionId;
+  }
+}
+
+/**
+ * Admission refusal for a session whose worktree ownership is being
+ * transferred to a replacement session (worktree reset). The daemon arms the
+ * barrier before the transfer's first side effect, so every prompt source and
+ * every other writer that could reach the session's checkout or cwd fails
+ * closed for its duration; the session id in the message is the superseded
+ * one.
+ */
+export class SessionResetPendingError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} is mid worktree reset; prompt admission is closed until the reset completes`,
+    );
+    this.name = 'SessionResetPendingError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class McpAuthenticationInProgressError extends Error {
+  constructor() {
+    super('Another MCP authentication is already in progress');
+    this.name = 'McpAuthenticationInProgressError';
+  }
+}
+
+export class WorkspaceRuntimeStopError extends Error {
+  constructor(
+    readonly code:
+      | 'workspace_runtime_stop_stale'
+      | 'workspace_runtime_stop_blocked',
+  ) {
+    super(
+      code === 'workspace_runtime_stop_stale'
+        ? 'The workspace changed. Refresh and confirm the affected sessions again.'
+        : 'The workspace cannot be stopped while other runtime work is pending.',
+    );
+    this.name = 'WorkspaceRuntimeStopError';
   }
 }

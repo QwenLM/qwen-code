@@ -14,13 +14,13 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { AgentEventType } from '@qwen-code/qwen-code-core/agents/runtime/agent-events.js';
+import type { AgentEventEmitter } from '@qwen-code/qwen-code-core/agents/runtime/agent-events.js';
+import type { AgentInteractive } from '@qwen-code/qwen-code-core/agents/runtime/agent-interactive.js';
 import {
   AgentStatus,
-  AgentEventType,
   isTerminalStatus,
-  type AgentInteractive,
-  type AgentEventEmitter,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
 import { StreamingState } from '../types.js';
 import { useTimer } from './useTimer.js';
 

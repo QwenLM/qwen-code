@@ -7,6 +7,7 @@
 import {
   useEffect,
   useId,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -18,12 +19,15 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
+  DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { workspaceLabel } from '../../utils/workspace';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Button } from '../ui/button';
 import {
@@ -35,6 +39,7 @@ import {
   DialogTitle,
 } from '../ui/dialog';
 import { Input } from '../ui/input';
+import { Textarea } from '../ui/textarea';
 import { Label } from '../ui/label';
 import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import {
@@ -51,10 +56,14 @@ import { ChannelPairingRequests } from './ChannelPairingRequests';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
-  hasDescriptorSenderPolicy,
+  defaultGroupSenders,
+  hasDescriptorGroupPolicy,
+  hasDescriptorPrivatePolicy,
+  configuredPrivatePolicy,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
   type ChannelEditorValidationCode,
+  type ChannelGroupSenders,
 } from './channel-editor-state';
 import { PLATFORM_MARKS } from './channel-platform';
 
@@ -72,23 +81,48 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     clientId: 'channels.editor.field.feishu.clientId',
     clientSecret: 'channels.editor.field.feishu.clientSecret',
   },
+  dws: {
+    privatePolicy: 'channels.editor.field.dws.privatePolicy',
+  },
   github: {
     token: 'channels.editor.field.github.token',
+    useLocalGh: 'channels.editor.field.github.useLocalGh',
     baseUrl: 'channels.editor.field.github.baseUrl',
     groupPolicy: 'channels.editor.field.github.groupPolicy',
-    senderPolicy: 'channels.editor.field.github.senderPolicy',
-    allowedUsers: 'channels.editor.field.github.allowedUsers',
     reasonFilter: 'channels.editor.field.github.reasonFilter',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',
     baseUrl: 'channels.editor.field.gitlab.baseUrl',
     groupPolicy: 'channels.editor.field.gitlab.groupPolicy',
-    senderPolicy: 'channels.editor.field.gitlab.senderPolicy',
-    allowedUsers: 'channels.editor.field.gitlab.allowedUsers',
     action_prompt_template:
       'channels.editor.field.gitlab.action_prompt_template',
   },
+};
+
+const SHARED_ACCESS_FIELD_KEYS = new Set([
+  'privatePolicy',
+  'allowedUsers',
+  'groupPolicy',
+  'operators',
+]);
+const GROUP_SENDERS_OPTIONS = ['open', 'allowlist'] as const;
+const SHARED_SESSION_FIELD_KEYS = new Set([
+  'outputMode',
+  'sessionScope',
+  'multiSession',
+  'instructions',
+]);
+
+const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
+  outputMode: 'channels.editor.field.shared.outputMode',
+  privatePolicy: 'channels.editor.field.shared.privatePolicy',
+  allowedUsers: 'channels.editor.field.shared.allowedUsers',
+  groupPolicy: 'channels.editor.field.shared.groupPolicy',
+  operators: 'channels.editor.field.shared.operators',
+  sessionScope: 'channels.editor.field.shared.sessionScope',
+  multiSession: 'channels.editor.field.shared.multiSession',
+  instructions: 'channels.editor.field.shared.instructions',
 };
 
 export interface ChannelEditorDialogProps {
@@ -97,6 +131,10 @@ export interface ChannelEditorDialogProps {
   instance?: DaemonChannelInstanceSnapshot;
   expectedRevision: string;
   existingNames: readonly string[];
+  workspaces: readonly DaemonWorkspaceCapability[];
+  workspaceCwd: string;
+  workspaceLoading?: boolean;
+  onWorkspaceChange: (workspaceCwd: string) => void;
   onOpenChange: (open: boolean) => void;
   onSave: (
     name: string,
@@ -115,7 +153,7 @@ export interface ChannelEditorDialogProps {
   ) => Promise<DaemonChannelPairingApprovalsSnapshot>;
   revokePairingApproval: (
     name: string,
-    senderId: string,
+    request: DaemonChannelPairingRevocationRequest,
   ) => Promise<DaemonChannelPairingRevocationResult>;
 }
 
@@ -179,6 +217,10 @@ export function ChannelEditorDialog({
   instance,
   expectedRevision,
   existingNames,
+  workspaces,
+  workspaceCwd,
+  workspaceLoading = false,
+  onWorkspaceChange,
   onOpenChange,
   onSave,
   onReload,
@@ -196,21 +238,57 @@ export function ChannelEditorDialog({
   const [submitError, setSubmitError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const dismissedRef = useRef(false);
+  const accessFields = descriptor.fields.filter((field) =>
+    SHARED_ACCESS_FIELD_KEYS.has(field.key),
+  );
+  const sessionFields = descriptor.fields.filter((field) =>
+    SHARED_SESSION_FIELD_KEYS.has(field.key),
+  );
+  const sessionScopeField = sessionFields.find(
+    (field) => field.key === 'sessionScope' && field.kind === 'enum',
+  );
+  const sessionScopeOptions = (sessionScopeField?.options ?? []).filter(
+    (option) =>
+      option.value !== 'thread' ||
+      instance?.config.sessionScope === 'thread' ||
+      (instance !== undefined &&
+        instance.config.sessionScope === undefined &&
+        sessionScopeField?.default === 'thread'),
+  );
+  const remainingSessionFields = sessionFields.filter(
+    (field) => field !== sessionScopeField,
+  );
+  const credentialFields = descriptor.fields.filter(
+    (field) =>
+      !SHARED_ACCESS_FIELD_KEYS.has(field.key) &&
+      !SHARED_SESSION_FIELD_KEYS.has(field.key),
+  );
 
   useEffect(() => {
     if (!open) return;
+    dismissedRef.current = false;
     setDraft(createChannelEditorDraft(descriptor, instance));
     setErrors({});
     setSubmitError(undefined);
   }, [descriptor, instance, open]);
 
+  useEffect(() => {
+    setErrors({});
+    setSubmitError(undefined);
+  }, [workspaceCwd]);
+
   const fieldLabel = (field: DaemonChannelConfigFieldDescriptor) => {
-    const key = FIELD_LABEL_KEYS[descriptor.type]?.[field.key];
+    const key =
+      FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ??
+      SHARED_FIELD_LABEL_KEYS[field.key];
     return key ? t(key) : field.label;
   };
 
   const fieldDescription = (field: DaemonChannelConfigFieldDescriptor) => {
-    const labelKey = FIELD_LABEL_KEYS[descriptor.type]?.[field.key];
+    const labelKey =
+      FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ??
+      SHARED_FIELD_LABEL_KEYS[field.key];
     if (labelKey) {
       const descKey = `${labelKey}.description`;
       const translated = t(descKey);
@@ -219,15 +297,42 @@ export function ChannelEditorDialog({
     return field.description;
   };
 
+  const fieldOptionLabel = (
+    field: DaemonChannelConfigFieldDescriptor,
+    value: string,
+    fallback: string,
+  ) => {
+    const labelKeys = [
+      FIELD_LABEL_KEYS[descriptor.type]?.[field.key],
+      SHARED_FIELD_LABEL_KEYS[field.key],
+    ].filter((key): key is string => Boolean(key));
+    for (const labelKey of labelKeys) {
+      const optionKey = `${labelKey}.option.${value}`;
+      const translated = t(optionKey);
+      if (translated !== optionKey) return translated;
+    }
+    return fallback;
+  };
+
   const validationMessage = (
     field: DaemonChannelConfigFieldDescriptor | undefined,
     code: ChannelEditorValidationCode,
   ) => {
     if (code === 'duplicate') return t('channels.editor.validation.duplicate');
+    if (code === 'credential')
+      return t('channels.editor.validation.credential');
     if (code === 'invalid') return t('channels.editor.validation.invalidName');
+    if (code === 'invalidGroupId')
+      return t('channels.editor.validation.invalidGroupId');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
+    if (code === 'outOfRange') {
+      return t('channels.editor.validation.outOfRange', {
+        min:
+          field && field.kind === 'number' ? (field.exclusiveMinimum ?? 0) : 0,
+      });
+    }
     if (code === 'policy') return t('channels.editor.validation.policy');
     return t('channels.editor.validation.required', {
       label: field ? fieldLabel(field) : t('channels.editor.instanceName'),
@@ -267,7 +372,7 @@ export function ChannelEditorDialog({
           instance,
         ),
       );
-      onOpenChange(false);
+      if (!dismissedRef.current) onOpenChange(false);
     } catch (error) {
       setSubmitError(extractErrorDetail(error));
     } finally {
@@ -383,6 +488,7 @@ export function ChannelEditorDialog({
   };
 
   const renderField = (field: DaemonChannelConfigFieldDescriptor) => {
+    if (field.kind === 'object') return null;
     if (field.kind === 'secret') return renderSecret(field);
     const id = `${formId}-${field.key}`;
     const value = draft.values[field.key];
@@ -390,7 +496,13 @@ export function ChannelEditorDialog({
     const update = (next: string | boolean) =>
       setDraft((current) => ({
         ...current,
-        values: { ...current.values, [field.key]: next },
+        values: {
+          ...current.values,
+          [field.key]: next,
+          ...(field.key === 'multiSession' && next === true
+            ? { sessionScope: 'user' }
+            : {}),
+        },
       }));
     if (field.kind === 'boolean') {
       return (
@@ -432,7 +544,7 @@ export function ChannelEditorDialog({
             <SelectContent>
               {field.options?.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
-                  {option.label}
+                  {fieldOptionLabel(field, option.value, option.label)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -493,6 +605,26 @@ export function ChannelEditorDialog({
         </FieldShell>
       );
     }
+    if (field.kind === 'string' && field.multiline) {
+      return (
+        <FieldShell
+          key={field.key}
+          id={id}
+          label={fieldLabel(field)}
+          required={field.required}
+          description={fieldDescription(field)}
+          error={error}
+        >
+          <Textarea
+            id={id}
+            value={String(value ?? '')}
+            aria-invalid={Boolean(error)}
+            aria-required={field.required}
+            onChange={(event) => update(event.target.value)}
+          />
+        </FieldShell>
+      );
+    }
     return (
       <FieldShell
         key={field.key}
@@ -520,7 +652,13 @@ export function ChannelEditorDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) dismissedRef.current = true;
+        onOpenChange(nextOpen);
+      }}
+    >
       <DialogContent className="max-w-[calc(100%-2rem)] p-5 sm:max-w-xl">
         <DialogHeader>
           <div className={styles.platformHeader}>
@@ -594,49 +732,199 @@ export function ChannelEditorDialog({
                   }
                 />
               </FieldShell>
+              <FieldShell
+                id={`${formId}-workspace`}
+                label={t('channels.editor.workspace')}
+                required
+                description={t(
+                  instance
+                    ? 'channels.editor.workspace.lockedDescription'
+                    : 'channels.editor.workspace.description',
+                )}
+              >
+                <Select
+                  value={workspaceCwd}
+                  disabled={Boolean(instance) || workspaceLoading || saving}
+                  onValueChange={onWorkspaceChange}
+                >
+                  <SelectTrigger
+                    id={`${formId}-workspace`}
+                    className="w-full"
+                    aria-required
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {workspaces.map((entry) => (
+                      <SelectItem
+                        key={entry.id}
+                        value={entry.cwd}
+                        disabled={!entry.trusted}
+                      >
+                        {workspaceLabel(entry)}
+                        {entry.primary
+                          ? ` · ${t('channels.workspace.primary')}`
+                          : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FieldShell>
             </section>
 
             <section className={styles.section}>
               <h3 className={styles.sectionHeading}>
                 {t('channels.editor.section.credentials')}
               </h3>
-              {descriptor.fields.map(renderField)}
+              {credentialFields.map(renderField)}
             </section>
 
+            {sessionFields.length > 0 ? (
+              <section className={styles.settingsPanel}>
+                <h3 className={styles.settingsPanelTitle}>
+                  {t('channels.editor.section.session')}
+                </h3>
+                {sessionScopeField ? (
+                  <div className={styles.sessionScopeField}>
+                    <span className={styles.sessionScopeLabel}>
+                      {t('channels.editor.session.isolation')}
+                    </span>
+                    <RadioGroup
+                      className={styles.sessionScopeControl}
+                      value={String(draft.values[sessionScopeField.key] ?? '')}
+                      aria-label={t('channels.editor.session.isolation')}
+                      aria-invalid={Boolean(errors[sessionScopeField.key])}
+                      aria-required={sessionScopeField.required}
+                      onValueChange={(value) =>
+                        setDraft((current) => ({
+                          ...current,
+                          values: {
+                            ...current.values,
+                            [sessionScopeField.key]: value,
+                          },
+                        }))
+                      }
+                    >
+                      {sessionScopeOptions.map((option) => (
+                        <Label
+                          key={option.value}
+                          htmlFor={`${formId}-${sessionScopeField.key}-${option.value}`}
+                          className={styles.sessionScopeOption}
+                          data-selected={
+                            draft.values[sessionScopeField.key] === option.value
+                          }
+                        >
+                          <RadioGroupItem
+                            id={`${formId}-${sessionScopeField.key}-${option.value}`}
+                            className={styles.sessionScopeRadio}
+                            value={option.value}
+                          />
+                          <span>
+                            {fieldOptionLabel(
+                              sessionScopeField,
+                              option.value,
+                              option.label,
+                            )}
+                          </span>
+                        </Label>
+                      ))}
+                    </RadioGroup>
+                    <p
+                      className={styles.sessionScopeDescription}
+                      aria-live="polite"
+                    >
+                      {t(
+                        `channels.editor.field.shared.sessionScope.detail.${String(
+                          draft.values[sessionScopeField.key] ?? 'user',
+                        )}`,
+                      )}
+                    </p>
+                    {errors[sessionScopeField.key] ? (
+                      <p role="alert" className="text-xs text-destructive">
+                        {errors[sessionScopeField.key]}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {remainingSessionFields.map(renderField)}
+              </section>
+            ) : null}
+
             {(() => {
-              const descriptorPolicy = hasDescriptorSenderPolicy(descriptor);
+              const descriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
               const effectivePolicy = descriptorPolicy
-                ? String(draft.values['senderPolicy'] ?? '')
-                : draft.senderPolicy;
+                ? String(draft.values['privatePolicy'] ?? '')
+                : draft.privatePolicy;
               const showRadioGroup = !descriptorPolicy;
-              const showPairing = effectivePolicy === 'pairing';
-              if (!showRadioGroup && !showPairing) return null;
+              const descriptorGroupPolicy =
+                hasDescriptorGroupPolicy(descriptor);
+              const effectiveGroupPolicy = descriptorGroupPolicy
+                ? String(draft.values['groupPolicy'] ?? '')
+                : String(instance?.config.groupPolicy ?? '');
+              const showPairing =
+                effectivePolicy === 'pairing' ||
+                effectiveGroupPolicy === 'pairing';
+              const visibleAccessFields = accessFields.filter(
+                (field) =>
+                  field.key !== 'operators' &&
+                  (field.key !== 'allowedUsers' ||
+                    effectivePolicy === 'allowlist' ||
+                    effectivePolicy === 'pairing'),
+              );
+              const operatorsField = accessFields.find(
+                (field) => field.key === 'operators',
+              );
+              const showGroupSenders =
+                descriptorGroupPolicy &&
+                effectiveGroupPolicy !== '' &&
+                effectiveGroupPolicy !== 'disabled';
+              const effectiveGroupSenders =
+                draft.groupSenders || defaultGroupSenders();
+              if (
+                !showRadioGroup &&
+                visibleAccessFields.length === 0 &&
+                !showGroupSenders &&
+                !operatorsField &&
+                !showPairing
+              ) {
+                return null;
+              }
               return (
-                <section className={styles.section}>
-                  <h3 className={styles.sectionHeading}>
-                    {t('channels.editor.section.access')}
-                  </h3>
+                <section className={styles.settingsPanel}>
+                  <div className={styles.settingsPanelHeader}>
+                    <h3 className={styles.settingsPanelTitle}>
+                      {t('channels.editor.section.access')}
+                    </h3>
+                    <p className={styles.settingsPanelDescription}>
+                      {t('channels.editor.section.access.description')}
+                    </p>
+                  </div>
                   {showRadioGroup ? (
                     <>
                       <RadioGroup
                         className={styles.policyGrid}
-                        value={draft.senderPolicy}
-                        aria-invalid={Boolean(errors['senderPolicy'])}
+                        value={draft.privatePolicy}
+                        aria-invalid={Boolean(errors['privatePolicy'])}
                         onValueChange={(value) =>
                           setDraft((current) => ({
                             ...current,
-                            senderPolicy:
-                              value === 'pairing' || value === 'open'
+                            privatePolicy:
+                              value === 'disabled' ||
+                              value === 'allowlist' ||
+                              value === 'pairing' ||
+                              value === 'open'
                                 ? value
                                 : '',
                           }))
                         }
                       >
-                        {(['pairing', 'open'] as const).map((policy) => (
+                        {(
+                          ['disabled', 'allowlist', 'pairing', 'open'] as const
+                        ).map((policy) => (
                           <Label
                             key={policy}
                             className={styles.policyCard}
-                            data-selected={draft.senderPolicy === policy}
+                            data-selected={draft.privatePolicy === policy}
                           >
                             <RadioGroupItem value={policy} />
                             <span className={styles.policyCopy}>
@@ -652,15 +940,104 @@ export function ChannelEditorDialog({
                           </Label>
                         ))}
                       </RadioGroup>
-                      {errors['senderPolicy'] ? (
+                      {errors['privatePolicy'] ? (
                         <p role="alert" className="text-xs text-destructive">
-                          {errors['senderPolicy']}
+                          {errors['privatePolicy']}
                         </p>
                       ) : null}
                     </>
                   ) : null}
+                  {visibleAccessFields.map(renderField)}
+                  {effectiveGroupPolicy === 'allowlist' ? (
+                    <FieldShell
+                      id={`${formId}-allowedGroupIds`}
+                      label={t('channels.editor.field.shared.allowedGroupIds')}
+                      description={t(
+                        'channels.editor.field.shared.allowedGroupIds.description',
+                      )}
+                      error={errors['allowedGroupIds']}
+                    >
+                      <Input
+                        id={`${formId}-allowedGroupIds`}
+                        value={draft.allowedGroupIds}
+                        aria-invalid={Boolean(errors['allowedGroupIds'])}
+                        placeholder={t(
+                          'channels.editor.field.shared.allowedGroupIds.placeholder',
+                        )}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            allowedGroupIds: event.target.value,
+                          }))
+                        }
+                      />
+                    </FieldShell>
+                  ) : null}
+                  {showGroupSenders ? (
+                    <FieldShell
+                      id={`${formId}-groupSenders`}
+                      label={t('channels.editor.field.shared.groupSenders')}
+                      description={t(
+                        'channels.editor.field.shared.groupSenders.description',
+                      )}
+                    >
+                      <Select
+                        value={effectiveGroupSenders}
+                        onValueChange={(value) =>
+                          setDraft((current) => ({
+                            ...current,
+                            groupSenders: value as ChannelGroupSenders,
+                          }))
+                        }
+                      >
+                        <SelectTrigger
+                          id={`${formId}-groupSenders`}
+                          className="w-full"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {GROUP_SENDERS_OPTIONS.map((option) => (
+                            <SelectItem key={option} value={option}>
+                              {t(
+                                `channels.editor.field.shared.groupSenders.option.${option}`,
+                              )}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FieldShell>
+                  ) : null}
+                  {showGroupSenders && effectiveGroupSenders === 'allowlist' ? (
+                    <FieldShell
+                      id={`${formId}-groupAllowedUsers`}
+                      label={t(
+                        'channels.editor.field.shared.groupAllowedUsers',
+                      )}
+                      description={t(
+                        'channels.editor.field.shared.groupAllowedUsers.description',
+                      )}
+                    >
+                      <Input
+                        id={`${formId}-groupAllowedUsers`}
+                        value={draft.groupAllowedUsers}
+                        placeholder={t(
+                          'channels.editor.field.shared.groupAllowedUsers.placeholder',
+                        )}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            groupAllowedUsers: event.target.value,
+                          }))
+                        }
+                      />
+                    </FieldShell>
+                  ) : null}
+                  {operatorsField ? renderField(operatorsField) : null}
                   {showPairing ? (
-                    instance?.config.senderPolicy === 'pairing' ? (
+                    (instance &&
+                      configuredPrivatePolicy(instance) === 'pairing') ||
+                    instance?.config.groupPolicy === 'pairing' ? (
                       <ChannelPairingRequests
                         channelName={instance.name}
                         listRequests={listPairingRequests}
@@ -689,11 +1066,19 @@ export function ChannelEditorDialog({
             <Button
               type="button"
               variant="outline"
-              onClick={() => onOpenChange(false)}
+              onClick={() => {
+                dismissedRef.current = true;
+                onOpenChange(false);
+              }}
             >
               {t('channels.editor.cancel')}
             </Button>
-            <Button type="submit" disabled={saving || reloading}>
+            <Button
+              type="submit"
+              disabled={
+                saving || reloading || workspaceLoading || !expectedRevision
+              }
+            >
               {saving ? <Spinner /> : null}
               {t('channels.editor.save')}
             </Button>

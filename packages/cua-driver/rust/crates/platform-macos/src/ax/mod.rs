@@ -16,9 +16,22 @@
 //! - Non-indexed (no actions, not interesting): `- AXRole = "value"`
 //! - 2-space indent per depth level
 
+pub(crate) mod app_text;
 pub mod bindings;
-pub mod tree;
 pub mod cache;
+pub(crate) mod dialogs;
+pub mod enablement;
+pub mod exact_target;
+pub(crate) mod menu;
+mod placeholder;
+pub(crate) mod projection;
+pub mod revision;
+pub mod sheets;
+pub mod tree;
+pub mod window_scope;
 
-pub use tree::{walk_tree, walk_tree_bounded, AXNode, TreeWalkResult, DEFAULT_MAX_ELEMENTS, DEFAULT_MAX_DEPTH};
 pub use cache::ElementCache;
+pub use tree::{
+    walk_tree, walk_tree_bounded, AXNode, TreeWalkResult, DEFAULT_MAX_DEPTH, DEFAULT_MAX_ELEMENTS,
+};
+pub use window_scope::WindowScope;

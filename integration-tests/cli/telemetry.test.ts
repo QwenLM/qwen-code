@@ -10,7 +10,7 @@ import { TestRig } from '../test-helper.js';
 describe('telemetry', () => {
   it('should emit a metric and a log event', async () => {
     const rig = new TestRig();
-    rig.setup('should emit a metric and a log event');
+    await rig.setup('should emit a metric and a log event');
 
     // Run a simple command that should trigger telemetry
     await rig.run('just saying hi');

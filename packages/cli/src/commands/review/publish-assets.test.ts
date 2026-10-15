@@ -24,14 +24,18 @@ const ghWithInputMock = vi.hoisted(() =>
 const ghWithInputPlainMock = vi.hoisted(() =>
   vi.fn((_input: string, ..._rest: string[]) => ''),
 );
-vi.mock('./lib/gh.js', () => ({
-  gh: ghMock,
-  // Two DISTINCT mocks: aliasing them hid which function a write actually
-  // used, and the retry-vs-not split is the point of having two.
-  ghWithInput: ghWithInputPlainMock,
-  ghWithInputRetried: ghWithInputMock,
-  setGhHost: setGhHostMock,
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghMock,
+    // Two DISTINCT mocks: aliasing them hid which function a write actually
+    // used, and the retry-vs-not split is the point of having two.
+    ghWithInput: ghWithInputPlainMock,
+    ghWithInputRetried: ghWithInputMock,
+    setGhHost: setGhHostMock,
+  };
+});
 
 const setGhHostMock = vi.hoisted(() => vi.fn((_h: string) => {}));
 
@@ -42,7 +46,44 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: stderrSpy,
 }));
 
-const { runPublishAssets } = await import('./publish-assets.js');
+// The handler resolves `review.comment` through `operatorReviewSettings` —
+// pin the view it reads so the wiring leg below does not depend on the
+// running developer's settings.json. The direct refusal assertions call
+// runPublishAssets and never touch this mock; the handler-path tests below
+// do.
+const reviewSettingsMock = vi.hoisted(() =>
+  vi.fn((): Record<string, unknown> => ({})),
+);
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    // The production call carries `{ skipWorkspaceSettings: true }` — the
+    // authorisation default resolves from operator scopes only. A caller that
+    // forgets the flag reads the workspace-polluted view instead; the guards
+    // that redden are submit.test.ts's handler-level refusal test,
+    // review-settings.test.ts's direct assertion, and this file's
+    // handler-level refusal test. The direct runPublishAssets refusals
+    // bypass the handler.
+    loadSettings: vi.fn((...callArgs: unknown[]) => {
+      const opts = callArgs[1] as
+        | { skipWorkspaceSettings?: boolean }
+        | undefined;
+      return {
+        merged: {
+          review: opts?.skipWorkspaceSettings
+            ? reviewSettingsMock()
+            : { attribution: false, comment: true, effort: 'low' },
+        },
+      };
+    }),
+  };
+});
+
+const { runPublishAssets, publishAssetsCommand } = await import(
+  './publish-assets.js'
+);
 
 // A 1x1 PNG, enough bytes to be a plausible file and stable to hash.
 const PNG = Buffer.from(
@@ -73,6 +114,7 @@ describe('publish-assets', () => {
     // dogfooding session's exported value must not leak into URL assertions.
     savedGhHostMain = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     // mockReset, not mockClear: a sibling block's persistent
@@ -124,6 +166,25 @@ describe('publish-assets', () => {
     } as never);
   }
 
+  // The handler-path counterpart of run(): every handler-level leg calls
+  // this, so the yargs-facing argument shape lives in exactly one place and
+  // a one-leg-only edit (a renamed key silenced by the `as never` cast) is
+  // structurally impossible.
+  async function runHandler(
+    overrides: Record<string, unknown> = {},
+  ): Promise<void> {
+    await publishAssetsCommand.handler?.({
+      _: [],
+      $0: 'qwen',
+      pr: 8346,
+      files: [pngFile('a.png')],
+      out: join(dir, 'manifest.json'),
+      'user-authorized': false,
+      'skill-args': argsFile,
+      ...overrides,
+    } as never);
+  }
+
   it('refuses without a designated repo — exit 3, nothing written', () => {
     delete process.env['QWEN_REVIEW_ASSETS_REPO'];
     run({ files: [pngFile('a.png')] });
@@ -143,6 +204,27 @@ describe('publish-assets', () => {
     expect(why).toContain('not authorised');
   });
 
+  it('refuses an all-whitespace --host — the write must not retarget (exit 3)', () => {
+    // The round-6 Critical: a whitespace-only --host resolves to '' (falsy),
+    // which would skip the routing setGhHost and silently write to the
+    // env/default host while authorisation bound another. The raw-flag
+    // validation must refuse it before any gh call. setGhHost's documented
+    // TypeError fires for the whitespace value (mocked here as in the
+    // malformed-GH_HOST test).
+    setGhHostMock.mockImplementationOnce(() => {
+      throw new TypeError('--host must be a hostname');
+    });
+    run({ files: [pngFile('a.png')], host: ' ' });
+    expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('(from --host)');
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
   it('binds authorisation to the target PR, not to a mood', () => {
     writeFileSync(argsFile, '999 --comment\n');
     run({ files: [pngFile('a.png')] });
@@ -156,6 +238,46 @@ describe('publish-assets', () => {
     run({ files: [pngFile('a.png')], userAuthorized: true });
     expect(process.exitCode).toBeUndefined();
     expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('the standing review.comment setting authorises publishing without --comment', () => {
+    // The two callers of the shared gate must agree on what authorises a
+    // run: submit accepts the setting, so publish-assets must too — or a
+    // run that posts the review still refuses to publish its evidence.
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    happyGh();
+    run({ files: [pngFile('a.png')], defaultComment: true });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('wires the standing review.comment setting through the handler', async () => {
+    // Wiring leg: dropping `defaultComment` from the handler call leaves the
+    // direct runPublishAssets test green while production refuses. The
+    // workspace-polluted mock stands guard on the scope flag at the same
+    // time — it answers a flag-less call with comment:true.
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    reviewSettingsMock.mockReturnValue({ comment: true });
+    happyGh();
+    await runHandler({ files: [pngFile('wired.png')] });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('the handler refuses when neither flag nor setting authorises — the polluted view must not decide', async () => {
+    // The refusal counterpart of the wiring leg above: setting off, no
+    // `--comment` in the recorded arguments. If the handler's loadSettings
+    // call drops `skipWorkspaceSettings`, the workspace-polluted mock view
+    // answers comment:true and this refusal becomes a publish — the exact
+    // regression review-settings.ts documents (a repository-controlled
+    // .qwen/settings.json deciding to publish for every reviewer).
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    reviewSettingsMock.mockReturnValue({}); // setting off
+    happyGh();
+    await runHandler({ files: [pngFile('refused.png')] });
+    expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('publishes, writes a manifest with commit-pinned URLs', () => {
@@ -290,6 +412,67 @@ describe('publish-assets', () => {
     );
   });
 
+  it('refuses bytes that are not the image their name claims — exit 3, nothing pushed', () => {
+    // The extension allowlist is only as strong as the bytes behind it: a
+    // shell script named evidence.png must refuse on CONTENT, before any
+    // upload happens.
+    happyGh();
+    const impostor = join(dir, 'evidence.png');
+    writeFileSync(impostor, '#!/bin/sh\necho pwned\n');
+    run({ files: [impostor] });
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('not a recognized image');
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
+  it('refuses the whole batch when one file fails the CONTENT ruling', () => {
+    // The extension gate has its two-file twin above; the content gate needs
+    // the same shape, or a future edit that ruled content for only the first
+    // prepared file would publish an impostor riding behind a good file.
+    happyGh();
+    const good = join(dir, 'a.png');
+    writeFileSync(
+      good,
+      Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    const impostor = join(dir, 'impostor.png');
+    writeFileSync(impostor, '#!/bin/sh\n');
+    run({ files: [good, impostor] });
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    // The full path names the file exactly once — the validator's reason
+    // carries no basename of its own, so there is no stuttered duplicate,
+    // and two same-named files from different directories stay tellable
+    // apart.
+    expect(why).toContain(`${JSON.stringify(impostor)}: content is`);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
+  it('publishes a webp whose bytes match — the slice covers the WEBP signature', () => {
+    // The content ruling sniffs a 16-byte slice, and WEBP's signature runs
+    // to its fourcc at bytes 12-15: a slice shorter than 16 would
+    // false-refuse every real WEBP at publish time while the unit tests
+    // (full headers) stayed green.
+    happyGh();
+    const shot = join(dir, 'shot.webp');
+    writeFileSync(
+      shot,
+      Uint8Array.from(
+        [...'RIFF\u0000\u0000\u0000\u0000WEBPVP8 '].map((c) => c.charCodeAt(0)),
+      ),
+    );
+    run({ files: [shot] });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
   it('refuses an unreadable file the same way', () => {
     run({ files: [join(dir, 'absent.png')] });
     expect(process.exitCode).toBe(3);
@@ -396,6 +579,7 @@ describe('publish-assets — round-2 review pins', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockClear();
@@ -529,6 +713,7 @@ describe('publish-assets — round-3 self-review pins', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockClear();
@@ -647,6 +832,7 @@ describe('publish-assets — round-4 pins', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockReset();
@@ -795,6 +981,7 @@ describe('publish-assets — empty is two different things', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockReset();
@@ -861,6 +1048,7 @@ describe('publish-assets — host binds even without --reviewed-repo', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockReset();
@@ -900,6 +1088,90 @@ describe('publish-assets — host binds even without --reviewed-repo', () => {
       skillArgs: argsFile,
     } as never);
     expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('publish-assets — minimal topology at the second caller shape', () => {
+  // The gate is shape-sensitive: this caller passes an env-resolved host and
+  // no absentHostFollowsRecording, so an absent host reads as a github.com
+  // claim. The minimal fall-through must order its refusals the SAME way
+  // here — the topology names only the sole blocker — or a future reorder
+  // regresses one caller's shape while the other caller's suite stays green.
+  let dir: string;
+  let argsFile: string;
+  let savedSessionId: string | undefined;
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'publish-assets-min-'));
+    argsFile = join(dir, 'args.txt');
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
+    ghMock.mockReset();
+    ghWithInputMock.mockReset();
+    setGhHostMock.mockReset();
+    stderrSpy.mockClear();
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env['QWEN_REVIEW_ASSETS_REPO'];
+    if (savedSessionId !== undefined) {
+      process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+    }
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
+    process.exitCode = undefined;
+  });
+
+  const png = (name: string): string => {
+    const p = join(dir, name);
+    writeFileSync(p, Buffer.from('89504e470d0a1a0a', 'hex'));
+    return p;
+  };
+  const runAt = (): void =>
+    runPublishAssets({
+      pr: 8346,
+      reviewedRepo: undefined,
+      files: [png('a.png')],
+      findings: undefined,
+      findingsOut: undefined,
+      out: join(dir, 'm.json'),
+      host: undefined,
+      userAuthorized: false,
+      skillArgs: argsFile,
+    } as never);
+
+  it('a fully-bound minimal record names the topology (evidence-images advice)', () => {
+    writeFileSync(argsFile, '8346 --topology minimal --comment\n');
+    runAt();
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('`--topology minimal`');
+    expect(why).toContain('Evidence images');
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('a wrong-host minimal record leads with the host binding, not the topology', () => {
+    // Without --reviewed-repo the gate binds number and host alone; the
+    // Enterprise-host record fails the host check before the topology
+    // refusal, exactly as it does at submit's shape — leading with the
+    // topology here would send the operator to re-run without it into the
+    // same still-unnamed host refusal.
+    writeFileSync(
+      argsFile,
+      'https://ghe.corp.example/reviewed/upstream/pull/8346 --topology minimal --comment\n',
+    );
+    runAt();
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('authorise ghe.corp.example');
+    expect(why).toContain('targets github.com');
+    expect(why).not.toContain('`--topology minimal`');
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 });
