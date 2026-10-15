@@ -330,6 +330,12 @@ describe('Hosted real-process gates', () => {
     );
     expect(evidence.with['include-hidden-files']).toBe(true);
     expect(upload.with.path).not.toContain('.qwen/');
+    // The writer side of the same path: the runner's default report
+    // directory must stay under what the step uploads, or the artifact
+    // goes empty with only a warning.
+    expect(read('scripts/run-managed-agent-server-e2e.ts')).toContain(
+      `\`${evidence.with.path}packaged-\${verificationMode}-`,
+    );
   });
 
   it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {

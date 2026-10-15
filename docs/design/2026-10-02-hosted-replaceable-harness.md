@@ -568,7 +568,9 @@ stack and use the existing fake model.
      text in sequence order;
    - the three provider requests are deeply equal;
    - one terminal and only the final answer appear in the public feed;
-   - the three boot IDs differ and the writer generations strictly increase;
+   - the three boot IDs differ, and the writer generation, journal revision
+     and committed sequence all strictly increase from one generation to the
+     next;
    - no tool executes;
    - the next Turn's model history holds exactly one copy of the prompt and
      one of the answer, and no prefix.
@@ -604,9 +606,13 @@ stack and use the existing fake model.
    replacement has gone quiet. Then it turns the MySQL general log on and
    sends SIGCONT. Before comparing, it waits until the general log shows an
    `UPDATE ma_turn` sent after the wake that carries the former owner id.
-   That proves the woken Spring tried its stale claim, so an unchanged
-   snapshot means the claim was fenced, not that nothing ran. Six seconds
-   later every snapshot value must be unchanged. Only then are the former
+   That proves the woken Spring tried its stale claim. It also waits for the
+   woken Harness to log the store's stale-writer refusal ("The Managed
+   Session writer grant is stale or unavailable"), which must not appear
+   before the wake. That proves the woken Harness presented its stale writer
+   grant (for a write, a renewal or a read) and the store refused it. An unchanged snapshot therefore means both were
+   fenced, not that nothing ran. Six seconds later every snapshot value must
+   be unchanged. Only then are the former
    owners killed and a next Turn run through the second Spring. Two live
    control planes would race for a new Turn's claim, and routing between
    them is out of scope.
@@ -628,8 +634,9 @@ writer-lease heartbeats are outside the snapshot because the live writer
 keeps moving those columns. A deployment with two live control planes
 remains unsupported (see Boundaries).
 
-The seven new steps are capped at 10 minutes each, so the job ceiling moves
-from 220 to 290 minutes.
+The seven new steps are capped at 10 minutes each, so the step ceilings sum
+to 275 (45 + 16×10 + 20 + 50) and the job ceiling moves from 220 to 290
+minutes.
 
 ## Changes and ownership
 
@@ -705,17 +712,19 @@ E2E (runner arms, all against the packaged stack):
 3. D7 freeze arm: post-SIGCONT assertions as listed. Deleting any of them
    fails the arm.
 4. CI: `hosted-harness-mysql` gains the D7 arm, the D8 arms and
-   `--session-failover`, and the job ceiling moves from 60 to 120 minutes
-   so the step ceilings sum to 104 (12 + 8×10 + 12, the workspace-output gates added their own step) plus the uncapped
-   setup steps keep headroom.
+   `--session-failover`. That slice moved the job ceiling from 60 to 120
+   minutes over step ceilings that summed to 104 (12 + 8×10 + 12, the
+   workspace-output gates added their own step), leaving headroom for the
+   uncapped setup steps. Later gates raised it again; D11 states the current
+   ceiling, 290 minutes over step ceilings that sum to 275.
 5. D11 Step 3 gates: one CI step each for Allow, Deny, Cancel, expiry and
    continuation closeout.
 6. D11 model-round arm: the assertions listed in D11. With both control-plane
    retraction paths turned into no-ops, the arm fails: both prefixes stay in
    the public transcript.
 7. D11 frozen control-plane arm: the replacement must be quiet before the
-   wake, the stale-claim witness must appear before the before/after
-   comparison, and every snapshot value must match. With
+   wake, the stale-claim and stale-writer witnesses must appear before the
+   before/after comparison, and every snapshot value must match. With
    the owner and status guards removed from the Turn retry write, the arm
    fails: the woken Spring bumps the completed Turn's version and retry
    count. Its report lists the writes it observed on the connections that

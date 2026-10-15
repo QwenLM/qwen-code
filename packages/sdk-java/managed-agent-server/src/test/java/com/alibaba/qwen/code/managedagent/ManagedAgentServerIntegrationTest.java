@@ -1560,7 +1560,15 @@ class ManagedAgentServerIntegrationTest {
                 former, "boot-successor", "boot-former")).isFalse();
         assertThatThrownBy(() -> store.recordAdmission(tenant, sessionId,
                 turnId, former, "epoch-former", 1))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Turn dispatch lease was lost");
+        // The epochs it expects are the ones that stand now, so only the
+        // owner check can refuse this recovery admission.
+        assertThatThrownBy(() -> store.recordRecoveryAdmission(tenant,
+                sessionId, turnId, former, "epoch-successor",
+                "epoch-successor", "epoch-former-retry", 2))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Turn dispatch lease was lost");
         assertThat(store.requireSession(tenant, sessionId))
                 .satisfies(record -> {
                     assertThat(record.harnessBootId())

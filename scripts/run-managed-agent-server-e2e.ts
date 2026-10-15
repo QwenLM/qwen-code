@@ -679,9 +679,11 @@ async function waitUntil(
   name: string,
   predicate: (remainingMs: number) => Promise<boolean> | boolean,
   timeoutMs: number,
-  child?: Child,
+  child?: Child | Child[],
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  const watched =
+    child === undefined ? [] : Array.isArray(child) ? child : [child];
   let lastError: unknown;
   let lastErrorPredatesStall = false;
   // Identity, not text: matching the rendered message would let a reworded
@@ -689,8 +691,10 @@ async function waitUntil(
   const stall = new Error(`${name} predicate stalled`);
   while (Date.now() < deadline) {
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
-    if (child && childExited(child.child)) {
-      throw new Error(`${name} exited early\n${child.log()}`);
+    for (const each of watched) {
+      if (childExited(each.child)) {
+        throw new Error(`${name} exited early\n${each.log()}`);
+      }
     }
     try {
       // Bound one iteration against the remaining deadline: a hung
@@ -1029,7 +1033,7 @@ async function waitForTerminal(
   tenant: string,
   sessionId: string,
   after: number,
-  child: Child,
+  child: Child | Child[],
   timeoutMs = 120_000,
 ): Promise<{ events: PublicEvent[]; lastSequence: number }> {
   const events: PublicEvent[] = [];
@@ -2814,6 +2818,10 @@ try {
       const heads = [firstHead];
       let retractedBeforeNewDeltas = true;
       let previousPrefixSequence = firstPrefixSequence;
+      // The terminal wait watches the live control plane and the Harness
+      // generation finishing the round, so either one's death fails it at
+      // once.
+      let finishingHarness = replacementHarness;
       if (harnessOnly) {
         // Generation two reissues the saved request: by the time its own
         // prefix is public, generation one's must already be retracted.
@@ -2869,14 +2877,16 @@ try {
             ) === '1',
           10_000,
         );
-        await startReplacementHarness('Third Hosted Harness');
+        finishingHarness = await startReplacementHarness(
+          'Third Hosted Harness',
+        );
       }
       await waitForTerminal(
         replacementSpringUrl,
         tenant,
         session.id,
         0,
-        replacementSpring,
+        [replacementSpring, finishingHarness],
         120_000,
       );
       const recovered = await publicTranscript(
@@ -2927,12 +2937,19 @@ try {
         turnCount !== 1 ||
         boots.some((boot) => boot.length === 0) ||
         new Set(boots).size !== boots.length ||
+        // Writer generation, journal revision and committed sequence all
+        // advance across each takeover. The negated form also fails a
+        // missing column or a NULL, which read as undefined or NaN.
         heads.some(
-          (head, index) => index > 0 && !(head[0] > heads[index - 1][0]),
+          (head, index) =>
+            index > 0 &&
+            ![0, 1, 2].every(
+              (column) => head[column] > heads[index - 1][column],
+            ),
         )
       ) {
         throw new Error(
-          `Model-round failover audit failed: terminals=${JSON.stringify(recovered.terminals)} text=${JSON.stringify(recovered.text)} retractedBeforeNewDeltas=${retractedBeforeNewDeltas} terminalRows=${terminalRows()} roundRequests=${roundRequests.length} equalRequests=${roundRequests.every((request) => isDeepStrictEqual(request.body, roundRequests[0]?.body))} executions=${executionCount} turns=${turnCount} boots=${boots.join('->')} writerGenerations=${heads.map((head) => head[0]).join('->')}`,
+          `Model-round failover audit failed: terminals=${JSON.stringify(recovered.terminals)} text=${JSON.stringify(recovered.text)} retractedBeforeNewDeltas=${retractedBeforeNewDeltas} terminalRows=${terminalRows()} roundRequests=${roundRequests.length} equalRequests=${roundRequests.every((request) => isDeepStrictEqual(request.body, roundRequests[0]?.body))} executions=${executionCount} turns=${turnCount} boots=${boots.join('->')} heads=${heads.map((head) => head.join(',')).join('->')}`,
         );
       }
 
@@ -2942,53 +2959,60 @@ try {
         // wake it must still hold its stale claim in memory and try it —
         // and nothing it tries may move the binding, the Turn, the public
         // feed or the journal.
-        const fencedState = (timeoutMs = 10_000) => ({
-          session: runMysql(
-            mysqlPort,
-            `SELECT harness_boot_id, harness_event_epoch, harness_last_event_id, status FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
-            timeoutMs,
-          ),
-          turns: runMysql(
-            mysqlPort,
-            `SELECT turn_id, status, version, dispatch_owner, dispatch_lease_until, retry_count, submission_attempted, harness_event_epoch, harness_last_event_id, error_code FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY turn_id`,
-            timeoutMs,
-          ),
-          // Row by row: a retraction rewrites delta payloads and identities
-          // in place, which no count or maximum would notice.
-          events: runMysql(
-            mysqlPort,
-            `SELECT stream_kind, HEX(stream_id), sequence_id, event_type, terminal, HEX(source_key), SHA2(data_json, 256), HEX(item_id), HEX(content_part_id), SHA2(text, 256), state FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} ORDER BY stream_kind, stream_id, sequence_id`,
-            timeoutMs,
-          ),
-          // Every Spring also sweeps expired operation claims on a timer, so
-          // the woken one writes ma_operation too; none of it may land here.
-          operations: runMysql(
-            mysqlPort,
-            `SELECT HEX(operation_key), operation_kind, state, phase, delivery_state, claim_owner FROM qwen_managed_agent.ma_operation WHERE ${sessionFilter} ORDER BY 1`,
-            timeoutMs,
-          ),
-          // The head's state, writer, checkpoint and recovery columns. Its
-          // lease, activation and revision columns move with every
-          // activation renewal the live writer journals.
-          head: runMysql(
-            mysqlPort,
-            `SELECT state, storage_version, writer_generation, HEX(writer_id), HEX(latest_checkpoint_resource_id), compacted_through_revision, recovery_status, recovery_detail_code FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
-            timeoutMs,
-          ),
-          // Every journal transaction except those renewals, by writer
-          // generation and operation; an older generation's renewals stay
-          // counted in staleWriterTx below.
-          journal: runMysql(
-            mysqlPort,
-            `SELECT writer_generation, operation, COUNT(*), MAX(journal_revision) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND operation <> 'renewActivation' GROUP BY writer_generation, operation ORDER BY writer_generation, operation`,
-            timeoutMs,
-          ),
-          staleWriterTx: runMysql(
-            mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter})`,
-            timeoutMs,
-          ),
-        });
+        const fencedProbes = 7;
+        const fencedState = (timeoutMs = fencedProbes * 10_000) => {
+          // The probes are synchronous, so waitUntil cannot cut one short: a
+          // budgeted call splits its budget over them (runMysql still gives
+          // each at least 2 s), and a one-shot call keeps 10 s per probe.
+          const probeMs = Math.max(1, Math.floor(timeoutMs / fencedProbes));
+          return {
+            session: runMysql(
+              mysqlPort,
+              `SELECT harness_boot_id, harness_event_epoch, harness_last_event_id, status FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
+              probeMs,
+            ),
+            turns: runMysql(
+              mysqlPort,
+              `SELECT turn_id, status, version, dispatch_owner, dispatch_lease_until, retry_count, submission_attempted, harness_event_epoch, harness_last_event_id, error_code FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY turn_id`,
+              probeMs,
+            ),
+            // Row by row: a retraction rewrites delta payloads and identities
+            // in place, which no count or maximum would notice.
+            events: runMysql(
+              mysqlPort,
+              `SELECT stream_kind, HEX(stream_id), sequence_id, event_type, terminal, HEX(source_key), SHA2(data_json, 256), HEX(item_id), HEX(content_part_id), SHA2(text, 256), state FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} ORDER BY stream_kind, stream_id, sequence_id`,
+              probeMs,
+            ),
+            // Every Spring also sweeps expired operation claims on a timer, so
+            // the woken one writes ma_operation too; none of it may land here.
+            operations: runMysql(
+              mysqlPort,
+              `SELECT HEX(operation_key), operation_kind, state, phase, delivery_state, claim_owner FROM qwen_managed_agent.ma_operation WHERE ${sessionFilter} ORDER BY 1`,
+              probeMs,
+            ),
+            // The head's state, writer, checkpoint and recovery columns. Its
+            // lease, activation and revision columns move with every
+            // activation renewal the live writer journals.
+            head: runMysql(
+              mysqlPort,
+              `SELECT state, storage_version, writer_generation, HEX(writer_id), HEX(latest_checkpoint_resource_id), compacted_through_revision, recovery_status, recovery_detail_code FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+              probeMs,
+            ),
+            // Every journal transaction except those renewals, by writer
+            // generation and operation; an older generation's renewals stay
+            // counted in staleWriterTx below.
+            journal: runMysql(
+              mysqlPort,
+              `SELECT writer_generation, operation, COUNT(*), MAX(journal_revision) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND operation <> 'renewActivation' GROUP BY writer_generation, operation ORDER BY writer_generation, operation`,
+              probeMs,
+            ),
+            staleWriterTx: runMysql(
+              mysqlPort,
+              `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter})`,
+              probeMs,
+            ),
+          };
+        };
         // The replacement must go quiet first: a late write of its own inside
         // the wake window would otherwise read as a stale mutation.
         // The window matches the wait after the wake, so a replacement-side
@@ -3045,6 +3069,33 @@ try {
             throw new Error(`${child.name} did not survive the freeze`);
           }
         }
+        // A woken Harness with no home would leave every check below
+        // holding by absence instead of by fencing.
+        if (!existsSync(harnessHome)) {
+          throw new Error(
+            'Frozen control-plane arm lost the Harness home the wake depends on',
+          );
+        }
+        // The writer axis has its own witness: the woken Harness still holds
+        // its stale writer grant, and only the store's writer-grant check
+        // answers with this refusal. It must not appear before the wake.
+        // After the wake the Harness's whole output is kept, not the log's
+        // rolling tail, so a busy Harness cannot push the refusal out.
+        const staleWriterRefusal =
+          'The Managed Session writer grant is stale or unavailable';
+        if (harness.log().includes(staleWriterRefusal)) {
+          throw new Error(
+            `The former Harness met the writer fence before the wake:\n${harness.log()}`,
+          );
+        }
+        let harnessOutputSinceWake = '';
+        const recordSinceWake = (chunk: Buffer) => {
+          harnessOutputSinceWake += chunk.toString();
+        };
+        harness.child.stdout?.on('data', recordSinceWake);
+        harness.child.stderr?.on('data', recordSinceWake);
+        const staleWriterRefusals = () =>
+          harnessOutputSinceWake.split(staleWriterRefusal).length - 1;
         // The general log names every statement the woken Spring sends, so
         // a claim UPDATE carrying the former owner id proves the wake really
         // exercised the stale authority instead of idling past the check.
@@ -3077,6 +3128,11 @@ try {
         await waitUntil(
           'Woken control plane exercises its stale claim',
           (remainingMs) => staleClaimUpdates(remainingMs) > 0,
+          30_000,
+        );
+        await waitUntil(
+          'Woken Harness meets the writer fence',
+          () => staleWriterRefusals() > 0,
           30_000,
         );
         // Several lease periods for anything the wake set in motion.
@@ -3116,6 +3172,7 @@ try {
             fencedFormerControlPlane: true,
             formerDispatchOwner,
             staleClaimUpdates: staleAttempts,
+            staleWriterRefusals: staleWriterRefusals(),
             staleConnectionWrites,
             harnessBootId: afterWake.session.split('\t')[0],
             journalHead: afterWake.head,
@@ -3211,6 +3268,8 @@ try {
           sessionId: session.id,
           harnessBootIds: boots,
           writerGenerations: heads.map((head) => head[0]),
+          journalRevisions: heads.map((head) => head[1]),
+          committedSequences: heads.map((head) => head[2]),
           replacedGenerations: modelRoundPartials.length,
           modelRoundRequests: roundRequests.length,
           equalSavedRequests: true,
@@ -3219,8 +3278,11 @@ try {
           physicalToolExecutions: executionCount,
           terminalTurns: terminalRows(),
           nextTurnHistoryClean: true,
+          // As in the frozen-owner arm, one key cannot mean both intents.
           oldHarnessDiskDeleted:
             !frozenControlPlane && !existsSync(harnessHome),
+          harnessHomeRetainedForWake:
+            frozenControlPlane && existsSync(harnessHome),
         },
         null,
         2,

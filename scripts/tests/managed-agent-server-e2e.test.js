@@ -328,6 +328,54 @@ describe('managed-agent-server e2e runner', () => {
       compare,
       'the fenced-state comparison must wait for the stale-claim witness',
     ).toBeGreaterThan(witness);
+    // The waits are awaited: a floating one would let the comparison run
+    // before anything it waits for was observed.
+    for (const label of [
+      'Replacement quiet before the wake',
+      'Woken control plane exercises its stale claim',
+      'Woken Harness meets the writer fence',
+    ]) {
+      expect(source).toMatch(new RegExp(`await waitUntil\\(\\s*'${label}'`));
+    }
+    // The baseline the comparison uses is the snapshot the quiet poll
+    // settled on, taken before the wake.
+    const settle = source.indexOf('beforeWake = settled;', quiet);
+    expect(
+      settle,
+      'the snapshot the equality gate compares must be taken before the wake',
+    ).toBeGreaterThan(quiet);
+    expect(settle).toBeLessThan(wake);
+    expect(
+      source.slice(wake, compare),
+      'the baseline must not be re-taken after the wake',
+    ).not.toMatch(/\bbeforeWake\s*=/);
+    // The woken Harness needs its home, or the checks hold by absence.
+    const home = source.indexOf(
+      "'Frozen control-plane arm lost the Harness home the wake depends on'",
+    );
+    expect(home).toBeGreaterThan(quiet);
+    expect(home).toBeLessThan(wake);
+    // The writer axis: no refusal before the wake, one after it, and the
+    // comparison waits for it. The refusal text is the store's own.
+    const refusal = 'The Managed Session writer grant is stale or unavailable';
+    expect(source).toContain(`'${refusal}'`);
+    expect(
+      read(
+        'packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/ManagedSessionStore.java',
+      ),
+    ).toContain(`"${refusal}."`);
+    const writerBefore = source.indexOf(
+      'if (harness.log().includes(staleWriterRefusal))',
+    );
+    // Counted on the output kept since the wake, not the rolling log tail.
+    expect(source).toContain(
+      'harnessOutputSinceWake.split(staleWriterRefusal).length - 1',
+    );
+    const writerWitness = source.indexOf('() => staleWriterRefusals() > 0');
+    expect(writerBefore).toBeGreaterThan(quiet);
+    expect(writerBefore).toBeLessThan(wake);
+    expect(writerWitness).toBeGreaterThan(wake);
+    expect(compare).toBeGreaterThan(writerWitness);
     const teardown = source.lastIndexOf('} finally {');
     const teardownWake = source.indexOf(
       'for (const child of frozenChildren.splice(0))',
@@ -741,6 +789,22 @@ describe('managed-agent-server e2e runner', () => {
   // sets signalCode: an exitCode-only early-exit guard never trips, the
   // poll burns its whole site budget, and the failure reads "did not
   // become ready" — pointing at the dependency instead of the dead child.
+  // The model-round terminal wait watches the control plane and the Harness
+  // generation finishing the round; either one dying must end the wait.
+  it('waitUntil watches every child it is given', async () => {
+    const { waitUntil } = loadWaitUntil();
+    await expect(
+      waitUntil('probe', () => false, 300, [
+        { child: { exitCode: null, signalCode: null }, log: () => '' },
+        { child: { exitCode: 1, signalCode: null }, log: () => 'second' },
+      ]),
+    ).rejects.toThrow(/exited early\nsecond/);
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toMatch(
+      /waitForTerminal\(\s*replacementSpringUrl,\s*tenant,\s*session\.id,\s*0,\s*\[replacementSpring, finishingHarness\],/,
+    );
+  });
+
   it('waitUntil reports a child that died by signal as exited early', async () => {
     const { waitUntil } = loadWaitUntil();
     await expect(
@@ -1042,6 +1106,32 @@ describe('managed-agent-server e2e runner', () => {
       source.match(/\(remainingMs\) =>\s*runMysql\([\s\S]*?remainingMs,/g),
       'every lease poll must derive the probe timeout from the waitUntil budget',
     ).toHaveLength(3);
+    // The frozen arm's snapshot fans one budget out over several
+    // synchronous probes; each takes its share, not the whole budget.
+    const fenced = source.slice(
+      source.indexOf('const fencedState = ('),
+      source.indexOf('// The replacement must go quiet first'),
+    );
+    const probes = Number(source.match(/const fencedProbes = (\d+);/)?.[1]);
+    expect(fenced).toContain(
+      'const probeMs = Math.max(1, Math.floor(timeoutMs / fencedProbes));',
+    );
+    expect(fenced.match(/runMysql\(/g)).toHaveLength(probes);
+    expect(fenced.match(/^\s*probeMs,$/gm)).toHaveLength(probes);
+    expect(fenced).not.toMatch(/^\s*timeoutMs,$/m);
+  });
+
+  // The model-round arm samples the head once per generation: each
+  // takeover must advance the writer, the journal and the committed
+  // sequence, not the writer generation alone.
+  it('requires every head column to advance across the model-round takeovers', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toMatch(
+      /!\[0, 1, 2\]\.every\(\s*\(column\) => head\[column\] > heads\[index - 1\]\[column\],?\s*\)/,
+    );
+    expect(source).toMatch(
+      /const currentHead = \(\) =>\s*runMysql\(\s*mysqlPort,\s*`SELECT writer_generation, journal_revision, committed_sequence FROM/,
+    );
   });
 
   it('names the jar explicitly on both surfaces — pom-derived name in the runner, classifier exclusion at image build', () => {

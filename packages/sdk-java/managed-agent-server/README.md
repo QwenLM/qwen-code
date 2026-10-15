@@ -264,10 +264,11 @@ supported state continues on the replacement (G3 Step 3). In a Session
 without Hooks or MCP, an unfinished model round reissues its saved request
 and retracts the dead owner's published prefix, and a requested native-file
 approval keeps its Action and deadline; a committed terminal is projected
-once. A takeover load that can never continue (an in-flight Shell call, a
-model round or approval in a Session with Hooks or MCP, an unfinished prefix
-continuation, a saved request that is oversized or carries image payloads, or
-other evidence a replacement cannot drive) ends the Turn as `managed_runtime_recovery_blocked` with a typed reason
+once. Step 3 neither reissues a model round nor resumes an approval in a
+Session with Hooks or MCP, and no gate covers how such a parked Turn ends. A
+takeover load that can never continue (an in-flight Shell call, an unfinished
+prefix continuation, a saved request that is oversized or carries image
+payloads, or other evidence a replacement cannot drive) ends the Turn as `managed_runtime_recovery_blocked` with a typed reason
 instead of retrying forever. The Session row and its generation binding
 survive that decline, but the declined Turn's input stays unsettled in the
 journal, so the Session cannot admit a further Turn — close it and start a new
@@ -1297,8 +1298,9 @@ writer commits nothing. The second freezes the original Spring and Harness
 together during a no-tool model round. It starts a second Spring and Harness
 on the same MySQL, and the new Harness reissues the round to completion.
 After the wake, the MySQL general log must show the former Spring's claim
-`UPDATE`s carrying its stale owner id, and none of them may change the
-Session binding, the Turn row, the public events or the journal. All of these
+`UPDATE`s carrying its stale owner id, and the former Harness must log the
+store's refusal of its stale writer grant. None of these attempts may change
+the Session binding, the Turn row, the public events or the journal. All of these
 arms run in the Hosted MySQL CI job.
 
 ### Hosted recovery scope
@@ -1310,9 +1312,9 @@ to its Session. Recovery covers only the profiles and parked states that are
 explicitly supported and accepted on the released artifacts. The gates above
 accept the in-flight and continuation Runtime takeovers, the native-file
 approval waits and the first model round of a no-tool Session, all without
-Hooks or MCP. An in-flight Shell call, a model round or approval in a Session
-with Hooks or MCP, and unknown external effects stay blocked rather than
-replayed. Journal writer fencing,
+Hooks or MCP. An in-flight Shell call and unknown external effects stay
+blocked rather than replayed, and Step 3 neither reissues a model round nor
+resumes an approval in a Session with Hooks or MCP. Journal writer fencing,
 durable engine ownership, capability and journal-contract checks and
 fail-closed recovery apply throughout. A refused recovery is never replayed
 through another Runtime or the Legacy engine.
