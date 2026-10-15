@@ -372,6 +372,23 @@ class SessionMessageRelayTest {
                 "accepted");
     }
 
+    // The store reads per sender, across runs: the match can sit behind
+    // older messages to other runs.
+    @Test
+    void holdsBehindAnyOfSeveralOlderMessages() {
+        when(store.olderOwedMessages(TENANT, PARENT, MESSAGE))
+                .thenReturn(List.of("resource-other-run", "resource-older"));
+        when(records.readResource(TENANT, PARENT, "resource-other-run"))
+                .thenReturn("{\"direction\":\"outbound\","
+                        + "\"route\":\"to_child\",\"childRunId\":\"run-2\"}");
+        when(records.readResource(TENANT, PARENT, "resource-older"))
+                .thenReturn("{\"direction\":\"outbound\","
+                        + "\"route\":\"to_child\",\"childRunId\":\"run-1\"}");
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+    }
+
     @Test
     void neverHoldsAMessageBehindOneToAnotherRun() {
         olderOwed(PARENT, "to_child", "run-2");
@@ -973,6 +990,18 @@ class SessionMessageRelayTest {
         assertThat(harness.calls).isEmpty();
         assertThat(row.get().state()).isEqualTo("relaying");
         assertThat(row.get().attempts()).isEqualTo(64);
+    }
+
+    // Past the bound a younger message no longer waits for this one, so
+    // once the fault clears it retries only its give-up, never its step:
+    // a late delivery would land behind the younger one.
+    @Test
+    void retriesOnlyTheGiveUpPastTheAttemptBound() {
+        row.set(new MessageRow(TENANT, PARENT, MESSAGE, null, "relaying",
+                "owner", 31_000L, 64, 0, "sender step faltered"));
+        relay.scan();
+        assertThat(kinds()).containsExactly("cancelled");
+        assertThat(row.get().state()).isEqualTo("unknown");
     }
 
     @Test

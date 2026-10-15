@@ -293,6 +293,10 @@ class SessionMessageRelayStoreTest {
                 owed("msg_y_accepting"));
         message(sender, "msg_x_given_up", "planned", owed("msg_x_given_up"));
         message(sender, "msg_w_unknown", "unknown", owed("msg_w_unknown"));
+        // Rows the relay finished with, over records still owing: a closed
+        // sender's or target's leftovers, never scanned again.
+        message(sender, "msg_v_done", "accepting", owed("msg_v_done"));
+        message(sender, "msg_u_orphaned", "planned", owed("msg_u_orphaned"));
         command(sender, "cmd_open", "planned", "{\"route\":\"to_parent\"}");
         message(sender, "msg_b_planned", "planned", owed("msg_b_planned"));
         message(sender, "msg_a_new", "planned", owed("msg_a_new"));
@@ -301,6 +305,11 @@ class SessionMessageRelayStoreTest {
         store.classify(store.claim(TENANT, sender, "msg_x_given_up",
                 "owner-a", 31_000, 1_000), "owner-a", "unknown", "gave up",
                 1_000);
+        store.classify(store.claim(TENANT, sender, "msg_v_done", "owner-a",
+                31_000, 1_000), "owner-a", "done", "target closed", 1_000);
+        store.classify(store.claim(TENANT, sender, "msg_u_orphaned",
+                "owner-a", 31_000, 1_000), "owner-a", "orphaned",
+                "sender closed", 1_000);
         assertThat(olderOwed(sender, "msg_a_new")).containsExactlyInAnyOrder(
                 "msg_y_accepting", "msg_w_unknown", "msg_b_planned");
         assertThat(olderOwed(sender, "msg_b_planned"))

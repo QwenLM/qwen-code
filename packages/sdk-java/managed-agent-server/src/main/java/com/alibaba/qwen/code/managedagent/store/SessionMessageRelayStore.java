@@ -18,6 +18,17 @@ public class SessionMessageRelayStore {
     /** The failed steps after which the relay gives an entry up. */
     public static final int MAX_ATTEMPTS = 64;
 
+    /** Over a ledger row `l` joined to its entry: the row still owes work —
+     * none opened yet, or one neither classified nor past the attempt
+     * bound. A sender that takes no further revision never lets the
+     * give-up's own step land, so the bound is the only proof the entry
+     * stops; the relay then owes it nothing but that give-up. The child
+     * relay's hold on a child's own outbox and the send-order hold on a
+     * younger message both end here. */
+    public static final String LEDGER_OWES_WORK = "(l.delivery_id IS NULL"
+            + " OR (l.transport_state NOT IN ('done', 'orphaned', 'unknown')"
+            + " AND l.attempt_count < " + MAX_ATTEMPTS + "))";
+
     /** One outbox entry the delivery-pending index surfaced. H4e-b3 adds
      * the domain: command entries share every field and never collide
      * with message ids, which would duplicate across the ledger. */
@@ -206,13 +217,11 @@ public class SessionMessageRelayStore {
                 senderSessionId).isEmpty();
     }
 
-    /** The bodies of a sender's messages older than this one, by its own
-     * commit order, that still owe their handover or receipt: planned,
-     * accepting or unknown, before discovery has opened a row or on one
-     * neither classified nor past the attempt bound — a sender that takes
-     * no further revision never lets the give-up's own step land, and the
-     * hold on a younger message must end where the settlement's does. The
-     * relay keeps the ones to the same run ahead of it. */
+    /** The record resource ids of a sender's messages older than this one,
+     * by its own commit order, that still owe their handover or receipt:
+     * planned, accepting or unknown, on a ledger row still owing work
+     * ({@link #LEDGER_OWES_WORK}). The relay keeps the ones to the same run
+     * ahead of it. */
     public List<String> olderOwedMessages(String tenantId,
             String senderSessionId, String messageId) {
         return jdbc.query("SELECT r.record_resource_id FROM"
@@ -230,9 +239,7 @@ public class SessionMessageRelayStore {
                         + " AND r.domain = 'session_message'"
                         + " AND r.first_sequence < c.first_sequence"
                         + " AND r.delivery_state IN ('planned', 'accepting', 'unknown')"
-                        + " AND (l.delivery_id IS NULL OR (l.transport_state NOT IN"
-                        + " ('done', 'unknown', 'orphaned') AND l.attempt_count < "
-                        + MAX_ATTEMPTS + "))",
+                        + " AND " + LEDGER_OWES_WORK,
                 (result, row) -> result.getString("record_resource_id"), messageId,
                 ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId, senderSessionId);
     }

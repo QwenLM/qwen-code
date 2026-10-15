@@ -152,6 +152,14 @@ public class SessionMessageRelay {
                         now + LEASE_MS, now);
                 return;
             }
+            if (row.attempts() >= MAX_ATTEMPTS) {
+                // Past the bound only the give-up is owed, never the step:
+                // a message that a younger one was released past (see
+                // olderOwedMessages) must not land after it.
+                defer(row, pending.domain(), new IllegalStateException(
+                        "past the attempt bound: " + row.lastError()), now);
+                return;
+            }
             if ("session_command".equals(pending.domain())) {
                 workCommand(row, body, current, now);
             } else {
