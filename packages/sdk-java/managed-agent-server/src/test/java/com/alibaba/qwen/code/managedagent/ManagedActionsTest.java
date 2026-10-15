@@ -1,35 +1,22 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.awaitility.Awaitility.await;
-import static org.mockito.Mockito.RETURNS_DEFAULTS;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.doReturn;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedActionService;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -38,7 +25,6 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -59,9 +45,9 @@ import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
-import java.time.Duration;
-import java.time.Clock;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -71,6 +57,17 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.RETURNS_DEFAULTS;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(
         properties = {
@@ -226,7 +223,6 @@ class ManagedActionsTest {
                 case "version" -> ref.put("schemaVersion", 2);
                 case "length" -> ref.put("byteLength", 1);
                 case "digest" -> ref.put("digest", "0".repeat(64));
-                default -> {}
             }
             if ("corrupt".equals(fault)) {
                 jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
@@ -312,7 +308,6 @@ class ManagedActionsTest {
                 case "payloadField" -> wrapper.put(
                         "payloadJson", "{\"toolName\":\"write_file\",\"input\":{},\"grant\":\"internal authorization\"}");
                 case "blankRuntime" -> wrapper.put("runtimeSessionId", "");
-                default -> {}
             }
             byte[] bytes = json.writeValueAsBytes(wrapper);
             if ("empty".equals(fault)) {
@@ -711,8 +706,9 @@ class ManagedActionsTest {
         responses.put(
                 journal.id,
                 call -> {
-                    if (attempts.incrementAndGet() == 1)
+                    if (attempts.incrementAndGet() == 1) {
                         throw new IllegalStateException("temporarily unavailable");
+                    }
                     journal.change("decided", call.getArgument(3));
                     return null;
                 });
@@ -893,7 +889,7 @@ class ManagedActionsTest {
                             .header("Idempotency-Key", "disabled-ended")
                             .contentType(MediaType.APPLICATION_JSON).content(response("allow")))
                     .path("id").asText();
-            var before = jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst();
+            var before = jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row, n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst();
             var claim = sessions.claimOperation(tenant, session, endedOp, "stopped-worker", Duration.ofMinutes(10))
                     .orElseThrow();
             ended.change("expired", null);
@@ -905,7 +901,7 @@ class ManagedActionsTest {
             assertThat(result.state()).isEqualTo("FAILED");
             assertThat(result.claimGeneration()).isEqualTo(claim.claimGeneration());
             assertThat(actions.response(tenant, session, endedOp).errorCode()).isEqualTo("action_expired");
-            assertThat(jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst())
+            assertThat(jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row, n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst())
                     .isEqualTo(before);
         } finally {
             doReturn(true).when(harness).isAvailable();
@@ -1224,7 +1220,7 @@ class ManagedActionsTest {
         jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
                         + "idempotency_key,idempotency_digest,request_digest,actor_id,session_id,state,created_at,updated_at)"
                         + " VALUES (?,'SESSION_CREATE_ACTOR',?,?,'ACTOR',?,?,?,?,?, ?,?,'COMPLETED',?,?)",
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("fixture",tenant,key),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("fixture", tenant, key),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant), tenant,
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("owner"), "owner", key,
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(key), "sha256:test",

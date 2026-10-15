@@ -1,19 +1,12 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.List;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,9 +15,15 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import javax.sql.DataSource;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 
-import javax.sql.DataSource;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedSchemaJournalAtomicityTest {
     private FaultJdbc jdbc;

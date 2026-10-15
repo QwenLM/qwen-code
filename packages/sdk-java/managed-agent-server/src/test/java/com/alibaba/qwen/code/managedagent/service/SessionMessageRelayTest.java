@@ -1,14 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
@@ -18,6 +9,10 @@ import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.Message
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.PendingMessage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
@@ -25,9 +20,15 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** The message relay's state machine against recorded harness calls. */
 class SessionMessageRelayTest {
@@ -140,36 +141,36 @@ class SessionMessageRelayTest {
         when(store.claim(anyString(), anyString(), anyString(), anyString(),
                 anyLong(), anyLong())).thenAnswer(ignored -> row.get());
         Mockito.doAnswer(args -> {
-                    MessageRow before = row.get();
-                    row.set(new MessageRow(before.tenantId(),
+            MessageRow before = row.get();
+            row.set(new MessageRow(before.tenantId(),
                             before.senderSessionId(), before.messageId(),
                             args.getArgument(3), args.getArgument(2),
                             before.claimedBy(), before.claimedUntil(),
                             before.attempts(), args.getArgument(4),
                             before.lastError()));
-                    return null;
-                }).when(store).advance(any(MessageRow.class), anyString(),
+            return null;
+        }).when(store).advance(any(MessageRow.class), anyString(),
                         anyString(), any(), anyLong(), anyLong(), anyLong());
         Mockito.doAnswer(args -> {
-                    MessageRow before = row.get();
-                    row.set(new MessageRow(before.tenantId(),
+            MessageRow before = row.get();
+            row.set(new MessageRow(before.tenantId(),
                             before.senderSessionId(), before.messageId(),
                             before.targetSessionId(), args.getArgument(2),
                             null, 0, before.attempts(), before.nextRetryAt(),
                             args.getArgument(3)));
-                    return null;
-                }).when(store).classify(any(MessageRow.class), anyString(),
+            return null;
+        }).when(store).classify(any(MessageRow.class), anyString(),
                         anyString(), any(), anyLong());
         Mockito.doAnswer(args -> {
-                    MessageRow before = row.get();
-                    row.set(new MessageRow(before.tenantId(),
+            MessageRow before = row.get();
+            row.set(new MessageRow(before.tenantId(),
                             before.senderSessionId(), before.messageId(),
                             before.targetSessionId(), before.state(),
                             before.claimedBy(), before.claimedUntil(),
                             before.attempts() + 1, args.getArgument(2),
                             args.getArgument(3)));
-                    return null;
-                }).when(store).defer(any(MessageRow.class), anyString(),
+            return null;
+        }).when(store).defer(any(MessageRow.class), anyString(),
                         anyLong(), any(), anyLong(), anyLong());
         when(store.currentRecord(anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(ignored -> new SessionMessageRelayStore
