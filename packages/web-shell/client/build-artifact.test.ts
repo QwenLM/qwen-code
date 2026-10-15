@@ -511,13 +511,17 @@ describe('build artifact — transcript entry (#11031)', () => {
     // both locales; its parser, worker and markup stay inside the lazily
     // imported SpreadsheetPreview chunk, so only the copy enters this graph.
     // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
-    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
+    // At cebf5719, main measures 1,330,863 and the deletion branch 1,331,565.
+    // The extra 702 units are the guarded deletion action in the shared
+    // workspace hook used by transcript artifact previews. Files UI and
+    // its messages remain excluded. A 1,333,000 ceiling leaves 1,435 units
+    // of margin.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_331_500);
+    expect(js.length).toBeLessThan(1_333_000);
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {
@@ -537,6 +541,10 @@ describe('build artifact — transcript entry (#11031)', () => {
       'files.sourceTooLarge',
     ] as const)
       expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
+    for (const key of Object.keys(FILES_MESSAGES_EN)) {
+      expect(bundle).not.toContain(`"${key}"`);
+      expect(bundle).not.toContain(`'${key}'`);
+    }
   });
 
   it('carries no Live Voice strings and looks none up', () => {
