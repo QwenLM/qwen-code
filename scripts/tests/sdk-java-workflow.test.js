@@ -21,6 +21,28 @@ const step = (block, name) => {
 };
 
 describe('SDK Java self-hosted workflow guards', () => {
+  it('builds native producer prerequisites before either Server test lane', () => {
+    const jobs = parse(workflow).jobs;
+    for (const name of ['mysql-integration', 'hosted-harness-mysql']) {
+      const steps = jobs[name].steps;
+      const install = steps.findIndex((s) =>
+        s.run?.includes('corepack pnpm install --frozen-lockfile'),
+      );
+      const verify = steps.findIndex(
+        (s) =>
+          (s['working-directory'] ===
+            'packages/sdk-java/managed-agent-server' ||
+            s.run?.includes(
+              '-f packages/sdk-java/managed-agent-server/pom.xml',
+            )) &&
+          s.run?.includes('clean verify'),
+      );
+      expect(install, name).toBeGreaterThan(-1);
+      expect(verify, name).toBeGreaterThan(install);
+      expect(steps[install].run, name).not.toContain('--ignore-scripts');
+    }
+  });
+
   it.each(['test', 'daemon-e2e'])('protects the %s job', (name) => {
     const block = job(name);
     for (const fragment of [
@@ -32,10 +54,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       // NONE, '') fail contains() and stay hosted.
       'contains(fromJSON(\'\'["OWNER","MEMBER","COLLABORATOR"]\'\'), github.event.pull_request.author_association)',
       'fromJSON(\'\'["self-hosted", "linux", "x64", "ecs-qwen"]\'\')',
-      "format('refs/pull/{0}/head', github.event.pull_request.number)",
-      "EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'",
-      'git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD',
-      'exit 1',
+      "ref: '${{ inputs.ref || github.sha }}'",
     ]) {
       expect(block).toContain(fragment);
     }
@@ -90,7 +109,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
       );
       expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
-        { test: 6, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
+        { test: 7, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
       );
       if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
@@ -137,8 +156,7 @@ describe('SDK Java Flyway migration version guard', () => {
     ]) {
       expect(block).toContain(fragment);
     }
-    // The merge result is the point: keep the default merge-ref checkout on
-    // the pool too, never the refs/pull/N/head the build lanes use.
+    // Every lane checks the release commit, or the event SHA on daily runs.
     expect(block).toContain('actions/checkout@');
     expect(block).not.toContain('refs/pull/');
     const steps = parsed.steps.map((s) => s.name);
@@ -150,7 +168,7 @@ describe('SDK Java Flyway migration version guard', () => {
     );
   });
 
-  it('scans every sdk-java module that owns a db/migration directory', () => {
+  it('scans every sdk-java module that owns a registered migration directory', () => {
     // The guard's premise is the shared classpath:db/migration namespace —
     // managed-agent-server depends on runtime-broker, so one invocation must
     // name every module that owns a migration sequence. Derive the
@@ -161,11 +179,10 @@ describe('SDK Java Flyway migration version guard', () => {
       withFileTypes: true,
     })) {
       if (!entry.isDirectory()) continue;
-      for (const location of [
-        'src/main/resources/db/migration',
-        'src/main/java/db/migration',
-      ]) {
-        if (existsSync(join('packages/sdk-java', entry.name, location))) {
+      for (const location of LOCATIONS) {
+        if (
+          existsSync(join('packages/sdk-java', entry.name, ...location.dir))
+        ) {
           owners.add(`packages/sdk-java/${entry.name}`);
         }
       }
@@ -177,23 +194,33 @@ describe('SDK Java Flyway migration version guard', () => {
     }
   });
 
-  it('triggers the workflow when the guard script itself changes', () => {
+  it('runs the full suite daily or on demand', () => {
     const yml = parse(workflow);
-    for (const event of ['pull_request', 'push']) {
-      expect(yml.on[event].paths).toContain(
-        'scripts/check-flyway-migrations.js',
-      );
-      expect(yml.on[event].paths).toContain(
-        'scripts/flyway-migration-utils.js',
-      );
-      // The contract version guard of #13804 rides the same lane.
-      expect(yml.on[event].paths).toContain(
-        'scripts/check-contract-version.js',
-      );
-      expect(yml.on[event].paths).toContain(
-        'scripts/contract-version-utils.js',
-      );
-    }
+    expect(Object.keys(yml.on).sort()).toEqual([
+      'schedule',
+      'workflow_call',
+      'workflow_dispatch',
+    ]);
+    expect(yml.on.schedule).toEqual([{ cron: '47 19 * * *' }]);
+  });
+
+  it('keeps the cheap migration guard in PR and post-merge CI', () => {
+    const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+    expect(ci.on.pull_request.branches).toContain('main');
+    expect(ci.on.push.branches).toContain('main');
+    expect(ci.on.pull_request.paths).toBeUndefined();
+    expect(ci.on.push.paths).toBeUndefined();
+    const guard = ci.jobs.lint_and_static.steps.find(
+      (s) => s.name === 'Check Flyway migration versions are unique',
+    );
+    expect(guard.run).toBe(
+      parse(workflow).jobs['flyway-migrations'].steps.find(
+        (s) => s.name === 'Check Flyway migration versions are unique',
+      ).run,
+    );
+    expect(guard.if).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
+    );
   });
 });
 
@@ -201,20 +228,34 @@ describe('SDK Java Flyway migration version guard', () => {
 // the base ref's whenever the document changed. Consumers key capability
 // detection on it, and a regressed or stalled number breaks nothing at
 // runtime to be caught by — both modes were seen in flight on 2026-10-09.
-// The check rides the same lane as the Flyway guard: a second job would
-// spend another pool checkout on a five-second scan.
+// The lightweight checks share the existing PR lint job.
 describe('SDK Java contract version guard', () => {
-  it('runs the advance check on every pull request in the Flyway lane', () => {
-    const parsed = parse(workflow).jobs['flyway-migrations'];
+  it('runs the advance check in PR CI before dependency installation', () => {
+    const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+    expect(ci.on.pull_request.branches).toContain('main');
+    expect(ci.on.pull_request.paths).toBeUndefined();
+    const parsed = ci.jobs.lint_and_static;
     const names = parsed.steps.map((s) => s.name);
     const index = names.indexOf('Check the API contract version advances');
     expect(index).toBeGreaterThan(names.indexOf('Checkout'));
     const step = parsed.steps[index];
     // A push has no base ref to compare against; the races that remain
     // after a pull request's check are the re-check workflow's below.
-    expect(step.if).toBe("${{ github.event_name == 'pull_request' }}");
+    expect(step.if).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
+    );
+    expect(index).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
+    expect(
+      names.indexOf('Check Flyway migration versions are unique'),
+    ).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
+    expect(index).toBeLessThan(
+      parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
+    );
     expect(step.env).toEqual({
       BASE_REF: '${{ github.event.pull_request.base.ref }}',
+      GH_TOKEN: '${{ github.token }}',
+      REPO: '${{ github.repository }}',
+      PR_NUMBER: '${{ github.event.pull_request.number }}',
     });
     // The default checkout is one commit deep, so the comparison copy comes
     // from a depth-one fetch of the base branch's head — not of a stale
@@ -223,6 +264,14 @@ describe('SDK Java contract version guard', () => {
       'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"',
     );
     expect(step.run).toContain(CONTRACT_DOCUMENT);
+    expect(parsed.permissions['pull-requests']).toBe('read');
+    expect(step.run).toContain('--paginate');
+    expect(step.run).toContain(
+      "--jq '.[] | .filename, .previous_filename // empty'",
+    );
+    expect(step.run).toContain(
+      'grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"',
+    );
     expect(step.run).toContain('node scripts/check-contract-version.js');
   });
 });
@@ -634,4 +683,64 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
       );
     },
   );
+});
+
+describe('Java SDK release validation gate', () => {
+  const checks = parse(workflow);
+  const release = parse(
+    readFileSync('.github/workflows/release-sdk-java.yml', 'utf8'),
+  );
+
+  it('checks the prepared source in every lane before publishing', () => {
+    expect(checks.on.workflow_call.inputs.ref).toMatchObject({
+      required: true,
+      type: 'string',
+    });
+    for (const lane of Object.values(checks.jobs)) {
+      const checkout = lane.steps.find((entry) =>
+        entry.uses?.startsWith('actions/checkout@'),
+      );
+      expect(checkout.with.ref).toBe('${{ inputs.ref || github.sha }}');
+      expect(lane.if).toBeUndefined();
+      expect(lane['continue-on-error']).toBeUndefined();
+    }
+    expect(release.jobs.java_checks).toMatchObject({
+      needs: 'prepare',
+      uses: './.github/workflows/sdk-java.yml',
+      with: { ref: '${{ needs.prepare.outputs.release_sha }}' },
+    });
+    expect(release.jobs.java_checks['continue-on-error']).toBeUndefined();
+    expect(release.jobs.release.needs).toEqual(['prepare', 'java_checks']);
+    expect(release.jobs.release.if).toBeUndefined();
+    const checkout = release.jobs.release.steps.find((entry) =>
+      entry.uses?.startsWith('actions/checkout@'),
+    );
+    expect(checkout.with.ref).toBe('${{ needs.prepare.outputs.release_sha }}');
+  });
+
+  it('resolves an existing tag before checks and refuses a changed tag', () => {
+    const prepare = release.jobs.prepare;
+    expect(prepare.permissions).toEqual({ contents: 'read' });
+    expect(prepare.environment).toBeUndefined();
+    const preflight = prepare.steps.find((entry) => entry.id === 'preflight');
+    expect(prepare.outputs.release_sha).toBe(
+      '${{ steps.preflight.outputs.release_sha }}',
+    );
+    expect(preflight.run.indexOf('echo "release_sha=')).toBeGreaterThan(
+      preflight.run.indexOf('git checkout --detach "${tag_commit}"'),
+    );
+    const steps = release.jobs.release.steps;
+    const guard = steps.findIndex(
+      (entry) => entry.name === 'Verify release tag has not changed',
+    );
+    expect(guard).toBeGreaterThan(-1);
+    expect(steps[guard].run).toContain('"${peeled_tag}" != "${RELEASE_SHA}"');
+    expect(steps[guard].run).toContain('exit 1');
+    expect(steps[guard].env.RELEASE_SHA).toBe(
+      '${{ needs.prepare.outputs.release_sha }}',
+    );
+    expect(guard).toBeLessThan(
+      steps.findIndex((entry) => entry.name === 'Create and push release tag'),
+    );
+  });
 });

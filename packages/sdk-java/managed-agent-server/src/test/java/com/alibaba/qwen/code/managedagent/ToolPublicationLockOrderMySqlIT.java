@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
@@ -14,6 +8,16 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -32,14 +36,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import javax.sql.DataSource;
-import org.flywaydb.core.Flyway;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DelegatingDataSource;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ToolPublicationLockOrderMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -64,7 +66,7 @@ class ToolPublicationLockOrderMySqlIT {
         try {
             var source = new OwnerPauseDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
-            Flyway.configure().dataSource(source).load().migrate();
+            Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
             var journal = PublicationJournalFixture.create(source, false);
             JsonNode reserved = journal.reserve();
             var transaction = new TransactionTemplate(journal.manager);
@@ -237,17 +239,17 @@ class ToolPublicationLockOrderMySqlIT {
                                         try {
                                             if (enabled && call.getName().startsWith("execute")
                                                     && "subject".equals(Thread.currentThread().getName())) {
-                                                if (sql.startsWith("INSERT INTO qwen_runtime_placement_guard")) {
+                                                if (sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'runtime_placement'")) {
                                                     requestedLocks.add("placement");
                                                     subjectPlacementLocks.set(List.copyOf(requestedLocks));
-                                                } else if (sql.startsWith("INSERT INTO qwen_tool_publication_tenant")) {
+                                                } else if (sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'output_publication'")) {
                                                     requestedLocks.add("retention");
                                                 }
                                             }
                                             Object value = call.invoke(statement, values);
                                             if (enabled && call.getName().startsWith("execute")
                                                     && "owner".equals(Thread.currentThread().getName())
-                                                    && sql.startsWith("SELECT tenant_id FROM qwen_runtime_placement_guard")
+                                                    && sql.startsWith("SELECT tenant_id FROM ma_tenant_guard") && sql.contains("'runtime_placement'")
                                                     && paused.compareAndSet(false, true)) {
                                                 ownerPlacement.countDown();
                                                 if (!releaseOwner.await(30, TimeUnit.SECONDS)) {

@@ -1,8 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.fasterxml.jackson.databind.JsonNode;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -12,8 +13,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class WorkspaceCsiWorkerAckMainTest {
     @TempDir
@@ -42,8 +43,8 @@ class WorkspaceCsiWorkerAckMainTest {
         var result = run(settings(url), arguments("acknowledge", fixture.selector()));
         assertFailure(result);
         assertThat(fixture.rows()).isEqualTo(1);
-        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Long.class)).isZero();
-        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM qwen_runtime_binding", Long.class)).isZero();
+        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM ma_tool_execution", Long.class)).isZero();
+        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM ma_runtime_binding", Long.class)).isZero();
     }
 
     @Test

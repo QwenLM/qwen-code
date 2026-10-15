@@ -119,8 +119,8 @@ command identity fields stay pinned.
 ## Tool interception
 
 `tool.call` receives the Qwen tool's arguments as flat fields alongside `tool`
-and `tool_use_id`. Names, argument schemas and output records use Qwen's native
-contracts, so a Mod written for Claude's built-in tools may need adaptation.
+and `tool_use_id`. By default, names, argument schemas and output records use
+Qwen's native contracts, including for plugins installed in Claude format.
 There is no separate `tool.result` event; inspect or change the value returned
 by `await next(e)`:
 
@@ -196,6 +196,60 @@ inherit their native output-budget exemptions.
 Goal tool calls also keep the native path: this stage does not allow Mod-authored
 results to enter a Goal's catalog as external evidence.
 Child agents and nested code-mode schedulers do not inherit this middleware.
+
+### Opt into Claude tool inputs
+
+To run a Mod that consumes the supported Claude input fields or passes through
+native results, select its tool dialect in user or system settings and restart:
+
+```json
+{
+  "experimental": { "mods": true },
+  "pluginConfigs": {
+    "my-mod": { "toolDialect": "claude" }
+  }
+}
+```
+
+Use `name@marketplace` for marketplace installations; local installations accept
+`name` or `name@inline`. The setting follows the same operator precedence as
+Mod options. Workspace settings cannot select a dialect. `"native"` is the
+default and explicitly restores the original view. This setting is separate
+from `options` passed to `register` and does not require a `userConfig` declaration.
+Unsupported dialect values fail initialization before any Mod starts.
+
+| Native tool         | Claude name | Fields available to the Mod                            |
+| ------------------- | ----------- | ------------------------------------------------------ |
+| `run_shell_command` | `Bash`      | `command`                                              |
+| `edit`              | `Edit`      | `file_path`, `old_string`, `new_string`, `replace_all` |
+| `write_file`        | `Write`     | `file_path`, `content`                                 |
+
+Both `tool.call` matchers/flat arguments and `tool.check` matchers/`input` use
+this view. Invocation IDs and host identity remain pinned. Inputs are converted
+back to Qwen arguments before the next plugin; native and Claude plugins may
+coexist in either order. The scheduler, native permission rules and recording
+continue to use Qwen names. `tool.check` input is still immutable and cannot
+relax native permissions.
+
+Other tools bypass that plugin's Claude tool hooks, including Read, MultiEdit
+and custom/MCP tools, even if a custom tool is named `Bash`, `Edit` or `Write`.
+Lifecycle, commands and logging are unaffected. This is a selected input
+contract, not compatibility with every Claude tool or Mod.
+
+Native-only parameters such as shell `directory`, `timeout`, `is_background`
+and write `record_as_artifact` are preserved by the host and hidden from this
+view. They cannot be added or changed through a Claude continuation. Unsupported
+fields raise a hook error; existing `.catch` and fallback behavior applies, so
+an uncaught error can still execute the original native request. Return `{deny}`
+to block a call. Omitting a supported field really removes it from the native
+arguments, including required fields; native validation still applies.
+
+Results remain Qwen-native, including refs, errors, images and execution facts.
+In particular, Bash results do not provide Claude's separate `stdout`/`stderr`
+schema. Foreground timeout and background behavior retain Qwen semantics; the
+60-second Mod root limit still applies. This stage supports input guards,
+observers and rewrites using the fields above, not full UI-based Mods such as
+Blast Radius or Replay Theater.
 
 ## Command recovery
 

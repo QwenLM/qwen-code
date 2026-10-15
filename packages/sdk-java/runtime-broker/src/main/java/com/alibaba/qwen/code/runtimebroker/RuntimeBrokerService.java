@@ -326,6 +326,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     || !harnessSessionId.equals(binding.getRequest().getIsolationKey())) {
                 return failed(conflict("workspace_close_identity_unverified", "Saved resource scope differs"));
             }
+            if (JdbcCsiFilesRetirementGuard.isProfile(binding.getRequest().getScope())) {
+                return failed(JdbcCsiFilesRetirementGuard.releaseUnavailable());
+            }
             work = work.thenCompose(ignored -> {
                 bindingRepository.requireHarnessCleanup(binding.getRequest().getScope(), harnessSessionId, authority);
                 if (binding.getState() == RuntimeBindingRecord.State.RELEASED) {
@@ -648,7 +651,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     bindingRepository.requireHarnessAdmission(context.session().getScope(), harnessId, authority);
                     requireSameSession(context.session(), new RuntimeSession(harnessId,
                             runtimeId, turnKind, context.session().getScope()));
-                    return requireReadySessionRecord(context);
+                    return requireAcquireSessionRecord(context);
                 } finally {
                     context.unlock();
                 }
@@ -729,12 +732,23 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         Map<String, Object> immutable = immutableMap(operation,
                 "operation");
+        if (CsiFileHistoryProtocol.isOperation(immutable)) {
+            CsiFileHistoryProtocol.operation(immutable);
+            if (authority != null) {
+                throw conflict("runtime_lifecycle_operation_invalid", "CSI history cannot use lifecycle authority");
+            }
+            return csiFileHistory(harnessSessionId, runtimeSessionId, immutable);
+        }
         if (!ManagedMcpProtocol.isOperation(immutable) && !ManagedHookProtocol.isOperation(immutable)
                 && !ManagedMonitorProtocol.isOperation(immutable)) {
             ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
         }
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
+                    if (JdbcCsiFilesRetirementGuard.isProfile(context.session().getScope())) {
+                        throw new RuntimeBrokerException(501, "csi_control_not_qualified",
+                                "Generic CSI runtime controls are not qualified.", false);
+                    }
                     if (ManagedMcpProtocol.isOperation(immutable)) {
                         ManagedMcpProtocol.validateSession(context.session(), immutable);
                     }
@@ -812,6 +826,50 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 });
     }
 
+    private CompletionStage<Object> csiFileHistory(String harnessSessionId,
+            String runtimeSessionId, Map<String, Object> operation) {
+        return requireSession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
+            if (!JdbcCsiFilesRetirementGuard.isProfile(context.session().getScope())) {
+                throw conflict("runtime_control_invalid", "CSI history requires the original private Runtime");
+            }
+            context.lock();
+            try {
+                RuntimeSessionRecord record = sessionRepository.findById(context.session().getScope(), runtimeSessionId);
+                RuntimeBindingRecord parent = bindingRepository.findById(context.binding().getBindingId());
+                if (record == null || parent == null
+                        || !record.getSession().getHarnessSessionId().equals(harnessSessionId)
+                        || !record.getSession().getRuntimeSessionId().equals(runtimeSessionId)
+                        || !record.getSession().getTurnKind().equals(context.session().getTurnKind())
+                        || !record.getSession().getScope().equals(context.session().getScope())
+                        || !record.getBindingId().equals(parent.getBindingId())
+                        || record.getRuntimeGeneration() != context.binding().getGeneration()
+                        || parent.getGeneration() != context.binding().getGeneration()
+                        || !parent.hasSameLease(context.lease())
+                        || parent.getState() != RuntimeBindingRecord.State.READY || parent.isDrainRequested()
+                        || record.getState() != RuntimeSessionRecord.State.READY) {
+                    throw conflict("csi_original_runtime_unavailable", "Original CSI history owner is unavailable");
+                }
+                requireReadySessionRecord(context);
+                bindingRepository.requireHarnessAdmission(context.session().getScope(), harnessSessionId, null);
+                context.beginControl();
+            } finally {
+                context.unlock();
+            }
+            CompletionStage<Object> result;
+            try {
+                if (!provisioner.isUsable(context.lease())) {
+                    throw conflict("csi_original_runtime_unavailable", "Original CSI worker is unavailable");
+                }
+                result = mapFailure(safeStage(() -> transport.control(context.lease(), context.session(), operation)),
+                        "csi_file_history_unavailable", "Original CSI history observation failed");
+            } catch (RuntimeException | Error failure) {
+                context.endControl();
+                throw failure;
+            }
+            return result.whenComplete((ignored, error) -> context.endControl());
+        });
+    }
+
     /**
      * A client Monitor control names one of this Runtime Session's own
      * watches: {@code operationId} is the execution that started it and
@@ -878,6 +936,61 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String idempotencyKey, Map<String, Object> reference) {
         return prepareExecution(harnessSessionId, runtimeSessionId,
                 idempotencyKey, reference, null);
+    }
+
+    public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
+            String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes) {
+        requireOpen();
+        String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
+        Map<String, Object> deferred = new LinkedHashMap<>(immutableMap(reference, "reference"));
+        if (deferred.containsKey("dispatchMode") || inputBytes == null || definitionBytes == null) {
+            throw invalid("runtime_reference_invalid", "Private CSI allocation fields are invalid");
+        }
+        deferred.put("dispatchMode", "deferred");
+        Map<String, Object> immutable = immutableMap(deferred, "reference");
+        byte[] input = inputBytes.clone();
+        byte[] definition = definitionBytes.clone();
+        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
+            context.lock();
+            try {
+                JdbcRuntimeBindingRepository jdbc = privateCsiRepository(context);
+                ToolExecutionRecord candidate = ToolExecutionRecord.prepared(nextExecutionId(), key,
+                        context.binding().getBindingId(), context.binding().getGeneration(), harnessSessionId, runtimeSessionId,
+                        referenceString(immutable, "promptId"), referenceString(immutable, "callId"),
+                        referenceString(immutable, "argsDigest"), immutable);
+                return jdbc.prepareCsiExecution(sessionRepository, executionRepository, context.binding(), candidate, input, definition);
+            } finally {
+                context.unlock();
+            }
+        });
+    }
+
+    public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
+            String promptId, String batchId) {
+        requireOpen();
+        BrokerValues.requireId(promptId, "promptId");
+        BrokerValues.requireId(batchId, "batchId");
+        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
+            context.lock();
+            try {
+                return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
+                        context.binding(), promptId, batchId);
+            } finally {
+                context.unlock();
+            }
+        });
+    }
+
+    private JdbcRuntimeBindingRepository privateCsiRepository(SessionContext context) {
+        requireReadySessionRecord(context);
+        if (!JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
+                || !context.session().getHarnessSessionId().equals(context.session().getRuntimeSessionId())
+                || !context.session().getRuntimeSessionId().equals(context.binding().getRequest().getIsolationKey())
+                || !context.session().getScope().equals(context.binding().getRequest().getScope())
+                || !(bindingRepository instanceof JdbcRuntimeBindingRepository jdbc)) {
+            throw invalid("csi_native_reservation_unavailable", "Original private CSI repositories are required");
+        }
+        return jdbc;
     }
 
     /** A v3 reservation keeps the raw payload digest distinct from canonical input. */
@@ -1001,6 +1114,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
+                        if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
+                                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
+                            throw invalid("runtime_payload_invalid", "The private CSI profile requires a file Tool v2 payload");
+                        }
                         if (v3) {
                             if (!"run_shell_command".equals(payload.get("toolName"))
                                     && !"monitor".equals(payload.get("toolName"))) {
@@ -1016,22 +1133,35 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     context.lease(), context.session(), grant)),
                                     "runtime_publication_install_failed", "Publication installation failed")
                                     .thenApply(ignored -> {
-                                        // The detached family holds its Runtime
-                                        // through its own ledger row: the Shell
-                                        // process for `is_background`, the watch
-                                        // for `is_monitor`.
-                                        Map<?, ?> toolInput = (Map<?, ?>) payload.get("input");
-                                        ManagedHoldFamily family = Boolean.TRUE.equals(toolInput.get("is_monitor"))
-                                                ? ManagedHoldFamily.MONITOR
-                                                : Boolean.TRUE.equals(toolInput.get("is_background"))
-                                                        ? ManagedHoldFamily.SHELL
-                                                        : null;
-                                        if (family != null) {
-                                            admitBackgroundProcess(context, record, family);
+                                        context.lock();
+                                        try {
+                                            ToolExecutionRecord current = executionRepository
+                                                    .findByExecutionCallId(executionId);
+                                            if (current == null || current.isTerminal()
+                                                    || current.isCancelRequested()
+                                                    || current.getState() == ToolExecutionRecord.State.UNKNOWN) {
+                                                return current == null ? record : current;
+                                            }
+                                            // The detached family holds its Runtime
+                                            // through its own ledger row: the Shell
+                                            // process for `is_background`, the watch
+                                            // for `is_monitor`.
+                                            Map<?, ?> toolInput = (Map<?, ?>) payload.get("input");
+                                            ManagedHoldFamily family = Boolean.TRUE.equals(toolInput.get("is_monitor"))
+                                                    ? ManagedHoldFamily.MONITOR
+                                                    : Boolean.TRUE.equals(toolInput.get("is_background"))
+                                                            ? ManagedHoldFamily.SHELL
+                                                            : null;
+                                            if (family != null) {
+                                                admitBackgroundProcess(context, current, family);
+                                            }
+                                            beginDispatch(context, current, payload, grant);
+                                            ToolExecutionRecord latest = executionRepository
+                                                    .findByExecutionCallId(executionId);
+                                            return latest == null ? current : latest;
+                                        } finally {
+                                            context.unlock();
                                         }
-                                        beginDispatch(context, record, payload, grant);
-                                        ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
-                                        return latest == null ? record : latest;
                                     });
                         }
                         if (shouldDriveDispatch(record)) {
@@ -1082,6 +1212,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (receipt != null && receipt.isTerminal()) {
                 requireOwnedExecution(harnessSessionId, runtimeSessionId,
                         receipt.getExecutionCallId());
+                RuntimeBindingRecord parent = bindingRepository.findById(receipt.getBindingId());
+                if (parent != null && JdbcCsiFilesRetirementGuard.isProfile(parent.getRequest().getScope())) {
+                    throw invalid("csi_native_resources_required", "Private CSI retry requires original resource bytes");
+                }
                 if (!BrokerValues.sameJsonMap(receipt.getReference(),
                         immutableMap(reference, "reference"))) {
                     throw conflict("runtime_idempotency_conflict",
@@ -1122,6 +1256,54 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     executionId)),
                     harnessSessionId, runtimeSessionId, executionId);
         });
+    }
+
+    /**
+     * The runtime Session ids of this Harness Session still owed the close's
+     * drain: a hold row (a background Shell process or a Monitor watch)
+     * exists — terminal or not — and the Runtime Session's release was never
+     * durably recorded. A hold row settling (the run exited, the watch
+     * stopped) discharges nothing on its own; only the Session's RELEASED
+     * record does. Read-only: a reloaded Harness asks this to restore the
+     * close's drain obligation after a restart — restore, never discharge
+     * (#13930 R1-2).
+     */
+    public CompletionStage<List<String>> listActiveHoldRuntimeSessionIds(
+            String harnessSessionId) {
+        requireOpen();
+        String id = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        return mapFailure(safeStage(() -> sessionResolver.resolveTenant(id)),
+                "runtime_hold_inventory_scope_failed",
+                "Runtime hold inventory scope resolution failed")
+                .thenApply(tenant -> listActiveHoldIdsSync(id, tenant));
+    }
+
+    private List<String> listActiveHoldIdsSync(String harnessSessionId,
+            String tenantId) {
+        Set<String> candidates = new LinkedHashSet<>();
+        String after = null;
+        for (;;) {
+            List<ToolExecutionRecord> batch = executionRepository
+                    .findHoldRowsByHarnessSession(harnessSessionId, after, 100);
+            for (ToolExecutionRecord row : batch) {
+                candidates.add(row.getRuntimeSessionId());
+            }
+            if (batch.size() < 100) {
+                break;
+            }
+            after = batch.get(batch.size() - 1).getExecutionCallId();
+        }
+        List<String> held = new ArrayList<>();
+        for (String runtimeSessionId : candidates) {
+            RuntimeSessionRecord session = sessionRepository.findHistorical(
+                    tenantId, harnessSessionId, runtimeSessionId);
+            // A missing record is not a durably recorded release either.
+            if (session == null
+                    || session.getState() != RuntimeSessionRecord.State.RELEASED) {
+                held.add(runtimeSessionId);
+            }
+        }
+        return List.copyOf(held);
     }
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
@@ -1332,6 +1514,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             if (ManagedHoldFamily.of(current) != null) {
                                 throw conflict("runtime_execution_conflict",
                                         "A background process settles only on stop evidence");
+                            }
+                            if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
+                                    && current.getAuthorizedDispatchGeneration() != null) {
+                                throw conflict("csi_execution_cancel_unavailable",
+                                        "An authorized private CSI execution does not support cancellation");
                             }
                             requested = requestCancel(current);
                             if (isPreparedProviderCancellation(requested)) {
@@ -2581,7 +2768,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 bindingRepository.requireHarnessAdmission(session.getScope(), session.getHarnessSessionId(),
                         session.getScope().getLifecycleAuthority());
                 requireSameSession(context.session(), session);
-                return requireReadySessionRecord(context);
+                return requireAcquireSessionRecord(context);
             } finally {
                 context.unlock();
             }
@@ -3397,6 +3584,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<BindingContext> reclaimLostBindingNow(
             RuntimeBindingRecord record, RuntimeProvisionRequest request) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(record.getRequest().getScope())) {
+            return failed(JdbcCsiFilesRetirementGuard.releaseUnavailable());
+        }
         RuntimeBindingRecord claimed = bindingRepository.claimOperation(
                 record.getBindingId(), brokerOwnerId, operationLeaseDuration);
         if (claimed == null || claimed.getState() != RuntimeBindingRecord.State.LOST) {
@@ -3417,6 +3607,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<RuntimeBindingRecord> cleanupLost(RuntimeBindingRecord claimed) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(claimed.getRequest().getScope())) {
+            return failed(JdbcCsiFilesRetirementGuard.releaseUnavailable());
+        }
         return safeStage(() -> {
             RuntimeBindingRecord recovered = recoverLostDrained(claimed,
                     false);
@@ -3872,6 +4065,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
         });
     }
 
+    private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {
+        RuntimeSessionRecord record = requireReadySessionRecord(context);
+        return JdbcCsiFilesRetirementGuard.isProfile(record.getSession().getScope())
+                ? bindingRepository.requireSessionAdmission(sessionRepository, record) : record;
+    }
+
     private RuntimeSessionRecord requireReadySessionRecord(
             SessionContext context) {
         RuntimeSessionRecord record = sessionRepository.findById(
@@ -3909,6 +4108,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
+                && (!(bindingRepository instanceof JdbcRuntimeBindingRepository)
+                        || payload == null || !Set.of("read_file", "write_file", "edit").contains(String.valueOf(payload.get("toolName"))) || grant != null)) {
+            throw new RuntimeBrokerException(501, "csi_file_dispatch_unavailable",
+                    "Private CSI dispatch requires original JDBC authorization and a finite file payload.", false);
+        }
         if (!prepared.isCancelRequested()) {
             bindingRepository.requireHarnessAdmission(context.session().getScope(), context.session().getHarnessSessionId(), null);
         }
@@ -3965,25 +4170,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         if (!provisioner.isUsable(context.lease())) {
             invalidateBinding(context.binding());
-            markUnknown(executing.getExecutionCallId(),
-                    executing.getDispatchGeneration());
+            markUnknown(executing);
             return CompletableFuture.completedFuture(null);
         }
-        DispatchRenewal renewal = new DispatchRenewal(
-                executing.getExecutionCallId(),
-                executing.getDispatchGeneration());
+        DispatchRenewal renewal = new DispatchRenewal(executing);
         try {
             renewal.start();
         } catch (RuntimeException | Error exception) {
-            markUnknown(executing.getExecutionCallId(),
-                    executing.getDispatchGeneration());
+            markUnknown(executing);
             throw exception;
         }
         invocations.add(executing.getExecutionCallId());
         CompletionStage<Map<String, Object>> invocation = grant == null
                 ? safeStage(() -> payload == null
                         ? transport.execute(context.lease(), context.session(), executing.getReference())
-                        : transport.execute(context.lease(), context.session(), dispatchReference(executing), payload))
+                        : transport.execute(context.lease(), context.session(),
+                                dispatchReference(executing, context.binding().getRequest().getScope()), payload))
                 : safeStage(() -> transport.executeV3(context.lease(), context.session(),
                         executing.getReference(), payload, capture(grant)))
                         .handle((answer, error) -> {
@@ -4011,18 +4213,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     // treat this finished invocation as still running.
                     invocations.remove(executing.getExecutionCallId());
                     if (error != null || result == null) {
-                        markUnknown(executing.getExecutionCallId(),
-                                executing.getDispatchGeneration());
+                        markUnknown(executing);
                         return null;
                     }
                     try {
-                        settleExecution(executing.getExecutionCallId(),
-                                executing.getDispatchGeneration(), result);
+                        settleExecution(executing, result);
                         settleUnstartedBackgroundSiblings(
                                 executing.getExecutionCallId(), result);
                     } catch (RuntimeException exception) {
-                        markUnknown(executing.getExecutionCallId(),
-                                executing.getDispatchGeneration());
+                        markUnknown(executing);
                     }
                     return null;
                 }).whenComplete((ignored, error) -> renewal.close());
@@ -4137,7 +4336,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 && capture.get("manifest") == null;
     }
 
-    private static Map<String, Object> dispatchReference(ToolExecutionRecord record) {
+    private static Map<String, Object> dispatchReference(ToolExecutionRecord record, RuntimeScope scope) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(scope)) {
+            Map<String, Object> reference = new LinkedHashMap<>(record.getReference());
+            reference.put("executionCallId", record.getExecutionCallId());
+            return Map.copyOf(reference);
+        }
         if (!Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))) {
             return record.getReference();
         }
@@ -4179,20 +4383,21 @@ public final class RuntimeBrokerService implements AutoCloseable {
             current = executionRepository.findByExecutionCallId(
                     claimed.getExecutionCallId());
         }
-        markUnknown(claimed.getExecutionCallId(),
-                claimed.getDispatchGeneration());
+        markUnknown(claimed);
         return null;
     }
 
-    private void settleExecution(String executionCallId,
-            long dispatchGeneration, Map<String, Object> result) {
+    private void settleExecution(ToolExecutionRecord original, Map<String, Object> result) {
+        String executionCallId = original.getExecutionCallId();
+        long dispatchGeneration = original.getDispatchGeneration();
         ToolExecutionRecord current = executionRepository
                 .findByExecutionCallId(executionCallId);
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current == null || current.isTerminal()
                     || current.getState()
                             == ToolExecutionRecord.State.UNKNOWN
-                    || !ownsDispatch(current, dispatchGeneration)) {
+                    || !ownsDispatch(current, dispatchGeneration)
+                    || !current.sameIdentity(original) || !current.sameAuthorization(original)) {
                 return;
             }
             ToolExecutionRecord replacement = current.withResult(result,
@@ -4210,15 +4415,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 "Runtime execution changed while settling");
     }
 
-    private void markUnknown(String executionCallId,
-            long dispatchGeneration) {
+    private void markUnknown(ToolExecutionRecord original) {
+        String executionCallId = original.getExecutionCallId();
+        long dispatchGeneration = original.getDispatchGeneration();
         ToolExecutionRecord current = executionRepository
                 .findByExecutionCallId(executionCallId);
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current == null || current.isTerminal()
                     || current.getState()
                             == ToolExecutionRecord.State.UNKNOWN
-                    || !ownsDispatch(current, dispatchGeneration)) {
+                    || !ownsDispatch(current, dispatchGeneration)
+                    || !current.sameIdentity(original) || !current.sameAuthorization(original)) {
                 return;
             }
             ToolExecutionRecord updated = executionRepository.compareAndSet(
@@ -4263,7 +4470,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             ToolExecutionRecord initial) {
         ToolExecutionRecord current = initial;
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
-            if (current.isTerminal() || current.isCancelRequested()) {
+            if (current.isTerminal()) {
                 return current;
             }
             ToolExecutionRecord updated = executionRepository.requestCancel(
@@ -4296,8 +4503,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         Map<String, Object> result = runtimeMap(status.get("result"),
                 "cancellation result");
         try {
-            settleExecution(requested.getExecutionCallId(),
-                    requested.getDispatchGeneration(), result);
+            settleExecution(requested, result);
         } catch (IllegalArgumentException exception) {
             throw unavailable("runtime_execution_cancel_failed",
                     "Runtime cancellation returned an invalid result",
@@ -4540,6 +4746,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (current == null) {
             throw notFound("runtime_session_not_found",
                     "Runtime Session was not found");
+        }
+        if (JdbcCsiFilesRetirementGuard.isProfile(current.getSession().getScope())) {
+            throw JdbcCsiFilesRetirementGuard.releaseUnavailable();
         }
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current.getState()
@@ -5289,14 +5498,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
         // Same virtual-thread rule as BindingRenewal: guarded repository
         // calls must not pin the caller's carrier while they block.
         private final ReentrantLock monitor = new ReentrantLock();
-        private final String executionCallId;
-        private final long dispatchGeneration;
+        private final ToolExecutionRecord original;
         private ScheduledFuture<?> task;
 
-        DispatchRenewal(String executionCallId,
-                long dispatchGeneration) {
-            this.executionCallId = executionCallId;
-            this.dispatchGeneration = dispatchGeneration;
+        DispatchRenewal(ToolExecutionRecord original) {
+            this.original = original;
         }
 
         void start() {
@@ -5320,15 +5526,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 try {
                     ToolExecutionRecord renewed =
                             executionRepository.renewDispatch(
-                                    executionCallId, brokerOwnerId,
-                                    dispatchGeneration,
-                                    dispatchLeaseDuration);
+                                    original.getExecutionCallId(), brokerOwnerId,
+                                    original.getDispatchGeneration(), dispatchLeaseDuration);
                     if (renewed == null) {
-                        executionRepository.claimDispatch(executionCallId,
+                        executionRepository.claimDispatch(original.getExecutionCallId(),
                                 brokerOwnerId, dispatchLeaseDuration);
+                        closeLocked();
+                    } else if (!renewed.sameIdentity(original) || !renewed.sameAuthorization(original)
+                            || !ownsDispatch(renewed, original)) {
                         closeLocked();
                     }
                 } catch (RuntimeException exception) {
+                    if (exception instanceof RuntimeBrokerException failure && !failure.isRetryable()
+                            && (failure.getCode().startsWith("csi_")
+                                    || "runtime_admission_closed".equals(failure.getCode()))) {
+                        closeLocked();
+                    }
                     // A transient repository failure does not prove claim loss.
                 }
             } finally {

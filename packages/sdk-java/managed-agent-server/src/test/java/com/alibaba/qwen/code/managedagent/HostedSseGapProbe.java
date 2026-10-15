@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
@@ -10,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -17,24 +16,25 @@ import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.core.Ordered;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Principal;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import org.springframework.core.Ordered;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 final class HostedSseGapProbe implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -89,7 +89,10 @@ final class HostedSseGapProbe implements AutoCloseable {
                         relay = CompletableFuture.runAsync(() -> relay(request, store, projector));
                         yield Map.of();
                     }
-                    case "entered" -> { assertExecution(false); yield Map.of(); }
+                    case "entered" -> {
+                        assertExecution(false);
+                        yield Map.of();
+                    }
                     case "held" -> Map.of("held", terminalHeld.getCount() == 0);
                     case "finished" -> {
                         assertExecution(true);
@@ -99,7 +102,10 @@ final class HostedSseGapProbe implements AutoCloseable {
                                 .containsExactly("session.created", "item.output_text.delta");
                         yield events;
                     }
-                    case "release" -> { releaseTerminal.countDown(); yield Map.of(); }
+                    case "release" -> {
+                        releaseTerminal.countDown();
+                        yield Map.of();
+                    }
                     case "ledger" -> {
                         relay.get(10, TimeUnit.SECONDS);
                         assertThat(failure.get()).isNull();
@@ -135,7 +141,9 @@ final class HostedSseGapProbe implements AutoCloseable {
                     assertThat(event).as("real source terminal required").isNotNull();
                     var projected = projector.project(new SourceEvent(event.getId(), event.getType(), event.getData(),
                             event.getPromptId(), event.getMetadata()), promptId);
-                    if (projected == null) continue;
+                    if (projected == null) {
+                        continue;
+                    }
                     assertThat(event.getPromptId()).isEqualTo(promptId);
                     if (projected.terminal()) {
                         terminalHeld.countDown();
@@ -145,7 +153,9 @@ final class HostedSseGapProbe implements AutoCloseable {
                     sourceKeys.add(key);
                     store.appendPublicEventIfAbsent(tenant, session, promptId, projected.type(), projected.data(),
                             projected.terminal(), key);
-                    if (projected.terminal()) break;
+                    if (projected.terminal()) {
+                        break;
+                    }
                 }
             }
         } catch (Throwable error) {
@@ -154,21 +164,24 @@ final class HostedSseGapProbe implements AutoCloseable {
     }
 
     private List<Map<String, Object>> events() {
-        return jdbc.queryForList("SELECT * FROM managed_agent_event WHERE tenant_id = ? AND session_id = ?"
-                + " ORDER BY sequence_id", tenant, session);
+        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE tenant_id = ? AND session_id = ? ORDER BY sequence_id", tenant, session);
     }
 
     private void assertExecution(boolean finished) throws Exception {
-        var rows = jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?", session);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", session);
         assertThat(rows).hasSize(1);
         var execution = rows.getFirst();
-        if (!finished) executionId = execution.get("execution_call_id").toString();
+        if (!finished) {
+            executionId = execution.get("execution_call_id").toString();
+        }
         assertThat(execution.get("execution_call_id")).isEqualTo(executionId);
-        String storageKey = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest((tenant + "\u0000storage-0").getBytes(StandardCharsets.UTF_8)));
-        var owner = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey);
-        if (finished) assertThat(owner.get("holder_key")).isNull();
-        else {
+        String storage = "storage-0";
+        var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                tenant, storage);
+        if (finished) {
+            assertThat(owner.get("holder_key")).isNull();
+        } else {
             assertThat(owner.get("holder_key")).isNotNull();
             assertThat(owner.get("binding_id")).isEqualTo(execution.get("binding_id"));
             assertThat(owner.get("runtime_generation")).isEqualTo(execution.get("runtime_generation"));
@@ -179,16 +192,20 @@ final class HostedSseGapProbe implements AutoCloseable {
         assertThat(execution.get("execution_state")).isEqualTo(finished ? "SETTLED" : "EXECUTING");
         assertThat(execution.get("execution_status")).isEqualTo(finished ? "success" : null);
         assertThat(((Number) execution.get("dispatch_generation")).intValue()).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT session_state FROM qwen_runtime_session WHERE harness_session_id = ?"
+        assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
                 + " AND runtime_session_id = ?", String.class, session, promptId)).isEqualTo(finished ? "RELEASED" : "READY");
-        if (finished) assertThat(Files.readString(proof)).isEqualTo("xx");
-        var records = jdbc.queryForList("SELECT record_bytes FROM qwen_managed_session_journal_tx"
+        if (finished) {
+            assertThat(Files.readString(proof)).isEqualTo("xx");
+        }
+        var records = jdbc.queryForList("SELECT record_bytes FROM ma_session_journal_tx"
                 + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", byte[].class, tenant, session);
         var events = new ArrayList<JsonNode>();
         for (byte[] record : records) {
             for (String line : new String(record, StandardCharsets.UTF_8).lines().toList()) {
                 JsonNode value = JSON.readTree(line);
-                if (value.path("subtype").asText().equals("managed_session_event_v1")) events.add(value.path("managedSession"));
+                if (value.path("subtype").asText().equals("managed_session_event_v1")) {
+                    events.add(value.path("managedSession"));
+                }
             }
         }
         assertThat(events.stream().filter(event -> event.path("kind").asText().equals("input.accepted"))).hasSize(1);
@@ -226,7 +243,11 @@ final class HostedSseGapProbe implements AutoCloseable {
         var processes = owned.values().stream()
                 .map(value -> (Process) ReflectionTestUtils.getField(value, "process")).toList();
         processes.forEach(Process::destroyForcibly);
-        for (Process process : processes) assertThat(process.waitFor(5, TimeUnit.SECONDS)).isTrue();
-        if (relay != null) relay.get(10, TimeUnit.SECONDS);
+        for (Process process : processes) {
+            assertThat(process.waitFor(5, TimeUnit.SECONDS)).isTrue();
+        }
+        if (relay != null) {
+            relay.get(10, TimeUnit.SECONDS);
+        }
     }
 }

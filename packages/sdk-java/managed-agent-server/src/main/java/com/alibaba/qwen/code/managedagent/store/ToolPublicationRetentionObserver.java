@@ -1,11 +1,12 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import java.util.HashMap;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
+
+import java.util.HashMap;
+import java.util.Map;
 
 public final class ToolPublicationRetentionObserver {
     private static final Logger LOG = LoggerFactory.getLogger(ToolPublicationRetentionObserver.class);

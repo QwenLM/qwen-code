@@ -71,7 +71,6 @@ reads add a deployment policy gate (`403 artifact_content_forbidden`);
 workspace discovery lists only `can_read` rows (401 without actor); legacy
 (unbound) Sessions and agent definitions are **tenant-wide** — any actor in the
 tenant may mutate them today; internal store/publication routes admit a writer
-<<<<<<< HEAD
 HMAC credential, not an actor. The public surface is `/v1/agents/**`, `/v1/agent-automations` and
 `/api/agent/web-shell/v1/**` (`PublicSurface`), realised by eleven Spring
 controllers — the section-10 matrix enumerates the current 39 public + 24
