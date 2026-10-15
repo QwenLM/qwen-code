@@ -99,13 +99,6 @@ public final class ApiModels {
             boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange) {
-        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
-                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
-                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
-                Boolean foregroundShell) {
-            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive,
-                    sessionUnarchive, sessionDelete, cwdChange, foregroundShell, null);
-        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -245,12 +238,6 @@ public final class ApiModels {
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
             JsonNode workspace, String approvalMode) {
-        public WebShellCreateRequest(String requestId, String idempotencyKey,
-                String agentId, String environmentId, String title,
-                List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace) {
-            this(requestId, idempotencyKey, agentId, environmentId, title,
-                    input, metadata, workspace, null);
-        }
     }
 
     public record WebShellSessionOptionsRequest(@NotBlank @Size(max = 128) String agentId) {
@@ -407,13 +394,6 @@ public final class ApiModels {
             WebShellWorkspace workspace,
             WebShellSessionCapabilities capabilities, String approvalMode,
             WebShellModelContext modelContext, WebShellModelSelection modelSelection) {
-        public WebShellSession(String sessionId, String title, String agentId,
-                String status, long createdAt, long updatedAt, WebShellTurn activeTurn,
-                Object environment, long lastSequence, WebShellWorkspace workspace,
-                WebShellSessionCapabilities capabilities) {
-            this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn,
-                    environment, lastSequence, workspace, capabilities, null, null, null);
-        }
     }
 
     /** H6b: the definition fields a create or revise request carries. */
