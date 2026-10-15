@@ -23,10 +23,15 @@ import {
 import { useStdin } from 'ink';
 import { EventEmitter } from 'node:events';
 
-const mockClipboardHasImage = vi.hoisted(() => vi.fn());
+const { mockClipboardHasImage, mockReadClipboardFiles } = vi.hoisted(() => ({
+  mockClipboardHasImage: vi.fn(),
+  mockReadClipboardFiles: vi.fn(),
+}));
 
-vi.mock('../utils/clipboardUtils.js', () => ({
+vi.mock('../utils/clipboardUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/clipboardUtils.js')>()),
   clipboardHasImage: mockClipboardHasImage,
+  readClipboardFiles: mockReadClipboardFiles,
 }));
 
 // Mock the 'ink' module to control stdin
@@ -91,6 +96,7 @@ describe('KeypressContext - Kitty Protocol', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClipboardHasImage.mockResolvedValue(false);
+    mockReadClipboardFiles.mockResolvedValue([]);
     stdin = new MockStdin();
     (useStdin as Mock).mockReturnValue({
       stdin,
@@ -1055,9 +1061,9 @@ describe('KeypressContext - Kitty Protocol', () => {
 
     it('reports an unavailable native module for an empty paste', async () => {
       const keyHandler = vi.fn();
-      mockClipboardHasImage.mockImplementation(async (onUnavailable) => {
+      mockReadClipboardFiles.mockImplementation(async (onUnavailable) => {
         onUnavailable?.();
-        return false;
+        return [];
       });
       const { result } = renderHook(() => useKeypressContext(), { wrapper });
       act(() => result.current.subscribe(keyHandler));
@@ -1072,7 +1078,43 @@ describe('KeypressContext - Kitty Protocol', () => {
           }),
         );
       });
+      expect(mockClipboardHasImage).not.toHaveBeenCalled();
     });
+
+    it.each([
+      ['raw paste path', false],
+      ['keypress paste path', true],
+    ])(
+      'turns copied Windows files into pasted paths through the %s',
+      async (_path, pasteWorkaround) => {
+        const keyHandler = vi.fn();
+        mockReadClipboardFiles.mockResolvedValue([
+          'C:\\Users\\mochi\\My Notes\\notes.txt',
+          '\\\\server\\share\\My Report.txt',
+        ]);
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) => wrapper({ children, pasteWorkaround }),
+        });
+        act(() => result.current.subscribe(keyHandler));
+
+        act(() => stdin.sendPaste(''));
+
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalledWith(
+            expect.objectContaining({
+              paste: true,
+              pasteImage: false,
+              clipboardFiles: [
+                '@C:/Users/mochi/My\\ Notes/notes.txt',
+                '@//server/share/My\\ Report.txt',
+              ],
+              sequence: '',
+            }),
+          );
+        });
+        expect(mockClipboardHasImage).not.toHaveBeenCalled();
+      },
+    );
 
     describe('paste mode markers', () => {
       // These tests use pasteWorkaround=true to force passthrough mode for raw keypress testing
