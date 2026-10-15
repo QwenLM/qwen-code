@@ -36,6 +36,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -3212,8 +3213,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 pairs.append(",");
             }
             pairs.append(" (?, ?)");
-            arguments.add(turn.sessionId());
-            arguments.add(turn.turnId());
+            arguments.add(ManagedSchemaKeys.identity(turn.sessionId()));
+            arguments.add(ManagedSchemaKeys.identity(turn.turnId()));
         }
         arguments.add(tenantId);
         // One row per session: the latest environment event of its latest

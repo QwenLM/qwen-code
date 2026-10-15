@@ -131,6 +131,12 @@ source reactor 完成 SDK 249 例 unit（跳过 9 例）、Broker 1,005 例（�
 
 随后合并 main，保留其子 Turn 取消行为，为 SSH 专用生命周期 fixture 补齐新增依赖。八处继承的 SQL fixture 插入改用规范时间列，其中 journal 使用数据库毫秒时钟。合并后的树通过 247 例聚焦 Java unit/H2、全部 72 例 MySQL 8.4 集成测试、Checkstyle 和 SpotBugs；完整 build、typecheck、bundle，以及 54 例模型/prompt/环境测试、21 例原生 bootstrap/目录 storage 测试和 34 例 WebShell 产物测试均通过。
 
-随后完整 SDK Java CI 发现了从 main 继承的旧故障门槛预期：已移除的 SQL 时间列、SSE 证据仍读取旧时间字段、租约探针将毫秒值与 SQL 日期比较，以及团队关闭 fixture 仍要求子 Turn 自然完成。本次续修仅调整这些测试 fixture，保留 SSE 投影的精确比较，使用共享数据库毫秒时钟，并要求模型响应仍被阻塞时，子 Turn 已取消且子 Session 已关闭。原生 macOS 检查与完整 Linux 生命周期及多节点 CI 分别记录；原有 local-process 能力检查保持有效。
+随后完整 SDK Java CI 发现了从 main 继承的旧故障门槛预期：已移除的 SQL 时间列、SSE 证据仍读取旧时间字段、租约探针将毫秒值与 SQL 日期比较，以及团队关闭 fixture 仍要求子 Turn 自然完成。提交 `8f98bac` 的续修仅调整这些测试 fixture，保留 SSE 投影的精确比较，使用共享数据库毫秒时钟，并要求模型响应仍被阻塞时，子 Turn 已取消且子 Session 已关闭。原生 macOS 检查与完整 Linux 生命周期及多节点 CI 分别记录；原有 local-process 能力检查保持有效。
 
-尚未执行 Linux 和跨物理机器验收，也未运行完整部署的 WebShell → Java → MySQL → 远端 Shell publication 链路；各组件已分别验证。没有配置或修改生产节点。这些缺口意味着当前不能宣称已通过生产验收。
+在 `8f98bac` 上，Linux SDK Java CI 通过全部 46 例 Hosted 进程集成测试（无跳过）、准入和 Runtime Broker 故障门槛，以及 EventTransport 多节点门槛。服务端 MySQL/MariaDB 任务和 Linux、原生 macOS、Windows 上的 Java 21 任务也均通过。随后 O4 步骤在普通 unit/H2 套件中失败，尚未执行 O4 集成场景；这不是 O4 集成结果。
+
+对实际最新环境查询在绑定参数后重编译，已稳定复现 H2 错误。H2 未推导出 Session/Turn 行参数的二进制类型，导致绑定的字符串无法与 schema 的二进制 ID 比较。查询现在使用已有规范 UTF-8 编码器绑定这两个身份，不改变 SQL 或 tenant 条件。已有准入顺序回归强制重编译，保留原有行为断言。
+
+修复后的树通过八例聚焦重编译回归及完整 2,944 例服务端 unit/H2，其中七例为原有跳过。真实 MySQL 8.4.11 上的九项独立实际 store 检查通过，覆盖批量读取、准入顺序、缺失事件、较旧 Turn 迟到事件、tenant 隔离，以及 Unicode 和大小写敏感身份。完整 MySQL profile 通过全部 76 例 Broker 测试；服务端共执行 611 例，在使用两秒 claim 的既有 publication fixture 中出现一项错误，因此整轮验证失败。该未修改方法的聚焦验证续跑通过，包括 Checkstyle 和 SpotBugs。这不构成完整 611 例通过；原失败与较小范围的成功复验分别保留记录。
+
+尚未执行 Linux 上的 SSH Runtime 验收和跨物理机器验收，也未运行完整部署的 WebShell → Java → MySQL → 远端 Shell publication 链路；各组件已分别验证。没有配置或修改生产节点。这些缺口意味着当前不能宣称已通过生产验收。
