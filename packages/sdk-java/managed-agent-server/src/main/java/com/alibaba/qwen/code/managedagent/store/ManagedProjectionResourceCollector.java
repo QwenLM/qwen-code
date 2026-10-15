@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -26,8 +27,7 @@ final class ManagedProjectionResourceCollector {
         // A builder can still hold this body's old RR view before publishing its snapshot ref.
         // Mark a candidate here; the collector must wait for that builder's read lease.
         jdbc.update(
-                "UPDATE ma_resource SET retention_until = CURRENT_TIMESTAMP(6) WHERE"
-                        + " session_scope_key = ? AND kind IN ("
+                "UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW + " WHERE session_scope_key = ? AND kind IN ("
                         + KINDS
                         + ") AND state = 'REFERENCED' AND publication_id IS NULL AND resource_key"
                         + " IN (SELECT f.resource_key FROM ma_resource_ref f WHERE"
@@ -56,11 +56,7 @@ final class ManagedProjectionResourceCollector {
     boolean runOnce() {
         boolean changed = expireSnapshots();
         var candidates = jdbc.queryForList(
-                        "SELECT resource_key, tenant_id, session_id FROM ma_resource WHERE"
-                            + " retention_until <= CURRENT_TIMESTAMP(6) AND NOT EXISTS (SELECT 1"
-                            + " FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND"
-                            + " s.session_id = ma_resource.session_id AND s.csi_guard = TRUE) ORDER"
-                            + " BY retention_until, resource_key LIMIT "
+                        "SELECT resource_key, tenant_id, session_id FROM ma_resource WHERE retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND s.session_id = ma_resource.session_id AND s.csi_guard = TRUE) ORDER BY retention_until, resource_key LIMIT "
                                 + BATCH);
         for (var candidate : candidates) {
             changed |= Boolean.TRUE.equals(transactions.execute(status -> collect(
@@ -162,11 +158,7 @@ final class ManagedProjectionResourceCollector {
                             + " session_scope_key = ? AND tenant_id = ? AND session_id = ? AND kind"
                             + " IN ("
                                 + KINDS
-                                + ") AND retention_until <= CURRENT_TIMESTAMP(6) AND state ="
-                                + " 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND"
-                                + " publication_id IS NULL AND object_key IS NULL AND"
-                                + " object_version_id IS NULL AND encryption_key_id IS NULL AND"
-                                + " deletion_operation_key IS NULL FOR UPDATE",
+                                + ") AND retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND publication_id IS NULL AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL AND deletion_operation_key IS NULL FOR UPDATE",
                         key,
                         scope,
                         tenant,
@@ -211,8 +203,7 @@ final class ManagedProjectionResourceCollector {
                         .isEmpty();
         if (protectedBody) {
             jdbc.update(
-                    "UPDATE ma_resource SET retention_until = TIMESTAMPADD(SECOND, 60,"
-                            + " CURRENT_TIMESTAMP(6)) WHERE resource_key = ?", key);
+                    "UPDATE ma_resource SET retention_until = (" + ManagedSchemaTime.SQL_NOW + " + 60000) WHERE resource_key = ?", key);
             return false;
         }
         // SQL inline deletion and its non-referenceable tombstone commit atomically; no external
