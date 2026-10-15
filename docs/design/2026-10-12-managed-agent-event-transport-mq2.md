@@ -227,8 +227,10 @@ with only the Harness stood in for. The rows:
 - **Post-commit latency.** The deployed composite (hub, then the public
   transport) and a flag-off composite (hub only) publish the same batches,
   interleaved: the committing thread's publish time and the hub
-  subscriber's delivery time may not grow by a millisecond at p95, and the
-  journal wire's after-commit hand-off stays under 20 ms at p95. In three
+  subscriber's delivery time may not grow by a millisecond at p95 locally.
+  Shared CI runners use a 20 ms allowance for scheduler noise; the raw
+  measurements are still recorded. The journal wire's after-commit hand-off
+  stays under 20 ms at p95. In three
   local runs (macOS, 300 rounds each) the transport added 13–186 µs at p95
   and the journal hand-off measured 0.35–1.5 ms; CI writes its own figures
   to `target/event-transport-latency.json`.
