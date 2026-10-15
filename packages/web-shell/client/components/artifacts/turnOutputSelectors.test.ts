@@ -4,8 +4,12 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './turnOutputSelectors';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import type { ACPToolCall, Message } from '../../adapters/types';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  DaemonTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
 
 type ToolGroupMessage = Extract<Message, { role: 'tool_group' }>;
 
@@ -18,6 +22,273 @@ function toolGroup(id: string, tools: ACPToolCall[]): ToolGroupMessage {
 }
 
 describe('turnOutputSelectors', () => {
+  it('associates a slash-command export with its turn through transcript metadata', () => {
+    const descriptor = {
+      kind: 'html',
+      storage: 'workspace',
+      title: 'export.html',
+      workspacePath: 'export.html',
+    };
+    const blocks: DaemonTranscriptBlock[] = [
+      { id: 'export-user', kind: 'user', text: '/export html' },
+      {
+        id: 'export-result',
+        kind: 'assistant',
+        text: 'Session exported to HTML: export.html',
+        meta: { source: 'slash_command', sessionArtifacts: [descriptor] },
+      },
+      { id: 'next-user', kind: 'user', text: 'Next turn' },
+    ].map((block) => ({
+      ...block,
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    })) as DaemonTranscriptBlock[];
+    const messages = transcriptBlocksToDaemonMessages(blocks);
+    const artifact: DaemonSessionArtifact = {
+      ...descriptor,
+      kind: 'html',
+      storage: 'workspace',
+      id: 'export-artifact',
+      source: 'client',
+      status: 'available',
+      retention: 'ephemeral',
+      clientRetained: false,
+      createdAt: '2026-09-16',
+      updatedAt: '2026-09-16',
+    };
+    const byTurn = getArtifactsByTurn(messages, [artifact], '/workspace');
+    expect(byTurn.get('export-user')).toEqual([artifact]);
+    expect(byTurn.has('next-user')).toBe(false);
+    expect(getArtifactsByTurn(messages, [], '/workspace').size).toBe(0);
+  });
+
+  it('keeps each saved version in its original turn and omits the matching local latest card', () => {
+    const latestUrl = 'file:///tmp/publications/latest/index.html';
+    const messages = [
+      userMessage('u1', 'build'),
+      toolGroup('t1', [
+        { callId: 'publish-1', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u2', 'update'),
+      toolGroup('t2', [
+        { callId: 'publish-2', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u3', 'record latest link'),
+      toolGroup('t3', [
+        {
+          callId: 'record',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { url: latestUrl },
+        },
+      ]),
+    ];
+    const first = {
+      id: 'first',
+      toolCallId: 'publish-1',
+      storage: 'published',
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        publishedUrl: latestUrl,
+      },
+    } as DaemonSessionArtifact;
+    const second = { ...first, id: 'second', toolCallId: 'publish-2' };
+    const latest = {
+      id: 'latest',
+      toolCallId: 'publish-2',
+      storage: 'published',
+      url: latestUrl,
+    } as DaemonSessionArtifact;
+    expect(
+      getArtifactsByTurn(messages.slice(0, 4), [first, second, latest]).get(
+        'u2',
+      ),
+    ).toEqual([second]);
+    const grouped = getArtifactsByTurn(messages, [first, second, latest]);
+    expect(grouped.get('u1')).toEqual([first]);
+    expect(grouped.get('u2')).toEqual([second]);
+    expect(grouped.get('u3')).toEqual([latest]);
+  });
+
+  it('keeps the matching latest card when its published page is browser-openable', () => {
+    const messages = [
+      userMessage('u1', 'build'),
+      toolGroup('t1', [
+        { callId: 'publish-1', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u2', 'update'),
+      toolGroup('t2', [
+        { callId: 'publish-2', toolName: 'Artifact', status: 'completed' },
+      ]),
+    ];
+    const first = {
+      id: 'first',
+      toolCallId: 'publish-1',
+      storage: 'published',
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        publishedUrl: 'https://example.com/latest',
+      },
+    } as DaemonSessionArtifact;
+    const second = { ...first, id: 'second', toolCallId: 'publish-2' };
+    const latest = {
+      id: 'latest',
+      toolCallId: 'publish-2',
+      storage: 'published',
+      url: 'https://example.com/latest',
+    } as DaemonSessionArtifact;
+    const grouped = getArtifactsByTurn(messages, [first, second, latest]);
+    expect(grouped.get('u1')).toEqual([first]);
+    expect(grouped.get('u2')).toEqual([second, latest]);
+  });
+
+  it('attaches expanded directory files to the recorded folder turn', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'scheduler_timeline_daily' },
+        },
+      ]),
+    ];
+    const artifacts = [
+      {
+        id: 'artifact-1',
+        title: 'day1.xlsx',
+        workspacePath: 'scheduler_timeline_daily/day1.xlsx',
+      },
+      {
+        id: 'artifact-2',
+        title: 'day2.xlsx',
+        workspacePath: 'scheduler_timeline_daily/nested/day2.xlsx',
+      },
+    ] as DaemonSessionArtifact[];
+
+    expect(getArtifactsByTurn(messages, artifacts).get('u1')).toEqual(
+      artifacts,
+    );
+  });
+
+  it('does not attach later artifacts under a previously recorded directory', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'reports' },
+        },
+      ]),
+      userMessage('u2', 'write summary'),
+      toolGroup('tg2', [
+        {
+          callId: 'call-2',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'reports/summary.csv' },
+        },
+      ]),
+    ];
+    const expanded = {
+      id: 'artifact-1',
+      workspacePath: 'reports/day1.xlsx',
+      toolCallId: 'call-1',
+    };
+    const later = {
+      id: 'artifact-2',
+      workspacePath: 'reports/summary.csv',
+      toolCallId: 'call-2',
+    };
+    const artifacts = [expanded, later] as DaemonSessionArtifact[];
+
+    expect(getArtifactsByTurn(messages, artifacts).get('u1')).toEqual([
+      expanded,
+    ]);
+    expect(getArtifactsByTurn(messages, artifacts).get('u2')).toEqual([later]);
+  });
+
+  it('ignores a failed record_artifact when grouping by directory prefix', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'failed',
+          args: { workspacePath: 'reports' },
+        },
+      ]),
+      userMessage('u2', 'write summary'),
+      toolGroup('tg2', [
+        {
+          callId: 'call-2',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'reports/summary.csv' },
+        },
+      ]),
+    ];
+    const later = {
+      id: 'artifact-2',
+      workspacePath: 'reports/summary.csv',
+      toolCallId: 'call-2',
+    } as DaemonSessionArtifact;
+
+    expect(getArtifactsByTurn(messages, [later]).get('u1')).toBeUndefined();
+    expect(getArtifactsByTurn(messages, [later]).get('u2')).toEqual([later]);
+  });
+
+  it('does not treat a sibling path as a recorded directory child', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'reports' },
+        },
+      ]),
+    ];
+    const artifacts = [
+      {
+        id: 'artifact-1',
+        workspacePath: 'reports-old/summary.xlsx',
+      },
+    ] as DaemonSessionArtifact[];
+
+    expect(getArtifactsByTurn(messages, artifacts).get('u1')).toBeUndefined();
+  });
+
+  it('groups expanded directory children through the workspace cwd', () => {
+    const messages = [
+      userMessage('u1', 'export excel'),
+      toolGroup('tg1', [
+        {
+          callId: 'call-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: '/workspace/project/reports' },
+        },
+      ]),
+    ];
+    const artifacts = [
+      {
+        id: 'artifact-1',
+        workspacePath: 'reports/day1.xlsx',
+      },
+    ] as DaemonSessionArtifact[];
+
+    expect(
+      getArtifactsByTurn(messages, artifacts, '/workspace/project').get('u1'),
+    ).toEqual(artifacts);
+  });
+
   it('groups artifacts by the turn that recorded them', () => {
     const messages = [
       userMessage('u1', 'make report'),
@@ -161,6 +432,86 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
+  it('keeps an intact unified patch when saved file bodies were truncated', () => {
+    const fileDiff =
+      '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new';
+    const messages = [
+      userMessage('u1', 'edit large file'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: { fileName: 'src/app.ts', fileDiff },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({ additions: 1, deletions: 1 });
+    expect(change?.diffs).toEqual([{ oldText: '', newText: '', fileDiff }]);
+  });
+
+  it('counts a saved patch after a full-content write', () => {
+    const fileDiff =
+      '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-one\n+two';
+    const messages = [
+      userMessage('u1', 'write then edit a large file'),
+      toolGroup('tg1', [
+        {
+          callId: 'write-1',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'src/app.ts', content: 'one\n' },
+        },
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: { fileName: 'src/app.ts', fileDiff },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({ additions: 2, deletions: 1 });
+  });
+
+  it('sums line stats from multiple saved patches', () => {
+    const patch = (oldText: string, newText: string) =>
+      `--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-${oldText}\n+${newText}`;
+    const messages = [
+      userMessage('u1', 'edit a large file twice'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            fileName: 'src/app.ts',
+            fileDiff: patch('one', 'two'),
+          },
+        },
+        {
+          callId: 'edit-2',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            fileName: 'src/app.ts',
+            fileDiff: patch('two', 'three'),
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({ additions: 2, deletions: 2 });
+  });
+
   it('keeps partial diffs after a full-content diff', () => {
     const messages = [
       userMessage('u1', 'write then edit file'),
@@ -221,7 +572,7 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
-  it('omits stats for large full-content diffs', () => {
+  it('shows stats for large full-content diffs', () => {
     const oldContent = Array.from({ length: 1001 }, (_, index) => `${index}`)
       .join('\n')
       .concat('\n');
@@ -245,11 +596,50 @@ describe('turnOutputSelectors', () => {
     ];
 
     const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
-    expect(change?.additions).toBeUndefined();
-    expect(change?.deletions).toBeUndefined();
+    expect(change).toMatchObject({
+      additions: 1001,
+      deletions: 1001,
+    });
     expect(change?.diffs).toEqual([
       { oldText: oldContent, newText: newContent, fullContent: true },
     ]);
+  });
+
+  it('shows accurate stats for a large file with a small edit', () => {
+    const oldContent = Array.from(
+      { length: 2000 },
+      (_, index) => `line ${index}`,
+    )
+      .join('\n')
+      .concat('\n');
+    const newContent = [
+      ...oldContent.split('\n').slice(0, 1000),
+      'inserted line',
+      ...oldContent.split('\n').slice(1000, -1),
+    ]
+      .join('\n')
+      .concat('\n');
+    const messages = [
+      userMessage('u1', 'edit large file'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            originalContent: oldContent,
+            newContent,
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({
+      additions: 1,
+      deletions: 0,
+    });
   });
 
   it('omits stats for unrelated partial diffs', () => {
@@ -474,6 +864,73 @@ describe('turnOutputSelectors', () => {
         newText: 'export const value = 1;\nconsole.log(value);\n',
         fullContent: true,
       },
+    ]);
+  });
+
+  it('keeps the complete write_file diff when a preview is also present', () => {
+    const rawContent = 'export const value = 1;\nconsole.log(value);\n';
+    const blocks: DaemonTranscriptBlock[] = [
+      {
+        id: 'u1',
+        kind: 'user',
+        text: 'write file',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: 'write-block',
+        kind: 'tool',
+        toolCallId: 'write-1',
+        toolName: 'write_file',
+        title: 'Write src/generated.ts',
+        status: 'completed',
+        rawInput: {
+          file_path: 'src/generated.ts',
+          content: rawContent,
+        },
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_PREVIEW\n',
+        },
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+    ];
+
+    const messages = transcriptBlocksToDaemonMessages(blocks);
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({
+      path: 'src/generated.ts',
+      additions: 2,
+      deletions: 0,
+    });
+    expect(change?.diffs).toEqual([
+      { oldText: '', newText: rawContent, fullContent: true },
+    ]);
+  });
+
+  it('uses normalized newText only when write_file content is unavailable', () => {
+    const messages = [
+      userMessage('u1', 'write from preview'),
+      toolGroup('tg1', [
+        {
+          callId: 'write-preview',
+          toolName: 'write_file',
+          status: 'completed',
+          args: {
+            path: 'src/preview.ts',
+            newText: 'preview only\n',
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change?.diffs).toEqual([
+      { oldText: '', newText: 'preview only\n', fullContent: true },
     ]);
   });
 

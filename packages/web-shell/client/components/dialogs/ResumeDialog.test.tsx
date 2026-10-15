@@ -11,7 +11,7 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-const sessions = [
+let sessions = [
   {
     sessionId: 'alpha-id',
     displayName: 'Alpha',
@@ -31,15 +31,22 @@ const sessions = [
     updatedAt: '2026-01-01T00:00:00Z',
   },
 ];
+const initialSessions = sessions.slice();
+let scopedSessionsOptions: unknown;
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
-  useWorkspace: () => ({ client: {} }),
-  useSessions: () => ({
-    sessions,
-    loading: false,
-    error: undefined,
-  }),
+}));
+
+vi.mock('../../hooks/useScopedSessions', () => ({
+  useScopedSessions: (_workspaceCwd: unknown, options: unknown) => {
+    scopedSessionsOptions = options;
+    return {
+      sessions,
+      loading: false,
+      error: undefined,
+    };
+  },
 }));
 
 const { ResumeDialog } = await import('./ResumeDialog');
@@ -98,12 +105,17 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  sessions = initialSessions.slice();
 });
 
 describe('ResumeDialog', () => {
   it('opens with no highlight; Enter does not switch sessions', () => {
     mount();
 
+    expect(scopedSessionsOptions).toEqual({
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
     expect(rows()).toHaveLength(3);
     expect(rows().some(isCursor)).toBe(false);
 
@@ -148,5 +160,31 @@ describe('ResumeDialog', () => {
     press('Enter');
     expect(onSelect).toHaveBeenCalledWith('beta-id');
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('matches a session by its bound PR number in the filter', () => {
+    sessions = [
+      {
+        sessionId: 'pr-id',
+        displayName: 'Fix CI',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+        prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+      },
+      {
+        sessionId: 'other',
+        displayName: 'Unrelated',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+    ];
+    mount();
+
+    typeFilter('#9517');
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('Fix CI');
+
+    typeFilter('#9999');
+    expect(rows()).toHaveLength(0);
   });
 });

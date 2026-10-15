@@ -1,10 +1,17 @@
-import { useRef, useState } from 'react';
-import { FolderClosedIcon, FolderPlusIcon, LockIcon } from 'lucide-react';
+import { Fragment, useRef, useState } from 'react';
+import {
+  CircleDashedIcon,
+  FolderClosedIcon,
+  FolderPlusIcon,
+  Globe2Icon,
+  LockIcon,
+} from 'lucide-react';
 import { useI18n } from '../i18n';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
@@ -19,6 +26,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from './ui/tooltip';
+import { HostLabel } from './workspaces/HostLabel';
 
 export interface WorkspaceSelectorOption {
   id: string;
@@ -26,6 +34,8 @@ export interface WorkspaceSelectorOption {
   label: string;
   primary: boolean;
   trusted: boolean;
+  /** Daemon host this workspace lives on; defaults to the page origin. */
+  hostOrigin?: string;
 }
 
 interface WorkspaceSelectorProps {
@@ -33,13 +43,30 @@ interface WorkspaceSelectorProps {
   selectedWorkspaceCwd?: string;
   disabled?: boolean;
   busy?: boolean;
+  alwaysVisible?: boolean;
   scratchSupported: boolean;
   existingFolderSupported: boolean;
+  /** Offer a projectless (standalone) target alongside the workspaces. */
+  standaloneSupported?: boolean;
+  selectedStandalone?: boolean;
   className?: string;
   onSelectWorkspace: (cwd: string | undefined) => void;
+  /**
+   * Host-aware selection for multi-daemon pages. When provided it fires
+   * INSTEAD of `onSelectWorkspace`, with the option's host (page origin when
+   * unset); `undefined` cwd keeps marking the host's primary workspace.
+   */
+  onSelectHostedWorkspace?: (
+    hostOrigin: string,
+    cwd: string | undefined,
+  ) => void;
+  onSelectStandalone?: () => void;
   onCreateScratch: () => void;
   onOpenExistingFolder: () => void;
 }
+
+/** Radio-group value that stands for the projectless target. */
+const STANDALONE_OPTION_ID = '__standalone__';
 
 /**
  * Composer workspace menu. Capability-gated creation actions and disabled
@@ -50,10 +77,15 @@ export function WorkspaceSelector({
   selectedWorkspaceCwd,
   disabled,
   busy,
+  alwaysVisible = false,
   scratchSupported,
   existingFolderSupported,
+  standaloneSupported,
+  selectedStandalone,
   className,
   onSelectWorkspace,
+  onSelectHostedWorkspace,
+  onSelectStandalone,
   onCreateScratch,
   onOpenExistingFolder,
 }: WorkspaceSelectorProps) {
@@ -62,25 +94,53 @@ export function WorkspaceSelector({
   const [tooltipOpen, setTooltipOpen] = useState(false);
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);
+  const pointerDismissedRef = useRef(false);
   const selected = workspaces.find((workspace) =>
     selectedWorkspaceCwd
       ? workspace.cwd === selectedWorkspaceCwd
       : workspace.primary,
   );
   const canCreate = scratchSupported || existingFolderSupported;
-  if (workspaces.length <= 1 && !canCreate) return null;
+  const standaloneSelectable = Boolean(
+    standaloneSupported && onSelectStandalone,
+  );
+  if (
+    !alwaysVisible &&
+    workspaces.length <= 1 &&
+    !canCreate &&
+    !standaloneSelectable
+  ) {
+    return null;
+  }
+  // Group by host in first-appearance order; a single-host list keeps the
+  // historic flat rendering (no group headers).
+  const pageOrigin =
+    typeof window === 'undefined' ? '' : window.location.origin;
+  const groups: { hostOrigin: string; items: WorkspaceSelectorOption[] }[] = [];
+  for (const workspace of workspaces) {
+    const hostOrigin = workspace.hostOrigin ?? pageOrigin;
+    const group = groups.find((entry) => entry.hostOrigin === hostOrigin);
+    if (group) {
+      group.items.push(workspace);
+    } else {
+      groups.push({ hostOrigin, items: [workspace] });
+    }
+  }
+  const groupedByHost = groups.length > 1;
+  const triggerLabel = selectedStandalone
+    ? t('sidebar.noWorkspace')
+    : (selected?.label ?? t('sidebar.workspaceSelectLabel'));
 
   return (
     <TooltipProvider delayDuration={300}>
       <DropdownMenu
         open={menuOpen}
         onOpenChange={(open) => {
+          if (open) pointerDismissedRef.current = false;
           menuOpenRef.current = open;
           setMenuOpen(open);
-          if (open) {
-            suppressTooltipRef.current = true;
-            setTooltipOpen(false);
-          }
+          suppressTooltipRef.current = true;
+          setTooltipOpen(false);
         }}
       >
         <Tooltip
@@ -104,7 +164,6 @@ export function WorkspaceSelector({
                   }
                 }}
                 onPointerLeave={() => {
-                  suppressTooltipRef.current = false;
                   setTooltipOpen(false);
                 }}
                 onBlur={() => {
@@ -114,40 +173,121 @@ export function WorkspaceSelector({
                   }
                 }}
               >
-                <FolderClosedIcon size={16} strokeWidth={1.2} />
-                <span data-slot="select-value">{selected?.label ?? ''}</span>
+                {selectedStandalone ? (
+                  <CircleDashedIcon size={16} strokeWidth={1.2} />
+                ) : (
+                  <FolderClosedIcon size={16} strokeWidth={1.2} />
+                )}
+                <span data-slot="select-value">{triggerLabel}</span>
               </button>
             </DropdownMenuTrigger>
           </TooltipTrigger>
-          <TooltipContent side="top">{selected?.label}</TooltipContent>
+          <TooltipContent side="top">{triggerLabel}</TooltipContent>
         </Tooltip>
-        <DropdownMenuContent align="start" className="min-w-56">
+        <DropdownMenuContent
+          side="top"
+          align="start"
+          className="min-w-56"
+          onPointerDownCapture={() => {
+            pointerDismissedRef.current = true;
+          }}
+          onKeyDownCapture={() => {
+            pointerDismissedRef.current = false;
+          }}
+          onPointerDownOutside={() => {
+            pointerDismissedRef.current = true;
+          }}
+          onCloseAutoFocus={(event) => {
+            if (pointerDismissedRef.current) event.preventDefault();
+            pointerDismissedRef.current = false;
+          }}
+        >
           <DropdownMenuRadioGroup
-            value={selected?.id}
+            value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
+              if (standaloneSelectable && id === STANDALONE_OPTION_ID) {
+                onSelectStandalone?.();
+                return;
+              }
               const next = workspaces.find((workspace) => workspace.id === id);
               if (!next?.trusted) return;
-              onSelectWorkspace(next.primary ? undefined : next.cwd);
+              const cwd = next.primary ? undefined : next.cwd;
+              if (onSelectHostedWorkspace) {
+                onSelectHostedWorkspace(next.hostOrigin ?? pageOrigin, cwd);
+              } else {
+                onSelectWorkspace(cwd);
+              }
             }}
           >
-            {workspaces.map((workspace) => (
-              <DropdownMenuRadioItem
-                key={workspace.id}
-                value={workspace.id}
-                disabled={!workspace.trusted}
-                title={workspace.cwd}
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {workspace.label}
-                </span>
-                {!workspace.trusted && (
-                  <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <LockIcon />
-                    {t('sidebar.workspaceUntrusted')}
-                  </span>
+            {groups.map((group) => (
+              <Fragment key={group.hostOrigin}>
+                {groupedByHost && (
+                  <DropdownMenuLabel
+                    className="flex items-center gap-1.5 text-[11px]"
+                    title={group.hostOrigin}
+                  >
+                    <HostLabel origin={group.hostOrigin} />
+                  </DropdownMenuLabel>
                 )}
-              </DropdownMenuRadioItem>
+                {group.items.map((workspace) => {
+                  const remoteHost =
+                    workspace.hostOrigin && workspace.hostOrigin !== pageOrigin
+                      ? workspace.hostOrigin
+                      : undefined;
+                  return (
+                    <DropdownMenuRadioItem
+                      key={workspace.id}
+                      value={workspace.id}
+                      disabled={!workspace.trusted}
+                      title={
+                        remoteHost
+                          ? `${remoteHost} — ${workspace.cwd}`
+                          : workspace.cwd
+                      }
+                    >
+                      <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate">
+                        {remoteHost && (
+                          <span
+                            className="relative inline-flex size-3.5 shrink-0 items-center justify-center"
+                            data-testid="remote-workspace-folder-icon"
+                          >
+                            <FolderClosedIcon
+                              className="size-3.5"
+                              strokeWidth={1.4}
+                              aria-hidden="true"
+                            />
+                            <Globe2Icon
+                              className="absolute -right-0.5 -bottom-0.5 size-2 rounded-full bg-popover text-[var(--agent-blue-500)]"
+                              strokeWidth={2}
+                              aria-hidden="true"
+                            />
+                          </span>
+                        )}
+                        {workspace.label}
+                      </span>
+                      {remoteHost && (
+                        <span className="max-w-[45%] truncate text-xs text-muted-foreground">
+                          {new URL(remoteHost).host}
+                        </span>
+                      )}
+                      {!workspace.trusted && (
+                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <LockIcon />
+                          {t('sidebar.workspaceUntrusted')}
+                        </span>
+                      )}
+                    </DropdownMenuRadioItem>
+                  );
+                })}
+              </Fragment>
             ))}
+            {standaloneSelectable && (
+              <DropdownMenuRadioItem value={STANDALONE_OPTION_ID}>
+                <span className="min-w-0 flex-1 truncate">
+                  {t('sidebar.noWorkspace')}
+                </span>
+              </DropdownMenuRadioItem>
+            )}
           </DropdownMenuRadioGroup>
           {canCreate && (
             <>
@@ -157,7 +297,14 @@ export function WorkspaceSelector({
                   <FolderPlusIcon />
                   {t('sidebar.newWorkspace')}
                 </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
+                <DropdownMenuSubContent
+                  onPointerDownCapture={() => {
+                    pointerDismissedRef.current = true;
+                  }}
+                  onKeyDownCapture={() => {
+                    pointerDismissedRef.current = false;
+                  }}
+                >
                   {scratchSupported && (
                     <DropdownMenuItem onSelect={onCreateScratch}>
                       {t('sidebar.startFromScratch')}

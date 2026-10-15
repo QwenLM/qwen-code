@@ -2,6 +2,7 @@
 
 import { spawn } from 'node:child_process';
 import {
+  constants,
   createWriteStream,
   existsSync,
   mkdirSync,
@@ -18,17 +19,23 @@ const skillPath = resolve(
   '..',
   'SKILL.md',
 );
-const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
+// Default absolute budget, 90m. Only the issue lane's `develop-issue` leg
+// relies on it (every other leg pins QWEN_TIMEOUT_MS in the workflow): at
+// the former 50m, 6 of the 13 develop attempts observed 2026-08-20..26 died
+// at the budget with the branch discarded, against 2 that published a PR.
+const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 90 * 60 * 1000;
 // Idle watchdog: a wedged sandbox produces NOTHING — four observed hangs
 // (#8663 x2, #8761 r3, #8763 r4) each printed their last byte at docker
 // container entry and then sat silent for the whole absolute budget,
-// burning 2 hours per round for zero work. Legitimate runs are never that
-// quiet: the longest silence the fleet tolerates elsewhere is the review
-// pipeline's 10-minute stream-idle window for thinking phases on ~1M-token
-// contexts, so twice that is the default. Distinct from QWEN_TIMEOUT_MS so
+// burning 2 hours per round for zero work. Streamed agent events keep active
+// runs observable; the longest silence the fleet tolerates elsewhere is the
+// review pipeline's 10-minute stream-idle window for thinking phases on
+// ~1M-token contexts, so twice that is the default. Distinct from
+// QWEN_TIMEOUT_MS so
 // the failure comment says which limit fired; a leg whose absolute budget is
-// shorter than this window (the review workflow's 18-minute repair pass)
-// always reaches the absolute timer first.
+// shorter than this window would always reach the absolute timer first
+// (none today — the shortest leg is the issue lane's 50-minute assess
+// pass).
 const parsedIdleTimeoutMs = Number(process.env.QWEN_IDLE_TIMEOUT_MS);
 // Reject negative/0/NaN: Number('-1') is truthy, so a bare `|| default`
 // guard would arm a sub-second window and kill every agent at the first
@@ -37,6 +44,9 @@ const QWEN_IDLE_TIMEOUT_MS =
   Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
     ? parsedIdleTimeoutMs
     : 20 * 60 * 1000;
+const MAX_STREAM_JSON_LINE_LENGTH = 1024 * 1024;
+const OVERSIZED_STREAM_JSON_LINE_NOTICE =
+  '[run-agent] dropped oversized stream-json line; full bytes in agent.log\n';
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -57,7 +67,17 @@ const specs = {
     anyOutput: true,
     exclusiveOutput: true,
     invocation: (o) =>
-      `/autofix address-review --pr ${o.pr} --issue ${o.issue} --workdir ${o.workdir} --conflict ${o.conflict} --base ${o.base}`,
+      [
+        `/autofix address-review --pr ${o.pr} --issue ${o.issue} --workdir ${o.workdir} --conflict ${o.conflict} --base ${o.base}`,
+        // In-round self-review arm (af-156). The workflow decides the arm
+        // per PR; the skill reads these three lines — and nothing else — to
+        // know whether it may run the delta review before the commit, with
+        // which CLI entry (the host's `qwen` wrapper is not on PATH inside
+        // the sandbox), and until when.
+        `Self-review: ${o.selfReview}`,
+        `Self-review CLI: ${o.selfReviewCli || 'qwen'}`,
+        `Round deadline (UTC): ${o.deadline || 'unknown'}`,
+      ].join('\n'),
   },
 };
 
@@ -166,13 +186,31 @@ function recoverableApiError(output) {
 
 function writeHandoff(workdir, message) {
   mkdirSync(workdir, { recursive: true });
-  writeFileSync(file(workdir, 'handoff.md'), `${message}\n`);
+  const handoffPath = file(workdir, 'handoff.md');
+  // A non-empty handoff.md is an agent-written verdict — the same
+  // convention missing() and the gate's -s checks apply — and a verdict
+  // must not be reclassified by a synthesized note.
+  if (existsSync(handoffPath) && statSync(handoffPath).size > 0) return;
+  writeFileSync(handoffPath, `${message}\n`);
 }
 
 function isLoopGuardOutput(output) {
   return (
     output.includes('turn_tool_call_cap') ||
     output.includes('Loop detection halted the run')
+  );
+}
+
+function streamResultOutput(event) {
+  if (!event || event.type !== 'result') return '';
+  return [event.error?.message, event.result]
+    .filter((value) => typeof value === 'string')
+    .join('\n');
+}
+
+function isLoopGuardResult(event) {
+  return (
+    event?.is_error === true && isLoopGuardOutput(streamResultOutput(event))
   );
 }
 
@@ -190,14 +228,21 @@ function runQwen(options, prompt) {
     flags: 'w',
   });
   log.on('error', () => {});
-  let outputTail = '';
-  let loopDetected = false;
+  let diagnosticTail = '';
+  let stdoutCarry = '';
+  let discardingOversizedStdoutLine = false;
+  let terminalResult;
+  // The stream's init event carries the RESOLVED model and the CLI version —
+  // what actually ran, versus the configured OPENAI_MODEL the workflow knows.
+  // finish() writes them to agent-model for the report footers.
+  let initModel = '';
+  let initVersion = '';
   let settled = false;
   let timedOut = false;
   let idleTimedOut = false;
   let lastOutputAt = Date.now();
   // The sandbox launcher prints the container name before the container
-  // starts (packages/cli/src/utils/sandbox.ts), so the FIRST match is this
+  // starts (packages/cli/src/serve/sandbox.ts), so the FIRST match is this
   // run's own container — the kill-path reap below relies on that ownership.
   let sandboxName = '';
   let lineCarry = '';
@@ -207,10 +252,92 @@ function runQwen(options, prompt) {
   let sandboxRemoval = null;
 
   return new Promise((resolve) => {
-    const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      detached: true,
-    });
+    const child = spawn(
+      options.qwenBin,
+      [
+        '--yolo',
+        '--output-format',
+        'stream-json',
+        '--include-partial-messages',
+        '--prompt',
+        prompt,
+      ],
+      {
+        stdio: ['inherit', 'pipe', 'pipe'],
+        detached: true,
+      },
+    );
+
+    const appendDiagnostic = (text) => {
+      diagnosticTail = (diagnosticTail + text).slice(-20_000);
+    };
+
+    const consumeStreamJsonLine = (line, terminated) => {
+      if (!line.trim()) return;
+      try {
+        const event = JSON.parse(line);
+        lastOutputAt = Date.now();
+        if (event?.type === 'result') terminalResult = event;
+        // First init event wins; newlines are flattened so the sentinel file
+        // stays two lines (the read sites allowlist further). The caps EQUAL
+        // the read sites' published bounds (cut -c1-100 / -c1-40), so a
+        // legitimate value is never written long and silently truncated on
+        // its way into the footer — a contract test pins the two pairs
+        // together.
+        if (
+          !initModel &&
+          event?.type === 'system' &&
+          event?.subtype === 'init' &&
+          typeof event.model === 'string'
+        ) {
+          initModel = event.model.split('\n')[0].slice(0, 100);
+          initVersion =
+            typeof event.qwen_code_version === 'string'
+              ? event.qwen_code_version.split('\n')[0].slice(0, 40)
+              : '';
+        }
+        if (event?.type !== 'stream_event') {
+          process.stdout.write(`${line}${terminated ? '\n' : ''}`);
+        }
+      } catch {
+        appendDiagnostic(`${line}${terminated ? '\n' : ''}`);
+        process.stdout.write(`${line}${terminated ? '\n' : ''}`);
+      }
+    };
+
+    const consumeStreamJson = (text, final = false) => {
+      const parts = text.split('\n');
+      for (const [index, part] of parts.entries()) {
+        const terminated = index < parts.length - 1;
+        if (!discardingOversizedStdoutLine) {
+          const remaining = MAX_STREAM_JSON_LINE_LENGTH - stdoutCarry.length;
+          if (part.length <= remaining) {
+            stdoutCarry += part;
+          } else {
+            stdoutCarry = '';
+            discardingOversizedStdoutLine = true;
+          }
+        }
+        if (terminated) {
+          if (discardingOversizedStdoutLine) {
+            process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+          } else {
+            consumeStreamJsonLine(stdoutCarry, true);
+          }
+          stdoutCarry = '';
+          discardingOversizedStdoutLine = false;
+        }
+      }
+      if (final) {
+        if (discardingOversizedStdoutLine) {
+          process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+        } else {
+          consumeStreamJsonLine(stdoutCarry, false);
+        }
+        stdoutCarry = '';
+        discardingOversizedStdoutLine = false;
+      }
+    };
 
     const finish = (result) => {
       if (settled) return;
@@ -218,18 +345,55 @@ function runQwen(options, prompt) {
       clearTimeout(timer);
       clearTimeout(killTimer);
       clearInterval(idleTimer);
-      const apiErrorInfo = recoverableApiError(outputTail);
+      consumeStreamJson('', true);
+      const terminalOutput = streamResultOutput(terminalResult);
+      const apiErrorInfo = recoverableApiError(
+        result.status === 0
+          ? terminalOutput
+          : `${diagnosticTail}\n${terminalOutput}`,
+      );
       const payload = {
         ...result,
         timedOut,
         idleTimedOut,
-        loopDetected: loopDetected || isLoopGuardOutput(outputTail),
+        loopDetected: isLoopGuardResult(terminalResult),
         // A RECOVERABLE model error means qwen never evaluated the feedback —
         // the workflow retries it rather than advancing the watermark.
         apiError: apiErrorInfo.error,
         apiErrorKind: apiErrorInfo.kind,
         sandboxRemoval,
       };
+      // Written on EVERY settle path — a crashed or timed-out round is exactly
+      // when the diagnosis footer needs to name the model that died. The open
+      // is non-following and non-blocking (af-053's rule for agent-writable
+      // paths, the shape run-ledger.ts's noFollow writes use): WORKDIR is
+      // bind-mounted rw into the sandbox as this same uid, so the round that
+      // just ran can leave a FIFO here — a plain O_WRONLY open would block
+      // forever at this point, after finish() has already disarmed every
+      // watchdog — or a symlink, which O_TRUNC would follow to truncate a
+      // host file while the round reports success. O_NOFOLLOW turns the
+      // symlink into ELOOP and O_NONBLOCK the readerless FIFO into ENXIO
+      // (undefined O_NOFOLLOW on Windows folds to 0; neither shape exists
+      // there), both landing in the best-effort catch.
+      if (initModel || initVersion) {
+        try {
+          writeFileSync(
+            file(options.workdir, 'agent-model'),
+            `${initModel}\n${initVersion}\n`,
+            {
+              flag:
+                constants.O_WRONLY |
+                constants.O_CREAT |
+                constants.O_TRUNC |
+                (constants.O_NOFOLLOW ?? 0) |
+                constants.O_NONBLOCK,
+            },
+          );
+        } catch {
+          // Best-effort: a write failure must not change the run outcome; the
+          // read sites fall back to the configured model.
+        }
+      }
       if (log.destroyed) {
         resolve(payload);
       } else {
@@ -237,8 +401,7 @@ function runQwen(options, prompt) {
       }
     };
 
-    const record = (chunk, stream) => {
-      lastOutputAt = Date.now();
+    const record = (chunk, stream, source) => {
       const text = chunk.toString('utf8');
       if (!sandboxName) {
         lineCarry += text;
@@ -256,14 +419,18 @@ function runQwen(options, prompt) {
           }
         }
       }
-      outputTail = (outputTail + text).slice(-20_000);
-      if (!loopDetected && isLoopGuardOutput(outputTail)) loopDetected = true;
+      if (source === 'stdout') {
+        consumeStreamJson(text);
+      } else {
+        lastOutputAt = Date.now();
+        appendDiagnostic(text);
+        stream.write(chunk);
+      }
       log.write(chunk);
-      stream.write(chunk);
     };
 
-    child.stdout.on('data', (chunk) => record(chunk, process.stdout));
-    child.stderr.on('data', (chunk) => record(chunk, process.stderr));
+    child.stdout.on('data', (chunk) => record(chunk, process.stdout, 'stdout'));
+    child.stderr.on('data', (chunk) => record(chunk, process.stderr, 'stderr'));
     child.on('error', (error) => finish({ error, status: null, signal: null }));
     child.on('close', (status, signal) =>
       finish({ error: null, status, signal }),
@@ -359,6 +526,9 @@ const { values } = parseArgs({
     pr: { type: 'string' },
     'print-prompt': { type: 'boolean', default: false },
     'qwen-bin': { type: 'string', default: 'qwen' },
+    'self-review': { type: 'string', default: 'off' },
+    'self-review-cli': { type: 'string', default: '' },
+    deadline: { type: 'string', default: '' },
     workdir: { type: 'string', default: '/tmp/autofix' },
   },
 });
@@ -366,11 +536,26 @@ const options = {
   ...values,
   printPrompt: values['print-prompt'],
   qwenBin: values['qwen-bin'],
+  selfReview: values['self-review'],
+  selfReviewCli: values['self-review-cli'],
 };
 const spec = specs[options.mode];
 if (!spec) fail(`--mode must be one of: ${Object.keys(specs).join(', ')}`);
 if (!['true', 'false'].includes(options.conflict)) {
   fail('--conflict must be true or false');
+}
+if (!['on', 'off'].includes(options.selfReview)) {
+  fail('--self-review must be on or off');
+}
+// Both values land verbatim in the prompt: keep them to a path/command and
+// an ISO instant so nothing can smuggle prose into the skill. The path
+// class covers every character a runner workspace path uses — a refusal
+// here fails the whole round, so it must never fire on a real path.
+if (!/^[A-Za-z0-9_./@:+=~%, -]*$/.test(options.selfReviewCli)) {
+  fail('--self-review-cli must be a plain command path');
+}
+if (!/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)?$/.test(options.deadline)) {
+  fail('--deadline must be an ISO-8601 UTC instant (YYYY-MM-DDTHH:MM:SSZ)');
 }
 for (const key of spec.required ?? []) {
   if (!options[key]) fail(`--${key} is required for ${options.mode}`);
@@ -394,7 +579,33 @@ const result = await runQwen(options, prompt);
 // timeout) so the leak warning and the removal itself settle before this
 // process exits and the next step inspects the host.
 if (result.sandboxRemoval) await result.sandboxRemoval;
-if (result.error || result.signal || result.status !== 0) {
+const missingOutputs = missing(options.workdir, spec.outputs);
+const presentOutputs = spec.outputs.filter(
+  (name) => !missingOutputs.includes(name),
+);
+const hasOutputVerdict = spec.anyOutput
+  ? presentOutputs.length > 0
+  : missingOutputs.length === 0;
+// A zero-byte handoff.md is not a verdict — the same non-empty convention
+// missing() and the gate's -s checks apply, so the two layers cannot
+// classify an empty file oppositely.
+const hasHandoffVerdict = !missing(options.workdir, ['handoff.md']).includes(
+  'handoff.md',
+);
+const apiErrorWithoutVerdict =
+  result.status === 0 &&
+  result.apiError &&
+  !hasOutputVerdict &&
+  !existsSync(file(options.workdir, 'failure.md')) &&
+  // A handoff is a verdict too: an agent that reached its BLOCKED stop must
+  // not be reclassified as a bare API blip by an error render in the tail.
+  !hasHandoffVerdict;
+if (
+  result.error ||
+  result.signal ||
+  result.status !== 0 ||
+  apiErrorWithoutVerdict
+) {
   const detail = result.error
     ? result.error.message
     : result.idleTimedOut
@@ -403,8 +614,26 @@ if (result.error || result.signal || result.status !== 0) {
         ? `timeout (${QWEN_TIMEOUT_MS}ms)`
         : result.signal
           ? `signal ${result.signal}`
-          : `status ${String(result.status)}`;
+          : apiErrorWithoutVerdict
+            ? 'recoverable API error without an agent verdict'
+            : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
+    if (hasHandoffVerdict) {
+      // A handoff is a verdict here too: the agent stopped under
+      // instruction and wrote its decision, then qwen died (crash,
+      // budget kill, loop guard). Synthesizing a failure.md would
+      // shadow the note — the gate reads failure.md first and would
+      // report a failed fix, and the timeout/api-error sentinels would
+      // re-hand the item the brake stopped on the next scan. Mirror the
+      // sibling arm that preserves an agent-written failure.md across
+      // the same crash, and exit 0 like the status-0 handoff path so
+      // the check color matches the outcome the gate reports from the
+      // preserved note.
+      console.error(
+        `Qwen failed during ${options.mode}: ${detail}; preserving agent-written handoff.md.`,
+      );
+      process.exit(0);
+    }
     if (result.loopDetected) {
       writeFailure(
         options.workdir,
@@ -462,7 +691,7 @@ if (result.error || result.signal || result.status !== 0) {
       `Qwen failed during ${options.mode}: ${detail}; preserving agent-written failure.md.`,
     );
   }
-  process.exit(result.status ?? 1);
+  process.exit(result.status === 0 ? 1 : (result.status ?? 1));
 }
 
 if (existsSync(file(options.workdir, 'failure.md'))) {
@@ -475,18 +704,32 @@ if (existsSync(file(options.workdir, 'failure.md'))) {
   process.exit(0);
 }
 
-const missingOutputs = missing(options.workdir, spec.outputs);
-const presentOutputs = spec.outputs.filter(
-  (name) => !missingOutputs.includes(name),
-);
+// A handoff the AGENT itself wrote — the growth-brake BLOCKED stop: the
+// feedback told it to defer to a human, so the round ends without a fix
+// verdict. Same standing as failure.md: a real, human-facing outcome, NOT
+// the missing-output failure class (which once reported a deliberate stop as
+// "finished without required output file(s)" and buried the brake's decision
+// under a generic failure.md). Honored only when no spec output exists: if
+// address-summary.md or no-action.md coexists, the runner exits on that
+// verdict, and the GATE decides the round — its handoff branch runs before
+// the no-action branch, so a deliberate stop outranks a co-written
+// no-change verdict and cannot close silently as "no action needed".
+if (!hasOutputVerdict && hasHandoffVerdict) {
+  const content = readFileSync(file(options.workdir, 'handoff.md'), 'utf8');
+  // Neutralize `::` workflow commands in agent-written content before it
+  // reaches the step log ('Show run artifacts' does the same).
+  console.error(
+    `Autofix agent wrote handoff.md:\n${content.replaceAll('::', ';;')}`,
+  );
+  process.exit(0);
+}
+
 if (spec.exclusiveOutput && presentOutputs.length > 1) {
   const message = `Autofix agent wrote mutually exclusive output files: ${presentOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);
   fail(message);
 }
-const ok = spec.anyOutput
-  ? missingOutputs.length < spec.outputs.length
-  : missingOutputs.length === 0;
+const ok = hasOutputVerdict;
 if (!ok) {
   const message = `Autofix agent finished without required output file(s): ${missingOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);

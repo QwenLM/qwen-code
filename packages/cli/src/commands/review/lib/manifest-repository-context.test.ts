@@ -15,15 +15,16 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   manifestRepositoryContextProvider,
   MAX_GLOB_CANDIDATES,
   MAX_MATCH_WORK,
 } from './manifest-repository-context.js';
 import { MAX_IDENTITY_BYTES } from './repository-context.js';
+import { arePermissionBitsEnforced } from '../../../test-utils/permission-bits.js';
 
-const worktrees: string[] = [];
+let worktrees: string[] = [];
 
 function temp(): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'manifest-context-')));
@@ -31,15 +32,19 @@ function temp(): string {
   return root;
 }
 
-// Several fixtures hold 16k-entry trees; leaking them exhausts a tmpfs
-// /tmp within a handful of runs. Deleting them is tens of thousands of
-// unlinks, which has blown past the default 10s hook timeout on a loaded
-// CI runner — give the teardown the time it needs rather than failing a
-// green suite on cleanup.
-afterAll(() => {
+// Several fixtures hold 16k-entry trees, and the skip-set suite stacks ten
+// of them — holding every tree until afterAll keeps ~164k files (inodes)
+// alive for the whole file, which on a shared self-hosted host coincides
+// with concurrent jobs' temp files and has surfaced as ENOSPC mid-suite.
+// Tear down per test instead so at most one 16k tree is live at a time.
+// Deleting one tree is tens of thousands of unlinks, which has blown past
+// the default 10s hook timeout on a loaded CI runner — give the teardown
+// the time it needs rather than failing a green suite on cleanup.
+afterEach(() => {
   for (const root of worktrees) {
     rmSync(root, { recursive: true, force: true });
   }
+  worktrees = [];
 }, 120_000);
 
 function write(path: string, content = ''): void {
@@ -185,7 +190,7 @@ describe('manifest repository context provider', () => {
     // so the total across rules — not each rule's array — is capped.
     const worktree = temp();
     const rules = [
-      { paths: Array.from({ length: 128 }, (_, index) => `area-${index}.ts`) },
+      { paths: Array.from({ length: 256 }, (_, index) => `area-${index}.ts`) },
       { paths: ['src/**'] },
     ];
     expect(() =>
@@ -195,7 +200,7 @@ describe('manifest repository context provider', () => {
 
   it('fails closed when merged fields or glob lists outgrow the wire bound', () => {
     const worktree = temp();
-    // Every single rule honors the 128-item bound; the MERGE does not.
+    // Every single rule honors the 256-item bound; the MERGE does not.
     expect(() =>
       provide(
         worktree,
@@ -205,14 +210,14 @@ describe('manifest repository context provider', () => {
             {
               paths: ['src/**'],
               domains: Array.from(
-                { length: 128 },
+                { length: 256 },
                 (_, index) => `domain-a-${String(index).padStart(3, '0')}`,
               ),
             },
             {
               paths: ['src/**'],
               domains: Array.from(
-                { length: 128 },
+                { length: 256 },
                 (_, index) => `domain-b-${String(index).padStart(3, '0')}`,
               ),
             },
@@ -230,6 +235,8 @@ describe('manifest repository context provider', () => {
             verificationNotes: [
               `note-a-${String(index).padStart(3, '0')}`,
               `note-b-${String(index).padStart(3, '0')}`,
+              `note-c-${String(index).padStart(3, '0')}`,
+              `note-d-${String(index).padStart(3, '0')}`,
             ],
           })),
         }),
@@ -247,14 +254,14 @@ describe('manifest repository context provider', () => {
               {
                 paths: ['src/**'],
                 relatedPaths: Array.from(
-                  { length: 128 },
+                  { length: 256 },
                   (_, index) => `p-a/${index}.ts`,
                 ),
               },
               {
                 paths: ['src/**'],
                 relatedPaths: Array.from(
-                  { length: 128 },
+                  { length: 256 },
                   (_, index) => `p-b/${index}.ts`,
                 ),
               },
@@ -381,14 +388,14 @@ describe('manifest repository context provider', () => {
   );
 
   it('accepts a scan sitting exactly at the resolved-file bound', () => {
-    // The reject side pins 129 matches; this accept pin sits exactly at
-    // 128, where a `>` → `>=` regression would fail a legal manifest
-    // closed at the source's own calibration point. 127 wildcard matches
+    // The reject side pins 257 matches; this accept pin sits exactly at
+    // 256, where a `>` → `>=` regression would fail a legal manifest
+    // closed at the source's own calibration point. 255 wildcard matches
     // plus one static entry also exercise the cap check in BOTH branches.
     const worktree = temp();
     const source = join(worktree, 'src');
     mkdirSync(source);
-    for (let index = 0; index < 127; index++) {
+    for (let index = 0; index < 255; index++) {
       writeFileSync(join(source, `${String(index).padStart(3, '0')}.ts`), '');
     }
     write(join(worktree, 'zz', 'extra.ts'));
@@ -405,7 +412,7 @@ describe('manifest repository context provider', () => {
           ],
         }),
       )?.relatedPaths,
-    ).toHaveLength(128);
+    ).toHaveLength(256);
   });
 
   it('accepts a scan visiting exactly the visited-entry ceiling', () => {
@@ -434,7 +441,7 @@ describe('manifest repository context provider', () => {
     const worktree = temp();
     const source = join(worktree, 'src');
     mkdirSync(source);
-    for (let index = 0; index < 129; index++) {
+    for (let index = 0; index < 257; index++) {
       writeFileSync(join(source, `${String(index).padStart(3, '0')}.ts`), '');
     }
     expect(() =>
@@ -449,13 +456,13 @@ describe('manifest repository context provider', () => {
   });
 
   it('fails closed on the static branch when merged matches exceed the bound', () => {
-    // 128 wildcard matches sit exactly at the bound, then a static root adds
+    // 256 wildcard matches sit exactly at the bound, then a static root adds
     // one more — the static-file branch enforces the same cap the directory
     // branch does, or the wire validator reports a schema shape error instead.
     const worktree = temp();
     const source = join(worktree, 'src');
     mkdirSync(source);
-    for (let index = 0; index < 128; index++) {
+    for (let index = 0; index < 256; index++) {
       writeFileSync(join(source, `${String(index).padStart(3, '0')}.ts`), '');
     }
     write(join(worktree, 'zz', 'extra.ts'));
@@ -566,10 +573,10 @@ describe('manifest repository context provider', () => {
   });
 
   it('deduplicates related patterns before applying the merge bound', () => {
-    // 128 rules each contribute the same two patterns: 256 pre-dedup
-    // (OVER the cap) and 2 post-dedup (under it). A cap-before-dedup
+    // 128 rules each contribute the same three patterns: 384 pre-dedup
+    // (OVER the cap) and 3 post-dedup (under it). A cap-before-dedup
     // regression throws here; under it, two matching rules sharing one
-    // 100-pattern list would reject a legal, human-authored manifest.
+    // 200-pattern list would reject a legal, human-authored manifest.
     const worktree = temp();
     for (let index = 0; index < 5; index++) {
       write(join(worktree, 'src', `${index}.ts`));
@@ -579,7 +586,7 @@ describe('manifest repository context provider', () => {
     }
     const rules = Array.from({ length: 128 }, () => ({
       paths: ['src/**'],
-      relatedPaths: ['src/**', 'docs/**'],
+      relatedPaths: ['src/**', 'docs/**', 'extra/**'],
     }));
     expect(
       provide(worktree, ['src/change.ts'], manifest({ rules }))?.relatedPaths,
@@ -984,11 +991,12 @@ describe('manifest repository context provider', () => {
     ).toEqual(['src/a1c/x.ts', 'src/a2c/y.ts']);
   });
 
-  // Permission-based failure injection is meaningless to root, and chmod(0)
-  // does not block reads on Windows — the repo convention for this case.
-  const isRoot = process.platform === 'win32' || process.getuid?.() === 0;
+  // Permission-based failure injection is meaningless where permission bits
+  // do not bind: root with its DAC capabilities ignores them, and chmod(0)
+  // does not block reads on Windows.
+  const permissionBitsIgnored = !arePermissionBitsEnforced();
 
-  it.skipIf(isRoot)(
+  it.skipIf(permissionBitsIgnored)(
     'fails closed when a scanned directory cannot be read',
     () => {
       // An unreadable subtree must fail the review closed, the way the

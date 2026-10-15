@@ -101,4 +101,21 @@ describe('exportSessionTranscript', () => {
     expect(loadSession).toHaveBeenCalledWith(sessionId);
     expect(loadArchivedSession).not.toHaveBeenCalled();
   });
+
+  it('passes original records to the HTML document renderer', async () => {
+    vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
+      sessionData,
+    );
+
+    await exportSessionTranscript({
+      workspaceCwd: '/workspace',
+      sessionId,
+      format: 'html',
+    });
+
+    expect(toHtml).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId }),
+      sessionData.conversation.messages,
+    );
+  });
 });

@@ -45,6 +45,31 @@ fn standalone_fixture_html() -> String {
     )
 }
 
+/// Synthetic control that records event delivery but deliberately rejects the
+/// application action unless the browser marks the click as trusted.
+fn standalone_trust_gated_click_html() -> String {
+    standalone_fixture_html().replace(
+        "</body>",
+        r#"<fieldset>
+  <legend>trust-gated click</legend>
+  <button id="standalone-trust-gated" data-cua-id="standalone-trust-gated">
+    Activate trust-gated control
+  </button>
+  <span id="standalone-trust-gated-state" data-cua-id="standalone-trust-gated-state">
+    activation=idle
+  </span>
+</fieldset>
+<script>
+  document.getElementById('standalone-trust-gated').addEventListener('click', event => {
+    document.getElementById('standalone-trust-gated-state').textContent = event.isTrusted
+      ? 'activation=accepted-trusted'
+      : 'activation=ignored-untrusted';
+  });
+</script>
+</body>"#,
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn standalone_generic_type_text_html() -> String {
     standalone_fixture_html().replace(
@@ -1579,6 +1604,68 @@ fn run_roundtrip(spec: &BrowserSpec) {
     });
 }
 
+fn run_trust_gated_dom_click(spec: &BrowserSpec) {
+    let scenario = format!(
+        "{}-{}-standalone-trust-gated-dom-click",
+        std::env::consts::OS,
+        spec.name
+    );
+    execute_case(case(&spec.name, "trust_gated_dom_click"), |evidence| {
+        let mut fixture =
+            launch_browser_with_html(spec, &scenario, standalone_trust_gated_click_html());
+        *evidence = recording_evidence(fixture.driver.recording_dir());
+        run_with_background_oracles(&mut fixture, |fixture| {
+            let session = format!("standalone-trust-gated-dom-click-{}", fixture.pid);
+            let (target, tab, snapshot) = bind(fixture, &session);
+            let click_ref = ref_by_label(&snapshot, "id=standalone-trust-gated");
+            let click = fixture.driver.call(
+                "browser_click",
+                serde_json::json!({
+                    "target_id": target,
+                    "tab_id": tab,
+                    "ref": click_ref,
+                    "input_route": "dom_event",
+                    "session": session,
+                }),
+            );
+
+            assert_eq!(click.action_effect(), Some("unverifiable"), "{}", click.raw);
+            assert_eq!(click.action_route(), Some("dom"), "{}", click.raw);
+            assert_eq!(
+                click.action_delivery_mode(),
+                Some("background"),
+                "{}",
+                click.raw
+            );
+            assert_eq!(
+                click.structured()["escalation"]["target"],
+                "page",
+                "{}",
+                click.raw
+            );
+            assert_eq!(
+                click.structured()["escalation"]["reason"],
+                "effect_unconfirmed",
+                "{}",
+                click.raw
+            );
+            assert!(
+                click.text().contains("application effect not verified")
+                    && click.text().contains("trust-gated controls"),
+                "{}",
+                click.raw
+            );
+            wait_for_text(
+                &fixture.server,
+                "standalone-trust-gated-state",
+                "activation=ignored-untrusted",
+            );
+
+            Observation::delivered(vec![OracleKind::FixtureState], Evidence::default())
+        })
+    });
+}
+
 fn run_semantic_state(spec: &BrowserSpec) {
     let scenario = format!(
         "{}-{}-standalone-semantic-state",
@@ -2173,11 +2260,6 @@ fn run_prepare_isolated_launch(spec: &BrowserSpec) {
                 "browser_prepare disclosed its private profile path: {}",
                 prepared.raw
             );
-            assert!(
-                !prepared_json.contains("approval_token"),
-                "{}",
-                prepared.raw
-            );
 
             let prepared_pid = prepared.structured()["prepared_pid"]
                 .as_u64()
@@ -2416,11 +2498,6 @@ fn run_existing_profile_attach(spec: &BrowserSpec) {
                     prepared.raw
                 );
                 assert!(
-                    !public_result.contains("approval_token"),
-                    "{}",
-                    prepared.raw
-                );
-                assert!(
                     !public_result.contains(&fixture._profile.path().display().to_string()),
                     "{}",
                     prepared.raw
@@ -2568,11 +2645,6 @@ fn run_existing_profile_setup(spec: &BrowserSpec) {
 
             let public_result = prepared.raw.to_string();
             assert!(!public_result.contains("ws://"), "{}", prepared.raw);
-            assert!(
-                !public_result.contains("approval_token"),
-                "{}",
-                prepared.raw
-            );
             assert!(
                 !public_result.contains(&fixture._profile.path().display().to_string()),
                 "{}",
@@ -3554,6 +3626,13 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
                 "Linux window capture already includes the browser-owned prompt surface: {}",
                 before.raw
             );
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(
+                before.structured()["capture_coverage"]["browser_chrome"]["status"],
+                "may_be_incomplete_in_window_scope",
+                "{}",
+                before.raw
+            );
         } else {
             assert_eq!(
                 before.structured()["capture_coverage"]["browser_chrome"]["status"],
@@ -3561,6 +3640,8 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
                 "{}",
                 before.raw
             );
+        }
+        if !cfg!(target_os = "linux") {
             assert_eq!(
                 before.structured()["capture_coverage"]["recovery"]["when"],
                 "verified_window_action_ineffective",
@@ -3568,34 +3649,22 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
                 before.raw
             );
             assert_eq!(
-                before.structured()["capture_coverage"]["recovery"]["escalate"],
+                before.structured()["capture_coverage"]["recovery"]["act_target"],
                 serde_json::json!({
-                    "tool": "escalate_session",
-                    "reason": "foreground_ineffective",
+                    "kind": "desktop",
+                    "display_id": "primary",
                 }),
                 "{}",
                 before.raw
             );
+            assert!(
+                before.structured()["capture_coverage"]["recovery"]
+                    .get("escalate")
+                    .is_none(),
+                "{}",
+                before.raw
+            );
         }
-        let escalated = fixture.driver.call(
-            "escalate_session",
-            serde_json::json!({
-                "session": window_session,
-                "reason": "foreground_ineffective",
-                "detail": "browser chrome may be outside window capture",
-            }),
-        );
-        assert!(
-            !escalated.is_error(),
-            "desktop inspection escalation failed: {}",
-            escalated.raw
-        );
-        assert_eq!(
-            escalated.structured()["effective_scope"],
-            "desktop",
-            "{}",
-            escalated.raw
-        );
         let desktop_before = fixture.driver.call(
             "get_desktop_state",
             serde_json::json!({
@@ -3654,6 +3723,13 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
             assert!(
                 window.structured()["capture_coverage"]["browser_chrome"].is_null(),
                 "Linux window capture already includes the browser-owned prompt surface: {}",
+                window.raw
+            );
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(
+                window.structured()["capture_coverage"]["browser_chrome"]["status"],
+                "may_be_incomplete_in_window_scope",
+                "{}",
                 window.raw
             );
         } else {
@@ -3725,7 +3801,7 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
                 "click",
                 serde_json::json!({
                     "session": window_session,
-                    "scope": "desktop",
+                    "target": {"kind": "desktop", "display_id": "primary"},
                     "x": x,
                     "y": y,
                 }),
@@ -3836,6 +3912,11 @@ fn run_browser_owned_permission_prompt(spec: &BrowserSpec) {
             assert!(
                 !desktop_has_materially_more_prompt_pixels,
                 "Linux desktop capture unexpectedly contained materially more permission UI than window capture: {metrics}"
+            );
+        } else if cfg!(target_os = "macos") {
+            assert!(
+                window_changed_pixels >= minimum_prompt_pixels,
+                "macOS window capture omitted the tested notification permission surface: {metrics}"
             );
         } else {
             assert!(
@@ -4544,6 +4625,10 @@ macro_rules! standalone_browser_test {
 }
 
 standalone_browser_test!(standalone_browser_roundtrip, run_roundtrip);
+standalone_browser_test!(
+    standalone_browser_trust_gated_dom_click,
+    run_trust_gated_dom_click
+);
 standalone_browser_test!(standalone_browser_semantic_state, run_semantic_state);
 standalone_browser_test!(standalone_browser_background_type, run_background_type);
 standalone_browser_test!(standalone_browser_type_replace, run_type_replace);

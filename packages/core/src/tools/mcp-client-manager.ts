@@ -42,6 +42,8 @@ import {
 } from './mcp-errors.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 import { mcpSessionMetadataKey } from './mcp-session-config.js';
+import { runWithTimeout } from './mcp-discovery-timeout.js';
+import { warnOnUnmatchedEagerToolEntries } from '../permissions/eager-allowlist-coverage.js';
 
 const debugLogger = createDebugLogger('MCP');
 export const RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG = '__qwenRuntimeMcpIfAbsent';
@@ -1223,6 +1225,9 @@ export class McpClientManager {
       this.bulkPassDepth--;
       this.emitRefusedBatchIfAny();
     }
+    // The registry is settled, so `tools.eager` entries that name no
+    // discovered tool can be reported without warning prematurely (#12435).
+    warnOnUnmatchedEagerToolEntries(cliConfig);
   }
 
   /**
@@ -1234,6 +1239,7 @@ export class McpClientManager {
   async discoverMcpToolsForServer(
     serverName: string,
     cliConfig: Config,
+    reconnect = false,
   ): Promise<void> {
     const servers = this.getEffectiveMcpServers();
     const serverConfig = servers[serverName];
@@ -1241,7 +1247,20 @@ export class McpClientManager {
       return;
     }
     if (this.pool && !isSdkMcpServerConfig(serverConfig)) {
+      const previous = this.pooledConnections.get(serverName);
       await this.discoverAllMcpToolsViaPool(cliConfig);
+      if (
+        reconnect &&
+        previous &&
+        this.pooledConnections.get(serverName) === previous
+      ) {
+        const [result] = await this.pool.restartByName(serverName, {
+          entryIndex: previous.entryIndex,
+        });
+        if (!result?.restarted) {
+          throw new Error(`Failed to reconnect MCP server '${serverName}'`);
+        }
+      }
       return;
     }
 
@@ -1764,6 +1783,8 @@ export class McpClientManager {
       setMCPDiscoveryState(MCPDiscoveryState.COMPLETED);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
+    // Same settled-registry report as the per-session bulk pass (#12435).
+    warnOnUnmatchedEagerToolEntries(cliConfig);
   }
 
   private releaseAllPooledConnections(): void {
@@ -2010,6 +2031,15 @@ export class McpClientManager {
     const timer = setInterval(async () => {
       await this.performHealthCheck(serverName);
     }, this.healthConfig.checkIntervalMs);
+    // Health monitoring is background bookkeeping — it must never hold the
+    // event loop open. Short-lived consumers (`qwen mcp reconnect`, other
+    // one-shot Config users) call `config.shutdown()` while an incremental
+    // discovery pass is still in flight; that pass's `finally` block then
+    // re-arms health checks AFTER `stop()` already cleared them, and a
+    // ref'd interval left the process hanging forever (issue #9944). Long-
+    // running sessions keep their own loop refs (TTY / server sockets), so
+    // unref'ing the monitor does not shorten its life where it matters.
+    timer.unref?.();
 
     this.healthCheckTimers.set(serverName, timer);
   }
@@ -2370,6 +2400,10 @@ export class McpClientManager {
     // the state is still IN_PROGRESS, so the AppContainer batch-flush
     // subscriber never observes the terminal state.
     this.eventEmitter?.emit('mcp-client-update', this.clients);
+    // Default startup path (`Config.startMcpDiscoveryInBackground`) and the
+    // MCP hot-reload reconcile both land here, so this is where a misspelt
+    // `tools.eager` entry becomes visible (#12435).
+    warnOnUnmatchedEagerToolEntries(cliConfig);
   }
 
   /**
@@ -2795,6 +2829,7 @@ export class McpClientManager {
     }
 
     if (client.getStatus() !== MCPServerStatus.CONNECTED) {
+      const timeoutMs = this.discoveryTimeoutFor(serverConfig);
       try {
         // wrap the
         // lazy-spawn `client.connect()` in the same discovery
@@ -2827,7 +2862,6 @@ export class McpClientManager {
         // a fixture that asserts the transport is actually torn
         // down.
 
-        const timeoutMs = this.discoveryTimeoutFor(serverConfig);
         let timeoutId: NodeJS.Timeout | undefined;
         await Promise.race([
           client.connect(),
@@ -2892,9 +2926,59 @@ export class McpClientManager {
         }
         throw err;
       }
+
+      // #13796: a lazily spawned server must also be discovered, or it stays
+      // CONNECTED with zero registered tools for the rest of the session.
+      // Best-effort and separately bounded — this read only needs a live
+      // transport, so neither a `tools/list` slower than the spawn's budget
+      // nor a server that advertises nothing (indistinguishable from a
+      // transient list blip — see `listMcpResources`) may fail it.
+      await this.discoverBestEffortAfterLazySpawn(
+        serverName,
+        client,
+        timeoutMs,
+      );
     }
 
     return client.readResource(uri, options);
+  }
+
+  /**
+   * Best-effort discovery for the `readResource` lazy-spawn path (#13796).
+   *
+   * Registers the freshly spawned server's tools, prompts and resources so it
+   * isn't left CONNECTED-but-empty, while never failing the read that
+   * triggered the spawn:
+   *
+   *   - bounded by the same `discoveryTimeoutMs` budget as the other spawn
+   *     paths, so a hung `tools/list` can't fall back to its own 10-minute
+   *     `MCP_DEFAULT_TIMEOUT_MSEC` default;
+   *   - `preserveStatusOnFailure` keeps the client CONNECTED, because
+   *     `discover()` otherwise flips it to DISCONNECTED on failure and
+   *     `McpClient.readResource()` refuses to serve a non-CONNECTED client —
+   *     which would convert this best-effort step back into a failed read,
+   *     on a transport that is demonstrably alive.
+   *
+   * A failure is logged and swallowed, matching the bulk path's "callers
+   * expect best-effort discovery" contract.
+   */
+  private async discoverBestEffortAfterLazySpawn(
+    serverName: string,
+    client: McpClient,
+    timeoutMs: number,
+  ): Promise<void> {
+    try {
+      await runWithTimeout(
+        client.discover(this.cliConfig, { preserveStatusOnFailure: true }),
+        timeoutMs,
+        `discovery after lazy spawn of '${serverName}'`,
+      );
+    } catch (error) {
+      // Log the error but don't throw: the read only needs a live transport.
+      debugLogger.error(
+        `Error during discovery after lazy spawn of '${serverName}': ${getErrorMessage(error)}`,
+      );
+    }
   }
 
   // ────────────────────────────────────────────────────────────────────

@@ -10,14 +10,17 @@ import {
   detectAvailableMemoryMb,
   formatMemoryBudgetStderr,
   isValidMemoryBudgetMb,
+  journalGrowthPoolMb,
   legacyChildCeilingMb,
   MAX_CHILD_HEAP_MB,
+  MAX_JOURNAL_GROWTH_POOL_MB,
   MAX_MEMORY_BUDGET_MB,
   MIN_CHILD_HEAP_MB,
   MIN_MEMORY_BUDGET_MB,
   normalizeMemoryBudgetMb,
   recommendedChildShareMb,
   resolveDaemonMemoryBudget,
+  serveJournalGrowthPoolMb,
 } from './daemon-memory-budget.js';
 
 const MB = 1024 * 1024;
@@ -307,5 +310,87 @@ describe('formatMemoryBudgetStderr', () => {
     const message = formatMemoryBudgetStderr(budget);
     expect(message).toContain('; below the 1024 MB minimum budget');
     expect(message).not.toContain('a derived budget needs');
+  });
+});
+
+describe('journalGrowthPoolMb', () => {
+  it.each([
+    // available MB, expected pool MB (5% of effective budget, clamped)
+    [32_768, 819],
+    [16_384, 409],
+    [8_192, 204],
+    [2_048, 51],
+  ])(
+    'derives 5%% of the effective budget from %i MB available',
+    (availableMemoryMb, expectedPoolMb) => {
+      const budget = resolveDaemonMemoryBudget({ availableMemoryMb });
+      expect(journalGrowthPoolMb(budget)).toBe(expectedPoolMb);
+    },
+  );
+
+  it('derives the pool from the capped effective budget, not the flag', () => {
+    // The flag may exceed host memory; the pool must divide the capped
+    // effective budget, not the uncapped flag, or growth is funded from
+    // capacity the host cannot back.
+    const budget = resolveDaemonMemoryBudget({
+      budgetMb: 8_192,
+      availableMemoryMb: 4_096,
+    });
+    expect(budget.effectiveBudgetMb).toBe(4_096);
+    expect(journalGrowthPoolMb(budget)).toBe(204);
+  });
+
+  it('disables the pool on a below-minimum host instead of flooring', () => {
+    // Any positive pool would carve growth capacity out of a budget the
+    // host cannot back; insufficient memory must disable growth outright.
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 512 });
+    expect(budget.insufficientMemory).toBe(true);
+    expect(journalGrowthPoolMb(budget)).toBe(0);
+  });
+
+  it('never exceeds the headroom left after the root reserve', () => {
+    // A synthetic budget whose reserve leaves less than the pool formula:
+    // the pool must shrink to the post-reserve headroom rather than take
+    // the clamped figure.
+    const budget = {
+      ...resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 }),
+      childPoolMb: 16,
+    };
+    expect(journalGrowthPoolMb(budget)).toBe(16);
+  });
+
+  it('caps at the maximum on a huge budget', () => {
+    const budget = resolveDaemonMemoryBudget({
+      budgetMb: MAX_MEMORY_BUDGET_MB,
+      availableMemoryMb: MAX_MEMORY_BUDGET_MB,
+    });
+    expect(journalGrowthPoolMb(budget)).toBe(MAX_JOURNAL_GROWTH_POOL_MB);
+  });
+});
+
+describe('serveJournalGrowthPoolMb', () => {
+  const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
+
+  it('derives the pool when neither journal cap is pinned', () => {
+    expect(serveJournalGrowthPoolMb({ budget })).toBe(
+      journalGrowthPoolMb(budget),
+    );
+  });
+
+  it('disables growth when the entry cap is pinned', () => {
+    expect(serveJournalGrowthPoolMb({ budget, maxJournalEvents: 5_000 })).toBe(
+      0,
+    );
+  });
+
+  it('disables growth when the byte cap is pinned', () => {
+    expect(
+      serveJournalGrowthPoolMb({ budget, maxJournalBytes: 16 * 1024 * 1024 }),
+    ).toBe(0);
+  });
+
+  it('disables growth on an insufficient host', () => {
+    const small = resolveDaemonMemoryBudget({ availableMemoryMb: 512 });
+    expect(serveJournalGrowthPoolMb({ budget: small })).toBe(0);
   });
 });

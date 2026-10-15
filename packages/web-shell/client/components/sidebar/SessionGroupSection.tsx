@@ -1,4 +1,10 @@
-import type { CSSProperties, ReactNode } from 'react';
+import {
+  Children,
+  useEffect,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import type { DaemonSessionGroupColor } from '@qwen-code/sdk/daemon';
 import {
   ChevronDownIcon,
@@ -6,6 +12,8 @@ import {
   PencilIcon,
   Trash2Icon,
 } from 'lucide-react';
+import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '../../constants/sessions';
+import { useI18n } from '../../i18n';
 import styles from './WebShellSidebar.module.css';
 
 export interface SessionGroupSectionProps {
@@ -14,6 +22,7 @@ export interface SessionGroupSectionProps {
   count: number;
   expanded: boolean;
   color?: DaemonSessionGroupColor;
+  icon?: ReactNode;
   children: ReactNode;
   onToggle: () => void;
   onRename?: () => void;
@@ -21,6 +30,7 @@ export interface SessionGroupSectionProps {
   renameLabel?: string;
   deleteLabel?: string;
   actionsDisabled?: boolean;
+  limitSessions?: boolean;
 }
 
 export function SessionGroupSection({
@@ -28,6 +38,7 @@ export function SessionGroupSection({
   count,
   expanded,
   color,
+  icon,
   children,
   onToggle,
   onRename,
@@ -35,7 +46,14 @@ export function SessionGroupSection({
   renameLabel,
   deleteLabel,
   actionsDisabled,
+  limitSessions = true,
 }: SessionGroupSectionProps) {
+  const { t } = useI18n();
+  const [showAll, setShowAll] = useState(false);
+  const items = Children.toArray(children);
+  useEffect(() => {
+    if (!expanded) setShowAll(false);
+  }, [expanded]);
   const colorClass = color?.startsWith('#')
     ? styles.groupColorCustom
     : color
@@ -55,11 +73,17 @@ export function SessionGroupSection({
           aria-expanded={expanded}
           onClick={onToggle}
         >
-          <span
-            className={`${styles.sessionGroupDot} ${colorClass}`}
-            style={dotStyle}
-            aria-hidden="true"
-          />
+          {icon ? (
+            <span className={styles.sessionGroupIcon} aria-hidden="true">
+              {icon}
+            </span>
+          ) : (
+            <span
+              className={`${styles.sessionGroupDot} ${colorClass}`}
+              style={dotStyle}
+              aria-hidden="true"
+            />
+          )}
           <span className={styles.sessionGroupTitle}>{label}</span>
           <span className={styles.sessionGroupCount}>· {count}</span>
           <span className={styles.sessionGroupChevron} aria-hidden="true">
@@ -95,7 +119,24 @@ export function SessionGroupSection({
           </div>
         )}
       </div>
-      {expanded && <div className={styles.sessionGroupList}>{children}</div>}
+      {expanded && (
+        <div className={styles.sessionGroupList}>
+          {!limitSessions || showAll
+            ? items
+            : items.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT)}
+          {limitSessions &&
+            !showAll &&
+            items.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+              <button
+                type="button"
+                className={styles.showAllSessions}
+                onClick={() => setShowAll(true)}
+              >
+                {t('sidebar.showAllSessions')}
+              </button>
+            )}
+        </div>
+      )}
     </section>
   );
 }

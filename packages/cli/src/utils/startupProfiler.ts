@@ -11,7 +11,7 @@
  * high-resolution timestamps at key phases of CLI startup and writes a JSON
  * report to ~/.qwen/startup-perf/ on finalization.
  *
- * Usage (already wired in index.ts / gemini.tsx):
+ * Usage (already wired in index.ts / llm.tsx):
  *   initStartupProfiler()        — call once at process start to record T0
  *   profileCheckpoint('name')    — call at each phase boundary (sequential)
  *   recordStartupEvent('name', attrs?) — record a discrete event (multi-fire allowed)
@@ -31,7 +31,7 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import type { StartupEventAttrs } from '@qwen-code/qwen-code-core';
-import { isServeFastPathArgv } from '../serve/fast-path-argv.js';
+import { isServeFastPathArgv } from './serve-fast-path-argv.js';
 
 interface Checkpoint {
   name: string;
@@ -266,7 +266,7 @@ function computeDerivedPhases(): DerivedPhases {
   // discover did the model actually receive an updated tool list. We must
   // pick the FIRST `gemini_tools_updated` event whose timestamp is >=
   // `mcp_first_tool_registered`, because earlier `setTools()` calls fire
-  // from `GeminiClient.initialize() -> startChat()` (built-in tools only)
+  // from `LlmClient.initialize() -> startChat()` (built-in tools only)
   // and from `SkillTool` post-construction refresh — both happen BEFORE
   // MCP discovery starts under PR-A, so naively taking the first
   // `gemini_tools_updated` would give a misleading negative lag.

@@ -5,8 +5,15 @@
  */
 
 /**
- * Supported image MIME types for vision models
- * These formats are supported by the vision model and can be processed by the image tokenizer
+ * Image MIME types accepted for vision input (attachment/thumbnail paths).
+ * This is an acceptance list for inputs, not a decode-capability list:
+ * token accounting uses the flat DEFAULT_IMAGE_TOKEN_ESTIMATE in
+ * compactionInputSlimming.ts — the former request-tokenizer estimator
+ * cluster, including ImageTokenizer and its dimension parsing, was removed
+ * as orphaned in PR #9676. The file-read path forwards only the narrower
+ * PIPELINE_IMAGE_MIME_TYPES subset to model endpoints (see
+ * PROVIDER_SAFE_IMAGE_MIME_TYPES in fileUtils.ts and #9291); anything else
+ * is omitted from requests with an in-band notice.
  */
 export const SUPPORTED_IMAGE_MIME_TYPES = [
   'image/bmp',
@@ -17,6 +24,21 @@ export const SUPPORTED_IMAGE_MIME_TYPES = [
   'image/tiff',
   'image/webp',
   'image/heic',
+] as const;
+
+/**
+ * Image MIME types the pipeline forwards to model endpoints end-to-end.
+ * Mirrors the read-path omission gate in fileUtils.ts (#9291): anything
+ * outside this set is omitted from requests with an in-band notice instead
+ * of being forwarded, because provider request-validation 400s on unknown
+ * media abort the whole session.
+ */
+export const PIPELINE_IMAGE_MIME_TYPES = [
+  'image/gif',
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
 ] as const;
 
 /**
@@ -39,11 +61,12 @@ export function isSupportedImageMimeType(
 }
 
 /**
- * Get a human-readable list of supported image formats
- * @returns Comma-separated string of supported formats
+ * Get a human-readable list of image formats the pipeline forwards to the
+ * model (the narrower pipeline subset, not the full acceptance list above).
+ * @returns Comma-separated string of forwarded formats
  */
 export function getSupportedImageFormatsString(): string {
-  return SUPPORTED_IMAGE_MIME_TYPES.map((type) =>
+  return PIPELINE_IMAGE_MIME_TYPES.map((type) =>
     type.replace('image/', '').toUpperCase(),
   ).join(', ');
 }

@@ -119,7 +119,7 @@ describe('repository context validation', () => {
     expect(() =>
       validateRepositoryContext({
         ...valid,
-        domains: Array.from({ length: 129 }, (_, index) => `d${index}`),
+        domains: Array.from({ length: 257 }, (_, index) => `d${index}`),
       }),
     ).toThrow('domains is invalid');
   });
@@ -210,13 +210,13 @@ describe('repository context validation', () => {
   });
 
   it('accepts the item-count bound exactly', () => {
-    // The reject side pins 129 items; this accept pin sits exactly at
+    // The reject side pins 257 items; this accept pin sits exactly at
     // MAX_ARRAY_ITEMS, where a `>` → `>=` regression would reject the
     // maximum valid manifest at the documented bound.
     const atBound = {
       ...valid,
       domains: Array.from(
-        { length: 128 },
+        { length: 256 },
         (_, index) => `d-${String(index).padStart(3, '0')}`,
       ),
     };
@@ -225,7 +225,7 @@ describe('repository context validation', () => {
 
   it('accepts every role the allow-list admits', () => {
     // Hardcoded, not spread from the constant: the accept side must pin
-    // all 13 roles, or dropping one from REPOSITORY_CONTEXT_ROLES ships
+    // all 15 roles, or dropping one from REPOSITORY_CONTEXT_ROLES ships
     // green (`satisfies readonly RoleId[]` still compiles, the type
     // narrows silently) and every consumer fails closed on a valid
     // manifest's required agent.
@@ -242,6 +242,8 @@ describe('repository context validation', () => {
       '6a',
       '6b',
       '6c',
+      '6d',
+      'prose-exec',
       'test-matrix',
     ];
     expect([...REPOSITORY_CONTEXT_ROLES]).toEqual(allRoles);

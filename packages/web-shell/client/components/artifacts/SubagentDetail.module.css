@@ -1,6 +1,8 @@
 .detail {
   display: flex;
   flex-direction: column;
+  height: 100%;
+  min-height: 0;
   min-width: 0;
 }
 
@@ -109,24 +111,11 @@
   color: var(--foreground);
 }
 
-.prompt {
-  background: var(--muted);
-  border-radius: 6px;
-  color: var(--foreground);
-  font: inherit;
-  margin: 2px 0 0;
-  max-height: 240px;
-  overflow: auto;
-  padding: 10px;
-  white-space: pre-wrap;
-}
-
 .transcript {
-  margin: 0 -24px;
+  margin: 0 -12px;
   display: flex;
   flex: 1;
   flex-direction: column;
-  height: min(65vh, 720px);
   min-height: 0;
 }
 

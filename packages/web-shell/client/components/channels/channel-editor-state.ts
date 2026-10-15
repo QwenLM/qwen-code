@@ -12,7 +12,14 @@ import type {
   DaemonChannelUpsertRequest,
 } from '@qwen-code/sdk/daemon';
 
-export type ChannelSenderPolicy = 'pairing' | 'open' | '';
+export type ChannelPrivatePolicy =
+  | 'disabled'
+  | 'allowlist'
+  | 'pairing'
+  | 'open'
+  | '';
+/** `groups["*"].senders`; `''` means the config leaves it unset. */
+export type ChannelGroupSenders = 'open' | 'allowlist' | '';
 
 export interface ChannelSecretDraft {
   operation: DaemonChannelSecretUpdate['operation'];
@@ -23,7 +30,10 @@ export interface ChannelEditorDraft {
   name: string;
   values: Record<string, string | boolean>;
   secrets: Record<string, ChannelSecretDraft>;
-  senderPolicy: ChannelSenderPolicy;
+  privatePolicy: ChannelPrivatePolicy;
+  allowedGroupIds: string;
+  groupSenders: ChannelGroupSenders;
+  groupAllowedUsers: string;
 }
 
 export type ChannelEditorValidationCode =
@@ -31,6 +41,7 @@ export type ChannelEditorValidationCode =
   | 'credential'
   | 'duplicate'
   | 'invalid'
+  | 'invalidGroupId'
   | 'invalidOption'
   | 'number'
   | 'outOfRange'
@@ -43,14 +54,66 @@ export type ChannelEditorValidationErrors = Record<
 
 const UNSAFE_OBJECT_KEYS = ['__proto__', 'constructor', 'prototype'];
 
-export function hasDescriptorSenderPolicy(
+export function hasDescriptorPrivatePolicy(
   descriptor: DaemonChannelTypeDescriptor,
 ): boolean {
-  return descriptor.fields.some((f) => f.key === 'senderPolicy');
+  return descriptor.fields.some((f) => f.key === 'privatePolicy');
+}
+
+export function hasDescriptorGroupPolicy(
+  descriptor: DaemonChannelTypeDescriptor,
+): boolean {
+  return descriptor.fields.some((f) => f.key === 'groupPolicy');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function configuredGroupIds(instance?: DaemonChannelInstanceSnapshot): string {
+  const groups = instance?.config['groups'];
+  if (!isRecord(groups)) return '';
+  return Object.keys(groups)
+    .filter((groupId) => groupId !== '*')
+    .join(', ');
+}
+
+function wildcardGroup(
+  instance?: DaemonChannelInstanceSnapshot,
+): Record<string, unknown> {
+  const groups = instance?.config['groups'];
+  return isRecord(groups) && isRecord(groups['*']) ? groups['*'] : {};
+}
+
+function configuredGroupSenders(
+  instance?: DaemonChannelInstanceSnapshot,
+): ChannelGroupSenders {
+  const senders = wildcardGroup(instance)['senders'];
+  return senders === 'open' || senders === 'allowlist' ? senders : '';
+}
+
+function configuredGroupAllowedUsers(
+  instance?: DaemonChannelInstanceSnapshot,
+): string {
+  const users = wildcardGroup(instance)['allowedUsers'];
+  return Array.isArray(users)
+    ? users.filter((user) => typeof user === 'string').join(', ')
+    : '';
+}
+
+export function defaultGroupSenders(): Exclude<ChannelGroupSenders, ''> {
+  return 'open';
+}
+
+export function configuredPrivatePolicy(
+  instance?: DaemonChannelInstanceSnapshot,
+): string {
+  return String(
+    instance?.config['privatePolicy'] ??
+      (instance?.config['dmPolicy'] === 'disabled'
+        ? 'disabled'
+        : (instance?.config['senderPolicy'] ?? 'allowlist')),
+  );
 }
 
 function initialFieldValue(
@@ -75,7 +138,24 @@ function initialFieldValue(
   }
   if (field.kind === 'enum') {
     if (typeof value === 'string' && value) return value;
-    return instance ? '' : (field.default ?? field.options?.[0]?.value ?? '');
+    if (instance) {
+      if (field.key === 'privatePolicy')
+        return configuredPrivatePolicy(instance);
+      if (field.key === 'groupPolicy') return 'disabled';
+      if (field.key === 'outputMode') return field.default ?? '';
+      if (field.key === 'dmPolicy') return 'open';
+      if (field.key !== 'sessionScope') return '';
+    }
+    if (field.key === 'sessionScope' && field.default === 'thread') {
+      if (instance) return 'thread';
+      return (
+        field.options?.find((option) => option.value === 'chat_thread')
+          ?.value ??
+        field.options?.find((option) => option.value !== 'thread')?.value ??
+        field.default
+      );
+    }
+    return field.default ?? field.options?.[0]?.value ?? '';
   }
   return typeof value === 'string' ? value : '';
 }
@@ -96,19 +176,22 @@ export function createChannelEditorDraft(
     }
     values[field.key] = initialFieldValue(field, instance);
   }
-  const hasDescriptorPolicy = hasDescriptorSenderPolicy(descriptor);
-  const configuredPolicy = instance?.config['senderPolicy'];
+  const hasDescriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
+  const configuredPolicy = instance
+    ? configuredPrivatePolicy(instance)
+    : 'pairing';
   return {
     name: instance?.name ?? '',
     values,
     secrets,
-    senderPolicy: hasDescriptorPolicy
+    privatePolicy: hasDescriptorPolicy
       ? ''
-      : configuredPolicy === 'pairing' || configuredPolicy === 'open'
-        ? configuredPolicy
-        : instance
-          ? ''
-          : 'pairing',
+      : ['disabled', 'allowlist', 'pairing', 'open'].includes(configuredPolicy)
+        ? (configuredPolicy as ChannelPrivatePolicy)
+        : '',
+    allowedGroupIds: configuredGroupIds(instance),
+    groupSenders: configuredGroupSenders(instance),
+    groupAllowedUsers: configuredGroupAllowedUsers(instance),
   };
 }
 
@@ -192,8 +275,16 @@ export function validateChannelEditorDraft(
       errors['token'] = 'credential';
     }
   }
-  if (!draft.senderPolicy && !hasDescriptorSenderPolicy(descriptor)) {
-    errors['senderPolicy'] = 'policy';
+  if (!draft.privatePolicy && !hasDescriptorPrivatePolicy(descriptor)) {
+    errors['privatePolicy'] = 'policy';
+  }
+  if (
+    String(draft.values['groupPolicy'] ?? '') === 'allowlist' &&
+    splitList(draft.allowedGroupIds).some((groupId) =>
+      UNSAFE_OBJECT_KEYS.includes(groupId),
+    )
+  ) {
+    errors['allowedGroupIds'] = 'invalidGroupId';
   }
   return errors;
 }
@@ -209,6 +300,16 @@ function assignField(
   }
   const value = typeof rawValue === 'string' ? rawValue.trim() : '';
   if (!value) {
+    // An explicitly empty list can mean "nobody" (`operators: []`), which an
+    // empty input cannot express; keep it rather than widen to "unset".
+    const previous = config[field.key];
+    if (
+      field.kind === 'string-list' &&
+      Array.isArray(previous) &&
+      previous.length === 0
+    ) {
+      return;
+    }
     delete config[field.key];
     return;
   }
@@ -244,6 +345,77 @@ function assignField(
   }
 }
 
+function splitList(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function assignGroups(
+  config: Record<string, unknown>,
+  allowedGroupIds: string,
+  instance?: DaemonChannelInstanceSnapshot,
+): void {
+  const previous = instance?.config['groups'];
+  const previousGroups = isRecord(previous) ? previous : {};
+  const groups: Record<string, unknown> = {};
+  if (isRecord(previousGroups['*'])) {
+    groups['*'] = previousGroups['*'];
+  }
+  for (const groupId of splitList(allowedGroupIds)) {
+    if (groupId === '*') continue;
+    groups[groupId] = isRecord(previousGroups[groupId])
+      ? previousGroups[groupId]
+      : {};
+  }
+  if (Object.keys(groups).length > 0) {
+    config['groups'] = groups;
+  } else {
+    delete config['groups'];
+  }
+}
+
+/** Write the group speaker default once the editor has chosen one. */
+function assignGroupSenders(
+  config: Record<string, unknown>,
+  draft: ChannelEditorDraft,
+): void {
+  if (!draft.groupSenders) return;
+  const groups = isRecord(config['groups']) ? { ...config['groups'] } : {};
+  const wildcard = isRecord(groups['*']) ? { ...groups['*'] } : {};
+  wildcard['senders'] = draft.groupSenders;
+  if (draft.groupSenders === 'allowlist') {
+    wildcard['allowedUsers'] = splitList(draft.groupAllowedUsers);
+  }
+  groups['*'] = wildcard;
+  config['groups'] = groups;
+}
+
+function removeGroupAllowlistMembership(
+  config: Record<string, unknown>,
+  instance: DaemonChannelInstanceSnapshot,
+): void {
+  const previous = instance.config['groups'];
+  const previousGroups = isRecord(previous) ? previous : {};
+  const groups = Object.fromEntries(
+    Object.entries(previousGroups).filter(
+      ([groupId, groupConfig]) =>
+        isRecord(groupConfig) &&
+        (groupId === '*' || Object.keys(groupConfig).length > 0),
+    ),
+  );
+  if (Object.keys(groups).length > 0) {
+    config['groups'] = groups;
+  } else {
+    delete config['groups'];
+  }
+}
+
 export function buildChannelUpsertRequest(
   descriptor: DaemonChannelTypeDescriptor,
   draft: ChannelEditorDraft,
@@ -269,8 +441,16 @@ export function buildChannelUpsertRequest(
     }
     assignField(config, field, draft.values[field.key]);
   }
-  if (!hasDescriptorSenderPolicy(descriptor)) {
-    config['senderPolicy'] = draft.senderPolicy;
+  if (!hasDescriptorPrivatePolicy(descriptor)) {
+    config['privatePolicy'] = draft.privatePolicy;
+  }
+  if (hasDescriptorGroupPolicy(descriptor)) {
+    if (config['groupPolicy'] === 'allowlist') {
+      assignGroups(config, draft.allowedGroupIds, instance);
+    } else if (instance?.config['groupPolicy'] === 'allowlist') {
+      removeGroupAllowlistMembership(config, instance);
+    }
+    assignGroupSenders(config, draft);
   }
   return { expectedRevision, config, secrets };
 }

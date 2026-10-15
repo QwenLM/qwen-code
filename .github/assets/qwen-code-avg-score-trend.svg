@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="220" viewBox="0 0 840 220" role="img" aria-labelledby="chart-title chart-description">
+  <title id="chart-title">Average SWE-bench Verified score by Qwen Code version</title>
+  <desc id="chart-description">Qwen 3.7 Max, 500 tasks, three trials per version. Average scores: 0.0.14, 77.80%; 0.1.0, 76.73%; 0.5.0, 76.60%; 0.10.0, 76.47%; 0.15.0, 77.67%; 0.19.0, 76.40%; 0.22.0, 77.33%. The line connects evaluated versions in release order. The vertical axis spans 70% to 80%.</desc>
+  <style>
+    .background { fill: #ffffff; }
+    .heading, .score { fill: #1f2328; }
+    .label { fill: #59636e; }
+    .grid { stroke: #e5e7eb; }
+    .axis { stroke: #9ca3af; }
+    .trend { stroke: #6b4eff; }
+    .point { fill: #6b4eff; stroke: #ffffff; }
+    @media (prefers-color-scheme: dark) {
+      .background { fill: #0d1117; }
+      .heading, .score { fill: #f0f6fc; }
+      .label { fill: #b1bac4; }
+      .grid { stroke: #30363d; }
+      .axis { stroke: #6e7681; }
+      .trend { stroke: #a78bfa; }
+      .point { fill: #a78bfa; stroke: #0d1117; }
+    }
+  </style>
+  <rect class="background" width="840" height="220"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text class="heading" x="24" y="28" font-size="20" font-weight="600">Average score by version</text>
+    <text class="label" x="24" y="51" font-size="14">SWE-bench Verified · Qwen 3.7 Max · y-axis: 70–80%</text>
+    <line class="grid" x1="84" y1="96" x2="816" y2="96" stroke-width="1"/>
+    <text class="label" x="70" y="101" text-anchor="end" font-size="14">80%</text>
+    <line class="grid" x1="84" y1="142" x2="816" y2="142" stroke-width="1"/>
+    <text class="label" x="70" y="147" text-anchor="end" font-size="14">75%</text>
+    <line class="axis" x1="84" y1="188" x2="816" y2="188" stroke-width="1"/>
+    <text class="label" x="70" y="193" text-anchor="end" font-size="14">70%</text>
+    <line class="axis" x1="84" y1="96" x2="84" y2="188" stroke-width="1"/>
+    <path class="trend" d="M 140 116.2400 L 244 126.0840 L 348 127.2800 L 452 128.4760 L 556 117.4360 L 660 129.1200 L 764 120.5640" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="point" cx="140" cy="116.2400" r="4.5" stroke-width="2"/>
+    <text class="score" x="140" y="82" text-anchor="middle" font-size="18" font-weight="600">77.80%</text>
+    <text class="label" x="140" y="214" text-anchor="middle" font-size="16">0.0.14</text>
+    <circle class="point" cx="244" cy="126.0840" r="4.5" stroke-width="2"/>
+    <text class="score" x="244" y="82" text-anchor="middle" font-size="18" font-weight="600">76.73%</text>
+    <text class="label" x="244" y="214" text-anchor="middle" font-size="16">0.1.0</text>
+    <circle class="point" cx="348" cy="127.2800" r="4.5" stroke-width="2"/>
+    <text class="score" x="348" y="82" text-anchor="middle" font-size="18" font-weight="600">76.60%</text>
+    <text class="label" x="348" y="214" text-anchor="middle" font-size="16">0.5.0</text>
+    <circle class="point" cx="452" cy="128.4760" r="4.5" stroke-width="2"/>
+    <text class="score" x="452" y="82" text-anchor="middle" font-size="18" font-weight="600">76.47%</text>
+    <text class="label" x="452" y="214" text-anchor="middle" font-size="16">0.10.0</text>
+    <circle class="point" cx="556" cy="117.4360" r="4.5" stroke-width="2"/>
+    <text class="score" x="556" y="82" text-anchor="middle" font-size="18" font-weight="600">77.67%</text>
+    <text class="label" x="556" y="214" text-anchor="middle" font-size="16">0.15.0</text>
+    <circle class="point" cx="660" cy="129.1200" r="4.5" stroke-width="2"/>
+    <text class="score" x="660" y="82" text-anchor="middle" font-size="18" font-weight="600">76.40%</text>
+    <text class="label" x="660" y="214" text-anchor="middle" font-size="16">0.19.0</text>
+    <circle class="point" cx="764" cy="120.5640" r="4.5" stroke-width="2"/>
+    <text class="score" x="764" y="82" text-anchor="middle" font-size="18" font-weight="600">77.33%</text>
+    <text class="label" x="764" y="214" text-anchor="middle" font-size="16">0.22.0</text>
+  </g>
+</svg>

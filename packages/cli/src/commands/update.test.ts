@@ -52,7 +52,7 @@ vi.mock('../utils/installationInfo.js', () => ({
   getInstallationInfo,
   resolveUpdateCommand,
 }));
-vi.mock('../utils/standalone-update.js', () => ({ performStandaloneUpdate }));
+vi.mock('../ui/standalone-update.js', () => ({ performStandaloneUpdate }));
 vi.mock('../utils/package.js', () => ({ getPackageJson }));
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStdoutLine,
@@ -69,6 +69,14 @@ vi.mock('../i18n/index.js', () => ({
 }));
 
 const { updateCommand } = await import('./update.js');
+
+// The ecs-qwen pool runs several jobs at once; under that contention these
+// tests pass alone in milliseconds but blow the 15s ceiling without any
+// real hang. Give that pool the raised budget its other suites already use.
+const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 60_000
+  : 15_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 const updateArgs: ArgumentsCamelCase<object> = {
   _: [],

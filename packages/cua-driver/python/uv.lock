@@ -13,7 +13,7 @@ wheels = [
 
 [[package]]
 name = "cua-driver"
-version = "0.17.0"
+version = "0.20.0"
 source = { editable = "." }
 
 [package.optional-dependencies]

@@ -21,7 +21,98 @@ function invalidPlugin(
 }
 
 describe('channel registry', () => {
+  it('adds the shared output descriptor only when a plugin opts in', async () => {
+    registerPlugin({
+      channelType: 'valid-output-mode',
+      displayName: 'Shared output mode',
+      supportsOutputMode: true,
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-output-mode',
+    );
+    const fields = entry?.fields.filter((field) => field.key === 'outputMode');
+    expect(fields).toHaveLength(1);
+    expect(fields?.[0]).toMatchObject({
+      kind: 'enum',
+      options: [
+        { value: 'per_task' },
+        { value: 'per_response' },
+        { value: 'per_turn' },
+      ],
+    });
+    expect(fields?.[0]?.default).toBe('per_turn');
+  });
+
+  it('publishes a plugin session-scope descriptor once with its runtime default', async () => {
+    registerPlugin({
+      channelType: 'valid-custom-session-scope',
+      displayName: 'Custom scope',
+      defaultSessionScope: 'thread',
+      management: {
+        fields: [
+          {
+            key: 'sessionScope',
+            label: 'Conversation scope',
+            kind: 'enum',
+            options: [
+              { value: 'user', label: 'User' },
+              { value: 'thread', label: 'Thread' },
+            ],
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+
+    const descriptor = (await supportedChannelCatalog()).find(
+      (entry) => entry.type === 'valid-custom-session-scope',
+    );
+    const scopeFields = descriptor?.fields.filter(
+      (field) => field.key === 'sessionScope',
+    );
+    expect(scopeFields).toHaveLength(1);
+    expect(scopeFields?.[0]).toMatchObject({
+      label: 'Conversation scope',
+      default: 'thread',
+    });
+  });
+
+  it('strips management for an invalid runtime session-scope default', async () => {
+    registerPlugin({
+      channelType: 'invalid-session-scope-default',
+      displayName: 'Invalid scope',
+      defaultSessionScope: 'workspace' as never,
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+
+    await expect(getPlugin('invalid-session-scope-default')).resolves.toEqual(
+      expect.objectContaining({ management: undefined }),
+    );
+  });
+
   it.each([
+    {
+      type: 'invalid-output-mode-descriptor',
+      fields: [
+        {
+          key: 'outputMode',
+          label: 'Output Mode',
+          kind: 'enum',
+          options: [{ value: 'all', label: 'All' }],
+        },
+      ],
+      message:
+        'Channel field "outputMode" is shared; declare supportsOutputMode instead.',
+    },
     {
       type: 'invalid-nested-secret',
       fields: [
@@ -654,6 +745,7 @@ describe('channel registry', () => {
     const plugin: ChannelPlugin = {
       channelType: 'valid-optional-required-object',
       displayName: 'valid-optional-required-object',
+      defaultSessionScope: 'thread',
       management: {
         fields: [
           {
@@ -686,6 +778,17 @@ describe('channel registry', () => {
       (candidate) => candidate.type === 'valid-optional-required-object',
     );
     expect(entry?.manageable).toBe(true);
+    expect(
+      entry?.fields.find((field) => field.key === 'sessionScope'),
+    ).toMatchObject({
+      default: 'thread',
+      options: [
+        { value: 'user' },
+        { value: 'thread' },
+        { value: 'chat_thread' },
+        { value: 'single' },
+      ],
+    });
   });
 
   it('only marks the manually configurable built-in types as manageable', async () => {
@@ -698,6 +801,8 @@ describe('channel registry', () => {
       'telegram',
       'weixin',
       'dingtalk',
+      'dws',
+      'email',
       'wecom',
       'feishu',
       'qq',
@@ -708,7 +813,51 @@ describe('channel registry', () => {
       builtinCatalog
         .filter((entry) => entry.manageable)
         .map((entry) => entry.type),
-    ).toEqual(['dingtalk', 'wecom', 'feishu', 'github', 'gitlab']);
+    ).toEqual([
+      'dingtalk',
+      'dws',
+      'email',
+      'wecom',
+      'feishu',
+      'github',
+      'gitlab',
+    ]);
+    expect(
+      builtinCatalog
+        .filter((entry) =>
+          entry.fields.some((field) => field.key === 'outputMode'),
+        )
+        .map((entry) => entry.type),
+    ).toEqual(['dingtalk']);
+    // The registry skips the shared `instructions` injection for any channel
+    // that declares its own, so pin the render invariants the editor depends on
+    // for every manageable built-in: exactly one field, plus the multiline hint
+    // (without it the editor falls back to a single-line input that flattens
+    // stored guidance on the first edit). The copy guarantee is scoped to the
+    // injected descriptor, because a channel declaring its own `instructions`
+    // takes the skip branch and may carry tailored neutral copy, and it is
+    // asserted where an operator actually reads it
+    // (ChannelEditorDialog.test.tsx): fieldDescription resolves
+    // `${labelKey}.description` and falls back to this literal only when that
+    // i18n key is missing.
+    for (const entry of builtinCatalog.filter((item) => item.manageable)) {
+      const instructions = entry.fields.filter(
+        (field) => field.key === 'instructions',
+      );
+      expect(instructions).toHaveLength(1);
+      expect(instructions[0]).toMatchObject({
+        kind: 'string',
+        multiline: true,
+      });
+      const declaresOwnInstructions = (
+        await getPlugin(entry.type)
+      )?.management?.fields?.some((field) => field.key === 'instructions');
+      if (!declaresOwnInstructions) {
+        expect(instructions[0].description).toContain(
+          'replace their own default guidance',
+        );
+      }
+    }
     expect(
       catalog.find((entry) => entry.type === 'dingtalk')?.fields,
     ).toContainEqual(
@@ -718,8 +867,61 @@ describe('channel registry', () => {
         required: true,
       }),
     );
+    for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
+      const fields = catalog.find((entry) => entry.type === type)?.fields;
+      expect(fields).not.toContainEqual(
+        expect.objectContaining({
+          key: 'messagePrefix',
+          kind: 'string',
+        }),
+      );
+      expect(
+        fields
+          ?.find((field) => field.key === 'privatePolicy')
+          ?.options?.map((option) => option.value),
+      ).toEqual(['disabled', 'pairing', 'allowlist', 'open']);
+      expect(
+        fields?.find((field) => field.key === 'privatePolicy'),
+      ).toMatchObject({ default: 'pairing' });
+      expect(fields).toContainEqual(
+        expect.objectContaining({
+          key: 'allowedUsers',
+          kind: 'string-list',
+        }),
+      );
+      expect(
+        fields
+          ?.find((field) => field.key === 'groupPolicy')
+          ?.options?.map((option) => option.value),
+      ).toEqual(['disabled', 'pairing', 'allowlist', 'open']);
+      expect(
+        fields?.find((field) => field.key === 'sessionScope'),
+      ).toMatchObject({
+        kind: 'enum',
+        required: true,
+        default: 'user',
+        options: [
+          { value: 'user' },
+          { value: 'thread' },
+          { value: 'chat_thread' },
+          { value: 'single' },
+        ],
+      });
+    }
     for (const type of ['github', 'gitlab'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
+      expect(fields).not.toContainEqual(
+        expect.objectContaining({
+          key: 'messagePrefix',
+          kind: 'string',
+        }),
+      );
+      expect(
+        fields?.filter((field) => field.key === 'privatePolicy'),
+      ).toHaveLength(1);
+      expect(
+        fields?.filter((field) => field.key === 'groupPolicy'),
+      ).toHaveLength(1);
       expect(fields).toContainEqual(
         expect.objectContaining({
           key: 'groupPolicy',
@@ -734,7 +936,7 @@ describe('channel registry', () => {
       ).toContain('pairing');
       expect(fields).toContainEqual(
         expect.objectContaining({
-          key: 'senderPolicy',
+          key: 'privatePolicy',
           kind: 'enum',
           required: true,
         }),
@@ -745,7 +947,28 @@ describe('channel registry', () => {
           kind: 'string-list',
         }),
       );
+      expect(
+        fields?.filter((field) => field.key === 'sessionScope'),
+      ).toHaveLength(1);
+      expect(
+        fields?.find((field) => field.key === 'sessionScope'),
+      ).toMatchObject({
+        kind: 'enum',
+        required: true,
+        default: 'chat_thread',
+      });
     }
+    expect(
+      catalog.find((entry) => entry.type === 'github')?.fields,
+    ).toContainEqual(
+      expect.objectContaining({
+        key: 'sessionScope',
+        default: 'chat_thread',
+      }),
+    );
+    expect(
+      catalog.find((entry) => entry.type === 'telegram')?.fields,
+    ).not.toContainEqual(expect.objectContaining({ key: 'sessionScope' }));
     expect(
       catalog.find((entry) => entry.type === 'dingtalk')?.fields,
     ).toContainEqual(

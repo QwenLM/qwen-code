@@ -14,8 +14,10 @@ import {
   type MutableRefObject,
 } from 'react';
 import { type PartListUnion } from '@google/genai';
+import process from 'node:process';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { ArenaDialogType } from './useArenaCommand.js';
+import { usePeerMessaging } from '../../peerMessaging/PeerMessagingContext.js';
 import {
   type Logger,
   type Config,
@@ -62,7 +64,7 @@ import {
   parseSlashCommand,
   parseStackedSlashCommands,
   MAX_STACKED_SKILLS,
-} from '../../utils/commands.js';
+} from '../commands/commands.js';
 import { AppEvent } from '../../utils/events.js';
 import { t } from '../../i18n/index.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
@@ -73,9 +75,12 @@ import {
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
+  SLASH_COMMANDS_SKIP_RECORDING,
 } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
+import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -107,19 +112,59 @@ function serializeHistoryItemForRecording(
   return clone;
 }
 
-const SLASH_COMMANDS_SKIP_RECORDING = new Set([
-  'quit',
-  'exit',
-  'clear',
-  'reset',
-  'new',
-  'resume',
-  'delete',
-  'branch',
-  'btw',
-  'history',
+const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
+  'auth',
+  'diff',
+  'editor',
+  'help',
+  'settings',
+  'status',
+  'stats',
+  'theme',
+]);
+const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
+  'effort',
+  'model',
+  'output-style',
+  'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+const QUIT_COMMAND_NAMES = [quitCommand.name, ...(quitCommand.altNames ?? [])];
+
+function shouldHideSlashCommandInvocation(
+  command: SlashCommand | undefined,
+  canonicalPath: string[],
+  args: string,
+): boolean {
+  if (command?.kind !== CommandKind.BUILT_IN) {
+    return false;
+  }
+
+  // Bare-root match only: subcommands that produce output (e.g. `/status
+  // paths`) keep their invocation like any other work-performing command.
+  if (
+    canonicalPath.length === 1 &&
+    SLASH_COMMAND_ROOTS_HIDE_INVOCATION.has(canonicalPath[0] ?? '')
+  ) {
+    // NO_COLOR prevents the theme dialog from opening, so /theme prints
+    // feedback instead and keeps its invocation like any work-performing
+    // command.
+    if (canonicalPath[0] === 'theme' && process.env['NO_COLOR']) {
+      return false;
+    }
+    return true;
+  }
+
+  const path = canonicalPath.join(' ');
+  if (BARE_SLASH_COMMANDS_HIDE_INVOCATION.has(path)) {
+    if (path === 'model') {
+      return isPickerOnlyModelInvocation(args);
+    }
+    return args.trim() === '';
+  }
+
+  return false;
+}
 
 function getSkillCommandName(command: SlashCommand): string {
   return command.skillDetail?.name ?? command.name;
@@ -135,6 +180,7 @@ export interface SlashCommandProcessorActions {
   openStatusLineDialog: () => void;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
+    advisorModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
@@ -145,6 +191,7 @@ export interface SlashCommandProcessorActions {
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
   openEffortDialog: () => void;
+  openOutputStyleDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
@@ -181,7 +228,7 @@ export const useSlashCommandProcessor = (
   isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
   isIdleRef: MutableRefObject<boolean>,
-  setGeminiMdFileCount: (count: number) => void,
+  setMemoryFileCount: (count: number) => void,
   actions: SlashCommandProcessorActions,
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
@@ -198,6 +245,10 @@ export const useSlashCommandProcessor = (
   }
   const activeExtensionRefreshState =
     extensionRefreshState ?? fallbackExtensionRefreshStateRef.current;
+
+  // Null unless cross-session messaging is enabled and bound; `/peers`
+  // reads that as "the feature is off" rather than as an error.
+  const peerMessaging = usePeerMessaging();
 
   // Ref avoids adding `history` to the commandContext useMemo deps,
   // which would cause a full context rebuild on every history append.
@@ -472,6 +523,7 @@ export const useSlashCommandProcessor = (
         settings,
         logger,
         extensionRefreshState: activeExtensionRefreshState,
+        peerMessaging,
       },
       ui: {
         get history() {
@@ -498,7 +550,7 @@ export const useSlashCommandProcessor = (
         btwAbortControllerRef,
         isIdleRef,
         toggleVimEnabled,
-        setGeminiMdFileCount,
+        setMemoryFileCount,
         reloadCommands,
         setSessionName: setSessionName ?? (() => {}),
         extensionsUpdateState,
@@ -531,17 +583,18 @@ export const useSlashCommandProcessor = (
       cancelBtw,
       toggleVimEnabled,
       sessionShellAllowlist,
-      setGeminiMdFileCount,
+      setMemoryFileCount,
       reloadCommands,
       setSessionName,
       extensionsUpdateState,
       isIdleRef,
       activeExtensionRefreshState,
+      peerMessaging,
     ],
   );
 
   useEffect(() => {
-    if (!config) {
+    if (!config || config.getShellExecutionSandbox?.()) {
       return;
     }
 
@@ -828,6 +881,8 @@ export const useSlashCommandProcessor = (
       oneTimeShellAllowlist?: Set<string>,
       overwriteConfirmed?: boolean,
       existingInvocationItemId?: number,
+      // Identity shared by the invocation item and submitted prompt.
+      invocationPromptId?: string,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -839,6 +894,26 @@ export const useSlashCommandProcessor = (
       }
       if (trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)) {
         return false;
+      }
+
+      let {
+        commandToExecute,
+        args,
+        canonicalPath: resolvedCommandPath,
+      } = parseSlashCommand(trimmed, commands);
+
+      if (!commandToExecute) {
+        const fallback = parseSlashCommand(trimmed, [quitCommand]);
+        if (
+          fallback.commandToExecute &&
+          !(config?.getDisabledSlashCommands() ?? []).some((name) =>
+            QUIT_COMMAND_NAMES.includes(name.trim().toLowerCase()),
+          )
+        ) {
+          commandToExecute = fallback.commandToExecute;
+          args = fallback.args;
+          resolvedCommandPath = fallback.canonicalPath;
+        }
       }
 
       const recordedItems: HistoryItemWithoutId[] = [];
@@ -862,20 +937,37 @@ export const useSlashCommandProcessor = (
       const userMessageTimestamp = Date.now();
       let invocationItemId = existingInvocationItemId;
       let invocationSentToModel = false;
-      if (!isBtwCommand(trimmed) && invocationItemId === undefined) {
+      let hideInvocation =
+        isBtwCommand(trimmed) ||
+        shouldHideSlashCommandInvocation(
+          commandToExecute,
+          resolvedCommandPath,
+          args,
+        );
+      if (!hideInvocation && invocationItemId === undefined) {
         invocationItemId = addItemWithRecording(
           { type: MessageType.USER, text: trimmed, sentToModel: false },
           userMessageTimestamp,
         );
       }
 
+      const revealHiddenInvocation = () => {
+        if (
+          resolvedCommandPath.join(' ') !== 'model' ||
+          !hideInvocation ||
+          invocationItemId !== undefined
+        ) {
+          return;
+        }
+        hideInvocation = false;
+        invocationItemId = addItemWithRecording(
+          { type: MessageType.USER, text: trimmed, sentToModel: false },
+          userMessageTimestamp,
+        );
+      };
+
       let hasError = false;
       let delegatedToRecursiveInvocation = false;
-      const {
-        commandToExecute,
-        args,
-        canonicalPath: resolvedCommandPath,
-      } = parseSlashCommand(trimmed, commands);
 
       const subcommand =
         resolvedCommandPath.length > 1
@@ -968,7 +1060,10 @@ export const useSlashCommandProcessor = (
           // Mark as sent to model so chat recording and telemetry work correctly
           invocationSentToModel = true;
           if (invocationItemId !== undefined) {
-            updateItem(invocationItemId, { sentToModel: true });
+            updateItem(invocationItemId, {
+              sentToModel: true,
+              ...(invocationPromptId ? { promptId: invocationPromptId } : {}),
+            });
           }
 
           // Combine all content into a single submit_prompt
@@ -1063,24 +1158,25 @@ export const useSlashCommandProcessor = (
                     toolArgs: result.toolArgs,
                   };
                 case 'message':
+                  // Picker-shaped commands can still reject their arguments
+                  // before opening a dialog. Keep those failures paired with
+                  // the invocation in both live and reconstructed history.
+                  revealHiddenInvocation();
                   if (result.messageType === 'info') {
-                    addMessage({
-                      type: MessageType.INFO,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    addItemWithRecording(
+                      { type: MessageType.INFO, text: result.content },
+                      Date.now(),
+                    );
                   } else if (result.messageType === 'warning') {
-                    addMessage({
-                      type: MessageType.WARNING,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    addItemWithRecording(
+                      { type: MessageType.WARNING, text: result.content },
+                      Date.now(),
+                    );
                   } else {
-                    addMessage({
-                      type: MessageType.ERROR,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    addItemWithRecording(
+                      { type: MessageType.ERROR, text: result.content },
+                      Date.now(),
+                    );
                   }
                   return { type: 'handled' };
                 case 'goal_control': {
@@ -1156,6 +1252,9 @@ export const useSlashCommandProcessor = (
                         persistScope: result.persistScope,
                       });
                       return { type: 'handled' };
+                    case 'advisor-model':
+                      actions.openModelDialog({ advisorModelMode: true });
+                      return { type: 'handled' };
                     case 'voice-model':
                       actions.openModelDialog({
                         voiceModelMode: true,
@@ -1210,6 +1309,9 @@ export const useSlashCommandProcessor = (
                     case 'effort':
                       actions.openEffortDialog();
                       return { type: 'handled' };
+                    case 'output-style':
+                      actions.openOutputStyleDialog();
+                      return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
                         await actions.handleResume(result.sessionId);
@@ -1249,7 +1351,7 @@ export const useSlashCommandProcessor = (
                     }
                   }
                 case 'load_history': {
-                  config?.getGeminiClient()?.setHistory(result.clientHistory);
+                  config?.getLlmClient()?.setHistory(result.clientHistory);
                   fullCommandContext.ui.clear();
                   result.history.forEach((item, index) => {
                     fullCommandContext.ui.addItem(item, index);
@@ -1297,8 +1399,8 @@ export const useSlashCommandProcessor = (
                       output.getAdditionalContext(),
                     );
                   }
+                  invocationSentToModel = true;
                   if (invocationItemId !== undefined) {
-                    invocationSentToModel = true;
                     debugLogger.debug(
                       `Marked slash command invocation as model-sent: /${resolvedCommandPath.join(
                         ' ',
@@ -1307,7 +1409,12 @@ export const useSlashCommandProcessor = (
                     // React applies this update asynchronously. No same-turn
                     // logic reads the UI history classification; rewind/resume
                     // consumers observe it after state has rendered.
-                    updateItem(invocationItemId, { sentToModel: true });
+                    updateItem(invocationItemId, {
+                      sentToModel: true,
+                      ...(invocationPromptId
+                        ? { promptId: invocationPromptId }
+                        : {}),
+                    });
                   }
                   recordSkillCommandInvocation(true);
                   void recordAutoSkillCommandUsage(config, commandToExecute);
@@ -1361,6 +1468,7 @@ export const useSlashCommandProcessor = (
                     new Set(approvedCommands),
                     undefined,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'confirm_action': {
@@ -1393,6 +1501,7 @@ export const useSlashCommandProcessor = (
                     undefined,
                     true,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'stream_messages': {
@@ -1462,8 +1571,15 @@ export const useSlashCommandProcessor = (
             resolvedCommandPath[0] ||
             trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
             trimmed;
+          // The built-in /advisor is skipped by identity (kind + name) so a
+          // user-defined command shadowing the name is still recorded like
+          // any other custom command.
+          const isBuiltInAdvisor =
+            primaryCommand === 'advisor' &&
+            commandToExecute?.kind === CommandKind.BUILT_IN;
           const shouldRecord =
             !delegatedToRecursiveInvocation &&
+            !isBuiltInAdvisor &&
             !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
           try {
             if (shouldRecord) {
@@ -1471,6 +1587,7 @@ export const useSlashCommandProcessor = (
                 phase: 'invocation',
                 rawCommand: trimmed,
                 sentToModel: invocationSentToModel,
+                hiddenInvocation: hideInvocation,
               });
               const outputItems = recordedItems
                 .filter((item) => item.type !== 'user')

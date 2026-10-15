@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
+import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import { dp } from './dialogStyles';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -11,21 +12,24 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-let sessions = [
+let sessions: DaemonSessionSummary[] = [
   {
     sessionId: 's0',
+    workspaceCwd: '/work/repo',
     displayName: 'S0',
     clientCount: 1,
     updatedAt: '2026-01-01T00:00:00Z',
   },
   {
     sessionId: 's1',
+    workspaceCwd: '/work/repo',
     displayName: 'S1',
     clientCount: 1,
     updatedAt: '2026-01-01T00:00:00Z',
   },
   {
     sessionId: 'me',
+    workspaceCwd: '/work/repo',
     displayName: 'Current Session',
     clientCount: 1,
     updatedAt: '2026-01-01T00:00:00Z',
@@ -34,18 +38,24 @@ let sessions = [
 
 const deleteSessionMock = vi.fn();
 const deleteSessionsMock = vi.fn();
+let scopedSessionsOptions: unknown;
 const initialSessions = sessions.slice();
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
-  useWorkspace: () => ({ client: {} }),
-  useSessions: () => ({
-    sessions,
-    loading: false,
-    error: undefined,
-    deleteSession: deleteSessionMock,
-    deleteSessions: deleteSessionsMock,
-  }),
+}));
+
+vi.mock('../../hooks/useScopedSessions', () => ({
+  useScopedSessions: (_workspaceCwd: unknown, options: unknown) => {
+    scopedSessionsOptions = options;
+    return {
+      sessions,
+      loading: false,
+      error: undefined,
+      deleteSession: deleteSessionMock,
+      deleteSessions: deleteSessionsMock,
+    };
+  },
 }));
 
 const { DeleteSessionDialog } = await import('./DeleteSessionDialog');
@@ -140,8 +150,28 @@ afterEach(() => {
 });
 
 describe('DeleteSessionDialog selection', () => {
+  it('excludes Qwen Live tasks from permanent deletion', () => {
+    sessions = [
+      {
+        ...initialSessions[0],
+        sourceType: 'qwen-live',
+        displayName: 'Live task',
+      },
+      initialSessions[1],
+    ];
+    mount();
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('S1');
+    expect(container!.textContent).not.toContain('Live task');
+  });
+
   it('keeps the keyboard cursor separate from the checked set; Enter only toggles', () => {
     mount();
+
+    expect(scopedSessionsOptions).toEqual({
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
 
     // Opens with no highlight and nothing checked; delete stays disabled.
     expect(rows().some(isCursor)).toBe(false);
@@ -177,14 +207,54 @@ describe('DeleteSessionDialog selection', () => {
     expect(isChecked(rows()[0])).toBe(true);
   });
 
-  it('does not check the current session row', () => {
+  it('checks and deletes the current session row when it is idle', async () => {
+    deleteSessionsMock.mockResolvedValue({
+      removed: ['me'],
+      notFound: [],
+      errors: [],
+    });
+    mount();
+
+    // A click checks the current session row like any other row (#12619).
+    clickRow(2);
+    expect(isChecked(rows()[2])).toBe(true);
+    expect(dangerButton().disabled).toBe(false);
+
+    // Keyboard Enter toggles the current row's checkbox too.
+    press('ArrowDown');
+    press('ArrowDown');
+    press('ArrowDown');
+    expect(isCursor(rows()[2])).toBe(true);
+    press('Enter');
+    expect(isChecked(rows()[2])).toBe(false);
+    press('Enter');
+    expect(isChecked(rows()[2])).toBe(true);
+
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(deleteSessionsMock).toHaveBeenCalledWith(['me']);
+    expect(onDeleted).toHaveBeenCalledWith(['me'], {
+      attachedSessionId: 'me',
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the current session row unselectable while it is running', () => {
+    sessions = [
+      initialSessions[0],
+      initialSessions[1],
+      { ...initialSessions[2], hasActivePrompt: true },
+    ];
     mount();
 
     clickRow(2);
     expect(isChecked(rows()[2])).toBe(false);
     expect(dangerButton().disabled).toBe(true);
 
-    // Keyboard Enter on the current session row must not check it either.
+    // Keyboard Enter on the running current row must not check it either.
     press('ArrowDown');
     press('ArrowDown');
     press('ArrowDown');
@@ -208,6 +278,34 @@ describe('DeleteSessionDialog selection', () => {
     expect(isChecked(rows()[0])).toBe(false);
     expect(rows().some(isCursor)).toBe(false);
     expect(dangerButton().disabled).toBe(true);
+  });
+
+  it('matches a session by its bound PR number in the filter', () => {
+    sessions = [
+      {
+        sessionId: 'pr-session',
+        workspaceCwd: '/work/repo',
+        displayName: 'Fix CI',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+        prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+      },
+      {
+        sessionId: 'other',
+        workspaceCwd: '/work/repo',
+        displayName: 'Unrelated',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+    ];
+    mount();
+
+    typeFilter('#9517');
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('Fix CI');
+
+    typeFilter('#9999');
+    expect(rows()).toHaveLength(0);
   });
 
   it('prunes stale checked ids after an unfiltered session refresh', async () => {
@@ -249,7 +347,9 @@ describe('DeleteSessionDialog selection', () => {
     });
 
     expect(deleteSessionsMock).toHaveBeenCalledWith(['s0', 's1']);
-    expect(onDeleted).toHaveBeenCalledWith(['s0', 's1']);
+    expect(onDeleted).toHaveBeenCalledWith(['s0', 's1'], {
+      attachedSessionId: 'me',
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
   });

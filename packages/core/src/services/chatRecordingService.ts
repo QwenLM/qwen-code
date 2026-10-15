@@ -4,10 +4,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '../utils/shell-result.js';
+import type { SessionSourcesSnapshot } from './session-sources.js';
+import type { ContentBlock } from '@agentclientprotocol/sdk';
+
 import { type Config } from '../config/config.js';
+import type { ToolLifecycleRecord } from '../telemetry/tool-lifecycle.js';
+import type { RequestLifecycleRecord } from '../telemetry/request-lifecycle.js';
+import {
+  backgroundTurnContext,
+  type BackgroundNotificationTurn,
+} from '../utils/background-turn-context.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import { isManagedExecutionTranscriptSync } from '../utils/sessionStorageUtils.js';
+import {
+  SessionExecutionEngineError,
+  type SessionExecutionEngine,
+  type SessionExecutionEnginePayload,
+} from './session-execution-engine.js';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   PartListUnion,
   Content,
@@ -18,7 +37,13 @@ import { createModelContent, createUserContent } from '../core/genai-compat.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+} from '../tools/tool-result-boundary-diagnostics.js';
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
+import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
 import type {
@@ -41,14 +66,28 @@ import {
   SessionTranscriptChangedError,
   SessionWriterLostError,
   SessionWriterUnavailableError,
+  type SessionWriterCommitProof,
   type SessionWriterLease,
 } from './session-writer-lease.js';
+import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import { getApiHistoryPromptId } from './session-api-history.js';
+import type {
+  AgentMentionRecordPayload,
+  AgentMessageRecordPayload,
+} from '../agents/session-agents/contract.js';
 import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
   TranscriptCursor,
 } from '../goals/goal-protocol.js';
-
+import {
+  collectPendingBranchToolCalls,
+  resolveCompletedTurnBranchCandidateFromRecords,
+  updatePendingBranchToolCalls,
+  type BranchCheckpointRecordPayloadV1,
+  type BranchPoint,
+  type BranchToolCallIdentity,
+} from './branch-points.js';
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
 /**
@@ -57,20 +96,17 @@ const debugLogger = createDebugLogger('CHAT_RECORDING');
  * retrying across turns.
  */
 const AUTO_TITLE_ATTEMPT_CAP = 3;
+const MAX_TITLE_USER_DISPLAY_TEXTS = 20;
 const SESSION_FILE_DIFF_AGGREGATE_CHAR_LIMIT = 100_000;
 const SESSION_FILE_DIFF_CHAR_LIMIT = 50_000;
 const SESSION_FILE_CONTENT_CHAR_LIMIT = 16_000;
 
 /**
- * Re-append a fresh `custom_title` record to EOF once this many bytes
- * of other JSONL content have been written since the last title
- * anchor. Half of the picker's 64KB tail-read window so that even an
- * oversized record landing right at the threshold keeps the title
- * within scan range. Lifting this above 64KB would let the title
- * fall out of the tail window between re-anchors; lowering it
- * trades extra writes for a tighter safety margin.
+ * Re-append tail-readable metadata to EOF once this many bytes of other JSONL
+ * content have been written since its last anchor. Half of the reader's 64KB
+ * tail window leaves room for the anchor record itself.
  */
-const TITLE_REANCHOR_BYTES = 32 * 1024;
+const METADATA_REANCHOR_BYTES = 32 * 1024;
 
 function isFileDiffDisplay(resultDisplay: unknown): resultDisplay is FileDiff {
   if (
@@ -240,19 +276,25 @@ export type ChatRecordProvenance =
   | 'real_user'
   | 'assistant_output'
   | 'tool_result'
+  | 'execution_output'
   | 'goal_control'
   | 'goal_runtime'
-  | 'system';
+  | 'system'
+  /** Written on behalf of a workspace agent (session multi-agent). */
+  | 'external_agent';
 
-export type RecordToolResultOptions =
+export type RecordToolResultOptions = {
+  subtype?: 'code_mode_tool_result';
+} & (
   | {
       goalContext?: GoalTurnPermit;
       provenance?: 'tool_result';
     }
   | {
       goalContext: GoalTurnPermit;
-      provenance: 'goal_runtime';
-    };
+      provenance: 'goal_runtime' | 'execution_output';
+    }
+);
 
 function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
   return {
@@ -262,7 +304,56 @@ function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
   };
 }
 
+/** An `agent_mention` / `agent_message` record found by its key. */
+export interface ExternalAgentRecordRef {
+  uuid: string;
+  /** The record's own ISO 8601 timestamp. */
+  timestamp: string;
+}
+
+/**
+ * Where a Managed session's records go instead of the transcript: the record
+ * sink of its Managed Session authority. Declared structurally so this module
+ * does not depend on the managed runtime.
+ */
+export interface ManagedSessionRecordWriter {
+  /**
+   * Whether the Managed Session format has a mapping for the record and the
+   * record has the shape that mapping takes.
+   */
+  canCarry(record: ChatRecord): boolean;
+  /** Commits the record to the log as a Managed transaction. */
+  write(record: ChatRecord): Promise<void>;
+  /** The reader-facing records rebuilt from the log, in log order. */
+  project(): Promise<ChatRecord[]>;
+  /** Records that this session stopped advancing the log. */
+  stopAdvancing(): Promise<void>;
+  /** The committed position the writer is sealed with. */
+  commitProof(): SessionWriterCommitProof;
+  /** The log's size in bytes, or `undefined` when it cannot be read. */
+  logSize(): number | undefined;
+}
+
+/**
+ * A record the Managed Session format has no mapping for, or a record in a
+ * shape its mapping does not take. It is refused before it is queued, so the
+ * session keeps recording.
+ */
+export class ManagedSessionRecordRefusedError extends Error {
+  readonly code = 'managed_session_record_refused';
+
+  constructor(record: Pick<ChatRecord, 'type' | 'subtype'>) {
+    super(
+      `A Managed session cannot record a ${record.type} record` +
+        `${record.subtype ? ` with subtype ${record.subtype}` : ''}.`,
+    );
+    this.name = 'ManagedSessionRecordRefusedError';
+  }
+}
+
 export interface ChatRecord {
+  /** Daemon admission identity, distinct from CLI file-history prompt IDs. */
+  daemonPromptId?: string;
   /** Unique identifier for this logical message */
   uuid: string;
   /** UUID of the parent message; null for root (first message in session) */
@@ -285,31 +376,84 @@ export interface ChatRecord {
     | 'at_command'
     | 'attribution_snapshot'
     | 'notification'
+    | 'background_task_completed'
     | 'cron'
     | 'mid_turn_user_message'
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'session_execution_engine'
+    | 'omni_recall'
+    | 'session_model'
+    | 'session_approval_mode'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
+    | 'agent_retry'
+    | 'agent_session_ready'
     | 'file_history_snapshot'
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
+    | 'session_sources_snapshot'
+    | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
-    | 'realtime_message';
+    | 'goal_turn_end'
+    | 'code_mode_tool_result'
+    | 'realtime_message'
+    | 'turn_result'
+    | 'turn_attempt'
+    | 'managed_session_header_v1'
+    | 'managed_session_event_v1'
+    | 'managed_session_commit_v1'
+    // Session multi-agent records (agents/session-agents/contract.ts). Both
+    // are `type: 'user'`: kept in model history, but never a real user
+    // prompt, a turn boundary, a title source, or a cold notification.
+    | 'agent_mention'
+    | 'agent_message';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
   goalContext?: GoalTurnPermit;
+  backgroundTurn?: BackgroundNotificationTurn;
+  /**
+   * `true` on a `subtype: 'notification'` record that IS the user entry of a
+   * turn the `LlmClient.sendMessageStream` send path admitted and went on to
+   * send (`client.ts`), so the stamp exists even where the admission branch
+   * runs outside `backgroundTurnContext`. Records persisted BEFORE their turn
+   * ran (`recordNotificationStrict`, the pre-send `recordNotification` copies)
+   * carry no stamp. This is the only reliable separator between the two — both
+   * share `provenance: 'system'` + `subtype: 'notification'`, and
+   * `backgroundTurn` vanishes on the `channelTask` admission branch
+   * (`backgroundTurnContext.exit`). Session recovery trims only unstamped
+   * notification records: a stamped-but-unanswered entry is treated as an
+   * `interrupted_prompt`, not as a cold notification nobody owes a response.
+   *
+   * The stamp means "admitted and sent", NOT "the model accepted a request".
+   * Every pre-send refusal gate on that path — `MaxSessionTurns`,
+   * `!boundedTurns`, the session token limit, the arena control signal —
+   * returns after the record is appended, and an abort before the first token
+   * does too, so a refused or aborted turn is stamped as well and then
+   * recovers as `interrupted_prompt`. That false positive is accepted: the
+   * record cannot move below the gates without losing the resumed info item it
+   * exists to restore, and an appended JSONL record cannot be mutated
+   * afterwards. Only the abort arm needs no setup — the gates are off or
+   * unreachable by default (`maxSessionTurns` is `-1`, the arena client is
+   * unset, `boundedTurns` reaches 0 only once the turn recursion is
+   * exhausted) — and the only observable symptom today is one recovery banner
+   * line, because no consumer of a record-derived plan reads `continuation`.
+   * Pinned by the cap-refusal case in `client.test.ts`.
+   */
+  deliveredTurn?: boolean;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
   version: string;
   /** Current git branch, if available */
   gitBranch?: string;
+  /** Stable identity shared with the visible user turn and API history. */
+  promptId?: string;
 
   // Content field - raw API format for history reconstruction
 
@@ -327,6 +471,12 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Effective session settings when user input reaches the recorder. */
+  executionContext?: {
+    modelId: string;
+    authType?: string;
+    approvalMode: ApprovalMode;
+  };
   /** Context window size of the model used for this response */
   contextWindowSize?: number;
   /**
@@ -349,15 +499,26 @@ export interface ChatRecord {
     | CustomTitleRecordPayload
     | ParentSessionRecordPayload
     | SessionSourceRecordPayload
+    | SessionModelRecordPayload
+    | SessionExecutionEnginePayload
+    | SessionApprovalModeRecordPayload
     | NotificationRecordPayload
     | UserPromptRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
+    | AgentRetryRecordPayload
+    | AgentSessionReadyRecordPayload
     | FileHistorySnapshotRecordPayload
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
-    | GoalStateRecordPayloadV2;
+    | SessionSourcesSnapshot
+    | BranchCheckpointRecordPayloadV1
+    | GoalStateRecordPayloadV2
+    | GoalTurnEndRecordPayload
+    | TurnResultRecordPayload
+    | AgentMessageRecordPayload
+    | AgentMentionRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -373,6 +534,12 @@ export interface ChatRecord {
   agentRound?: number;
   /** Source kind for injected external input records. */
   externalInputKind?: 'message' | 'notification';
+  /**
+   * Idempotency key of an `agent_mention` / `agent_message` record the daemon
+   * asked for (`recordExternalAgentRecordStrict`). Persisted so a re-sent
+   * request after a restart finds the record instead of writing a second one.
+   */
+  externalRecordKey?: string;
 
   /**
    * Set on every record of a forked session to record its lineage.
@@ -395,22 +562,44 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
+  attachmentReferences?: UserPromptAttachmentReference[];
   backgroundTask?: {
     taskId: string;
     status: string;
-    kind: 'agent' | 'monitor' | 'shell';
+    /** `peer`: a message from another session; `taskId` is the message id. */
+    kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
     toolUseId?: string;
+    sourceTurnId?: string;
+    /** Structured fields for i18n rendering (persisted for page refresh). */
+    description?: string;
+    commandLabel?: string;
+    eventCount?: number;
+    droppedLines?: number;
   };
 }
 
 export interface UserPromptRecordPayload {
   /**
-   * TUI submittedPrompt projection when available; otherwise the expanded
-   * pre-hook prompt.
+   * Core/headless: submitted projection, otherwise expanded pre-hook text.
+   * ACP: display projection or raw request text before expansion. ACP omits
+   * this payload when no projection, references, or input annotations exist.
    */
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
+  /** UI-only annotations; interpreted by transcript consumers, not the model. */
+  inputAnnotations?: unknown[];
+  /** Daemon-owned attachment references used to restore prompt previews. */
+  attachmentReferences?: UserPromptAttachmentReference[];
+  /** Original ACP resource references, independent of model-input expansion. */
+  resourceLinks?: Array<Extract<ContentBlock, { type: 'resource_link' }>>;
+}
+
+export interface UserPromptAttachmentReference {
+  type: 'image' | 'resource';
+  attachmentId: string;
+  mimeType: string;
+  size: number;
 }
 
 export interface AgentBootstrapRecordPayload {
@@ -434,9 +623,28 @@ export interface AgentBootstrapRecordPayload {
   tools?: Array<string | FunctionDeclaration>;
 }
 
+export interface AgentSessionReadyRecordPayload {
+  callId: string;
+  subagentSessionReady: boolean;
+}
+
+export interface AgentRetryRecordPayload {
+  /** 1-based attempt number this attach resumes with (2+ on a retry). */
+  attempt: number;
+}
+
 /**
  * Stored payload for chat compression checkpoints. This allows us to rebuild the
  * effective chat history on resume while keeping the original UI-visible history.
+ *
+ * NOTE: the payload carries `ChatCompressionInfo`, which has no
+ * `compressionKind` — the 'summarize' vs 'fast' distinction (see
+ * `CompressionProps.compressionKind` in cli's ui/types.ts) exists only on
+ * ephemeral UI items today. If resume ever reconstructs compression markers
+ * from this record, it must re-derive the kind; rebuilding every marker
+ * kind-less and falling back to 'summarize' would misclassify fast markers
+ * as truncation boundaries and re-introduce the silent pre-marker history
+ * drop of #9320 on any session that ran /compress-fast before being resumed.
  */
 export interface ChatCompressionRecordPayload {
   /** Compression metrics/status returned by the compression service */
@@ -447,6 +655,13 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  /** Prompt identities parallel to compressedHistory. */
+  promptIds?: Array<string | null>;
+  completedToolCallIds?: string[];
+}
+
+export interface GoalTurnEndRecordPayload {
+  toolCallId: string;
 }
 
 export interface SlashCommandRecordPayload {
@@ -456,6 +671,11 @@ export interface SlashCommandRecordPayload {
   rawCommand: string;
   /** Whether the visible slash-command invocation reached model history. */
   sentToModel?: boolean;
+  /**
+   * Whether the UI intentionally hid this invocation from visible history,
+   * so resume/preview reconstruction skips the user row as well.
+   */
+  hiddenInvocation?: boolean;
   /**
    * History items the UI displayed for this command, in the same shape used by
    * the CLI (without IDs). Stored as plain objects for replay on resume.
@@ -518,11 +738,128 @@ export interface SessionSourceRecordPayload {
   sourceId?: string;
 }
 
+/** Last-wins binding of the model a daemon session should restore. */
+export interface SessionModelRecordPayload {
+  modelId: string;
+  authType: string;
+  baseUrl?: string;
+  isRuntime?: boolean;
+}
+
+/** Last-wins approval state a daemon session should restore. */
+export interface SessionApprovalModeRecordPayload {
+  mode: ApprovalMode;
+  prePlanMode?: ApprovalMode;
+  planExecutionMode?: ApprovalMode;
+}
+
+interface SessionApprovalModeRecordCandidate {
+  mode: ApprovalMode;
+  prePlanMode?: unknown;
+  planExecutionMode?: unknown;
+}
+
+const APPROVAL_MODE_VALUES = new Set<string>(Object.values(ApprovalMode));
+
+function isApprovalMode(value: unknown): value is ApprovalMode {
+  return typeof value === 'string' && APPROVAL_MODE_VALUES.has(value);
+}
+
+export function isValidSessionApprovalModePayload(
+  payload: unknown,
+): payload is SessionApprovalModeRecordCandidate {
+  const candidate = payload as
+    | SessionApprovalModeRecordCandidate
+    | null
+    | undefined;
+  if (!isApprovalMode(candidate?.mode)) return false;
+  if (candidate.mode !== ApprovalMode.PLAN) return true;
+  return (
+    (candidate.prePlanMode === undefined ||
+      (isApprovalMode(candidate.prePlanMode) &&
+        candidate.prePlanMode !== ApprovalMode.PLAN)) &&
+    (candidate.planExecutionMode === undefined ||
+      (isApprovalMode(candidate.planExecutionMode) &&
+        candidate.planExecutionMode !== ApprovalMode.PLAN))
+  );
+}
+
+export function normalizeSessionApprovalModePayload(
+  payload: SessionApprovalModeRecordCandidate,
+): SessionApprovalModeRecordPayload {
+  if (payload.mode !== ApprovalMode.PLAN) {
+    return { mode: payload.mode };
+  }
+  return {
+    mode: ApprovalMode.PLAN,
+    prePlanMode:
+      isApprovalMode(payload.prePlanMode) &&
+      payload.prePlanMode !== ApprovalMode.PLAN
+        ? payload.prePlanMode
+        : ApprovalMode.DEFAULT,
+    ...(isApprovalMode(payload.planExecutionMode) &&
+    payload.planExecutionMode !== ApprovalMode.PLAN
+      ? { planExecutionMode: payload.planExecutionMode }
+      : {}),
+  };
+}
+
+export function sessionApprovalModePayloadsEqual(
+  a: SessionApprovalModeRecordPayload,
+  b: SessionApprovalModeRecordPayload,
+): boolean {
+  return (
+    a.mode === b.mode &&
+    a.prePlanMode === b.prePlanMode &&
+    a.planExecutionMode === b.planExecutionMode
+  );
+}
+
+export function isValidSessionModelPayload(
+  payload: unknown,
+): payload is SessionModelRecordPayload {
+  const candidate = payload as SessionModelRecordPayload | null | undefined;
+  return (
+    typeof candidate?.modelId === 'string' &&
+    Boolean(candidate.modelId.trim()) &&
+    typeof candidate.authType === 'string' &&
+    Boolean(candidate.authType.trim())
+  );
+}
+
+export function normalizeSessionModelPayload(
+  payload: SessionModelRecordPayload,
+): SessionModelRecordPayload {
+  const normalized: SessionModelRecordPayload = {
+    modelId: stripRuntimeSnapshotPrefix(payload.modelId.trim()),
+    authType: payload.authType.trim(),
+  };
+  if (payload.baseUrl !== undefined) {
+    normalized.baseUrl = payload.baseUrl;
+  }
+  if (payload.isRuntime) {
+    normalized.isRuntime = true;
+  }
+  return normalized;
+}
+
+export function sessionModelPayloadsEqual(
+  a: SessionModelRecordPayload,
+  b: SessionModelRecordPayload,
+): boolean {
+  return (
+    a.modelId === b.modelId &&
+    a.authType === b.authType &&
+    (a.baseUrl ?? '') === (b.baseUrl ?? '') &&
+    Boolean(a.isRuntime) === Boolean(b.isRuntime)
+  );
+}
+
 /**
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
-  uiEvent: UiEvent;
+  uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord;
 }
 
 /**
@@ -554,6 +891,193 @@ export interface UserTextElementsRecordPayload {
   textElements: unknown[];
 }
 
+/**
+ * Cap (in UTF-16 code units) on the prompt / result text stored in a
+ * `turn_result` record. Writers truncate and set the paired flag.
+ */
+export const TURN_RESULT_TEXT_MAX_CHARS = 32_768;
+export const TURN_RESULT_ERROR_MESSAGE_MAX_CHARS = 4_096;
+export const TURN_RESULT_ERROR_CODE_MAX_CHARS = 256;
+export const TURN_RESULT_IDENTIFIER_MAX_CHARS = 256;
+
+export const TURN_RESULT_CODE_TEXT_TRUNCATED = 'RESULT_TEXT_TRUNCATED' as const;
+export type TurnResultCode = typeof TURN_RESULT_CODE_TEXT_TRUNCATED;
+
+export interface TurnResultErrorPayload {
+  message: string;
+  code?: string;
+  messageTruncated?: boolean;
+  codeTruncated?: boolean;
+}
+
+function readTurnResultErrorField(
+  error: unknown,
+  field: 'message' | 'code' | 'rpcCode',
+): unknown {
+  if (
+    (typeof error !== 'object' || error === null) &&
+    typeof error !== 'function'
+  ) {
+    return undefined;
+  }
+  try {
+    return Reflect.get(error, field);
+  } catch {
+    return undefined;
+  }
+}
+
+function truncateTurnResultErrorField(
+  value: string,
+  maxChars: number,
+): { value: string; truncated: boolean } {
+  return value.length > maxChars
+    ? { value: value.slice(0, maxChars), truncated: true }
+    : { value, truncated: false };
+}
+
+export function normalizeTurnResultError(
+  error: unknown,
+): TurnResultErrorPayload {
+  const rawMessage = readTurnResultErrorField(error, 'message');
+  let message =
+    typeof rawMessage === 'string' && rawMessage.length > 0
+      ? rawMessage
+      : undefined;
+  if (message === undefined) {
+    try {
+      const converted = String(error);
+      if (converted.length > 0) message = converted;
+    } catch {
+      // Use the stable fallback below.
+    }
+  }
+  const boundedMessage = truncateTurnResultErrorField(
+    message ?? 'Unknown error',
+    TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
+  );
+
+  const rawCode =
+    readTurnResultErrorField(error, 'code') ??
+    readTurnResultErrorField(error, 'rpcCode');
+  const code =
+    typeof rawCode === 'string' && rawCode.length > 0
+      ? rawCode
+      : typeof rawCode === 'number'
+        ? String(rawCode)
+        : undefined;
+  const boundedCode =
+    code === undefined
+      ? undefined
+      : truncateTurnResultErrorField(code, TURN_RESULT_ERROR_CODE_MAX_CHARS);
+
+  return {
+    message: boundedMessage.value,
+    ...(boundedMessage.truncated ? { messageTruncated: true } : {}),
+    ...(boundedCode ? { code: boundedCode.value } : {}),
+    ...(boundedCode?.truncated ? { codeTruncated: true } : {}),
+  };
+}
+
+/**
+ * Settled outcome of one admitted prompt, appended at turn settle so
+ * pollable turn-status queries survive daemon restarts. `state`
+ * distinguishes normal completion (`completed`, with `stopReason`),
+ * user/abort cancellation (`cancelled`), and failure (`error`).
+ */
+export interface TurnResultRecordPayload {
+  promptId: string;
+  state: 'completed' | 'cancelled' | 'error';
+  stopReason?: string;
+  error?: TurnResultErrorPayload;
+  /** Epoch ms the turn started executing (agent clock). */
+  startedAt?: number;
+  /** Epoch ms the cancellation signal was received (agent clock). */
+  cancelledAt?: number;
+  /** Explicit user intent; legacy timestamps alone do not establish it. */
+  cancelReason?: 'user';
+  /** Epoch ms the turn settled (agent clock). */
+  endedAt: number;
+  promptText?: string;
+  promptTextTruncated?: boolean;
+  resultText?: string;
+  resultTruncated?: boolean;
+  resultCode?: TurnResultCode;
+  originatorClientId?: string;
+}
+
+export function isTurnResultRecordPayload(
+  value: unknown,
+): value is TurnResultRecordPayload {
+  if (typeof value !== 'object' || value === null) return false;
+  const payload = value as Record<string, unknown>;
+  if (
+    typeof payload['promptId'] !== 'string' ||
+    payload['promptId'].length === 0 ||
+    payload['promptId'].length > TURN_RESULT_IDENTIFIER_MAX_CHARS ||
+    !['completed', 'cancelled', 'error'].includes(payload['state'] as string) ||
+    typeof payload['endedAt'] !== 'number' ||
+    !Number.isFinite(payload['endedAt'])
+  ) {
+    return false;
+  }
+  const optionalString = (field: string, maxChars?: number) => {
+    const fieldValue = payload[field];
+    return (
+      fieldValue === undefined ||
+      (typeof fieldValue === 'string' &&
+        (maxChars === undefined || fieldValue.length <= maxChars))
+    );
+  };
+  const optionalBoolean = (field: string) =>
+    payload[field] === undefined || typeof payload[field] === 'boolean';
+  const optionalTimestamp = (field: string) =>
+    payload[field] === undefined ||
+    (typeof payload[field] === 'number' && Number.isFinite(payload[field]));
+  if (
+    !optionalString('stopReason', TURN_RESULT_IDENTIFIER_MAX_CHARS) ||
+    !optionalTimestamp('startedAt') ||
+    !optionalTimestamp('cancelledAt') ||
+    (payload['cancelReason'] !== undefined &&
+      (payload['cancelReason'] !== 'user' ||
+        payload['state'] !== 'cancelled' ||
+        payload['cancelledAt'] === undefined)) ||
+    !optionalString('promptText', TURN_RESULT_TEXT_MAX_CHARS) ||
+    !optionalBoolean('promptTextTruncated') ||
+    !optionalString('resultText', TURN_RESULT_TEXT_MAX_CHARS) ||
+    !optionalBoolean('resultTruncated') ||
+    !optionalString('originatorClientId', TURN_RESULT_IDENTIFIER_MAX_CHARS) ||
+    (payload['resultCode'] !== undefined &&
+      (payload['resultCode'] !== TURN_RESULT_CODE_TEXT_TRUNCATED ||
+        payload['resultTruncated'] !== true))
+  ) {
+    return false;
+  }
+  const error = payload['error'];
+  if (error === undefined) return payload['state'] !== 'error';
+  if (
+    payload['state'] !== 'error' ||
+    typeof error !== 'object' ||
+    error === null
+  ) {
+    return false;
+  }
+  const fields = error as Record<string, unknown>;
+  return (
+    typeof fields['message'] === 'string' &&
+    fields['message'].length > 0 &&
+    fields['message'].length <= TURN_RESULT_ERROR_MESSAGE_MAX_CHARS &&
+    (fields['code'] === undefined ||
+      (typeof fields['code'] === 'string' &&
+        fields['code'].length > 0 &&
+        fields['code'].length <= TURN_RESULT_ERROR_CODE_MAX_CHARS)) &&
+    (fields['messageTruncated'] === undefined ||
+      typeof fields['messageTruncated'] === 'boolean') &&
+    (fields['codeTruncated'] === undefined ||
+      typeof fields['codeTruncated'] === 'boolean')
+  );
+}
+
 export interface ChatRecordingFailureEvent {
   sessionId: string;
   error: Error;
@@ -562,6 +1086,35 @@ export interface ChatRecordingFailureEvent {
 export type ChatRecordingFailureListener = (
   event: ChatRecordingFailureEvent,
 ) => void | Promise<void>;
+
+interface BufferedRecordAppend {
+  record: ChatRecord;
+  options: { updateActiveTail?: boolean } | undefined;
+  resolve?: () => void;
+  reject?: (error: unknown) => void;
+}
+
+interface TranscriptTopologyFence {
+  buffered: BufferedRecordAppend[];
+}
+
+export interface BranchCheckpointCursor {
+  recordId: string | null;
+  activeRecordCount: number;
+  pendingToolCalls: readonly BranchToolCallIdentity[];
+}
+
+export interface ChatRecordingRestoreState {
+  lastCompletedUuid: string;
+  turnParentUuids: Array<string | null>;
+  customTitle?: string;
+  titleSource?: TitleSource;
+  parentSessionId?: string;
+  sourceType?: string;
+  sourceId?: string;
+  sessionModel?: SessionModelRecordPayload;
+  sessionApprovalMode?: SessionApprovalModeRecordPayload;
+}
 
 /**
  * Service for recording the current chat session to disk.
@@ -592,6 +1145,12 @@ export class ChatRecordingService {
   private lastRecordUuid: string | null = null;
   /** UUID of the last active-tail record confirmed written to disk. */
   private lastPersistedRecordUuid: string | null = null;
+  /** Active chain mirrored in memory so end-of-turn validation is incremental. */
+  private activeBranchRecords: ChatRecord[] = [];
+  /** Parent of the first mirrored record, or the restored tail before appends. */
+  private activeBranchBaseUuid: string | null = null;
+  /** Unclosed tool calls at the current active tail. */
+  private pendingBranchToolCalls: BranchToolCallIdentity[] = [];
   private readonly config: Config;
   /**
    * Tracks the `lastRecordUuid` value just before each user turn was recorded.
@@ -607,6 +1166,8 @@ export class ChatRecordingService {
   private turnParentUuids: Array<string | null> = [];
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
+  /** Session identity pinned by `pinSessionIdentity` at rotation time. */
+  private pinnedSessionId: string | undefined;
   private state:
     | 'inactive'
     | 'active'
@@ -624,10 +1185,22 @@ export class ChatRecordingService {
   private acceptingWrites = false;
   private closePromise: Promise<void> | undefined;
   private handoffRequested = false;
+  /** Prevents asynchronous metadata writers from becoming checkpoint siblings. */
+  private topologyFence: TranscriptTopologyFence | undefined;
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
   private readonly writerLeaseRequired: boolean;
+  /**
+   * `externalRecordKey` -> record of the active chain, built from the
+   * transcript on first use and extended by every external record written.
+   */
+  private externalRecordIndex: Map<string, ExternalAgentRecordRef> | undefined;
+  private externalRecordIndexLoad:
+    | Promise<Map<string, ExternalAgentRecordRef>>
+    | undefined;
+  /** Bumped whenever recorder state is rebuilt; a stale index load is dropped. */
+  private externalRecordIndexGeneration = 0;
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -643,6 +1216,13 @@ export class ChatRecordingService {
   /** Immutable creator attribution once recorded. */
   private currentSourceType: string | undefined;
   private currentSourceId: string | undefined;
+  /** Last-wins daemon session model binding, used to skip duplicate writes. */
+  private currentSessionModel: SessionModelRecordPayload | undefined;
+  /** Last-wins daemon session approval state, used to skip duplicate writes. */
+  private currentSessionApprovalMode:
+    | SessionApprovalModeRecordPayload
+    | undefined;
+  private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -668,6 +1248,8 @@ export class ChatRecordingService {
   private pendingExplicitTitleWrites = 0;
   /** Title writes whose durable result and final cached value are unresolved. */
   private pendingTitleWrites = 0;
+  /** Source writes whose durable result and cached value are unresolved. */
+  private pendingSourceWrites = 0;
 
   /**
    * JSON-serialized form of the most recent attribution snapshot accepted for
@@ -697,6 +1279,7 @@ export class ChatRecordingService {
    */
   private bytesSinceTitleAnchor = 0;
   private hasNonTitleContentSinceTitleAnchor = false;
+  private bytesSinceSourceAnchor = 0;
 
   constructor(
     config: Config,
@@ -704,25 +1287,31 @@ export class ChatRecordingService {
     writerLeaseRequired = config.isSessionWriterLeaseEnabled?.() ??
       config.getExperimentalZedIntegration?.() ??
       true,
+    restoreState?: ChatRecordingRestoreState,
   ) {
     this.config = config;
     this.writerLeaseRequired = writerLeaseRequired;
     const resumed = config.getResumedSessionData();
     if (writerLeaseRequired) {
-      this.lastRecordUuid = resumed?.lastCompletedUuid ?? null;
+      this.lastRecordUuid =
+        restoreState?.lastCompletedUuid ?? resumed?.lastCompletedUuid ?? null;
       this.lastPersistedRecordUuid = this.lastRecordUuid;
     } else {
       this.state = 'active';
       this.acceptingWrites = true;
-      this.restoreSessionState(
-        resumed
-          ? {
-              conversation: resumed.conversation ?? { messages: [] },
-              lastCompletedUuid: resumed.lastCompletedUuid,
-            }
-          : undefined,
-        resumed ? this.readPersistedTitleInfo() : undefined,
-      );
+      if (restoreState) {
+        this.restoreProjectedState(restoreState);
+      } else {
+        this.restoreSessionState(
+          resumed
+            ? {
+                conversation: resumed.conversation ?? { messages: [] },
+                lastCompletedUuid: resumed.lastCompletedUuid,
+              }
+            : undefined,
+          resumed ? this.readPersistedTitleInfo() : undefined,
+        );
+      }
     }
   }
 
@@ -760,7 +1349,11 @@ export class ChatRecordingService {
    * @returns The session ID.
    */
   private getSessionId(): string {
-    return this.binding?.sessionId ?? this.config.getSessionId();
+    return (
+      this.binding?.sessionId ??
+      this.pinnedSessionId ??
+      this.config.getSessionId()
+    );
   }
 
   private ensureChatsDir(): string {
@@ -791,6 +1384,12 @@ export class ChatRecordingService {
         );
       }
     }
+    if (isManagedExecutionTranscriptSync(conversationFile)) {
+      throw new SessionExecutionEngineError(
+        this.getSessionId(),
+        'belongs to managed, cannot record with legacy',
+      );
+    }
     this.cachedConversationFile = conversationFile;
     return conversationFile;
   }
@@ -804,14 +1403,27 @@ export class ChatRecordingService {
   ): void {
     this.lastRecordUuid = sessionData?.lastCompletedUuid ?? null;
     this.lastPersistedRecordUuid = this.lastRecordUuid;
+    this.resetExternalRecordIndex();
     this.currentCustomTitle = undefined;
     this.currentTitleSource = undefined;
     this.currentParentSessionId = undefined;
     this.currentSourceType = undefined;
     this.currentSourceId = undefined;
+    this.currentSessionModel = undefined;
+    this.currentSessionApprovalMode = undefined;
+    this.activeBranchRecords = [];
+    this.activeBranchBaseUuid = null;
+    this.pendingBranchToolCalls = [];
+    this.userDisplayTextsForTitle.length = 0;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
+      if (record.type === 'user' && record.subtype === undefined) {
+        this.trackUserDisplayTextForTitle(
+          (record.systemPayload as UserPromptRecordPayload | undefined)
+            ?.displayText,
+        );
+      }
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
         const payload = record.systemPayload as
@@ -829,6 +1441,18 @@ export class ChatRecordingService {
           | undefined;
         this.currentSourceType = payload?.sourceType;
         this.currentSourceId = payload?.sourceId;
+      } else if (record.subtype === 'session_model') {
+        if (isValidSessionModelPayload(record.systemPayload)) {
+          this.currentSessionModel = normalizeSessionModelPayload(
+            record.systemPayload,
+          );
+        }
+      } else if (record.subtype === 'session_approval_mode') {
+        if (isValidSessionApprovalModePayload(record.systemPayload)) {
+          this.currentSessionApprovalMode = normalizeSessionApprovalModePayload(
+            record.systemPayload,
+          );
+        }
       }
     }
     if (persistedTitleInfo !== undefined) {
@@ -836,7 +1460,42 @@ export class ChatRecordingService {
       this.currentTitleSource = persistedTitleInfo.source;
     }
     if (this.currentCustomTitle) {
-      this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+      this.bytesSinceTitleAnchor = METADATA_REANCHOR_BYTES;
+    }
+    if (this.currentSourceType) {
+      this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
+    }
+  }
+
+  private trackUserDisplayTextForTitle(displayText: string | undefined): void {
+    this.userDisplayTextsForTitle.push(displayText);
+    if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
+      this.userDisplayTextsForTitle.shift();
+    }
+  }
+
+  private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    this.lastRecordUuid = state.lastCompletedUuid;
+    this.lastPersistedRecordUuid = state.lastCompletedUuid;
+    this.resetExternalRecordIndex();
+    this.activeBranchBaseUuid = state.lastCompletedUuid;
+    this.turnParentUuids = [...state.turnParentUuids];
+    this.currentCustomTitle = state.customTitle;
+    this.currentTitleSource = state.titleSource;
+    this.currentParentSessionId = state.parentSessionId;
+    this.currentSourceType = state.sourceType;
+    this.currentSourceId = state.sourceId;
+    this.currentSessionModel = state.sessionModel
+      ? normalizeSessionModelPayload(state.sessionModel)
+      : undefined;
+    this.currentSessionApprovalMode = state.sessionApprovalMode
+      ? normalizeSessionApprovalModePayload(state.sessionApprovalMode)
+      : undefined;
+    if (this.currentCustomTitle) {
+      this.bytesSinceTitleAnchor = METADATA_REANCHOR_BYTES;
+    }
+    if (this.currentSourceType) {
+      this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
   }
 
@@ -847,6 +1506,7 @@ export class ChatRecordingService {
       lastCompletedUuid: string | null;
     },
     persistedTitleInfo?: { title?: string; source?: TitleSource },
+    restoreState?: ChatRecordingRestoreState,
   ): void {
     if (
       !this.writerLeaseRequired ||
@@ -856,7 +1516,11 @@ export class ChatRecordingService {
       throw new SessionWriterUnavailableError();
     }
     this.binding = { sessionId: lease.sessionId, lease };
-    this.restoreSessionState(sessionData, persistedTitleInfo);
+    if (restoreState) {
+      this.restoreProjectedState(restoreState);
+    } else {
+      this.restoreSessionState(sessionData, persistedTitleInfo);
+    }
     this.state = 'active';
     this.acceptingWrites = true;
   }
@@ -868,7 +1532,15 @@ export class ChatRecordingService {
     type: ChatRecord['type'],
   ): Omit<ChatRecord, 'message' | 'tokens' | 'model' | 'toolCallsMetadata'> {
     const cwd = this.config.getProjectRoot();
+    const background = backgroundTurnContext.getStore();
+    const backgroundTurn =
+      background?.active &&
+      background.sessionId === this.getSessionId() &&
+      !getCurrentAgentId()
+        ? background.turn
+        : undefined;
     return {
+      ...(backgroundTurn ? { backgroundTurn } : {}),
       uuid: randomUUID(),
       parentUuid: this.lastRecordUuid,
       sessionId: this.getSessionId(),
@@ -938,6 +1610,65 @@ export class ChatRecordingService {
     return this.integrityFailure ?? this.writeFailure;
   }
 
+  private updateActiveBranch(record: ChatRecord): void {
+    const currentTail = this.activeBranchRecords.at(-1)?.uuid ?? null;
+    if (record.parentUuid !== currentTail) {
+      const parentIndex =
+        record.parentUuid === null
+          ? -1
+          : this.activeBranchRecords.findIndex(
+              (candidate) => candidate.uuid === record.parentUuid,
+            );
+      this.activeBranchRecords =
+        parentIndex < 0
+          ? []
+          : this.activeBranchRecords.slice(0, parentIndex + 1);
+      if (parentIndex < 0) {
+        this.activeBranchBaseUuid = record.parentUuid ?? null;
+      }
+      this.pendingBranchToolCalls = collectPendingBranchToolCalls(
+        this.activeBranchRecords,
+      );
+    }
+    this.activeBranchRecords.push(record);
+    updatePendingBranchToolCalls(this.pendingBranchToolCalls, record);
+  }
+
+  /**
+   * Set for a Managed session: its records go to the authority's record sink
+   * instead of straight into the transcript.
+   */
+  private managedSink?: ManagedSessionRecordWriter;
+
+  /** The Managed log's size when the recorder last measured its growth. */
+  private managedLogSizeSeen = 0;
+
+  /**
+   * Routes every record of a Managed session through its authority. Bound
+   * before activation, so no record of the session reaches the transcript
+   * directly.
+   */
+  bindManagedSink(sink: ManagedSessionRecordWriter): void {
+    if (
+      !this.writerLeaseRequired ||
+      this.state !== 'inactive' ||
+      this.managedSink !== undefined
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.managedSink = sink;
+    this.managedLogSizeSeen = sink.logSize() ?? 0;
+  }
+
+  /**
+   * Whether a Managed session must refuse the record. The refusal happens
+   * before the record is queued: a failed write would stop the recorder for
+   * the rest of the session.
+   */
+  private refusesManagedRecord(record: ChatRecord): boolean {
+    return this.managedSink !== undefined && !this.managedSink.canCarry(record);
+  }
+
   private enqueueRecordWrite(
     record: ChatRecord,
     legacyConversationFile?: string,
@@ -945,9 +1676,14 @@ export class ChatRecordingService {
   ): Promise<void> {
     const pendingWrite = this.operationTail.then(async () => {
       if (this.writeFailure) throw this.writeFailure;
+      const managedSink = this.managedSink;
       try {
         const lease = this.binding?.lease;
-        if (lease) {
+        if (managedSink) {
+          // The authority appends through the same lease; writing the record
+          // here as well would leave a raw line in the Managed Session log.
+          await managedSink.write(record);
+        } else if (lease) {
           await lease.appendJsonLine(record);
         } else if (!this.writerLeaseRequired && legacyConversationFile) {
           await jsonl.writeLine(legacyConversationFile, record);
@@ -960,6 +1696,7 @@ export class ChatRecordingService {
       } catch (error) {
         throw this.enterWriteFailure(error, record.sessionId);
       }
+      if (managedSink) await this.anchorManagedMetadata(managedSink);
     });
     this.operationTail = pendingWrite.then(
       () => undefined,
@@ -977,7 +1714,18 @@ export class ChatRecordingService {
     record: ChatRecord,
     options?: { updateActiveTail?: boolean },
   ): void {
-    if (this.writeFailure || !this.acceptingWrites || this.state !== 'active') {
+    if (this.writeFailure || !this.acceptingWrites || this.state !== 'active')
+      return;
+    if (this.refusesManagedRecord(record)) {
+      debugLogger.warn(
+        `Managed session ${record.sessionId} dropped a ${record.type} record${
+          record.subtype ? ` with subtype ${record.subtype}` : ''
+        } that its log cannot carry`,
+      );
+      return;
+    }
+    if (this.topologyFence) {
+      this.topologyFence.buffered.push({ record, options });
       return;
     }
     const legacyConversationFile = this.writerLeaseRequired
@@ -986,9 +1734,10 @@ export class ChatRecordingService {
     const updateActiveTail = options?.updateActiveTail !== false;
     if (updateActiveTail) {
       this.lastRecordUuid = record.uuid;
+      this.updateActiveBranch(record);
     }
     this.enqueueRecordWrite(record, legacyConversationFile, updateActiveTail);
-    this.updateTitleAnchorTracking(record);
+    this.updateMetadataAnchorTracking(record);
   }
 
   private async appendRecordStrict(
@@ -996,8 +1745,21 @@ export class ChatRecordingService {
     options?: { updateActiveTail?: boolean },
   ): Promise<void> {
     if (this.writeFailure) throw this.writeFailure;
-    if (!this.acceptingWrites || this.state !== 'active') {
+    if (!this.acceptingWrites || this.state !== 'active')
       throw new SessionWriterUnavailableError();
+    if (this.refusesManagedRecord(record)) {
+      throw new ManagedSessionRecordRefusedError(record);
+    }
+    if (this.topologyFence) {
+      await new Promise<void>((resolve, reject) => {
+        this.topologyFence!.buffered.push({
+          record,
+          options,
+          resolve,
+          reject,
+        });
+      });
+      return;
     }
 
     const updateActiveTail = options?.updateActiveTail !== false;
@@ -1006,6 +1768,7 @@ export class ChatRecordingService {
       : this.ensureConversationFile();
     if (updateActiveTail) {
       this.lastRecordUuid = record.uuid;
+      this.updateActiveBranch(record);
     }
     const pendingWrite = this.enqueueRecordWrite(
       record,
@@ -1015,23 +1778,38 @@ export class ChatRecordingService {
     // Keep anchor accounting in logical queue order, matching appendRecord.
     // Once accepted, a failed write permanently stops this recorder, so no
     // rollback of this bookkeeping is needed on rejection.
-    this.updateTitleAnchorTracking(record);
+    this.updateMetadataAnchorTracking(record);
 
     await pendingWrite;
   }
 
+  private releaseTopologyFence(fence: TranscriptTopologyFence): void {
+    if (this.topologyFence !== fence) return;
+    this.topologyFence = undefined;
+    for (const intent of fence.buffered) {
+      // Side artifacts keep updateActiveTail=false, but still move behind the
+      // reserved checkpoint so they cannot become siblings of the completed
+      // turn and invalidate the active transcript topology.
+      intent.record.parentUuid = this.lastRecordUuid;
+      if (intent.resolve && intent.reject) {
+        void this.appendRecordStrict(intent.record, intent.options).then(
+          intent.resolve,
+          intent.reject,
+        );
+      } else {
+        this.appendRecord(intent.record, intent.options);
+      }
+    }
+  }
+
   /**
-   * Maintain the "title is always in the tail window" invariant by
-   * counting bytes accepted since the last `custom_title` record and
-   * re-anchoring once enough non-title content has been written.
+   * Keep title and source metadata inside the reader's tail window by
+   * counting bytes accepted since each metadata record and re-anchoring
+   * independently before either can drift beyond that window.
    *
-   * - A `custom_title` record IS the new anchor — reset the counter.
-   * - Without a current or pending title, the counter is irrelevant.
-   * - Otherwise accumulate this record's serialized size; if the
-   *   running total breaches the threshold, re-append a fresh
-   *   `custom_title` to EOF. The recursive `appendRecord` call will
-   *   land this branch's first arm (subtype === 'custom_title') and
-   *   reset the counter to 0.
+   * Each metadata subtype resets only its own counter. Otherwise, active or
+   * pending metadata accumulates the serialized record size and is re-appended
+   * to EOF once its threshold is reached.
    *
    * Size estimate uses `JSON.stringify` for parity with the actual
    * write path (`jsonl.writeLine` serializes the same way). It's an
@@ -1044,15 +1822,30 @@ export class ChatRecordingService {
    * on disk than `.length` reports, and undercounting would let the
    * actual on-disk distance from the last anchor blow past the 64KB
    * tail window before the threshold fires.
+   *
+   * A Managed session only resets its anchor counters here;
+   * {@link anchorManagedMetadata} measures its log once each record lands.
    */
-  private updateTitleAnchorTracking(record: ChatRecord): void {
-    if (record.type === 'system' && record.subtype === 'custom_title') {
+  private updateMetadataAnchorTracking(record: ChatRecord): void {
+    const isTitleAnchor =
+      record.type === 'system' && record.subtype === 'custom_title';
+    const isSourceAnchor =
+      record.type === 'system' && record.subtype === 'session_source';
+    if (isTitleAnchor) {
       this.bytesSinceTitleAnchor = 0;
       this.hasNonTitleContentSinceTitleAnchor = false;
-      return;
     }
-    if (!this.currentCustomTitle && this.pendingTitleWrites === 0) return;
-    this.hasNonTitleContentSinceTitleAnchor = true;
+    if (isSourceAnchor) {
+      this.bytesSinceSourceAnchor = 0;
+    }
+    const trackTitle =
+      !isTitleAnchor &&
+      (this.currentCustomTitle !== undefined || this.pendingTitleWrites > 0);
+    const trackSource =
+      !isSourceAnchor &&
+      (this.currentSourceType !== undefined || this.pendingSourceWrites > 0);
+    if (!trackTitle && !trackSource) return;
+    if (this.managedSink) return;
     let serializedRecord: string;
     try {
       serializedRecord = JSON.stringify(record);
@@ -1061,14 +1854,95 @@ export class ChatRecordingService {
       // The real serializer will surface the failure through writeChain.
       return;
     }
-    // +1 for the trailing newline jsonl.writeLine appends.
-    this.bytesSinceTitleAnchor +=
-      Buffer.byteLength(serializedRecord, 'utf8') + 1;
+    const bytes = Buffer.byteLength(serializedRecord, 'utf8') + 1;
+    if (trackTitle) {
+      this.hasNonTitleContentSinceTitleAnchor = true;
+      this.bytesSinceTitleAnchor += bytes;
+    }
+    if (trackSource) {
+      this.bytesSinceSourceAnchor += bytes;
+    }
     if (
-      this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+      this.bytesSinceTitleAnchor >= METADATA_REANCHOR_BYTES &&
       this.pendingTitleWrites === 0
     ) {
       this.reanchorTitle();
+    }
+    if (
+      this.bytesSinceSourceAnchor >= METADATA_REANCHOR_BYTES &&
+      this.pendingSourceWrites === 0
+    ) {
+      this.reanchorSessionSource();
+    }
+  }
+
+  /**
+   * Keeps a Managed session's title and source inside the readers' windows.
+   * The readers scan the same windows as on a Legacy transcript, but a
+   * record's own size does not tell how far the log moved: the record is
+   * committed inside transaction records, its content goes to a resource, and
+   * activation renewals append between records. So once a record lands, the
+   * growth of the log is counted, and a due anchor is written right behind
+   * that record, inside the same queued write: it lands before anything
+   * queued later, and a flush waits for it. Growth of records that were queued
+   * before an anchor still counts against that anchor, so a re-anchor comes
+   * early rather than late.
+   */
+  private async anchorManagedMetadata(
+    sink: ManagedSessionRecordWriter,
+  ): Promise<void> {
+    this.countManagedLogGrowth(sink);
+    const anchors: ChatRecord[] = [];
+    if (
+      this.currentCustomTitle &&
+      this.bytesSinceTitleAnchor >= METADATA_REANCHOR_BYTES &&
+      this.pendingTitleWrites === 0
+    ) {
+      anchors.push(
+        this.titleAnchorRecord(
+          this.currentCustomTitle,
+          this.currentTitleSource,
+        ),
+      );
+    }
+    if (
+      this.currentSourceType &&
+      this.bytesSinceSourceAnchor >= METADATA_REANCHOR_BYTES &&
+      this.pendingSourceWrites === 0
+    ) {
+      anchors.push(
+        this.sourceAnchorRecord(this.currentSourceType, this.currentSourceId),
+      );
+    }
+    for (const anchor of anchors) {
+      // Its parent is the last record in the log, not the last one queued.
+      anchor.parentUuid = this.lastPersistedRecordUuid;
+      try {
+        await sink.write(anchor);
+      } catch (error) {
+        // The record before it was committed; only later writes fail.
+        this.enterWriteFailure(error, anchor.sessionId);
+        return;
+      }
+      this.countManagedLogGrowth(sink);
+      if (anchor.subtype === 'custom_title') {
+        this.bytesSinceTitleAnchor = 0;
+      } else {
+        this.bytesSinceSourceAnchor = 0;
+      }
+    }
+  }
+
+  private countManagedLogGrowth(sink: ManagedSessionRecordWriter): void {
+    const size = sink.logSize();
+    if (size === undefined) return;
+    const growth = Math.max(0, size - this.managedLogSizeSeen);
+    this.managedLogSizeSeen = size;
+    if (this.currentCustomTitle !== undefined || this.pendingTitleWrites > 0) {
+      this.bytesSinceTitleAnchor += growth;
+    }
+    if (this.currentSourceType !== undefined || this.pendingSourceWrites > 0) {
+      this.bytesSinceSourceAnchor += growth;
     }
   }
 
@@ -1080,19 +1954,18 @@ export class ChatRecordingService {
    * scanning the middle of the file.
    */
   private reanchorTitle(): void {
-    if (!this.currentCustomTitle) return;
+    if (
+      !this.currentCustomTitle ||
+      this.bytesSinceTitleAnchor < METADATA_REANCHOR_BYTES
+    ) {
+      return;
+    }
+    this.bytesSinceTitleAnchor = 0;
     try {
-      const record: ChatRecord = {
-        ...this.createBaseRecord('system'),
-        type: 'system',
-        subtype: 'custom_title',
-        systemPayload: {
-          customTitle: this.currentCustomTitle,
-          ...(this.currentTitleSource
-            ? { titleSource: this.currentTitleSource }
-            : {}),
-        },
-      };
+      const record = this.titleAnchorRecord(
+        this.currentCustomTitle,
+        this.currentTitleSource,
+      );
       this.appendRecord(record, { updateActiveTail: false });
     } catch (error) {
       // Reset the counter even on failure: otherwise every subsequent
@@ -1105,6 +1978,55 @@ export class ChatRecordingService {
     }
   }
 
+  private reanchorSessionSource(): void {
+    if (
+      !this.currentSourceType ||
+      this.bytesSinceSourceAnchor < METADATA_REANCHOR_BYTES
+    ) {
+      return;
+    }
+    this.bytesSinceSourceAnchor = 0;
+    try {
+      const record = this.sourceAnchorRecord(
+        this.currentSourceType,
+        this.currentSourceId,
+      );
+      this.appendRecord(record, { updateActiveTail: false });
+    } catch (error) {
+      debugLogger.error('Error re-anchoring session source:', error);
+    }
+  }
+
+  private titleAnchorRecord(
+    title: string,
+    source: TitleSource | undefined,
+  ): ChatRecord {
+    return {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'custom_title',
+      systemPayload: {
+        customTitle: title,
+        ...(source ? { titleSource: source } : {}),
+      },
+    };
+  }
+
+  private sourceAnchorRecord(
+    sourceType: string,
+    sourceId: string | undefined,
+  ): ChatRecord {
+    return {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: {
+        sourceType,
+        ...(sourceId !== undefined ? { sourceId } : {}),
+      },
+    };
+  }
+
   /**
    * Awaits all queued async writes. Call before process exit / session
    * teardown to ensure no records are dropped.
@@ -1112,6 +2034,27 @@ export class ChatRecordingService {
   async flush(): Promise<void> {
     await this.operationTail;
     if (this.writeFailure) throw this.writeFailure;
+  }
+
+  async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
+    await this.flush();
+    if (this.managedSink) {
+      // A Managed log holds wrapper records; the records a reader sees come
+      // from its projection, and the active chain is rebuilt from them the
+      // same way as from a transcript.
+      return prepareTranscriptRecords(await this.managedSink.project())
+        .records as ChatRecord[];
+    }
+    const sessionId = this.getSessionId();
+    const session = await this.config
+      .getSessionService()
+      .loadSession(sessionId);
+    if (!session) {
+      throw new Error(
+        `Unable to load active transcript for session ${sessionId}`,
+      );
+    }
+    return session.conversation.messages;
   }
 
   async runWithWriteBarrier<T>(operation: () => Promise<T>): Promise<T> {
@@ -1172,8 +2115,18 @@ export class ChatRecordingService {
     if (this.closePromise) return this.closePromise;
     if (this.state === 'closed') return Promise.resolve();
     this.beginClose(options);
-    this.closePromise = this.closeOnce();
-    return this.closePromise;
+    const pending = this.closeOnce();
+    this.closePromise = pending;
+    void pending.catch(() => {
+      if (
+        this.closePromise === pending &&
+        this.binding !== undefined &&
+        this.state === 'integrity_failed'
+      ) {
+        this.closePromise = undefined;
+      }
+    });
+    return pending;
   }
 
   beginClose(options?: { handoff?: boolean }): void {
@@ -1194,7 +2147,8 @@ export class ChatRecordingService {
     } catch (error) {
       flushFailure = error;
     }
-    if (this.handoffRequested && flushFailure !== undefined) {
+    const managedSink = this.managedSink;
+    if (this.handoffRequested && flushFailure !== undefined && !managedSink) {
       // Fail closed: a handoff whose final flush did not durably land must
       // neither seal (the proof would be incomplete) nor release (a successor
       // could take over records that were never persisted). Unlike the
@@ -1205,8 +2159,29 @@ export class ChatRecordingService {
       throw flushFailure;
     }
     const lease = this.binding?.lease;
+    let stopFailure: unknown;
     try {
-      if (this.handoffRequested) {
+      if (managedSink) {
+        // A Managed log is only ever sealed: releasing would delete the lock
+        // and leave the log open to any writer. The seal pins the authority's
+        // committed position, which stays exact even after a failed write,
+        // because a record without its commit marker is not part of it.
+        //
+        // Due anchors land first: a close without finalize(), such as a
+        // handoff, still leaves the title and source where the session list
+        // reads them, however far renewals moved the log since the last one.
+        // A failed write does not skip them: an anchor the authority cannot
+        // take fails on its own, and the seal below still follows.
+        await this.anchorManagedMetadata(managedSink);
+        try {
+          // After the last record and before the seal: the authority refuses
+          // a record that names a stopped activation.
+          await managedSink.stopAdvancing();
+        } catch (error) {
+          stopFailure = error;
+        }
+        await lease?.sealForHandoff(managedSink.commitProof());
+      } else if (this.handoffRequested) {
         await lease?.sealForHandoff();
       } else {
         await lease?.release();
@@ -1214,7 +2189,10 @@ export class ChatRecordingService {
       this.binding = undefined;
       this.state = 'closed';
     } catch (error) {
-      if (lease?.isReleased || error instanceof SessionWriterLostError) {
+      if (
+        error instanceof SessionWriterLostError ||
+        (lease?.isReleased && !lease.isReleaseDurabilityPending)
+      ) {
         this.binding = undefined;
         this.state = 'closed';
       } else {
@@ -1223,28 +2201,96 @@ export class ChatRecordingService {
       throw error;
     }
     if (flushFailure !== undefined) throw flushFailure;
+    if (stopFailure !== undefined) throw stopFailure;
   }
 
   hasWriteOwnership(): boolean {
-    return this.binding !== undefined;
+    return this.binding !== undefined && !this.binding.lease.isReleased;
   }
 
-  async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
-    await this.flush();
-    const sessionId = this.getSessionId();
-    const session = await this.config
-      .getSessionService()
-      .loadSession(sessionId);
-    if (!session) {
-      throw new Error(
-        `Unable to load active transcript for session ${sessionId}`,
-      );
+  /**
+   * Pins this recorder to the given session identity so late writes keep
+   * targeting that session's transcript even after `Config.startNewSession()`
+   * rotates the shared Config to a new session id. Called on the outgoing
+   * recorder at rotation time; a lease binding already owns the identity and
+   * is never overridden.
+   */
+  pinSessionIdentity(sessionId: string): void {
+    if (this.binding === undefined) {
+      this.pinnedSessionId = sessionId;
     }
-    return session.conversation.messages;
   }
 
   getTranscriptCursor(): TranscriptCursor {
     return { recordId: this.lastRecordUuid };
+  }
+
+  getBranchCheckpointCursor(): BranchCheckpointCursor {
+    return {
+      recordId: this.lastRecordUuid,
+      activeRecordCount: this.activeBranchRecords.length,
+      pendingToolCalls: this.pendingBranchToolCalls.map((call) => ({
+        ...call,
+      })),
+    };
+  }
+
+  async recordBranchCheckpointTransaction(input: {
+    cursor: BranchCheckpointCursor;
+    stopReason: string;
+  }): Promise<BranchPoint | undefined> {
+    if (input.stopReason !== 'end_turn') return undefined;
+    if (this.writeFailure) throw this.writeFailure;
+    if (this.state !== 'active') throw new SessionWriterUnavailableError();
+    if (this.topologyFence) {
+      throw new Error('Transcript topology transaction already active');
+    }
+
+    const fence: TranscriptTopologyFence = { buffered: [] };
+    this.topologyFence = fence;
+    try {
+      await this.flush();
+      const endInclusiveRecordUuid = this.lastRecordUuid;
+      if (endInclusiveRecordUuid === null) return undefined;
+      const cursorRecordId =
+        input.cursor.activeRecordCount === 0
+          ? this.activeBranchBaseUuid
+          : this.activeBranchRecords[input.cursor.activeRecordCount - 1]?.uuid;
+      if (
+        cursorRecordId !== input.cursor.recordId ||
+        this.activeBranchRecords.at(-1)?.uuid !== endInclusiveRecordUuid
+      ) {
+        throw new Error('Transcript changed while recording branch checkpoint');
+      }
+      const candidate = resolveCompletedTurnBranchCandidateFromRecords({
+        records: this.activeBranchRecords.slice(input.cursor.activeRecordCount),
+        startExclusiveRecordUuid: input.cursor.recordId,
+        pendingCallsAtStart: input.cursor.pendingToolCalls,
+      });
+      if (!candidate) return undefined;
+
+      const checkpointUuid = randomUUID();
+      const checkpoint: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        uuid: checkpointUuid,
+        parentUuid: endInclusiveRecordUuid,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: input.cursor.recordId,
+          assistantRecordUuid: candidate.assistantRecordUuid,
+        },
+      };
+
+      this.topologyFence = undefined;
+      const checkpointWrite = this.appendRecordStrict(checkpoint);
+      this.topologyFence = fence;
+      await checkpointWrite;
+      return { ...candidate, checkpointUuid };
+    } finally {
+      this.releaseTopologyFence(fence);
+    }
   }
 
   async recordGoalState(
@@ -1277,6 +2323,15 @@ export class ChatRecordingService {
     }
     this.chatsDirEnsured = false;
     this.cachedConversationFile = undefined;
+    this.resetExternalRecordIndex();
+  }
+
+  private getExecutionContext(): NonNullable<ChatRecord['executionContext']> {
+    return {
+      modelId: this.config.getModel(),
+      authType: this.config.getAuthType(),
+      approvalMode: this.config.getApprovalMode(),
+    };
   }
 
   /**
@@ -1286,24 +2341,36 @@ export class ChatRecordingService {
    * @param message The raw PartListUnion object as used with the API
    * @param goalContext Goal identity and turn that own this message
    * @param promptPayload User-authored display text and hook-context provenance
+   * @param promptId Identity shared with this turn's API-history entry
+   * @param daemonPromptId Transport identity replayed to the daemon
    */
   recordUserMessage(
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
     promptPayload?: UserPromptRecordPayload,
+    promptId?: string,
+    daemonPromptId?: string,
   ): void {
     try {
+      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
+        ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
+        ...(promptId ? { promptId } : {}),
       };
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }
+  }
+
+  getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
+    return this.userDisplayTextsForTitle;
   }
 
   recordGoalRuntimeMessage(
@@ -1324,6 +2391,18 @@ export class ChatRecordingService {
     }
   }
 
+  async recordGoalTurnEnd(
+    toolCallId: string,
+    goalContext: GoalTurnPermit,
+  ): Promise<void> {
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'goal_turn_end',
+      goalContext: copyGoalContext(goalContext),
+      systemPayload: { toolCallId },
+    });
+  }
+
   /**
    * Records a user message drained while tool results are being submitted.
    *
@@ -1333,18 +2412,21 @@ export class ChatRecordingService {
    */
   recordMidTurnUserMessage(
     message: PartListUnion,
-    displayText?: string,
+    displayText: string,
     goalContext?: GoalTurnPermit,
+    attachmentReferences?: UserPromptAttachmentReference[],
   ): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
         subtype: 'mid_turn_user_message',
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
-        systemPayload: displayText
-          ? ({ displayText } as NotificationRecordPayload)
-          : undefined,
+        systemPayload: {
+          displayText,
+          ...(attachmentReferences ? { attachmentReferences } : {}),
+        },
       };
       this.appendRecord(record);
     } catch (error) {
@@ -1371,16 +2453,37 @@ export class ChatRecordingService {
     );
   }
 
+  recordBackgroundTaskCompleted(payload: NotificationRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        subtype: 'background_task_completed',
+        systemPayload: payload,
+      };
+      delete record.backgroundTurn;
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving background task completion:', error);
+    }
+  }
+
   /**
    * Records a background agent notification.
    * Stored as a user-role message with subtype 'notification' so the
    * UI restores it as an info item, not a user turn.
+   *
+   * `deliveredTurn` must be `true` exactly when the record IS the user entry
+   * of a notification turn the `client.ts` send path admitted and went on to
+   * send; copies persisted before the turn runs leave it unset so session
+   * recovery can still trim them. See `ChatRecord.deliveredTurn` for what the
+   * stamp does and does not guarantee.
    */
   recordNotification(
     message: PartListUnion,
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): void {
     this.recordNotificationLike(
       message,
@@ -1388,6 +2491,7 @@ export class ChatRecordingService {
       displayText,
       backgroundTask,
       goalContext,
+      deliveredTurn,
     );
   }
 
@@ -1411,12 +2515,150 @@ export class ChatRecordingService {
     );
   }
 
+  /**
+   * Durably records a session multi-agent record (`agent_mention` or
+   * `agent_message`) the daemon asked the ACP child to write, and returns
+   * its uuid (the agents' read-cursor anchor) and its own timestamp, so a live
+   * update can carry exactly what replay will.
+   *
+   * Written as `type: 'user'` so the main model reads it as input on its next
+   * turn (resume rebuilds it through `appendApiHistoryRecord`). It never
+   * starts a turn, never feeds the auto title (only subtype-less user records
+   * do), and is never trimmed as a cold notification.
+   *
+   * Idempotent per `recordKey`, durably: the key is persisted on the record
+   * (`externalRecordKey`) and a repeat returns the existing record with
+   * `created: false`, also after a restart (see
+   * {@link findExternalAgentRecord}).
+   *
+   * Managed sessions: `ManagedSessionRecordSink.canCarry` has no mapping for
+   * these subtypes, so `appendRecordStrict` throws
+   * `ManagedSessionRecordRefusedError` before queueing. That refusal is left
+   * in place on purpose and propagates to the caller, which reports the
+   * feature as not supported in managed sessions.
+   * TODO(multi-agent): add a managed mapping if managed sessions need agents.
+   */
+  async recordExternalAgentRecordStrict(
+    input:
+      | {
+          kind: 'agent_mention';
+          modelText: string;
+          payload: AgentMentionRecordPayload;
+          recordKey: string;
+        }
+      | {
+          kind: 'agent_message';
+          modelText: string;
+          payload: AgentMessageRecordPayload;
+          recordKey: string;
+        },
+  ): Promise<ExternalAgentRecordRef & { created: boolean }> {
+    const existing = await this.findExternalAgentRecord(input.recordKey);
+    if (existing) return { ...existing, created: false };
+    const generation = this.externalRecordIndexGeneration;
+    const record: ChatRecord = {
+      ...this.createBaseRecord('user'),
+      subtype: input.kind,
+      provenance:
+        input.kind === 'agent_mention' && input.payload.author === undefined
+          ? 'real_user'
+          : 'external_agent',
+      message: createUserContent([{ text: input.modelText }]),
+      systemPayload: input.payload,
+      externalRecordKey: input.recordKey,
+      ...(input.kind === 'agent_message'
+        ? {
+            agentId: input.payload.author.agentId,
+            agentName: input.payload.author.name,
+            ...(input.payload.author.color
+              ? { agentColor: input.payload.author.color }
+              : {}),
+          }
+        : {}),
+    };
+    // Not part of any background notification turn.
+    delete record.backgroundTurn;
+    await this.appendRecordStrict(record);
+    const ref = { uuid: record.uuid, timestamp: record.timestamp };
+    // A rebuilt index (generation moved) reads this record from disk instead.
+    if (generation === this.externalRecordIndexGeneration) {
+      this.externalRecordIndex?.set(input.recordKey, ref);
+    }
+    return { ...ref, created: true };
+  }
+
+  /**
+   * The external record written for `recordKey` on the active chain, if any.
+   * The first call reads the transcript once (`readActiveTranscriptChain`);
+   * later calls are answered from memory. Throws when that read fails, so a
+   * caller never mistakes an unreadable transcript for a missing record.
+   */
+  async findExternalAgentRecord(
+    recordKey: string,
+  ): Promise<ExternalAgentRecordRef | undefined> {
+    return (await this.loadExternalRecordIndex()).get(recordKey);
+  }
+
+  private loadExternalRecordIndex(): Promise<
+    Map<string, ExternalAgentRecordRef>
+  > {
+    if (this.externalRecordIndex) {
+      return Promise.resolve(this.externalRecordIndex);
+    }
+    if (this.externalRecordIndexLoad) return this.externalRecordIndexLoad;
+    const generation = this.externalRecordIndexGeneration;
+    const load = (async () => {
+      const index = new Map<string, ExternalAgentRecordRef>();
+      // Nothing persisted yet (a fresh session, whose transcript cannot be
+      // loaded at all), or a Managed log, which refuses these records anyway.
+      if (this.lastPersistedRecordUuid !== null && !this.managedSink) {
+        for (const record of await this.readActiveTranscriptChain()) {
+          if (
+            typeof record.externalRecordKey === 'string' &&
+            (record.subtype === 'agent_mention' ||
+              record.subtype === 'agent_message')
+          ) {
+            index.set(record.externalRecordKey, {
+              uuid: record.uuid,
+              timestamp: record.timestamp,
+            });
+          }
+        }
+      }
+      return index;
+    })();
+    this.externalRecordIndexLoad = load;
+    void load.then(
+      (index) => {
+        if (this.externalRecordIndexLoad !== load) return;
+        this.externalRecordIndexLoad = undefined;
+        if (generation === this.externalRecordIndexGeneration) {
+          this.externalRecordIndex = index;
+        }
+      },
+      () => {
+        // Retried on the next call.
+        if (this.externalRecordIndexLoad === load) {
+          this.externalRecordIndexLoad = undefined;
+        }
+      },
+    );
+    return load;
+  }
+
+  private resetExternalRecordIndex(): void {
+    this.externalRecordIndexGeneration += 1;
+    this.externalRecordIndex = undefined;
+    this.externalRecordIndexLoad = undefined;
+  }
+
   private recordNotificationLike(
     message: PartListUnion,
     subtype: 'notification' | 'cron',
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): void {
     try {
       const record = this.createNotificationRecord(
@@ -1425,6 +2667,7 @@ export class ChatRecordingService {
         displayText,
         backgroundTask,
         goalContext,
+        deliveredTurn,
       );
       this.appendRecord(record);
     } catch (error) {
@@ -1438,17 +2681,90 @@ export class ChatRecordingService {
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): ChatRecord {
     return {
       ...this.createBaseRecord('user'),
       subtype,
       provenance: 'system',
       ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
+      ...(deliveredTurn ? { deliveredTurn: true } : {}),
       message: createUserContent(message),
       systemPayload: displayText
-        ? ({ displayText, backgroundTask } as NotificationRecordPayload)
+        ? {
+            displayText,
+            ...(backgroundTask ? { backgroundTask } : {}),
+          }
         : undefined,
     };
+  }
+
+  /**
+   * Tokens billed to the Goal turn that is currently open.
+   *
+   * One entry, not a map: the Goal runtime holds a single permit at a time, so
+   * a record stamped with a different turn id means the previous turn is over
+   * and its total was either already taken or is no longer wanted.
+   */
+  private goalTurnSpend?: { turnId: string; tokens: number };
+
+  private accumulateGoalTurnTokens(
+    turnId: string,
+    usage: GenerateContentResponseUsageMetadata,
+  ): void {
+    this.billGoalTurnTokens(turnId, usage.totalTokenCount ?? 0);
+  }
+
+  billGoalTurnTokens(turnId: string, total: number): void {
+    if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
+      return;
+    }
+    if (this.goalTurnSpend?.turnId !== turnId) {
+      this.goalTurnSpend = { turnId, tokens: 0 };
+    }
+    this.goalTurnSpend.tokens += total;
+  }
+
+  /**
+   * The tokens billed to `turnId`, consuming them so a turn is counted once.
+   *
+   * Answers zero for a turn that spent nothing, that was never opened, or
+   * whose total has already been taken — a Goal with no model calls in a turn
+   * bills nothing rather than guessing.
+   */
+  takeGoalTurnTokens(turnId: string): number {
+    if (this.goalTurnSpend?.turnId !== turnId) return 0;
+    const { tokens } = this.goalTurnSpend;
+    this.goalTurnSpend = undefined;
+    return tokens;
+  }
+
+  /**
+   * Evidence-bearing tool results recorded in the Goal turn that is currently
+   * open. Single entry for the same reason the spend is.
+   */
+  private goalTurnToolResults?: { turnId: string; count: number };
+
+  private accumulateGoalTurnToolResult(turnId: string): void {
+    if (this.goalTurnToolResults?.turnId !== turnId) {
+      this.goalTurnToolResults = { turnId, count: 0 };
+    }
+    this.goalTurnToolResults.count += 1;
+  }
+
+  /**
+   * The evidence-bearing tool results `turnId` recorded, consuming them so a
+   * turn is counted once.
+   *
+   * `get_goal` and `update_goal` results are excluded: they are the Goal
+   * runtime talking to itself, and a turn that only reads its own state is
+   * exactly the idling this count exists to notice.
+   */
+  takeGoalTurnToolResults(turnId: string): number {
+    if (this.goalTurnToolResults?.turnId !== turnId) return 0;
+    const { count } = this.goalTurnToolResults;
+    this.goalTurnToolResults = undefined;
+    return count;
   }
 
   /**
@@ -1483,6 +2799,9 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
+        if (data.goalContext) {
+          this.accumulateGoalTurnTokens(data.goalContext.turnId, data.tokens);
+        }
       }
 
       if (data.contextWindowSize !== undefined) {
@@ -1565,6 +2884,7 @@ export class ChatRecordingService {
         const outcome = await tryGenerateSessionTitle(
           this.config,
           controller.signal,
+          this.userDisplayTextsForTitle,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
@@ -1629,20 +2949,35 @@ export class ChatRecordingService {
     options?: RecordToolResultOptions,
   ): void {
     try {
-      const record: ChatRecord = {
-        ...this.createBaseRecord('tool_result'),
-        ...(options?.goalContext
-          ? { goalContext: copyGoalContext(options.goalContext) }
-          : {}),
-        ...(options?.provenance ? { provenance: options.provenance } : {}),
-        message: createUserContent(message),
-      };
-
+      const persistedOutputFiles = toolCallResult?.persistedOutputFiles;
+      const artifacts = [
+        toolResultBoundaryArtifact(
+          persistedOutputFiles,
+          toolCallResult?.artifacts,
+        ),
+      ];
+      const inputDisplay = toolCallResult?.resultDisplay;
+      const inputValues = () => [
+        ...toolResultPartDiagnosticValues(message),
+        ...(shellResultText(inputDisplay) !== undefined
+          ? [
+              {
+                representation: 'display' as const,
+                value: shellResultText(inputDisplay)!,
+              },
+            ]
+          : []),
+      ];
+      let recordingToolCallResult:
+        | (Partial<ToolCallResponseInfo> & { status: Status })
+        | undefined;
       if (toolCallResult) {
-        const recordingToolCallResult =
-          sanitizeToolCallResultForRecording(toolCallResult);
-
-        // special case for task executions - we don't want to record the tool calls
+        const recordableToolCallResult = { ...toolCallResult };
+        delete recordableToolCallResult.persistedOutputFiles;
+        delete recordableToolCallResult.boundaryArtifact;
+        recordingToolCallResult = sanitizeToolCallResultForRecording(
+          recordableToolCallResult,
+        );
         if (
           typeof recordingToolCallResult.resultDisplay === 'object' &&
           recordingToolCallResult.resultDisplay !== null &&
@@ -1651,18 +2986,60 @@ export class ChatRecordingService {
         ) {
           const taskResult =
             recordingToolCallResult.resultDisplay as AgentResultDisplay;
-          record.toolCallResult = {
+          recordingToolCallResult = {
             ...recordingToolCallResult,
-            resultDisplay: {
-              ...taskResult,
-              toolCalls: [],
-            },
+            resultDisplay: { ...taskResult, toolCalls: [] },
           };
-        } else {
-          record.toolCallResult = recordingToolCallResult;
         }
       }
+      const outputDisplay = recordingToolCallResult?.resultDisplay;
+      let displayMutated: boolean | undefined;
+      const mutated = () =>
+        (displayMutated ??= !isDeepStrictEqual(inputDisplay, outputDisplay));
+      observeToolResultBoundary({
+        stage: 'recorder_input',
+        sessionId: this.getSessionId(),
+        toolCallId: toolCallResult?.callId,
+        artifacts,
+        mutated,
+        values: inputValues,
+      });
+      observeToolResultBoundary({
+        stage: 'recorder_output',
+        sessionId: this.getSessionId(),
+        toolCallId: toolCallResult?.callId,
+        artifacts,
+        mutated,
+        values: () => [
+          ...toolResultPartDiagnosticValues(message),
+          ...(shellResultText(outputDisplay) !== undefined
+            ? [
+                {
+                  representation: 'display' as const,
+                  value: shellResultText(outputDisplay)!,
+                },
+              ]
+            : []),
+        ],
+      });
 
+      const record: ChatRecord = {
+        ...this.createBaseRecord('tool_result'),
+        ...(options?.subtype ? { subtype: options.subtype } : {}),
+        ...(options?.goalContext
+          ? { goalContext: copyGoalContext(options.goalContext) }
+          : {}),
+        ...(options?.provenance ? { provenance: options.provenance } : {}),
+        message: createUserContent(message),
+      };
+
+      if (recordingToolCallResult) {
+        record.toolCallResult = recordingToolCallResult;
+      }
+
+      if (options?.goalContext && options.provenance !== 'goal_runtime') {
+        this.accumulateGoalTurnToolResult(options.goalContext.turnId);
+      }
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving tool result:', error);
@@ -1690,17 +3067,49 @@ export class ChatRecordingService {
   }
 
   /**
+   * Records the omni passive media-memory recall payload injected into the
+   * model-bound request (memory design M §9.3, D10 sideQuery mode). The
+   * reminder is assembled AFTER the user record is persisted, so without
+   * this record the transcript would never show what memory the model was
+   * given — the trajectory exporter reads it back as `turn.recall`.
+   */
+  recordOmniRecallReminder(payload: unknown): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'omni_recall',
+        systemPayload: payload as ChatRecord['systemPayload'],
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving omni recall record:', error);
+    }
+  }
+
+  /**
    * Records a chat compression checkpoint as a system record. This keeps the UI
    * history immutable while allowing resume/continue flows to reconstruct the
    * compressed model-facing history from the stored snapshot.
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
+      // Freeze the array so later live-history mutations cannot desynchronize
+      // entries from the parallel promptIds array.
+      const compressedHistory = [...payload.compressedHistory];
+      const promptIds = compressedHistory.map(
+        (content) => getApiHistoryPromptId(content) ?? null,
+      );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'chat_compression',
-        systemPayload: payload,
+        systemPayload: {
+          ...payload,
+          compressedHistory,
+          ...(promptIds.some(Boolean) ? { promptIds } : {}),
+        },
       };
 
       this.appendRecord(record);
@@ -1712,7 +3121,9 @@ export class ChatRecordingService {
   /**
    * Records a UI telemetry event for replaying metrics on resume.
    */
-  recordUiTelemetryEvent(uiEvent: UiEvent): void {
+  recordUiTelemetryEvent(
+    uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord,
+  ): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -1744,10 +3155,25 @@ export class ChatRecordingService {
     targetTurnIndex: number,
     payload: RewindRecordPayload,
     survivingFileHistorySnapshots?: FileHistorySnapshot[],
+    sessionApprovalMode?: SessionApprovalModeRecordPayload,
   ): void {
     try {
+      if (
+        sessionApprovalMode &&
+        isValidSessionApprovalModePayload(sessionApprovalMode)
+      ) {
+        this.currentSessionApprovalMode =
+          normalizeSessionApprovalModePayload(sessionApprovalMode);
+      }
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
+      const projectionStart = Math.max(
+        0,
+        this.turnParentUuids.length - this.userDisplayTextsForTitle.length,
+      );
+      this.userDisplayTextsForTitle.splice(
+        Math.max(0, targetTurnIndex - projectionStart),
+      );
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
       // The previous attribution snapshot now sits on the abandoned
@@ -1764,6 +3190,26 @@ export class ChatRecordingService {
       };
 
       this.appendRecord(record);
+
+      // Last-wins session_model may now sit on the abandoned branch. Re-append
+      // the live binding so cold restore still sees the model Config is on.
+      if (this.currentSessionModel) {
+        this.appendRecord({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'session_model',
+          systemPayload: this.currentSessionModel,
+        });
+      }
+
+      if (this.currentSessionApprovalMode) {
+        this.appendRecord({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'session_approval_mode',
+          systemPayload: this.currentSessionApprovalMode,
+        });
+      }
 
       // Re-record surviving file history snapshots on the active branch so
       // they are visible to reconstructHistory on resume.
@@ -1783,7 +3229,11 @@ export class ChatRecordingService {
    * `lastRecordUuid` to the last record in the chain.
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
+    this.resetExternalRecordIndex();
     this.turnParentUuids = [];
+    this.activeBranchRecords = [...messages];
+    this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
+    this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
 
     for (let i = 0; i < messages.length; i++) {
       const record = messages[i];
@@ -1793,7 +3243,9 @@ export class ChatRecordingService {
         record.subtype !== 'notification' &&
         record.subtype !== 'cron' &&
         record.subtype !== 'mid_turn_user_message' &&
-        record.subtype !== 'realtime_message'
+        record.subtype !== 'realtime_message' &&
+        record.subtype !== 'agent_mention' &&
+        record.subtype !== 'agent_message'
       ) {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.
@@ -1883,7 +3335,12 @@ export class ChatRecordingService {
         systemPayload: { customTitle, titleSource },
       };
 
-      await this.appendRecordStrict(record);
+      // A Managed log keeps a title as metadata that its projection does not
+      // replay, so the title must not become the parent of the next record.
+      await this.appendRecordStrict(
+        record,
+        this.managedSink ? { updateActiveTail: false } : undefined,
+      );
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
       try {
@@ -1907,7 +3364,7 @@ export class ChatRecordingService {
       if (
         persisted &&
         this.pendingTitleWrites === 0 &&
-        this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+        this.bytesSinceTitleAnchor >= METADATA_REANCHOR_BYTES &&
         !this.writeFailure
       ) {
         this.reanchorTitle();
@@ -1951,6 +3408,21 @@ export class ChatRecordingService {
     }
   }
 
+  /**
+   * Persist the execution engine that owns this session. A failed write
+   * rejects, so creation fails instead of continuing without a durable owner.
+   * A session without chat recording has no recorder, so nothing is written.
+   */
+  async recordExecutionEngine(engine: SessionExecutionEngine): Promise<void> {
+    const systemPayload: SessionExecutionEnginePayload = { version: 1, engine };
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload,
+    });
+  }
+
   /** Persist immutable creator attribution near the start of the transcript. */
   async recordSessionSource(
     sourceType: string,
@@ -1962,6 +3434,8 @@ export class ChatRecordingService {
         this.currentSourceId === sourceId
       );
     }
+    this.pendingSourceWrites++;
+    let persisted = false;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -1975,10 +3449,105 @@ export class ChatRecordingService {
       await this.appendRecordStrict(record);
       this.currentSourceType = sourceType;
       this.currentSourceId = sourceId;
+      persisted = true;
       return true;
     } catch (error) {
       if (error !== this.writeFailure) {
         debugLogger.error('Error saving session source:', error);
+      }
+      return false;
+    } finally {
+      this.pendingSourceWrites--;
+      if (
+        persisted &&
+        this.pendingSourceWrites === 0 &&
+        this.bytesSinceSourceAnchor >= METADATA_REANCHOR_BYTES &&
+        !this.writeFailure
+      ) {
+        this.reanchorSessionSource();
+      }
+    }
+  }
+
+  /** Persist the daemon session's current model so load/resume can restore it. */
+  async recordSessionModel(
+    payload: SessionModelRecordPayload,
+  ): Promise<boolean> {
+    if (!isValidSessionModelPayload(payload)) {
+      return false;
+    }
+    const normalized = normalizeSessionModelPayload(payload);
+    if (
+      this.currentSessionModel &&
+      sessionModelPayloadsEqual(this.currentSessionModel, normalized)
+    ) {
+      return true;
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_model',
+        systemPayload: normalized,
+      };
+      // Assign before the awaited write so a rewind landing in the
+      // pending-write window re-appends the new binding rather than the
+      // stale one. Roll back on failure: ensureConversationFile can throw
+      // before writeFailure latches, and a later identical call would
+      // otherwise skip the write.
+      const previous = this.currentSessionModel;
+      this.currentSessionModel = normalized;
+      try {
+        await this.appendRecordStrict(record);
+      } catch (error) {
+        this.currentSessionModel = previous;
+        throw error;
+      }
+      return true;
+    } catch (error) {
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving session model record:', error);
+      }
+      return false;
+    }
+  }
+
+  /** Persist the daemon session's approval state so load/resume can restore it. */
+  async recordSessionApprovalMode(
+    payload: SessionApprovalModeRecordPayload,
+  ): Promise<boolean> {
+    if (!isValidSessionApprovalModePayload(payload)) {
+      return false;
+    }
+    const normalized = normalizeSessionApprovalModePayload(payload);
+    if (
+      this.currentSessionApprovalMode &&
+      sessionApprovalModePayloadsEqual(
+        this.currentSessionApprovalMode,
+        normalized,
+      )
+    ) {
+      return true;
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        systemPayload: normalized,
+      };
+      this.currentSessionApprovalMode = normalized;
+      try {
+        await this.appendRecordStrict(record);
+      } catch (error) {
+        // A newer mode may already be queued, so only invalidate deduplication.
+        this.currentSessionApprovalMode = undefined;
+        throw error;
+      }
+      return true;
+    } catch (error) {
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving session approval mode record:', error);
       }
       return false;
     }
@@ -1988,7 +3557,10 @@ export class ChatRecordingService {
    * Finalizes the current session by re-appending cached metadata to EOF, but
    * only after this recorder has appended non-title content since the last
    * title anchor. Pure load/resume must remain read-only so session lists do
-   * not treat restored sessions as newly active.
+   * not treat restored sessions as newly active. A Managed session re-appends
+   * it only once its log grew past the re-anchor threshold since the last
+   * anchor, as after each record and on close; its activation writes to the
+   * log on any resume, so there is no read-only resume to keep.
    *
    * Best-effort: errors are logged but never thrown.
    */
@@ -2013,7 +3585,12 @@ export class ChatRecordingService {
     if (!this.currentCustomTitle) {
       return;
     }
-    if (!this.hasNonTitleContentSinceTitleAnchor) {
+    if (this.managedSink) {
+      // Re-anchored by the log's growth alone, which renewals add to while the
+      // session is idle.
+      this.countManagedLogGrowth(this.managedSink);
+      if (this.bytesSinceTitleAnchor < METADATA_REANCHOR_BYTES) return;
+    } else if (!this.hasNonTitleContentSinceTitleAnchor) {
       return;
     }
     try {
@@ -2028,7 +3605,11 @@ export class ChatRecordingService {
             : {}),
         },
       };
-      this.appendRecord(record);
+      // A Managed title is metadata the projection does not replay.
+      this.appendRecord(
+        record,
+        this.managedSink ? { updateActiveTail: false } : undefined,
+      );
     } catch (error) {
       debugLogger.error('Error finalizing session metadata:', error);
     }
@@ -2128,6 +3709,61 @@ export class ChatRecordingService {
     await this.appendRecordStrict(record);
   }
 
+  /** A resumed attempt must supersede an old cancellation before model execution. */
+  async recordTurnAttempt(
+    promptId: string | undefined,
+    daemonPromptId: string,
+  ): Promise<void> {
+    if (
+      (promptId !== undefined &&
+        (typeof promptId !== 'string' ||
+          promptId.length === 0 ||
+          promptId.length > TURN_RESULT_IDENTIFIER_MAX_CHARS)) ||
+      typeof daemonPromptId !== 'string' ||
+      daemonPromptId.length === 0 ||
+      daemonPromptId.length > TURN_RESULT_IDENTIFIER_MAX_CHARS
+    ) {
+      throw new TypeError('Invalid turn attempt identity');
+    }
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'turn_attempt',
+      promptId,
+      daemonPromptId,
+    });
+  }
+
+  /**
+   * Append the settled outcome of a turn. Best-effort by design: a
+   * recording failure must never break turn settlement, so this uses the
+   * non-strict append path (inactive/failed writers skip silently).
+   */
+  recordTurnResult(payload: TurnResultRecordPayload, promptId?: string): void {
+    if (!isTurnResultRecordPayload(payload)) {
+      debugLogger.error(
+        'Skipping turn result record that violates the bounded contract:',
+        payload,
+      );
+      return;
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'turn_result',
+        ...(typeof promptId === 'string' &&
+        promptId.length > 0 &&
+        promptId.length <= TURN_RESULT_IDENTIFIER_MAX_CHARS
+          ? { promptId }
+          : {}),
+        systemPayload: payload,
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error recording turn result:', error);
+    }
+  }
+
   private appendSerializedFileHistorySnapshotBatch(
     snapshots: SerializedFileHistorySnapshot[],
   ): void {
@@ -2163,6 +3799,17 @@ export class ChatRecordingService {
       ...this.createBaseRecord('system'),
       type: 'system',
       subtype: 'session_artifact_snapshot',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, { updateActiveTail: false });
+  }
+  async recordSessionSourcesSnapshot(
+    payload: SessionSourcesSnapshot,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });

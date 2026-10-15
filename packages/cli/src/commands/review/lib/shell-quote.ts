@@ -10,7 +10,7 @@
  * plain `'…'` wrap traded that for breaking on the first embedded apostrophe
  * (`~/Documents/John's Projects/…` is an ordinary macOS workspace). The
  * `'\''` dance closes both: end the quote, emit a literal `'`, reopen.
- * Same pattern as `shellQuoteForSh` in utils/standalone-update.ts.
+ * Same pattern as `shellQuoteForSh` in ui/standalone-update.ts.
  */
 export function shellQuotePath(p: string): string {
   return `'${p.replace(/'/g, "'\\''")}'`;

@@ -46,6 +46,11 @@ vi.mock('../utils/measure-element-position.js', () => ({
   measureElementPosition: vi.fn(),
 }));
 
+vi.mock('../utils/hyperlink-at.js', () => ({
+  hyperlinkAtCell: vi.fn(),
+}));
+
+import { hyperlinkAtCell } from '../utils/hyperlink-at.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 
 import { toggleKeyHint } from './messages/ConversationMessages.js';
@@ -154,6 +159,21 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Converted 1 image(s) to text via vm.');
   });
 
+  it('renders AdvisorMessage for "advisor" type', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: MessageType.ADVISOR,
+      text: 'review body',
+      model: 'qwen3-max',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('/advisor · qwen3-max');
+    expect(output).toContain('review body');
+  });
+
   it('renders v2 goal_state history items through the lifecycle card', () => {
     const item: HistoryItem = {
       id: 1,
@@ -169,6 +189,7 @@ describe('<HistoryItemDisplay />', () => {
           evidenceCursor: { recordId: 'record-1' },
           turnCount: 2,
           activeTimeMs: 4_000,
+          tokensUsed: 0,
           createdAt: 1_000,
           updatedAt: 5_000,
           lastReason: 'waiting for approval',
@@ -373,7 +394,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('should render a full gemini item when using availableTerminalHeightGemini', () => {
+  it('should render a full gemini item when using availableTerminalHeightLlm', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini',
@@ -385,7 +406,7 @@ describe('<HistoryItemDisplay />', () => {
         isPending={false}
         terminalWidth={80}
         availableTerminalHeight={10}
-        availableTerminalHeightGemini={Number.MAX_SAFE_INTEGER}
+        availableTerminalHeightLlm={Number.MAX_SAFE_INTEGER}
       />,
     );
 
@@ -410,7 +431,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('should render a full gemini_content item when using availableTerminalHeightGemini', () => {
+  it('should render a full gemini_content item when using availableTerminalHeightLlm', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_content',
@@ -422,7 +443,7 @@ describe('<HistoryItemDisplay />', () => {
         isPending={false}
         terminalWidth={80}
         availableTerminalHeight={10}
-        availableTerminalHeightGemini={Number.MAX_SAFE_INTEGER}
+        availableTerminalHeightLlm={Number.MAX_SAFE_INTEGER}
       />,
     );
 
@@ -763,6 +784,17 @@ describe('<HistoryItemDisplay />', () => {
       handler?.(mouseEvent('left-press', 5));
       handler?.(mouseEvent('move', 20));
       handler?.(mouseEvent('left-release', 20));
+
+      expect(toggle).not.toHaveBeenCalled();
+    });
+
+    it('does not toggle on a plain click over an OSC 8 hyperlink (reserved for the link gesture)', () => {
+      vi.mocked(hyperlinkAtCell).mockReturnValue('https://example.com');
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(toggle);
+
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
 
       expect(toggle).not.toHaveBeenCalled();
     });

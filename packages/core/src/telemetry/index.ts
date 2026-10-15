@@ -29,9 +29,12 @@ export {
   resolveTelemetrySettings,
   parseBooleanEnvFlag,
   parseTelemetryTargetValue,
+  resolveUsageStatisticsEnabled,
+  resolveExtensionTelemetryProxy,
 } from './config.js';
 export {
   logStartSession,
+  logSessionEnd,
   logUserPrompt,
   logUserRetry,
   logToolCall,
@@ -41,6 +44,7 @@ export {
   logApiCancel,
   logApiResponse,
   logFlashFallback,
+  logGoalState,
   logSlashCommand,
   logConversationFinishedEvent,
   logKittySequenceOverflow,
@@ -65,8 +69,16 @@ export {
   logMemoryDream,
   logMemoryRecall,
   logMemoryRecallDelivery,
+  logMemorySearch,
+  logMemoryMigration,
+  logMemoryRecallModeTransition,
 } from './loggers.js';
-export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
+export type {
+  SlashCommandEvent,
+  ChatCompressionEvent,
+  GoalStateEvent,
+  GoalStateEventCause,
+} from './types.js';
 export {
   SlashCommandStatus,
   EndSessionEvent,
@@ -96,9 +108,21 @@ export {
   MemoryDreamEvent,
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
+  MemoryMigrationEvent,
+  MemoryRecallModeTransitionEvent,
   RepeatedToolFailureGuardEvent,
 } from './types.js';
-export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
+export {
+  makeSlashCommandEvent,
+  makeChatCompressionEvent,
+  makeGoalStateEvent,
+  GOAL_STATE_EVENT_CAUSES,
+} from './types.js';
+export {
+  goalStateEventFromSnapshot,
+  isGoalStateEventCause,
+} from './goal-events.js';
 export type {
   ArenaSessionStartedEvent,
   ArenaAgentCompletedEvent,
@@ -140,6 +164,7 @@ export {
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
+  recordGoalStateMetrics,
   // Auto-Memory metrics functions
   recordMemoryExtractMetrics,
   recordMemoryDreamMetrics,
@@ -174,6 +199,7 @@ export {
   endSubagentSpan,
   runInSubagentSpanContext,
   getActiveInteractionSpan,
+  recordInteractionActivity,
   truncateSpanError,
 } from './session-tracing.js';
 export type {
@@ -201,7 +227,9 @@ export {
   captureDaemonTelemetryContext,
   createDaemonBridgeTelemetry,
   emitDaemonLog,
+  extractDaemonHttpTraceContext,
   extractDaemonTraceContext,
+  extractInboundTraceId,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
   recordDaemonError,
@@ -211,6 +239,7 @@ export {
   withDaemonRequestSpan,
   withDaemonSpan,
   type DaemonBridgeTelemetryMetrics,
+  type DaemonRequestSpanOptions,
 } from './daemon-tracing.js';
 export {
   initializeDaemonMetrics,
@@ -239,6 +268,9 @@ export {
   registerAcpEventLoopLagGauge,
 } from './event-loop-lag-metrics.js';
 export {
+  addAgentInputMessageAttributes,
+  addAgentOutputMessageAttributes,
+  AgentOutputMessageCapture,
   addUserPromptAttributes,
   addSystemPromptAttributes,
   addToolSchemaAttributes,

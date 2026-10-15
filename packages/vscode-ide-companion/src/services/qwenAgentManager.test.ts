@@ -12,7 +12,11 @@ import {
   extractSessionListItems,
   QwenAgentManager,
 } from './qwenAgentManager.js';
-import type { ModelInfo } from '@agentclientprotocol/sdk';
+import type {
+  ModelInfo,
+  RequestPermissionRequest,
+} from '@agentclientprotocol/sdk';
+import type { AskUserQuestionRequest } from '../types/acpTypes.js';
 
 vi.mock('vscode', () => ({
   window: {
@@ -59,6 +63,55 @@ describe('extractSessionListItems', () => {
     expect(extractSessionListItems({ sessions: 'not-array' })).toEqual([]);
     expect(extractSessionListItems({ items: 123 })).toEqual([]);
     expect(extractSessionListItems({})).toEqual([]);
+  });
+});
+
+describe('QwenAgentManager input fallbacks', () => {
+  it('cancels when no input callbacks are registered', async () => {
+    const manager = new QwenAgentManager();
+    const connection = (
+      manager as unknown as {
+        connection: {
+          onPermissionRequest: (
+            request: RequestPermissionRequest,
+          ) => Promise<{ optionId: string }>;
+          onAskUserQuestion: (
+            request: AskUserQuestionRequest,
+          ) => Promise<{ optionId: string }>;
+        };
+      }
+    ).connection;
+
+    await expect(
+      connection.onPermissionRequest({
+        sessionId: 'session-1',
+        options: [
+          {
+            optionId: 'proceed_once',
+            name: 'Allow once',
+            kind: 'allow_once',
+          },
+          {
+            optionId: 'reject_once',
+            name: 'Reject',
+            kind: 'reject_once',
+          },
+        ],
+        toolCall: {
+          toolCallId: 'tool-call-1',
+          title: 'Run command',
+          kind: 'execute',
+          status: 'pending',
+        },
+      }),
+    ).resolves.toEqual({ optionId: 'cancel' });
+
+    await expect(
+      connection.onAskUserQuestion({
+        sessionId: 'session-1',
+        questions: [],
+      }),
+    ).resolves.toEqual({ optionId: 'cancel' });
   });
 });
 
@@ -179,6 +232,60 @@ describe('QwenAgentManager.createNewSession', () => {
 });
 
 describe('QwenAgentManager.getSessionMessages', () => {
+  it.each(['request_lifecycle', 'tool_lifecycle'])(
+    'omits %s telemetry from JSONL chat history while retaining messages and other telemetry',
+    async (eventName) => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'qwen-agent-manager-'));
+      const filePath = join(tempDir, 'session.jsonl');
+      const timestamp = '2026-10-10T00:00:00.000Z';
+      const rows = [
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'question' }] },
+        },
+        ...['started', 'ended', 'unknown'].map((phase) => ({
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': eventName,
+              v: phase === 'unknown' ? 99 : 1,
+              phase,
+            },
+          },
+        })),
+        {
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'answer' }] },
+        },
+        {
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: { uiEvent: { 'event.name': 'other_event' } },
+        },
+      ];
+      writeFileSync(
+        filePath,
+        rows.map((row) => JSON.stringify({ ...row, timestamp })).join('\n') +
+          '\n',
+      );
+      try {
+        const manager = new QwenAgentManager();
+        vi.spyOn(manager, 'getSessionList').mockResolvedValue([
+          { id: 'session-1', sessionId: 'session-1', filePath },
+        ]);
+        const messages = await manager.getSessionMessages('session-1');
+        expect(messages.map((message) => message.content)).toEqual([
+          'question',
+          'answer',
+          'System Event: other_event',
+        ]);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('projects UserPromptSubmit provenance while mapping JSONL history', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'qwen-agent-manager-'));
     const filePath = join(tempDir, 'session.jsonl');
@@ -226,5 +333,108 @@ describe('QwenAgentManager.getSessionMessages', () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it('renders the outer tool result once and skips internal Code Mode results', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'qwen-agent-manager-'));
+    const filePath = join(tempDir, 'session.jsonl');
+    const timestamp = '2026-03-22T16:48:35.000Z';
+    const rows = [
+      {
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+        toolCallResult: { callId: 'exec-1:code:1', status: 'success' },
+      },
+      {
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+        toolCallResult: { callId: 'exec-1:code:2', status: 'success' },
+      },
+      {
+        type: 'tool_result',
+        toolCallResult: { callId: 'exec-1', status: 'success' },
+      },
+    ].map((row) => ({ sessionId: 'session-1', timestamp, ...row }));
+    writeFileSync(
+      filePath,
+      `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`,
+    );
+
+    try {
+      const manager = new QwenAgentManager();
+      vi.spyOn(manager, 'getSessionList').mockResolvedValue([
+        {
+          id: 'session-1',
+          sessionId: 'session-1',
+          filePath,
+        },
+      ]);
+
+      const messages = await manager.getSessionMessages('session-1');
+
+      expect(messages).toEqual([
+        {
+          role: 'assistant',
+          content: 'Tool Result (exec-1): success',
+          timestamp: new Date(timestamp).getTime(),
+        },
+      ]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('QwenAgentManager session-update transcript forwarding', () => {
+  function fireSessionUpdate(
+    manager: QwenAgentManager,
+    notification: Record<string, unknown>,
+  ): void {
+    const connection = (
+      manager as unknown as {
+        connection: { onSessionUpdate?: (data: never) => void };
+      }
+    ).connection;
+    connection.onSessionUpdate?.(notification as never);
+  }
+
+  it('forwards live session updates verbatim to onTranscriptUpdate', () => {
+    const manager = new QwenAgentManager();
+    const onTranscriptUpdate = vi.fn();
+    manager.onTranscriptUpdate(onTranscriptUpdate);
+
+    const notification = {
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'live chunk' },
+      },
+    };
+    fireSessionUpdate(manager, notification);
+
+    expect(onTranscriptUpdate).toHaveBeenCalledWith(notification);
+  });
+
+  it('forwards rehydrating session updates verbatim to onTranscriptUpdate', () => {
+    const manager = new QwenAgentManager();
+    const onTranscriptUpdate = vi.fn();
+    manager.onTranscriptUpdate(onTranscriptUpdate);
+    (
+      manager as unknown as { rehydratingSessionId: string | null }
+    ).rehydratingSessionId = 'session-1';
+
+    const notification = {
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'rehydrated chunk' },
+      },
+    };
+    fireSessionUpdate(manager, notification);
+
+    // Rehydration additionally maps chunks onto discrete onMessage calls,
+    // but the raw notification must still reach the transcript feed
+    // unchanged so the WebShell timeline sees history replay frames.
+    expect(onTranscriptUpdate).toHaveBeenCalledWith(notification);
   });
 });

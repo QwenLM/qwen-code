@@ -7,31 +7,51 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const projectRoot = path.resolve(
   path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..'),
 );
 const packagePath = path.join(projectRoot, 'packages', 'vscode-ide-companion');
-const noticeFilePath = path.join(packagePath, 'NOTICES.txt');
+
+/**
+ * Standard MIT license text used when a package declares MIT but ships no
+ * license file (some packages keep the text only in their README). The
+ * copyright holder line is taken from package.json metadata when available.
+ */
+const MIT_FALLBACK_TEXT = `MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.`;
 
 /**
  * Read license information for a dependency from its on-disk location.
  *
  * @param {string} depName - Package name
  * @param {string} depVersion - Resolved version string
- * @param {string} resolvedKey - Lockfile key indicating where the package is installed
+ * @param {string} packageDir - Directory the package is installed in
  * @returns {Promise<{name: string, version: string, repository: string, license: string}>}
  */
-async function getDependencyLicense(depName, depVersion, resolvedKey) {
+async function getDependencyLicense(depName, depVersion, packageDir) {
   let licenseContent = 'License text not found.';
   let repositoryUrl = 'No repository found';
 
-  // Derive the on-disk path directly from the lockfile key
-  const depPackageJsonPath = path.join(
-    projectRoot,
-    resolvedKey,
-    'package.json',
-  );
+  const depPackageJsonPath = path.join(packageDir, 'package.json');
 
   try {
     const depPackageJsonContent = await fs.readFile(
@@ -40,7 +60,8 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
     );
     const depPackageJson = JSON.parse(depPackageJsonContent);
 
-    repositoryUrl = depPackageJson.repository?.url || repositoryUrl;
+    repositoryUrl =
+      normalizeRepositoryUrl(depPackageJson.repository) || repositoryUrl;
 
     const packageDir = path.dirname(depPackageJsonPath);
     const licenseFile = await findLicenseFile(
@@ -57,7 +78,67 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
         );
       }
     } else {
-      console.warn(`Warning: Could not find license file for ${depName}`);
+      const fallbackLicense = getFallbackLicenseText(
+        depPackageJson.license,
+        depPackageJson.author,
+      );
+      if (fallbackLicense) {
+        licenseContent = fallbackLicense;
+      } else {
+        console.warn(`Warning: Could not find license file for ${depName}`);
+      }
+    }
+
+    // Some packages keep additional license texts outside the top level:
+    // a `licenses/` directory (e.g. echarts ships licenses/LICENSE-d3 for
+    // its embedded d3-derived files, referenced from its Apache LICENSE)
+    // and an Apache-style NOTICE file (required by Apache-2.0 §4(d)).
+    // Append both so the notices they accompany are actually shipped.
+    const extraSections = [];
+    // pako 1.0.11's top-level LICENSE omits its lib/zlib/inflate.js header.
+    // Original: https://registry.npmjs.org/pako/-/pako-1.0.11.tgz
+    if (depName === 'pako' && depVersion === '1.0.11') {
+      const zlibLicense = await fs.readFile(
+        new URL('./licenses/pako-1.0.11-zlib.txt', import.meta.url),
+        'utf-8',
+      );
+      extraSections.push(
+        `--- lib/zlib/inflate.js (Zlib) ---\n\n${zlibLicense.trim()}`,
+      );
+    }
+    for (const supplementaryFile of await findSupplementaryLicenseFiles(
+      packageDir,
+    )) {
+      try {
+        const content = await fs.readFile(supplementaryFile, 'utf-8');
+        const relativeName = path
+          .relative(packageDir, supplementaryFile)
+          .split(path.sep)
+          .join('/');
+        extraSections.push(`--- ${relativeName} ---\n\n${content.trim()}`);
+      } catch (e) {
+        console.warn(
+          `Warning: Failed to read supplementary license file for ${depName}: ${e.message}`,
+        );
+      }
+    }
+
+    const noticeFile = await findNoticeFile(packageDir);
+    if (noticeFile) {
+      try {
+        const noticeContent = (await fs.readFile(noticeFile, 'utf-8')).trim();
+        if (noticeContent) {
+          extraSections.push(`--- NOTICE ---\n\n${noticeContent}`);
+        }
+      } catch (e) {
+        console.warn(
+          `Warning: Failed to read NOTICE file for ${depName}: ${e.message}`,
+        );
+      }
+    }
+
+    if (extraSections.length > 0) {
+      licenseContent = `${licenseContent.replace(/\s+$/, '')}\n\n${extraSections.join('\n\n')}`;
     }
   } catch (e) {
     console.warn(
@@ -74,11 +155,30 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
 }
 
 /**
- * Resolve a dependency's license file case-insensitively. The default macOS
- * filesystem is case-insensitive while Linux (CI) is case-sensitive, so a
- * fixed-case candidate list finds a `License` file on macOS but misses it on
- * Linux, making the generated notices platform-dependent. Scan the directory
- * and compare lowercased names so the result is identical on both.
+ * Scan a directory and map lowercased entry names to the actual entry name.
+ * The default macOS filesystem is case-insensitive while Linux (CI) is
+ * case-sensitive, so a fixed-case candidate list finds a `License` file on
+ * macOS but misses it on Linux, making the generated notices
+ * platform-dependent. Comparing lowercased names gives the same result on
+ * both.
+ *
+ * @param {string} dir - Directory to scan
+ * @returns {Promise<Map<string, string>>} Lowercased name -> actual name
+ */
+async function entriesByLowerName(dir) {
+  const dirEntries = await fs.readdir(dir).catch(() => []);
+  const map = new Map();
+  for (const entry of dirEntries) {
+    const lower = entry.toLowerCase();
+    if (!map.has(lower)) {
+      map.set(lower, entry);
+    }
+  }
+  return map;
+}
+
+/**
+ * Resolve a dependency's license file case-insensitively.
  *
  * @param {string} packageDir - Directory containing the dependency's package.json
  * @param {string} [licenseFileHint] - License file name declared in package.json, if any
@@ -89,6 +189,7 @@ export async function findLicenseFile(packageDir, licenseFileHint) {
     licenseFileHint,
     'LICENSE',
     'LICENSE.md',
+    'LICENSE.markdown',
     'LICENSE.txt',
     'LICENSE-MIT.txt',
     'LICENSE-MIT',
@@ -99,17 +200,10 @@ export async function findLicenseFile(packageDir, licenseFileHint) {
     .filter(Boolean)
     .map((candidate) => candidate.toLowerCase());
 
-  const dirEntries = await fs.readdir(packageDir).catch(() => []);
-  const entriesByLowerName = new Map();
-  for (const entry of dirEntries) {
-    const lower = entry.toLowerCase();
-    if (!entriesByLowerName.has(lower)) {
-      entriesByLowerName.set(lower, entry);
-    }
-  }
+  const entries = await entriesByLowerName(packageDir);
 
   for (const candidate of candidates) {
-    const match = entriesByLowerName.get(candidate);
+    const match = entries.get(candidate);
     if (match) {
       return path.join(packageDir, match);
     }
@@ -118,176 +212,341 @@ export async function findLicenseFile(packageDir, licenseFileHint) {
 }
 
 /**
- * Resolve a package in the lockfile by walking up the node_modules chain,
- * mirroring Node.js module resolution algorithm.
+ * Resolve a dependency's NOTICE file case-insensitively. Apache-2.0 §4(d)
+ * requires redistribution to retain NOTICE attributions when the work ships
+ * a NOTICE file.
  *
- * @param {string} packageName - Package to find
- * @param {object} packages - packageLock.packages map
- * @param {string} resolveFrom - Lockfile key to start resolution from
- * @returns {{info: object, key: string} | null}
+ * @param {string} packageDir - Directory containing the dependency's package.json
+ * @returns {Promise<string | undefined>} Absolute path to the NOTICE file, or undefined
  */
-function resolveInLockfile(packageName, packages, resolveFrom) {
-  // Walk up from resolveFrom, trying each node_modules level
-  let current = resolveFrom;
-  while (current) {
-    const candidate = `${current}/node_modules/${packageName}`;
-    if (packages[candidate]) {
-      return { info: packages[candidate], key: candidate };
+export async function findNoticeFile(packageDir) {
+  const candidates = ['notice', 'notice.txt', 'notice.md'];
+  const entries = await entriesByLowerName(packageDir);
+
+  for (const candidate of candidates) {
+    const match = entries.get(candidate);
+    if (match) {
+      const matchPath = path.join(packageDir, match);
+      const stat = await fs.stat(matchPath).catch(() => undefined);
+      if (stat?.isFile()) {
+        return matchPath;
+      }
     }
-    // Move up: strip the last /node_modules/... segment
-    const lastNm = current.lastIndexOf('/node_modules/');
-    if (lastNm === -1) break;
-    current = current.slice(0, lastNm);
   }
-  // Finally try root hoisted level
-  const hoistedKey = `node_modules/${packageName}`;
-  if (packages[hoistedKey]) {
-    return { info: packages[hoistedKey], key: hoistedKey };
-  }
-  return null;
+  return undefined;
 }
 
 /**
- * Recursively collect third-party dependencies by walking the lockfile.
- * Mirrors Node.js module resolution: walks up the node_modules chain from
- * the current package's location.
+ * List supplementary license files kept in a package's top-level `licenses/`
+ * directory (sorted for deterministic output). These are referenced from the
+ * package's main license text (e.g. echarts' Apache LICENSE points at
+ * licenses/LICENSE-d3 for its embedded d3-derived files) but were previously
+ * never shipped with the notices. The match is exact-case on purpose: the
+ * uppercase `LICENSES/` directory is the unrelated REUSE convention of
+ * SPDX-keyed standard texts, which the package's own license entry already
+ * covers.
  *
- * @param {string} packageName - Package to resolve
- * @param {object} packageLock - Parsed package-lock.json
- * @param {Map<string, {version: string, resolvedKey: string}>} dependenciesMap - Accumulated results
- * @param {string} resolveFrom - Lockfile key prefix to resolve from (e.g. "packages/vscode-ide-companion")
+ * @param {string} packageDir - Directory containing the dependency's package.json
+ * @returns {Promise<string[]>} Absolute paths of the supplementary license files
  */
-function collectDependencies(
-  packageName,
-  packageLock,
-  dependenciesMap,
-  resolveFrom,
-  visitedKeys,
-) {
-  const resolved = resolveInLockfile(
-    packageName,
-    packageLock.packages,
-    resolveFrom,
-  );
-  if (!resolved) {
-    console.warn(
-      `Warning: Could not find package info for ${packageName} in package-lock.json.`,
-    );
-    return;
+export async function findSupplementaryLicenseFiles(packageDir) {
+  const dirEntries = await fs.readdir(packageDir).catch(() => []);
+  if (!dirEntries.includes('licenses')) {
+    return [];
+  }
+  const licensesDir = path.join(packageDir, 'licenses');
+  const dirStat = await fs.stat(licensesDir).catch(() => undefined);
+  if (!dirStat?.isDirectory()) {
+    return [];
   }
 
-  const { info: packageInfo, key: resolvedKey } = resolved;
-
-  // Traversal guard: skip if this exact lockfile path was already visited.
-  // Keyed by resolved path (not package name) so different installed versions
-  // of the same package are each traversed once.
-  if (visitedKeys.has(resolvedKey)) {
-    return;
-  }
-  visitedKeys.add(resolvedKey);
-
-  // Workspace-linked packages: follow resolved pointer to collect their third-party deps
-  if (packageInfo.link) {
-    const realInfo = packageLock.packages[packageInfo.resolved];
-    if (realInfo?.dependencies) {
-      for (const depName of Object.keys(realInfo.dependencies)) {
-        collectDependencies(
-          depName,
-          packageLock,
-          dependenciesMap,
-          resolveFrom,
-          visitedKeys,
-        );
-      }
+  const filePaths = [];
+  const files = (await fs.readdir(licensesDir).catch(() => []))
+    .slice()
+    .sort((a, b) => a.localeCompare(b));
+  for (const file of files) {
+    const filePath = path.join(licensesDir, file);
+    const fileStat = await fs.stat(filePath).catch(() => undefined);
+    if (fileStat?.isFile()) {
+      filePaths.push(filePath);
     }
-    return;
+  }
+  return filePaths;
+}
+
+/**
+ * Normalize the package.json `repository` field to a display URL.
+ *
+ * Object-form values are returned unchanged (preserving the historical
+ * output). String-form values — which npm allows as a full URL, a
+ * `github:user/repo` shortcut, or a bare `user/repo` GitHub shorthand — are
+ * expanded to an https URL so they are not dropped as "No repository found".
+ *
+ * @param {string | {url?: string} | undefined} repository - The `repository` field from package.json
+ * @returns {string | undefined} A display URL, or undefined when absent
+ */
+export function normalizeRepositoryUrl(repository) {
+  if (typeof repository !== 'string') {
+    return repository?.url;
   }
 
-  // Output dedup: emit each (name, version) pair once, even when the same
-  // version is installed at multiple paths.
-  const outputKey = `${packageName}@${packageInfo.version}`;
-  if (!dependenciesMap.has(outputKey)) {
-    dependenciesMap.set(outputKey, {
-      name: packageName,
-      version: packageInfo.version,
-      resolvedKey,
-    });
+  let value = repository.trim();
+  if (!value) {
+    return undefined;
   }
 
-  if (packageInfo.dependencies) {
-    for (const depName of Object.keys(packageInfo.dependencies)) {
-      // Resolve transitive deps from THIS package's location
-      collectDependencies(
-        depName,
-        packageLock,
-        dependenciesMap,
-        resolvedKey,
-        visitedKeys,
+  if (value.startsWith('git+') && /^git\+https?:/.test(value)) {
+    value = value.slice('git+'.length);
+  }
+  if (value.startsWith('github:')) {
+    return `https://github.com/${value.slice('github:'.length)}`;
+  }
+  const scpMatch = value.match(/^git@([^:]+):(.+)$/);
+  if (scpMatch) {
+    return `https://${scpMatch[1]}/${scpMatch[2]}`;
+  }
+  if (value.startsWith('git://')) {
+    return `https://${value.slice('git://'.length)}`;
+  }
+  if (/^[\w.-]+\/[\w.-]+$/.test(value)) {
+    return `https://github.com/${value}`;
+  }
+  return value;
+}
+
+/**
+ * Produce fallback license text for packages that declare a known SPDX
+ * license but ship no license file. Only exact MIT declarations use this
+ * fallback; bundled packages with other licenses retain their original texts.
+ *
+ * @param {unknown} license - The `license` field from package.json
+ * @param {unknown} author - The `author` field from package.json
+ * @returns {string | undefined} Fallback text, or undefined when no fallback applies
+ */
+export function getFallbackLicenseText(license, author) {
+  if (typeof license !== 'string' || license.trim().toUpperCase() !== 'MIT') {
+    return undefined;
+  }
+  const authorName =
+    typeof author === 'string' && author.trim()
+      ? // npm author strings may carry a trailing homepage in parentheses
+        // ("Name <email> (url)"), which does not belong in a copyright line.
+        author.trim().replace(/\s*\([^)]*\)$/, '')
+      : typeof author?.name === 'string' && author.name.trim()
+        ? author.name.trim()
+        : undefined;
+  const copyrightLine = authorName ? `Copyright (c) ${authorName}\n\n` : '';
+  return `Standard MIT license text (package declares MIT but ships no license file; copyright holder from package.json metadata).\n\n${copyrightLine}${MIT_FALLBACK_TEXT}`;
+}
+
+/**
+ * Find where `packageName` resolves from `fromDir` by walking up the
+ * node_modules chain the way Node.js does. This reads the installed tree
+ * rather than a lockfile, so the notices describe what the extension actually
+ * bundles, whichever package manager laid that tree out.
+ *
+ * @param {string} packageName - Package to find
+ * @param {string} fromDir - Real directory of the package that depends on it
+ * @returns {Promise<{dir: string, manifest: object} | null>}
+ */
+async function resolveInstalled(packageName, fromDir) {
+  let dir = fromDir;
+  for (;;) {
+    const candidate = path.join(dir, 'node_modules', packageName);
+    try {
+      const manifest = JSON.parse(
+        await fs.readFile(path.join(candidate, 'package.json'), 'utf-8'),
       );
+      return { dir: await fs.realpath(candidate), manifest };
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
     }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
 }
 
-async function main() {
-  try {
-    const packageJsonPath = path.join(packagePath, 'package.json');
-    const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
-    const packageJson = JSON.parse(packageJsonContent);
-
-    const packageLockJsonPath = path.join(projectRoot, 'package-lock.json');
-    const packageLockJsonContent = await fs.readFile(
-      packageLockJsonPath,
-      'utf-8',
+/**
+ * Recursively collect third-party dependencies from the installed tree,
+ * resolving each one from the real location of the package that needs it.
+ *
+ * @param {string} packageName - Package to resolve
+ * @param {string} fromDir - Real directory to resolve from
+ * @param {Map<string, {name: string, version: string, dir: string}>} dependenciesMap - Accumulated results
+ * @param {Set<string>} visitedDirs - Installed directories already traversed
+ */
+export async function collectDependencies(
+  packageName,
+  fromDir,
+  dependenciesMap,
+  visitedDirs,
+) {
+  const resolved = await resolveInstalled(packageName, fromDir);
+  if (!resolved) {
+    console.warn(
+      `Warning: ${packageName} is not installed where ${fromDir} resolves it.`,
     );
-    const packageLockJson = JSON.parse(packageLockJsonContent);
-
-    const allDependencies = new Map();
-    const visitedKeys = new Set();
-    const directDependencies = Object.keys(packageJson.dependencies);
-    const workspacePrefix = path.relative(projectRoot, packagePath);
-
-    for (const depName of directDependencies) {
-      collectDependencies(
-        depName,
-        packageLockJson,
-        allDependencies,
-        workspacePrefix,
-        visitedKeys,
-      );
-    }
-
-    const dependencyEntries = Array.from(allDependencies.values());
-
-    const licensePromises = dependencyEntries.map(
-      ({ name, version, resolvedKey }) =>
-        getDependencyLicense(name, version, resolvedKey),
-    );
-
-    const dependencyLicenses = await Promise.all(licensePromises);
-
-    let noticeText =
-      'This file contains third-party software notices and license terms.\n\n';
-
-    for (const dep of dependencyLicenses) {
-      noticeText +=
-        '============================================================\n';
-      noticeText += `${dep.name}@${dep.version}\n`;
-      noticeText += `(${dep.repository})\n\n`;
-      noticeText += `${dep.license}\n\n`;
-    }
-
-    // Normalize line endings to LF. Third-party license files may use CRLF,
-    // which would otherwise be embedded verbatim and produce spurious diffs
-    // (the file is declared `eol=lf` in .gitattributes).
-    noticeText = noticeText.replace(/\r\n/g, '\n');
-
-    await fs.writeFile(noticeFilePath, noticeText);
-    console.log(`NOTICES.txt generated at ${noticeFilePath}`);
-    console.log(`Total dependencies: ${dependencyEntries.length}`);
-  } catch (error) {
-    console.error('Error generating NOTICES.txt:', error);
-    process.exit(1);
+    return;
   }
+
+  const { dir, manifest } = resolved;
+
+  // Traversal guard: keyed by real directory, not package name, so different
+  // installed versions of the same package are each traversed once.
+  if (visitedDirs.has(dir)) {
+    return;
+  }
+  visitedDirs.add(dir);
+
+  // A workspace package resolves outside every node_modules directory: follow
+  // it for its third-party dependencies without listing it.
+  if (dir.split(path.sep).includes('node_modules')) {
+    // Output dedup: emit each (name, version) pair once, even when the same
+    // version is installed at multiple paths.
+    const outputKey = `${packageName}@${manifest.version}`;
+    if (!dependenciesMap.has(outputKey)) {
+      dependenciesMap.set(outputKey, {
+        name: packageName,
+        version: manifest.version,
+        dir,
+      });
+    }
+  }
+
+  const bundled = dir.split(path.sep).includes('node_modules')
+    ? []
+    : (manifest.bundledDevDependencies ?? []);
+  for (const depName of [
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...bundled,
+  ]) {
+    // Web Shell uses ExcelJS's prebuilt browser entry. These Node-only branches
+    // are not in that bundle; its actual embedded packages are inventoried below.
+    if (
+      packageName === 'exceljs' &&
+      ['archiver', 'unzipper', 'tmp'].includes(depName)
+    )
+      continue;
+    await collectDependencies(depName, dir, dependenciesMap, visitedDirs);
+  }
+}
+
+// ExcelJS ships a prebuilt browser bundle whose embedded dependencies are not
+// discoverable by walking its runtime package.json dependencies.
+export async function getExceljsBrowserNotices(packageDir) {
+  const inventory = JSON.parse(
+    await fs.readFile(
+      new URL('./licenses/exceljs-browser.json', import.meta.url),
+      'utf-8',
+    ),
+  );
+  const manifest = JSON.parse(
+    await fs.readFile(path.join(packageDir, 'package.json'), 'utf-8'),
+  );
+  const bundle = await fs.readFile(path.join(packageDir, inventory.browser));
+  if (
+    manifest.version !== inventory.exceljsVersion ||
+    manifest.browser !== inventory.browser ||
+    createHash('sha256').update(bundle).digest('hex') !== inventory.bundleSha256
+  ) {
+    throw new Error(
+      'ExcelJS browser bundle changed; refresh its bundled license inventory.',
+    );
+  }
+  return inventory.packages;
+}
+
+async function main({ packageDir = packagePath, bundledOnly = false } = {}) {
+  const packageJsonPath = path.join(packageDir, 'package.json');
+  const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
+  const packageJson = JSON.parse(packageJsonContent);
+
+  const allDependencies = new Map();
+  const visitedDirs = new Set();
+  const directDependencies = bundledOnly
+    ? (packageJson.bundledDevDependencies ?? [])
+    : Object.keys(packageJson.dependencies);
+
+  if (bundledOnly) {
+    if (directDependencies.length === 0)
+      throw new Error('No bundled dependency seeds declared');
+    for (const name of directDependencies) {
+      if (!(await resolveInstalled(name, packageDir)))
+        throw new Error(`Bundled dependency ${name} is not installed`);
+    }
+  }
+
+  // Sequential on purpose: the traversal order is the file's order, and it
+  // must not depend on which filesystem read finishes first.
+  for (const depName of directDependencies) {
+    await collectDependencies(
+      depName,
+      packageDir,
+      allDependencies,
+      visitedDirs,
+    );
+  }
+
+  const dependencyEntries = Array.from(allDependencies.values());
+
+  const exceljs = dependencyEntries.find(({ name }) => name === 'exceljs');
+  const browserLicenses = exceljs
+    ? await getExceljsBrowserNotices(exceljs.dir)
+    : [];
+  const bundledLicenses = new Map(
+    browserLicenses.map((license) => [
+      `${license.name}@${license.version}`,
+      license,
+    ]),
+  );
+  const licensePromises = dependencyEntries.map(
+    ({ name, version, dir }) =>
+      bundledLicenses.get(`${name}@${version}`) ??
+      getDependencyLicense(name, version, dir),
+  );
+  const dependencyLicenses = [
+    ...(await Promise.all(licensePromises)),
+    ...browserLicenses.filter(
+      ({ name, version }) => !allDependencies.has(`${name}@${version}`),
+    ),
+  ];
+
+  let noticeText =
+    'This file contains third-party software notices and license terms.\n\n';
+
+  for (const dep of dependencyLicenses) {
+    noticeText +=
+      '============================================================\n';
+    noticeText += `${dep.name}@${dep.version}\n`;
+    noticeText += `(${dep.repository})\n\n`;
+    noticeText += `${dep.license}\n\n`;
+  }
+
+  // Normalize line endings to LF. Third-party license files may use CRLF,
+  // which would otherwise be embedded verbatim and produce spurious diffs
+  // (the file is declared `eol=lf` in .gitattributes).
+  noticeText = noticeText.replace(/\r\n/g, '\n');
+
+  const noticeFilePath = path.join(packageDir, 'NOTICES.txt');
+  await fs.writeFile(noticeFilePath, noticeText);
+  console.log(`NOTICES.txt generated at ${noticeFilePath}`);
+  console.log(`Total dependencies: ${dependencyLicenses.length}`);
+}
+
+export async function runNoticeGeneration(env = process.env, options) {
+  const skipGeneration = ['1', 'true'].includes(
+    (env.QWEN_SKIP_NOTICE_GENERATION ?? '').toLowerCase(),
+  );
+
+  if (skipGeneration) {
+    console.log(
+      'Skipping VS Code notice generation during worktree bootstrap.',
+    );
+    return;
+  }
+
+  await main(options);
 }
 
 // Only run when executed directly (e.g. `npm run generate:notices`), not when
@@ -296,5 +555,12 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main().catch(console.error);
+  const options =
+    process.argv[2] === '--bundled'
+      ? { packageDir: path.resolve(process.argv[3]), bundledOnly: true }
+      : undefined;
+  runNoticeGeneration(process.env, options).catch((error) => {
+    console.error('Error generating NOTICES.txt:', error);
+    process.exitCode = 1;
+  });
 }

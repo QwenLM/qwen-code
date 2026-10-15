@@ -1,0 +1,315 @@
+.content {
+  display: flex;
+  flex-direction: column;
+  min-height: 50vh;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 8px;
+}
+
+.filter {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted-foreground);
+}
+
+.filter:focus-within {
+  border-color: var(--agent-blue-500, var(--muted-foreground));
+}
+
+.filterInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.newButton {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.newButton:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.placeholder {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+
+.notice {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+  font-size: 12px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.row:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.rowMain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.badge {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.badgeMain {
+  background: var(--success-bg, rgba(76, 175, 80, 0.12));
+  color: var(--success-color);
+}
+
+.badgeWarn {
+  background: var(--warning-bg, rgba(255, 193, 7, 0.15));
+  color: var(--warning-color, #b8860b);
+}
+
+.branch {
+  display: inline-flex;
+  flex-shrink: 1;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.meta {
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.branchName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.statusDirty {
+  color: var(--warning-color, #b8860b);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.removeBtn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.row:hover .removeBtn,
+.removeBtn:focus-visible {
+  opacity: 1;
+}
+
+.removeBtn:hover {
+  background: var(--muted);
+  color: var(--error-color);
+}
+
+.path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.sessions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.sessionChip {
+  max-width: 260px;
+  overflow: hidden;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionChip:hover:not(:disabled) {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.sessionChip:disabled {
+  cursor: default;
+}
+
+.sessionLive {
+  border-color: var(--success-color);
+}
+
+.confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+  font-size: 12px;
+}
+
+.confirmText {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sentence {
+  display: block;
+}
+
+.confirmActions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.btnDanger {
+  border-color: var(--error-color);
+  color: var(--error-color);
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.spin {
+  animation: gitWorktreesSpin 0.8s linear infinite;
+}
+
+@keyframes gitWorktreesSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* One of these per unsettled row, and a repository can have hundreds. */
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+}

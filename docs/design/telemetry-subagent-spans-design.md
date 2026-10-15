@@ -2,8 +2,9 @@
 
 > **GenAI attribute migration:**
 > [`gen-ai-arms-field-alignment.md`](./gen-ai-arms-field-alignment.md) supersedes
-> this document's use of `gen_ai.provider.name=qwen-code` and the temporary
-> `gen_ai.agent.id`. The `qwen-code.subagent.*` lifecycle, identity, parenting,
+> the historical proposal to emit `gen_ai.provider.name=qwen-code` and the
+> temporary `gen_ai.agent.id`. Neither field is emitted. The
+> `qwen-code.subagent.*` lifecycle, identity, parenting,
 > and linking design described here remains valid.
 
 > Issue #3731 — Phase 3 of hierarchical session tracing. Adds a `qwen-code.subagent` span so subagent invocations get isolated, queryable trace structure instead of interleaving silently under the parent `qwen-code.interaction` span.
@@ -41,7 +42,7 @@ Today every `AgentTool.execute` invocation runs under the parent's `qwen-code.in
 | Source                                                                                                                 | Key takeaway                                                                                                                                                                                                                                                                                                                 |
 | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [OTel Trace Spec — Links between spans](https://opentelemetry.io/docs/specs/otel/overview/#links-between-spans)        | Verbatim: "The new linked Trace may also represent a long running asynchronous data processing operation that was initiated by one of many fast incoming requests." → fork/background should be linked roots, not children.                                                                                                  |
-| [OTel GenAI Agent Spans](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/) (status: Development) | Span name `invoke_agent {gen_ai.agent.name}`; required attrs `gen_ai.operation.name`, `gen_ai.provider.name`; recommended: `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id`.                                                                                                                                 |
+| [OTel GenAI Agent Spans](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/) (status: Development) | Frameworks may define their own span name. `gen_ai.operation.name` identifies invocation; agent name and conversation ID are conditional. Provider is not required for an in-process agent.                                                                                                                                  |
 | LangSmith — 25,000 runs / trace cap                                                                                    | Long agent sessions force trace splitting eventually; favors hybrid traceId design.                                                                                                                                                                                                                                          |
 | [Sentry — distributed tracing](https://docs.sentry.io/concepts/key-terms/tracing/distributed-tracing/)                 | "Child transactions may outlive the transactions containing their parent spans" — child-with-outliving-life is supported.                                                                                                                                                                                                    |
 | claude-code (Anthropic)                                                                                                | Has subagent hierarchy in local Perfetto JSON file only; OTel export is flat. No portable code.                                                                                                                                                                                                                              |
@@ -171,8 +172,8 @@ OTel GenAI spec says the canonical span name is `invoke_agent {gen_ai.agent.name
 | Category                                                         | Attribute                                       | Source                                                               | Notes                                                                                                                                                                            |
 | ---------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Required spec**                                                | `gen_ai.operation.name='invoke_agent'`          | literal                                                              | spec-required                                                                                                                                                                    |
-| **Required spec**                                                | `gen_ai.provider.name='qwen-code'`              | literal                                                              | spec-required; ambiguous for in-process agents (spec wrote it for LLM provider). Setting to `'qwen-code'` is the most honest interpretation                                      |
-| **Required (dual-emit)**                                         | `gen_ai.agent.id` + `qwen-code.subagent.id`     | `agentContext.agentId`                                               | dual-emit until spec reaches Stable; remove vendor key later                                                                                                                     |
+| **Omitted**                                                      | `gen_ai.provider.name`                          | —                                                                    | no hosted provider identity exists for the in-process agent                                                                                                                      |
+| **Vendor only**                                                  | `qwen-code.subagent.id`                         | `agentContext.agentId`                                               | per-invocation identity is not a stable `gen_ai.agent.id`                                                                                                                        |
 | **Required (dual-emit)**                                         | `gen_ai.agent.name` + `qwen-code.subagent.name` | `agentConfig.subagentType` (e.g. `Explore`, `code-reviewer`, `fork`) | same dual-emit                                                                                                                                                                   |
 | **Recommended spec**                                             | `gen_ai.conversation.id`                        | `config.getSessionId()`                                              | enables cross-trace queries by session; co-exists with the existing `session.id` span attr (set globally per #4367) — both point at the same UUID, drop one when spec stabilises |
 | **Recommended spec**                                             | `gen_ai.request.model`                          | model override if any                                                | only when subagent overrides parent model                                                                                                                                        |
@@ -193,11 +194,11 @@ OTel GenAI spec says the canonical span name is `invoke_agent {gen_ai.agent.name
 
 **SpanStatus mapping**:
 
-- `status === 'completed'` → `SpanStatus { code: OK }`
+- `status === 'completed'` → `SpanStatus { code: UNSET }`
 - `status === 'failed'` → `SpanStatus { code: ERROR, message: truncated(error.message) }`
 - `status === 'cancelled'` or `'aborted'` → `SpanStatus { code: UNSET }` (matches Phase 2 convention)
 
-**Why dual-emit on `id` + `name`**: spec is in Development (one step earlier than Experimental). `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` exists for opt-in. Spec attr names may rename before Stable. Dual-emit is the same pattern Phase 2 used for `call_id` → `tool.call_id`; remove the vendor key when spec reaches Stable.
+**Why retain vendor identity attributes**: the per-invocation `qwen-code.subagent.id` is not a stable Agent identity, so it is not copied to `gen_ai.agent.id`. The stable agent name is dual-emitted under the standard and vendor keys while the GenAI convention remains in Development; remove the vendor name key when the convention reaches Stable.
 
 **Why `qwen-code.subagent.*` (not `qwen.subagent.*`)**: every existing vendor-prefixed key in `constants.ts` uses `qwen-code.*` (`qwen-code.user_prompt`, `qwen-code.tool_call`, etc.). Internal consistency > OTel naming-convention preference, since operators query ARMS by prefix.
 
@@ -453,7 +454,7 @@ If review pushes back on size: split into 2 PRs — (A) telemetry helpers + test
 | `3 concurrent subagent spans don't share children`                           | Headline concurrency guarantee                                  |
 | `nested subagent records depth + parentAgentId`                              | Nesting metadata                                                |
 | `endSubagentSpan status mapping (completed / failed / cancelled / aborted)`  | Status taxonomy                                                 |
-| `endSubagentSpan dual-emits gen_ai.agent.id + qwen-code.subagent.id`         | Spec-compliance dual-emit                                       |
+| `subagent ID stays vendor-only; agent name dual-emits`                       | Stable Agent identity and compatibility boundaries              |
 | `fork lifecycle: span survives AgentTool.execute return`                     | Fire-and-forget correctness                                     |
 | `TTL: subagent fork stays past 30min, gets stamped + ended at 4h`            | Type-aware TTL                                                  |
 | `TTL: foreground subagent at 30min gets default sweep`                       | TTL doesn't over-extend                                         |
@@ -524,7 +525,7 @@ These are all already gated; #4097's pattern is to call `addSubagentSensitiveAtt
 
 ## Open questions
 
-1. **`gen_ai.provider.name`**: spec requires it but writes the description for LLM provider, not agent framework. Setting to `'qwen-code'` is best interpretation; if a future spec revision adds an `agent.provider.name` variant we should switch.
+1. **`gen_ai.provider.name`**: omitted because an in-process subagent has no hosted-agent provider identity. Revisit only if the convention defines a matching identity.
 2. **Span name `qwen-code.subagent` vs spec `invoke_agent {name}`**: chose internal consistency. If GenAI-aware tooling adoption grows and `invoke_agent ${name}` becomes critical for auto-discovery, we can switch — span name is the most rebrandable thing in OTel.
 3. **Soft-warn at depth ≥ 5**: arbitrary number. Could be a config knob. Defer until production data shows a need.
 4. **`SubagentExecutionEvent.result`'s full LLM output is large**: today it bloats LogRecord volume. The migration plan (LogRecord → span events) is deferred but worth doing once token-usage aggregation lands in Phase 4.

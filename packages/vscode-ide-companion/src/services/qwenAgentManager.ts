@@ -9,12 +9,10 @@ import type {
   ModelInfo,
   AvailableCommand,
   ContentBlock,
-  RequestPermissionRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
 import type {
   AuthenticateUpdateNotification,
-  AskUserQuestionRequest,
   SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
@@ -42,6 +40,7 @@ import {
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
 import { getErrorMessage } from '../utils/errorMessage.js';
 import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 
 export type { ChatMessage, PlanEntry, ToolCallUpdateData };
 
@@ -127,6 +126,11 @@ export class QwenAgentManager {
 
     // Set ACP connection callbacks
     this.connection.onSessionUpdate = (data: SessionNotification) => {
+      // Forward the raw notification verbatim for consumers that reduce the
+      // transcript themselves (WebShell transcript UI). This runs before the
+      // rehydration branch so history replay and live streaming are both
+      // captured with the same shape the daemon SSE envelope would carry.
+      this.callbacks.onTranscriptUpdate?.(data);
       // If we are rehydrating a loaded session, map message chunks into
       // discrete messages for the UI instead of streaming behavior.
       // During rehydration the webview is NOT in streaming mode, so
@@ -222,31 +226,6 @@ export class QwenAgentManager {
       this.sessionUpdateHandler.handleSessionUpdate(data);
     };
 
-    this.connection.onPermissionRequest = async (
-      data: RequestPermissionRequest,
-    ) => {
-      if (this.callbacks.onPermissionRequest) {
-        const optionId = await this.callbacks.onPermissionRequest(data);
-        return {
-          optionId:
-            this.resolvePermissionOptionId(data, optionId) ||
-            this.resolvePermissionOptionId(data) ||
-            '',
-        };
-      }
-      return { optionId: this.resolvePermissionOptionId(data) || '' };
-    };
-
-    this.connection.onAskUserQuestion = async (
-      data: AskUserQuestionRequest,
-    ) => {
-      if (this.callbacks.onAskUserQuestion) {
-        const result = await this.callbacks.onAskUserQuestion(data);
-        return result;
-      }
-      return { optionId: 'cancel' };
-    };
-
     this.connection.onEndTurn = (reason?: string, source?: string) => {
       try {
         if (this.callbacks.onEndTurn) {
@@ -286,14 +265,9 @@ export class QwenAgentManager {
         const obj = (init || {}) as Record<string, unknown>;
         const modes = obj['modes'] as
           | {
-              currentModeId?:
-                | 'plan'
-                | 'default'
-                | 'auto-edit'
-                | 'auto'
-                | 'yolo';
+              currentModeId?: ApprovalModeValue;
               availableModes?: Array<{
-                id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+                id: ApprovalModeValue;
                 name: string;
                 description: string;
               }>;
@@ -834,9 +808,12 @@ export class QwenAgentManager {
             });
           }
         }
-        // Handle tool result records
+        // Handle tool result records. Internal Code Mode results have no
+        // model-emitted call partner, so rendering them adds rows for calls
+        // the model never made.
         else if (
           r.type === 'tool_result' &&
+          !isInternalCodeModeToolResult(r) &&
           r.toolCallResult &&
           typeof r.toolCallResult === 'object'
         ) {
@@ -867,6 +844,12 @@ export class QwenAgentManager {
               uiEvent?: Record<string, unknown>;
             }
           ).uiEvent as Record<string, unknown>;
+          if (
+            uiEvent['event.name'] === 'request_lifecycle' ||
+            uiEvent['event.name'] === 'tool_lifecycle'
+          ) {
+            continue;
+          }
           let telemetryText = '';
 
           if (
@@ -1364,32 +1347,6 @@ export class QwenAgentManager {
   }
 
   /**
-   * Register permission request callback
-   *
-   * @param callback - Permission request callback function
-   */
-  onPermissionRequest(
-    callback: (request: RequestPermissionRequest) => Promise<string>,
-  ): void {
-    this.callbacks.onPermissionRequest = callback;
-    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
-  }
-
-  /**
-   * Register ask user question callback
-   *
-   * @param callback - Ask user question callback function
-   */
-  onAskUserQuestion(
-    callback: (
-      request: AskUserQuestionRequest,
-    ) => Promise<{ optionId: string; answers?: Record<string, string> }>,
-  ): void {
-    this.callbacks.onAskUserQuestion = callback;
-    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
-  }
-
-  /**
    * Register end-of-turn callback
    *
    * @param callback - Called when ACP stopReason is reported
@@ -1404,9 +1361,9 @@ export class QwenAgentManager {
    */
   onModeInfo(
     callback: (info: {
-      currentModeId?: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+      currentModeId?: ApprovalModeValue;
       availableModes?: Array<{
-        id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+        id: ApprovalModeValue;
         name: string;
         description: string;
       }>;
@@ -1419,11 +1376,7 @@ export class QwenAgentManager {
   /**
    * Register mode changed callback
    */
-  onModeChanged(
-    callback: (
-      modeId: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo',
-    ) => void,
-  ): void {
+  onModeChanged(callback: (modeId: ApprovalModeValue) => void): void {
     this.callbacks.onModeChanged = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
@@ -1481,6 +1434,19 @@ export class QwenAgentManager {
   ): void {
     this.callbacks.onSlashCommandNotification = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register a handler for raw ACP session/update notifications. Unlike the
+   * dedicated callbacks (onStreamChunk, onToolCall, ...) this is emitted
+   * verbatim from {@link onSessionUpdate} before any rehydration/streaming
+   * shaping, so transcript-reducing consumers see the same shape the daemon
+   * SSE envelope would carry.
+   */
+  onTranscriptUpdate(
+    callback: (notification: SessionNotification) => void,
+  ): void {
+    this.callbacks.onTranscriptUpdate = callback;
   }
 
   /**
@@ -1563,34 +1529,5 @@ export class QwenAgentManager {
         this.callbacks.onAvailableModels?.(this.baselineAvailableModels);
       }
     }
-  }
-
-  private resolvePermissionOptionId(
-    request: RequestPermissionRequest,
-    preferredOptionId?: string,
-  ): string | undefined {
-    // Keep this mapping aligned with AcpConnection.resolvePermissionOptionId:
-    // Webview callbacks may provide a semantic choice (allow/reject) while the
-    // CLI requires a concrete ToolConfirmationOutcome optionId.
-    // Always normalize to an optionId that exists in request.options.
-    const options = Array.isArray(request.options) ? request.options : [];
-    if (options.length === 0) {
-      return undefined;
-    }
-
-    if (
-      preferredOptionId &&
-      options.some((option) => option.optionId === preferredOptionId)
-    ) {
-      return preferredOptionId;
-    }
-
-    return (
-      options.find((option) => option.kind === 'allow_once')?.optionId ||
-      options.find((option) => option.optionId === 'proceed_once')?.optionId ||
-      options.find((option) => option.optionId.includes('proceed_once'))
-        ?.optionId ||
-      options[0]?.optionId
-    );
   }
 }

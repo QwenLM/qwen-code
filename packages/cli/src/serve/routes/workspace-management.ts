@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  readWorkspaceActivity,
+  type WorkspaceRemovalActivity,
+} from '../workspace-activity.js';
+import { prepareSshWorkspace } from '../ssh-workspace-store.js';
 import { readdir, stat } from 'node:fs/promises';
 import {
   translateAndCheckAbsoluteWorkspacePath,
@@ -19,6 +24,8 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import type { AcpHttpHandle } from '../acp-http/index.js';
 import {
   isPortableAbsolutePath,
@@ -30,6 +37,7 @@ import {
   WorkspaceDisplayNameValidationError,
   WorkspaceRegistrationStoreCommittedError,
   WorkspaceRegistrationStoreLimitError,
+  WorkspaceRegistrationStoreTooLargeError,
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
 import {
@@ -54,7 +62,139 @@ import {
 // readdir/stat work on huge directories.
 const MAX_PATH_SUGGESTIONS = 50;
 
+// Budgets for the remote-daemon proxy routes below. Those routes dial an
+// origin the *caller* names, so a peer that accepts the connection and then
+// goes quiet, or one that answers with an endless body, must not be able to
+// pin a daemon request (and its socket) or grow this process without bound.
+// Legitimate answers are tiny: a suggestion list is already capped at
+// MAX_PATH_SUGGESTIONS entries and a registration returns one object.
+const REMOTE_DAEMON_PROXY_TIMEOUT_MS = 30_000;
+const REMOTE_DAEMON_PROXY_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Dials a caller-named remote daemon on behalf of a proxy route.
+ *
+ * Two deliberate departures from a bare `fetch`:
+ * - a full-transfer timeout, so a silent peer cannot hold the request open
+ *   forever (the same signal also bounds the body read below);
+ * - `redirect: 'error'`. Following a redirect would replay the forwarded
+ *   `Authorization` bearer against whatever origin the peer names, and a qwen
+ *   daemon never redirects these routes — a 3xx means a misconfigured or
+ *   hostile target, not a success.
+ *
+ * `clientSignal` carries the caller's own cancellation (both proxy routes wire
+ * `res.on('close')` to one, matching `/workspace-directory-picker` below):
+ * browse fires a suggestion request per debounced keystroke, and a request the
+ * browser already discarded must not keep an outbound socket alive until the
+ * timeout expires. It is combined with, not substituted for, the timeout.
+ *
+ * The private/metadata SSRF guard is intentionally NOT applied: the legitimate
+ * targets of these routes are other daemons on localhost and the LAN, which is
+ * exactly the address space that guard rejects. Restricting which origins an
+ * operator may proxy to is a separate policy decision.
+ */
+function fetchRemoteDaemon(
+  url: string,
+  init: RequestInit,
+  clientSignal?: AbortSignal,
+): Promise<globalThis.Response> {
+  const timeout = AbortSignal.timeout(REMOTE_DAEMON_PROXY_TIMEOUT_MS);
+  return fetch(url, {
+    ...init,
+    redirect: 'error',
+    signal: clientSignal ? AbortSignal.any([timeout, clientSignal]) : timeout,
+  });
+}
+
+/**
+ * Reads a remote daemon's JSON answer under a byte cap enforced while
+ * streaming, with a `content-length` precheck — the same shape as `fetchBytes`
+ * in workspace-skill-management.ts, so an oversized answer is rejected before
+ * it is buffered rather than after.
+ *
+ * `globalThis.Response`, not the bare name: this module imports express's
+ * `Response` type, which shadows the fetch one.
+ */
+async function readRemoteDaemonJson(
+  response: globalThis.Response,
+): Promise<unknown> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > REMOTE_DAEMON_PROXY_MAX_BYTES) {
+    throw new Error(
+      `Remote daemon response exceeded the ${REMOTE_DAEMON_PROXY_MAX_BYTES}-byte limit`,
+    );
+  }
+  if (!response.body) {
+    return JSON.parse(await response.text()) as unknown;
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > REMOTE_DAEMON_PROXY_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(
+          `Remote daemon response exceeded the ${REMOTE_DAEMON_PROXY_MAX_BYTES}-byte limit`,
+        );
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(Buffer.concat(chunks, size).toString('utf8')) as unknown;
+}
+
+/**
+ * Maps a non-2xx upstream answer onto this daemon's error envelope.
+ *
+ * A JSON answer keeps its own `error`/`code`, so a target's `400
+ * invalid_prefix` and a wrong-token `401` stay distinguishable from each other
+ * and from a dead network. Anything else — an HTML gateway 502, a bodyless 401
+ * — degrades to the status alone rather than surfacing a JSON parse failure as
+ * the explanation, which is what an unconditional `upstream.json()` did.
+ */
+async function remoteErrorEnvelope(upstream: globalThis.Response): Promise<{
+  status: number;
+  body: { error: string; code: string };
+}> {
+  const fallback = {
+    status: upstream.status,
+    body: {
+      error: `Remote daemon returned ${upstream.status}`,
+      code: 'remote_error',
+    },
+  };
+  const contentType = upstream.headers.get('content-type') ?? '';
+  if (!contentType.includes('application/json')) return fallback;
+  try {
+    const data = (await readRemoteDaemonJson(upstream)) as {
+      error?: unknown;
+      code?: unknown;
+    } | null;
+    if (!data || typeof data !== 'object') return fallback;
+    const error = typeof data.error === 'string' ? data.error.trim() : '';
+    const code = typeof data.code === 'string' ? data.code.trim() : '';
+    if (!error && !code) return fallback;
+    return {
+      status: upstream.status,
+      body: {
+        error: error || fallback.body.error,
+        code: code || fallback.body.code,
+      },
+    };
+  } catch {
+    // An unreadable or malformed JSON error body says nothing worth forwarding.
+    return fallback;
+  }
+}
+
 export interface WorkspaceManagementRouteDeps {
+  maxRegisteredWorkspaces?: number;
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
@@ -70,20 +210,14 @@ export interface WorkspaceManagementRouteDeps {
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   getAcpHandle?: () => AcpHttpHandle | undefined;
   runtimeRemoval?: WorkspaceRuntimeRemovalController;
+  onWorkspaceRemoved?: (workspaceCwd: string) => void;
   pickWorkspaceDirectory?: (
     signal?: AbortSignal,
   ) => Promise<string | undefined>;
+  reservedWorkspaceRoots?: readonly string[];
 }
 
-export interface WorkspaceRemovalActivity {
-  sessions: number;
-  activePrompts: number;
-  pendingSessionStarts: number;
-  acpConnections: number;
-  memoryTasks: number;
-  channelWorkers: number;
-  voiceSessions: number;
-}
+export type { WorkspaceRemovalActivity } from '../workspace-activity.js';
 
 export interface WorkspaceRuntimeRemovalController {
   runtimeAdded?(runtime: WorkspaceRuntime): Promise<void>;
@@ -106,8 +240,11 @@ export interface WorkspaceManagementHandle {
   publishOwnedRuntime(
     canonicalCwd: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
-    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+    validateBeforePublication: (
+      runtime: WorkspaceRuntime,
+    ) => void | Promise<void>,
   ): Promise<WorkspaceRuntime>;
+  quarantineOwnedRuntime(runtime: WorkspaceRuntime): Promise<void>;
 }
 
 export function registerWorkspaceManagementRoutes(
@@ -115,6 +252,7 @@ export function registerWorkspaceManagementRoutes(
   deps: WorkspaceManagementRouteDeps,
 ): WorkspaceManagementHandle {
   const {
+    maxRegisteredWorkspaces = MAX_REGISTERED_WORKSPACES,
     workspaceRegistry,
     mutate,
     safeBody,
@@ -126,9 +264,32 @@ export function registerWorkspaceManagementRoutes(
     getAcpHandle,
     runtimeRemoval,
     pickWorkspaceDirectory: pickWorkspaceDirectoryOverride,
+    reservedWorkspaceRoots = [],
   } = deps;
   const pickWorkspaceDirectory =
     pickWorkspaceDirectoryOverride ?? pickNativeDirectory;
+  const canonicalizeIfPresent = (candidate: string): string => {
+    const resolved = resolve(candidate);
+    try {
+      return realpathSync.native(resolved);
+    } catch {
+      return resolved;
+    }
+  };
+  const isReservedWorkspacePath = (candidate: string): boolean => {
+    const resolvedCandidate = resolve(candidate);
+    const canonicalCandidate = canonicalizeIfPresent(candidate);
+    return reservedWorkspaceRoots.some((configuredRoot) => {
+      const resolvedRoot = resolve(configuredRoot);
+      const canonicalRoot = canonicalizeIfPresent(configuredRoot);
+      return (
+        resolvedCandidate === resolvedRoot ||
+        isWithinRoot(resolvedCandidate, resolvedRoot) ||
+        canonicalCandidate === canonicalRoot ||
+        isWithinRoot(canonicalCandidate, canonicalRoot)
+      );
+    });
+  };
   // Serialize runtime addition, persistence promotion/forget, updates, and
   // removal by canonical cwd so conflicting management mutations cannot cross
   // their validation and persistence commit points concurrently.
@@ -136,6 +297,11 @@ export function registerWorkspaceManagementRoutes(
     string,
     'addition' | 'promotion' | 'removal' | 'forget' | 'update'
   >();
+  // Owned Conversations publications ride the same in-flight serialization
+  // map (they must keep colliding on cwd and nesting), but they are daemon
+  // infrastructure: the capacity projection skips them just like it skips
+  // the published internal runtime.
+  const internalAdditionsInFlight = new Set<string>();
   let sealed = false;
   let activeOperations = 0;
   let pendingScratchCreations = 0;
@@ -154,6 +320,23 @@ export function registerWorkspaceManagementRoutes(
       error: 'Daemon is shutting down',
       code: 'daemon_shutting_down',
     });
+  };
+  const sendStoreCapacityError = (res: Response, error: unknown): boolean => {
+    if (error instanceof WorkspaceRegistrationStoreLimitError) {
+      res.status(409).json({
+        error: 'Workspace registration limit reached',
+        code: 'workspace_limit_reached',
+      });
+      return true;
+    }
+    if (error instanceof WorkspaceRegistrationStoreTooLargeError) {
+      res.status(409).json({
+        error: 'Workspace registration store is too large',
+        code: 'workspace_registration_store_too_large',
+      });
+      return true;
+    }
+    return false;
   };
   const attachRegistrationIds = (
     runtime: WorkspaceRuntime,
@@ -191,13 +374,20 @@ export function registerWorkspaceManagementRoutes(
     }
   };
   const projectedWorkspaceCount = (): number => {
+    // The daemon-owned Conversations runtime is daemon infrastructure, not a
+    // user workspace: it must not consume user registration capacity.
     // A scratch request reserves capacity before its cwd exists, while normal
     // additions reserve by canonical cwd. Count both forms exactly once.
     const cwdSet = new Set(
-      workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
+      workspaceRegistry
+        .listManaged()
+        .filter((runtime) => !isInternalWorkspaceRuntime(runtime))
+        .map((runtime) => runtime.workspaceCwd),
     );
     for (const [cwd, operation] of inFlight) {
-      if (operation === 'addition') cwdSet.add(cwd);
+      if (operation === 'addition' && !internalAdditionsInFlight.has(cwd)) {
+        cwdSet.add(cwd);
+      }
     }
     return cwdSet.size + pendingScratchCreations;
   };
@@ -239,7 +429,12 @@ export function registerWorkspaceManagementRoutes(
     if (nestingConflict) {
       throw new Error('Workspace path nests with an existing workspace');
     }
-    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+    // The owned Conversations runtime is daemon infrastructure: user
+    // workspaces filling the limit must not block its publication.
+    if (
+      provenance !== 'live-conversation' &&
+      projectedWorkspaceCount() >= maxRegisteredWorkspaces
+    ) {
       throw new Error('Workspace registration limit reached');
     }
   };
@@ -247,19 +442,27 @@ export function registerWorkspaceManagementRoutes(
   const publishOwnedRuntime = async (
     canonicalCwd: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
-    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+    validateBeforePublication: (
+      runtime: WorkspaceRuntime,
+    ) => void | Promise<void>,
   ): Promise<WorkspaceRuntime> => {
     if (!createWorkspaceRuntime || !runtimeRemoval) {
       throw new Error('Managed workspace runtime publication is unavailable');
     }
     assertOwnedRuntimeAdmission(canonicalCwd, provenance);
     inFlight.set(canonicalCwd, 'addition');
+    if (provenance === 'live-conversation') {
+      internalAdditionsInFlight.add(canonicalCwd);
+    }
     operationStarted();
     let runtime: WorkspaceRuntime | undefined;
     let registered = false;
     try {
       runtime = await createWorkspaceRuntime(canonicalCwd, { provenance });
-      await validate(runtime);
+      if (runtime.primary) {
+        throw new Error('Daemon-owned workspace runtime must not be primary');
+      }
+      await validateBeforePublication(runtime);
       const publish = async () => {
         if (sealed) throw new Error('Daemon is shutting down');
         if (workspaceRegistry.getManagedByWorkspaceCwd(canonicalCwd)) {
@@ -278,7 +481,10 @@ export function registerWorkspaceManagementRoutes(
         if (nestingConflict) {
           throw new Error('Workspace path nests with an existing workspace');
         }
-        if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+        if (
+          provenance !== 'live-conversation' &&
+          projectedWorkspaceCount() >= maxRegisteredWorkspaces
+        ) {
           throw new Error('Workspace registration limit reached');
         }
         workspaceRegistry.add(runtime!);
@@ -316,6 +522,76 @@ export function registerWorkspaceManagementRoutes(
           });
       }
       inFlight.delete(canonicalCwd);
+      internalAdditionsInFlight.delete(canonicalCwd);
+      operationFinished();
+    }
+  };
+
+  const quarantineOwnedRuntime = async (
+    runtime: WorkspaceRuntime,
+  ): Promise<void> => {
+    if (
+      runtime.primary ||
+      runtime.provenance !== 'live-conversation' ||
+      !runtime.trusted ||
+      runtime.removable !== false
+    ) {
+      throw new Error(
+        'Only the owned Conversations runtime may be quarantined',
+      );
+    }
+    if (!runtimeRemoval) {
+      throw new Error('Managed workspace runtime removal is unavailable');
+    }
+    if (sealed) throw new Error('Daemon is shutting down');
+    if (inFlight.has(runtime.workspaceCwd)) {
+      throw new Error('Workspace runtime transition is already in progress');
+    }
+    inFlight.set(runtime.workspaceCwd, 'removal');
+    operationStarted();
+    let disposed = false;
+    const failures: unknown[] = [];
+    try {
+      if (!workspaceRegistry.beginDrain(runtime)) {
+        throw new Error('Workspace runtime is no longer active');
+      }
+      try {
+        runtimeRemoval.beginDrain(runtime);
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        workspaceRegistry.commitDrain(runtime);
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await runtimeRemoval.disposeRuntime(runtime, 'workspace_removed');
+        disposed = true;
+      } catch (error) {
+        failures.push(error);
+      }
+      if (disposed) {
+        try {
+          runtimeRemoval.completeDrain(runtime);
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          workspaceRegistry.completeDrain(runtime);
+          deps.onWorkspaceRemoved?.(runtime.workspaceCwd);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          'Failed to quarantine the Conversations runtime',
+        );
+      }
+    } finally {
+      inFlight.delete(runtime.workspaceCwd);
       operationFinished();
     }
   };
@@ -338,6 +614,7 @@ export function registerWorkspaceManagementRoutes(
         .listManaged()
         .some(
           (runtime) =>
+            !isInternalWorkspaceRuntime(runtime) &&
             !isScratchRootCompatible(
               runtime.workspaceCwd,
               managedScratchRoot.canonicalRoot,
@@ -355,7 +632,7 @@ export function registerWorkspaceManagementRoutes(
       });
       return;
     }
-    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+    if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
       res.status(409).json({
         error: 'Workspace registration limit reached',
         code: 'workspace_limit_reached',
@@ -384,6 +661,7 @@ export function registerWorkspaceManagementRoutes(
 
       const boundCwds = workspaceRegistry
         .listManaged()
+        .filter((entry) => !isInternalWorkspaceRuntime(entry))
         .map((entry) => entry.workspaceCwd);
       for (const [cwd, operation] of inFlight) {
         if (operation === 'addition' && cwd !== canonical) boundCwds.push(cwd);
@@ -565,6 +843,162 @@ export function registerWorkspaceManagementRoutes(
     },
   );
 
+  // Proxies directory suggestions from a remote daemon, so the Web Shell can
+  // browse a remote daemon's folders without navigating the page. The target
+  // daemon must be reachable from this daemon's host.
+  app.get(
+    '/remote-workspace-path-suggestions',
+    async (req: Request, res: Response) => {
+      const daemonRaw = req.query['daemon'];
+      const prefixRaw = req.query['prefix'];
+      if (typeof daemonRaw !== 'string' || daemonRaw.trim().length === 0) {
+        res.status(400).json({
+          error: '`daemon` must be a non-empty string',
+          code: 'invalid_daemon',
+        });
+        return;
+      }
+      if (typeof prefixRaw !== 'string' || prefixRaw.trim().length === 0) {
+        res.status(400).json({
+          error: '`prefix` must be a non-empty string',
+          code: 'invalid_prefix',
+        });
+        return;
+      }
+      let daemonOrigin: string;
+      try {
+        const parsed = new URL(daemonRaw);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new Error('unsupported protocol');
+        }
+        daemonOrigin = parsed.origin;
+      } catch {
+        res.status(400).json({
+          error: '`daemon` must be a valid HTTP(S) origin',
+          code: 'invalid_daemon',
+        });
+        return;
+      }
+      const token = req.headers['x-daemon-token'];
+      const headers: Record<string, string> = {};
+      if (typeof token === 'string' && token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      // Browse mode fires one of these per debounced keystroke and drops stale
+      // answers client-side only, so a hung-up caller must also release the
+      // outbound socket — the pattern `/workspace-directory-picker` uses.
+      const clientAbort = new AbortController();
+      res.on('close', () => clientAbort.abort());
+      try {
+        const query = new URLSearchParams({ prefix: prefixRaw });
+        const upstream = await fetchRemoteDaemon(
+          `${daemonOrigin}/workspace-path-suggestions?${query.toString()}`,
+          { headers },
+          clientAbort.signal,
+        );
+        if (!upstream.ok) {
+          const envelope = await remoteErrorEnvelope(upstream);
+          res.status(envelope.status).json(envelope.body);
+          return;
+        }
+        const data = await readRemoteDaemonJson(upstream);
+        res.status(200).json(data);
+      } catch (error) {
+        // The caller hung up: the response is gone, so there is nothing to
+        // answer and writing a 502 to it would only throw.
+        if (clientAbort.signal.aborted) return;
+        res.status(502).json({
+          error: `Failed to reach remote daemon: ${error instanceof Error ? error.message : String(error)}`,
+          code: 'remote_unreachable',
+        });
+      }
+    },
+  );
+
+  // Proxies workspace registration to a remote daemon, so the Web Shell can
+  // register a workspace on a remote daemon without navigating the page first.
+  app.post(
+    '/remote-workspaces',
+    mutate(),
+    async (req: Request, res: Response) => {
+      const body = safeBody(req);
+      const daemonRaw = body['daemon'];
+      const cwd = body['cwd'];
+      if (typeof daemonRaw !== 'string' || daemonRaw.trim().length === 0) {
+        res.status(400).json({
+          error: '`daemon` must be a non-empty string',
+          code: 'invalid_daemon',
+        });
+        return;
+      }
+      if (typeof cwd !== 'string' || cwd.trim().length === 0) {
+        res.status(400).json({
+          error: '`cwd` must be a non-empty string',
+          code: 'invalid_cwd',
+        });
+        return;
+      }
+      let daemonOrigin: string;
+      try {
+        const parsed = new URL(daemonRaw);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new Error('unsupported protocol');
+        }
+        daemonOrigin = parsed.origin;
+      } catch {
+        res.status(400).json({
+          error: '`daemon` must be a valid HTTP(S) origin',
+          code: 'invalid_daemon',
+        });
+        return;
+      }
+      const token = req.headers['x-daemon-token'];
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (typeof token === 'string' && token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      const clientAbort = new AbortController();
+      res.on('close', () => clientAbort.abort());
+      try {
+        const upstream = await fetchRemoteDaemon(
+          `${daemonOrigin}/workspaces`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              cwd,
+              ...(body['persist'] === true ? { persist: true } : {}),
+              ...(typeof body['displayName'] === 'string'
+                ? { displayName: body['displayName'] }
+                : {}),
+            }),
+          },
+          clientAbort.signal,
+        );
+        // A failure the target explained is not "unreachable": parsing its
+        // body unconditionally turned a bodyless 401 and an HTML gateway 502
+        // into `remote_unreachable` with a JSON parse message as the reason.
+        if (!upstream.ok) {
+          const envelope = await remoteErrorEnvelope(upstream);
+          res.status(envelope.status).json(envelope.body);
+          return;
+        }
+        const data = await readRemoteDaemonJson(upstream);
+        res.status(upstream.status).json(data);
+      } catch (error) {
+        // The caller hung up: the response is gone, so there is nothing to
+        // answer and writing a 502 to it would only throw.
+        if (clientAbort.signal.aborted) return;
+        res.status(502).json({
+          error: `Failed to reach remote daemon: ${error instanceof Error ? error.message : String(error)}`,
+          code: 'remote_unreachable',
+        });
+      }
+    },
+  );
+
   app.post(
     '/workspace-directory-picker',
     mutate(),
@@ -632,7 +1066,7 @@ export function registerWorkspaceManagementRoutes(
         await createScratchWorkspace(res);
         return;
       }
-      const cwd = body['cwd'];
+      const requestedCwd = body['cwd'];
       const persist = body['persist'] ?? false;
       const hasDisplayName = Object.hasOwn(body, 'displayName');
       let displayName: string | undefined;
@@ -648,13 +1082,17 @@ export function registerWorkspaceManagementRoutes(
           return;
         }
       }
-      if (typeof cwd !== 'string' || cwd.trim().length === 0) {
+      if (
+        typeof requestedCwd !== 'string' ||
+        requestedCwd.trim().length === 0
+      ) {
         res.status(400).json({
           error: '`cwd` must be a non-empty string',
           code: 'invalid_path',
         });
         return;
       }
+      let cwd: string = requestedCwd;
       if (typeof persist !== 'boolean') {
         res.status(400).json({
           error: '`persist` must be a boolean',
@@ -689,6 +1127,29 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
+      if (cwd.startsWith('ssh://')) {
+        if (sealed) {
+          sendSealed(res);
+          return;
+        }
+        operationStarted();
+        try {
+          const prepared = await prepareSshWorkspace(
+            cwd,
+            AbortSignal.timeout(30_000),
+          );
+          cwd = prepared.cwd;
+        } catch (error) {
+          res.status(400).json({
+            error: error instanceof Error ? error.message : String(error),
+            code: 'ssh_workspace_connection_failed',
+          });
+          return;
+        } finally {
+          operationFinished();
+        }
+      }
+
       // #7139: the shared helper maps a Windows-shaped cwd to its container
       // bind mount before the absolute-path check.
       const sandboxCwd = translateAndCheckAbsoluteWorkspacePath(cwd);
@@ -696,6 +1157,14 @@ export function registerWorkspaceManagementRoutes(
         res.status(400).json({
           error: '`cwd` must be an absolute path',
           code: 'invalid_path',
+        });
+        return;
+      }
+
+      if (isReservedWorkspacePath(sandboxCwd)) {
+        res.status(409).json({
+          error: 'Workspace path is reserved for Conversations.',
+          code: 'conversation_workspace_reserved',
         });
         return;
       }
@@ -712,6 +1181,14 @@ export function registerWorkspaceManagementRoutes(
         res.status(400).json({
           error: 'Path does not exist or is not accessible',
           code: 'invalid_path',
+        });
+        return;
+      }
+
+      if (isReservedWorkspacePath(canonical)) {
+        res.status(409).json({
+          error: 'Workspace path is reserved for Conversations.',
+          code: 'conversation_workspace_reserved',
         });
         return;
       }
@@ -817,7 +1294,7 @@ export function registerWorkspaceManagementRoutes(
           const alreadyPersisted = persistedWorkspaces.length > 0;
           if (
             !alreadyPersisted &&
-            snapshot.workspaces.length >= MAX_REGISTERED_WORKSPACES - 1
+            snapshot.workspaces.length >= maxRegisteredWorkspaces - 1
           ) {
             res.status(409).json({
               error: 'Workspace registration limit reached',
@@ -847,13 +1324,11 @@ export function registerWorkspaceManagementRoutes(
               const persistedDisplayName = hasDisplayName
                 ? displayName
                 : existingRuntime.displayName;
-              added =
-                persistedDisplayName === undefined
-                  ? await workspaceRegistrationStore!.add(canonical)
-                  : await workspaceRegistrationStore!.add(
-                      canonical,
-                      persistedDisplayName,
-                    );
+              added = await workspaceRegistrationStore!.add(
+                canonical,
+                persistedDisplayName,
+                maxRegisteredWorkspaces,
+              );
             } catch (err) {
               if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
                 throw err;
@@ -892,18 +1367,12 @@ export function registerWorkspaceManagementRoutes(
             persisted: true,
           });
         } catch (err) {
-          if (err instanceof WorkspaceRegistrationStoreLimitError) {
-            res.status(409).json({
-              error: 'Workspace registration limit reached',
-              code: 'workspace_limit_reached',
-            });
-            return;
-          }
           writeStderrLine(
             `qwen serve: failed to persist existing workspace registration: ${
               err instanceof Error ? err.message : String(err)
             }`,
           );
+          if (sendStoreCapacityError(res, err)) return;
           res.status(500).json({
             error: 'Failed to persist workspace registration',
             code: 'workspace_registration_store_error',
@@ -948,7 +1417,7 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+      if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
         res.status(409).json({
           error: 'Workspace registration limit reached',
           code: 'workspace_limit_reached',
@@ -971,13 +1440,11 @@ export function registerWorkspaceManagementRoutes(
           if (persist) {
             try {
               try {
-                persistedRecordAdded =
-                  displayName === undefined
-                    ? await workspaceRegistrationStore!.add(canonical)
-                    : await workspaceRegistrationStore!.add(
-                        canonical,
-                        displayName,
-                      );
+                persistedRecordAdded = await workspaceRegistrationStore!.add(
+                  canonical,
+                  displayName,
+                  maxRegisteredWorkspaces,
+                );
               } catch (err) {
                 if (
                   !(err instanceof WorkspaceRegistrationStoreCommittedError)
@@ -1090,6 +1557,7 @@ export function registerWorkspaceManagementRoutes(
           }`,
         );
         if (persistenceFailed) {
+          if (sendStoreCapacityError(res, err)) return;
           res.status(500).json({
             error: 'Failed to persist workspace registration',
             code: 'workspace_registration_store_error',
@@ -1109,25 +1577,12 @@ export function registerWorkspaceManagementRoutes(
 
   const workspaceActivity = (
     runtime: WorkspaceRuntime,
-  ): WorkspaceRemovalActivity => {
-    const controllerActivity = runtimeRemoval?.getActivity(runtime) ?? {
-      pendingSessionStarts: 0,
-      channelWorkers: 0,
-      voiceSessions: 0,
-    };
-    const acpActivity = getAcpHandle?.()?.getWorkspaceActivity(
-      runtime.workspaceId,
-    ) ?? { acpConnections: 0, memoryTasks: 0 };
-    return {
-      pendingSessionStarts: controllerActivity.pendingSessionStarts,
-      sessions: runtime.bridge.sessionCount,
-      activePrompts: runtime.bridge.activePromptCount,
-      acpConnections: acpActivity.acpConnections,
-      memoryTasks: acpActivity.memoryTasks,
-      channelWorkers: controllerActivity.channelWorkers,
-      voiceSessions: controllerActivity.voiceSessions,
-    };
-  };
+  ): WorkspaceRemovalActivity =>
+    readWorkspaceActivity(
+      runtime,
+      runtimeRemoval?.getActivity(runtime),
+      getAcpHandle?.()?.getWorkspaceActivity(runtime.workspaceId),
+    );
   const isBusy = (activity: WorkspaceRemovalActivity): boolean =>
     Object.values(activity).some((count) => count > 0);
   const resolveManagedRuntime = (
@@ -1136,7 +1591,7 @@ export function registerWorkspaceManagementRoutes(
   ): WorkspaceRuntime | undefined => {
     const selector = String(req.params['workspace'] ?? '');
     const byId = workspaceRegistry.getManagedByWorkspaceId(selector);
-    if (byId) return byId;
+    if (byId && !isInternalWorkspaceRuntime(byId)) return byId;
     if (!isPortableAbsolutePath(selector)) {
       res.status(400).json({
         error: '`workspace` must decode to a workspace id or absolute path',
@@ -1336,6 +1791,9 @@ export function registerWorkspaceManagementRoutes(
       let controllerDraining = false;
       let acpDraining = false;
       let removalCommitted = false;
+      let runtimeCoordinatorDraining = false;
+      const runtimeCoordinator =
+        getWorkspaceRuntimeCoordinatorIfSupported(runtime);
       const rollbackDrain = (): void => {
         if (removalCommitted) return;
         if (acpDraining) {
@@ -1353,6 +1811,14 @@ export function registerWorkspaceManagementRoutes(
             // Continue rolling back the remaining gates.
           }
           controllerDraining = false;
+        }
+        if (runtimeCoordinatorDraining) {
+          try {
+            runtimeCoordinator?.cancelDrain();
+          } catch {
+            // Continue rolling back the remaining gates.
+          }
+          runtimeCoordinatorDraining = false;
         }
         if (registryDraining) {
           try {
@@ -1424,6 +1890,7 @@ export function registerWorkspaceManagementRoutes(
         }
         try {
           workspaceRegistry.completeDrain(runtime);
+          deps.onWorkspaceRemoved?.(runtime.workspaceCwd);
         } catch (err) {
           logCleanupFailure(
             `qwen serve: failed to complete workspace registry drain: ${
@@ -1434,6 +1901,7 @@ export function registerWorkspaceManagementRoutes(
         registryDraining = false;
         controllerDraining = false;
         acpDraining = false;
+        runtimeCoordinatorDraining = false;
       };
 
       try {
@@ -1445,6 +1913,8 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
+        runtimeCoordinator?.beginDrain();
+        runtimeCoordinatorDraining = runtimeCoordinator !== undefined;
         runtimeRemoval.beginDrain(runtime);
         controllerDraining = true;
         getAcpHandle?.()?.beginWorkspaceDrain(runtime.workspaceId);
@@ -1564,7 +2034,10 @@ export function registerWorkspaceManagementRoutes(
         primaryWorkspace: snapshot.primaryWorkspace,
         entries: snapshot.workspaces.map((cwd) => {
           const registrationId = workspaceRegistrationId(cwd);
-          const runtime = workspaceRegistry.getByWorkspaceCwd(cwd);
+          const reserved = isReservedWorkspacePath(cwd);
+          const runtime = reserved
+            ? undefined
+            : workspaceRegistry.getByWorkspaceCwd(cwd);
           return {
             id: registrationId,
             cwd,
@@ -1572,7 +2045,8 @@ export function registerWorkspaceManagementRoutes(
               ? { displayName: snapshot.displayNames[registrationId] }
               : {}),
             active:
-              runtime !== undefined || registrationIsActive(registrationId),
+              !reserved &&
+              (runtime !== undefined || registrationIsActive(registrationId)),
             persisted: true,
           };
         }),
@@ -1618,7 +2092,11 @@ export function registerWorkspaceManagementRoutes(
                 registrationId ||
               candidate.registrationIds?.includes(registrationId) === true,
           );
+        if (runtime && isInternalWorkspaceRuntime(runtime)) {
+          runtime = undefined;
+        }
         operationCwd = runtime?.workspaceCwd;
+        let reservedRegistration = false;
         if (!operationCwd) {
           let storedCwd: string | undefined;
           try {
@@ -1640,6 +2118,7 @@ export function registerWorkspaceManagementRoutes(
             return;
           }
           if (storedCwd) {
+            reservedRegistration = isReservedWorkspacePath(storedCwd);
             try {
               operationCwd = realpathSync.native(resolve(storedCwd));
             } catch {
@@ -1666,10 +2145,14 @@ export function registerWorkspaceManagementRoutes(
           ownsInFlight = true;
         }
         runtime =
-          (operationCwd
+          (!reservedRegistration && operationCwd
             ? workspaceRegistry.getManagedByWorkspaceCwd(operationCwd)
             : undefined) ?? runtime;
-        const active = registrationIsActive(registrationId);
+        if (runtime && isInternalWorkspaceRuntime(runtime)) {
+          runtime = undefined;
+        }
+        const active =
+          !reservedRegistration && registrationIsActive(registrationId);
         let removed: boolean;
         try {
           removed = await workspaceRegistrationStore.removeById(registrationId);
@@ -1721,6 +2204,7 @@ export function registerWorkspaceManagementRoutes(
 
   return {
     publishOwnedRuntime,
+    quarantineOwnedRuntime,
     async sealAndWait() {
       sealed = true;
       if (activeOperations === 0) return;

@@ -115,6 +115,15 @@ describe('Subagents (E2E)', () => {
   });
 
   it('delegates a file read to a tool-restricted subagent', async () => {
+    // `agent` is natively deferred, and a deferred tool stays out of the
+    // advertised declaration list even after `tool_search` selects it, so this
+    // case pins the `tools.visible` contract instead: the subagent catalogue
+    // has to ride in the first request for the assertion below to mean
+    // anything.
+    testWorkDir = await helper.setup('subagent-tests', {
+      settings: { tools: { visible: ['agent'] } },
+    });
+    await helper.createFile('test.txt', 'Hello from test file\n');
     const fileReaderAgent: SubagentConfig = {
       name: 'file-reader',
       description: 'Reads a requested file and reports its exact contents.',

@@ -23,6 +23,39 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 describe('auto-skill curator', () => {
   let projectRoot: string;
+  const now = new Date('2026-07-27T00:00:00.000Z');
+  const plusDays = (days: number, base = now) =>
+    new Date(base.getTime() + days * DAY_MS);
+  const qwenPath = (...segments: string[]) =>
+    path.join(projectRoot, '.qwen', ...segments);
+  const statePath = () => qwenPath('skill-curator.json');
+  const readState = async () =>
+    JSON.parse(await fs.readFile(statePath(), 'utf8')) as {
+      skills: Record<
+        string,
+        {
+          firstSeenAt: string;
+          lastActivityAt: string;
+          useCount: number;
+          pinned?: boolean;
+        }
+      >;
+    };
+  const readStatus = (at = now) => getAutoSkillCuratorStatus(projectRoot, at);
+  const curate = (options: { dryRun?: boolean; now?: Date } = {}) =>
+    runAutoSkillCurator(projectRoot, { now, ...options });
+  const restore = (directoryName: string) =>
+    restoreArchivedAutoSkill(projectRoot, directoryName, now);
+  const names = (entries: Array<{ directoryName: string }>) =>
+    entries.map((entry) => entry.directoryName);
+  const surfaced = async () => {
+    const status = await readStatus();
+    return names([...status.active, ...status.stale, ...status.archived]);
+  };
+  const expectPresent = (target: string) =>
+    expect(fs.access(target)).resolves.toBeUndefined();
+  const expectMissing = (target: string) =>
+    expect(fs.access(target)).rejects.toMatchObject({ code: 'ENOENT' });
 
   beforeEach(async () => {
     projectRoot = await fs.mkdtemp(
@@ -34,33 +67,79 @@ describe('auto-skill curator', () => {
     await fs.rm(projectRoot, { recursive: true, force: true });
   });
 
-  async function writeSkill(
+  const frontmatter = (
+    name: string,
+    description: string,
+    source = 'auto-skill',
+  ) => [
+    '---',
+    `name: ${name}`,
+    `description: ${description}`,
+    `source: ${source}`,
+    '---',
+    '',
+  ];
+
+  async function writeManifest(
+    directory: string,
+    lines: string[],
+    modifiedAt?: Date,
+  ): Promise<string> {
+    const manifest = path.join(directory, 'SKILL.md');
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(manifest, lines.join('\n'));
+    if (modifiedAt) await fs.utimes(manifest, modifiedAt, modifiedAt);
+    return manifest;
+  }
+
+  const writeSkill = (
     directoryName: string,
     source: string,
     modifiedAt: Date,
-  ): Promise<string> {
-    const directory = path.join(projectRoot, '.qwen', 'skills', directoryName);
-    const manifest = path.join(directory, 'SKILL.md');
-    await fs.mkdir(directory, { recursive: true });
-    await fs.writeFile(
-      manifest,
+  ) =>
+    writeManifest(
+      qwenPath('skills', directoryName),
       [
-        '---',
-        `name: ${directoryName.replace(/^auto-skill-/, '')}`,
-        `description: ${directoryName}`,
-        `source: ${source}`,
-        '---',
-        '',
+        ...frontmatter(
+          directoryName.replace(/^auto-skill-/, ''),
+          directoryName,
+          source,
+        ),
         '# Skill',
-      ].join('\n'),
+      ],
+      modifiedAt,
     );
-    await fs.utimes(manifest, modifiedAt, modifiedAt);
+
+  // Records a project-level use of the manifest under its frontmatter name.
+  const recordUse = (
+    filePath: string,
+    at: Date,
+    level: 'project' | 'user' = 'project',
+  ) =>
+    recordAutoSkillUsage(
+      projectRoot,
+      {
+        name: path.basename(path.dirname(filePath)).replace(/^auto-skill-/, ''),
+        level,
+        filePath,
+      },
+      at,
+    );
+
+  // A managed auto-skill last modified and last used at `modifiedAt`, unless
+  // `usedAt` says otherwise.
+  async function writeUsedSkill(
+    directoryName: string,
+    modifiedAt: Date,
+    usedAt = modifiedAt,
+  ): Promise<string> {
+    const manifest = await writeSkill(directoryName, 'auto-skill', modifiedAt);
+    await recordUse(manifest, usedAt);
     return manifest;
   }
 
   it('only manages doubly-marked project auto-skills', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const old = plusDays(-100);
     const managedManifest = await writeSkill(
       'auto-skill-managed',
       'auto-skill',
@@ -68,42 +147,29 @@ describe('auto-skill curator', () => {
     );
     await writeSkill('hand-authored', 'auto-skill', old);
     await writeSkill('auto-skill-learned', 'learned', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'managed', level: 'project', filePath: managedManifest },
-      old,
-    );
+    await recordUse(managedManifest, old);
 
-    const status = await getAutoSkillCuratorStatus(projectRoot, now);
+    const status = await readStatus();
 
-    expect(status.stale.map((entry) => entry.directoryName)).toEqual([
-      'auto-skill-managed',
-    ]);
+    expect(names(status.stale)).toEqual(['auto-skill-managed']);
     expect(status.active).toEqual([]);
   });
 
   it('does not leave a placeholder file beside the proper lock', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-
-    await runAutoSkillCurator(projectRoot, { now });
+    await curate();
 
     await expect(
-      fs.lstat(path.join(projectRoot, '.qwen', 'skill-curator.lock')),
+      fs.lstat(qwenPath('skill-curator.lock')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('registers a lock-compromised handler and completes when the curator lock is compromised', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
     const { lockSpy, getLockedFile, getOnCompromised } = mockCompromisedLock();
 
     try {
-      await expect(
-        runAutoSkillCurator(projectRoot, { now }),
-      ).resolves.toMatchObject({ dryRun: false });
+      await expect(curate()).resolves.toMatchObject({ dryRun: false });
       expect(getOnCompromised()).toBeTypeOf('function');
-      expect(getLockedFile()).toBe(
-        path.join(projectRoot, '.qwen', 'skill-curator.lock'),
-      );
+      expect(getLockedFile()).toBe(qwenPath('skill-curator.lock'));
     } finally {
       lockSpy.mockRestore();
     }
@@ -112,92 +178,57 @@ describe('auto-skill curator', () => {
   it.skipIf(process.platform === 'win32')(
     'ignores auto-skill directories whose names carry control/ANSI bytes',
     async () => {
-      const now = new Date('2026-07-27T00:00:00.000Z');
-      const old = new Date(now.getTime() - 100 * DAY_MS);
+      const old = plusDays(-100);
 
-      // A crafted directory that satisfies the `auto-skill-` prefix and basename
-      // checks and carries a VALID frontmatter name, so only the directory-name
-      // charset guard can exclude it. Its name embeds an ESC control sequence
-      // that the non-interactive `/curator` output would otherwise print verbatim
-      // (terminal control-sequence injection). Keep a clean managed skill so the
-      // enumeration itself is exercised.
-      const maliciousDir = 'auto-skill-[2J[31mevil';
-      const directory = path.join(projectRoot, '.qwen', 'skills', maliciousDir);
-      await fs.mkdir(directory, { recursive: true });
-      const maliciousManifest = path.join(directory, 'SKILL.md');
-      await fs.writeFile(
-        maliciousManifest,
-        [
-          '---',
-          'name: evil',
-          'description: crafted',
-          'source: auto-skill',
-          '---',
-          '',
-          '# Skill',
-        ].join('\n'),
+      // A crafted directory that satisfies the `auto-skill-` prefix and
+      // basename checks and carries a VALID frontmatter name, so only the
+      // directory-name charset guard can exclude it. Its name embeds an ESC
+      // control sequence the non-interactive `/curator` output would otherwise
+      // print verbatim (terminal control-sequence injection). A clean managed
+      // skill keeps the enumeration itself exercised.
+      const maliciousDir = 'auto-skill-[2J[31mevil';
+      await writeManifest(
+        qwenPath('skills', maliciousDir),
+        [...frontmatter('evil', 'crafted'), '# Skill'],
+        old,
       );
-      await fs.utimes(maliciousManifest, old, old);
-
       await writeSkill('auto-skill-clean', 'auto-skill', old);
 
-      const status = await getAutoSkillCuratorStatus(projectRoot, now);
+      const listed = await surfaced();
 
-      const surfaced = [
-        ...status.active,
-        ...status.stale,
-        ...status.archived,
-      ].map((entry) => entry.directoryName);
-      expect(surfaced).toContain('auto-skill-clean');
-      expect(surfaced).not.toContain(maliciousDir);
+      expect(listed).toContain('auto-skill-clean');
+      expect(listed).not.toContain(maliciousDir);
     },
   );
 
   it.skipIf(process.platform === 'win32')(
     'refuses an auto-skill whose manifest is a symlink',
     async () => {
-      const now = new Date('2026-07-27T00:00:00.000Z');
-      const old = new Date(now.getTime() - 100 * DAY_MS);
-
       // A managed directory whose SKILL.md is a symlink (git mode 120000
       // survives a clone). Even though the link target is a valid auto-skill
       // manifest, the O_NOFOLLOW read refuses to follow it — so the skill is
       // not managed and a crafted target (e.g. /dev/zero) can never be read.
-      const target = await writeSkill('auto-skill-real', 'auto-skill', old);
-      const linkedDir = path.join(
-        projectRoot,
-        '.qwen',
-        'skills',
-        'auto-skill-linked',
+      const target = await writeSkill(
+        'auto-skill-real',
+        'auto-skill',
+        plusDays(-100),
       );
+      const linkedDir = qwenPath('skills', 'auto-skill-linked');
       await fs.mkdir(linkedDir, { recursive: true });
       await fs.symlink(target, path.join(linkedDir, 'SKILL.md'));
 
-      const status = await getAutoSkillCuratorStatus(projectRoot, now);
+      const listed = await surfaced();
 
-      const surfaced = [
-        ...status.active,
-        ...status.stale,
-        ...status.archived,
-      ].map((entry) => entry.directoryName);
-      expect(surfaced).not.toContain('auto-skill-linked');
+      expect(listed).not.toContain('auto-skill-linked');
       // The real, non-symlinked skill is still enumerated normally.
-      expect(surfaced).toContain('auto-skill-real');
+      expect(listed).toContain('auto-skill-real');
     },
   );
 
   it('keeps dry-run non-mutating while reporting first-sight seeding', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    await writeSkill(
-      'auto-skill-old',
-      'auto-skill',
-      new Date(now.getTime() - 100 * DAY_MS),
-    );
+    await writeSkill('auto-skill-old', 'auto-skill', plusDays(-100));
 
-    const result = await runAutoSkillCurator(projectRoot, {
-      dryRun: true,
-      now,
-    });
+    const result = await curate({ dryRun: true });
 
     expect(result).toMatchObject({
       dryRun: true,
@@ -205,70 +236,36 @@ describe('auto-skill curator', () => {
       seeded: ['auto-skill-old'],
       archived: [],
     });
-    await expect(
-      fs.access(path.join(projectRoot, '.qwen', 'skill-curator.json')),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(
-      fs.access(path.join(projectRoot, '.qwen', 'archived-skills')),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(
-      fs.access(
-        path.join(projectRoot, '.qwen', 'skills', 'auto-skill-old', 'SKILL.md'),
-      ),
-    ).resolves.toBeUndefined();
+    await expectMissing(statePath());
+    await expectMissing(qwenPath('archived-skills'));
+    await expectPresent(qwenPath('skills', 'auto-skill-old', 'SKILL.md'));
   });
 
   it('previews aged persisted candidates without changing state', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
-    const manifest = await writeSkill('auto-skill-old', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'old', level: 'project', filePath: manifest },
-      old,
-    );
-    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
-    const before = await fs.readFile(statePath, 'utf8');
+    await writeUsedSkill('auto-skill-old', plusDays(-100));
+    const before = await fs.readFile(statePath(), 'utf8');
 
-    const result = await runAutoSkillCurator(projectRoot, {
-      dryRun: true,
-      now,
-    });
+    const result = await curate({ dryRun: true });
 
     expect(result.archived).toEqual(['auto-skill-old']);
     expect(result.seeded).toEqual([]);
-    await expect(fs.readFile(statePath, 'utf8')).resolves.toBe(before);
-    await expect(
-      fs.access(path.join(projectRoot, '.qwen', 'archived-skills')),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.readFile(statePath(), 'utf8')).resolves.toBe(before);
+    await expectMissing(qwenPath('archived-skills'));
   });
 
   it('seeds the first automatic observation before aging skills', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    await writeSkill(
-      'auto-skill-existing',
-      'auto-skill',
-      new Date(now.getTime() - 200 * DAY_MS),
-    );
+    await writeSkill('auto-skill-existing', 'auto-skill', plusDays(-200));
 
     await expect(maybeRunAutoSkillCurator(projectRoot, now)).resolves.toEqual({
       status: 'seeded',
       checked: 1,
     });
+    await expectPresent(qwenPath('skills', 'auto-skill-existing'));
     await expect(
-      fs.access(
-        path.join(projectRoot, '.qwen', 'skills', 'auto-skill-existing'),
-      ),
-    ).resolves.toBeUndefined();
-    await expect(
-      maybeRunAutoSkillCurator(
-        projectRoot,
-        new Date(now.getTime() + 6 * DAY_MS),
-      ),
+      maybeRunAutoSkillCurator(projectRoot, plusDays(6)),
     ).resolves.toEqual({ status: 'not_due' });
 
-    const later = new Date(now.getTime() + 91 * DAY_MS);
-    const result = await maybeRunAutoSkillCurator(projectRoot, later);
+    const result = await maybeRunAutoSkillCurator(projectRoot, plusDays(91));
     expect(result.status).toBe('ran');
     if (result.status === 'ran') {
       expect(result.result.archived).toEqual(['auto-skill-existing']);
@@ -277,78 +274,40 @@ describe('auto-skill curator', () => {
 
   it('preserves an existing usage baseline when seeding the first run', async () => {
     const usedAt = new Date('2026-04-01T00:00:00.000Z');
-    const manifest = await writeSkill(
-      'auto-skill-preseeded',
-      'auto-skill',
-      new Date(usedAt.getTime() - 200 * DAY_MS),
-    );
     // Usage recorded before the first curator run establishes the inactivity
     // baseline (firstSeenAt / lastActivityAt) at usedAt.
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'preseeded', level: 'project', filePath: manifest },
+    await writeUsedSkill(
+      'auto-skill-preseeded',
+      plusDays(-200, usedAt),
       usedAt,
     );
 
     // The first automatic (seeding) run happens ~40 days later. It must not
     // reset the inactivity clock to `now`, or the stale transition would be
     // delayed by up to the full interval.
-    const seedAt = new Date(usedAt.getTime() + 40 * DAY_MS);
     await expect(
-      maybeRunAutoSkillCurator(projectRoot, seedAt),
+      maybeRunAutoSkillCurator(projectRoot, plusDays(40, usedAt)),
     ).resolves.toEqual({ status: 'seeded', checked: 1 });
 
-    const state = JSON.parse(
-      await fs.readFile(
-        path.join(projectRoot, '.qwen', 'skill-curator.json'),
-        'utf8',
-      ),
-    ) as {
-      skills: Record<
-        string,
-        { firstSeenAt: string; lastActivityAt: string; useCount: number }
-      >;
-    };
-    const record = state.skills['auto-skill-preseeded']!;
+    const record = (await readState()).skills['auto-skill-preseeded']!;
     expect(record.firstSeenAt).toBe(usedAt.toISOString());
     expect(record.lastActivityAt).toBe(usedAt.toISOString());
     expect(record.useCount).toBe(1);
   });
 
   it('marks inactive skills stale before archiving them', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 40 * DAY_MS);
-    const manifest = await writeSkill('auto-skill-stale', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'stale', level: 'project', filePath: manifest },
-      old,
-    );
+    await writeUsedSkill('auto-skill-stale', plusDays(-40));
 
-    const result = await runAutoSkillCurator(projectRoot, { now });
+    const result = await curate();
 
     expect(result.markedStale).toEqual(['auto-skill-stale']);
     expect(result.archived).toEqual([]);
-    await expect(
-      fs.access(path.join(projectRoot, '.qwen', 'skills', 'auto-skill-stale')),
-    ).resolves.toBeUndefined();
+    await expectPresent(qwenPath('skills', 'auto-skill-stale'));
   });
 
   it('archives stale packages and restores them without overwriting', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const manifest = await writeSkill(
-      'auto-skill-old',
-      'auto-skill',
-      new Date(now.getTime() - 100 * DAY_MS),
-    );
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'old', level: 'project', filePath: manifest },
-      new Date(now.getTime() - 100 * DAY_MS),
-    );
-    const supportFile = path.join(
-      projectRoot,
-      '.qwen',
+    const manifest = await writeUsedSkill('auto-skill-old', plusDays(-100));
+    const supportFile = qwenPath(
       'skills',
       'auto-skill-old',
       'references',
@@ -357,50 +316,25 @@ describe('auto-skill curator', () => {
     await fs.mkdir(path.dirname(supportFile), { recursive: true });
     await fs.writeFile(supportFile, 'keep me');
 
-    const run = await runAutoSkillCurator(projectRoot, { now });
+    const run = await curate();
     expect(run.archived).toEqual(['auto-skill-old']);
-    await expect(
-      recordAutoSkillUsage(
-        projectRoot,
-        { name: 'old', level: 'project', filePath: manifest },
-        now,
-      ),
-    ).resolves.toBe(false);
+    await expect(recordUse(manifest, now)).resolves.toBe(false);
     await expect(
       fs.readFile(
-        path.join(
-          projectRoot,
-          '.qwen',
-          'archived-skills',
-          'auto-skill-old',
-          'references',
-          'notes.md',
-        ),
+        qwenPath('archived-skills', 'auto-skill-old', 'references', 'notes.md'),
         'utf8',
       ),
     ).resolves.toBe('keep me');
 
-    await restoreArchivedAutoSkill(projectRoot, 'auto-skill-old', now);
+    await restore('auto-skill-old');
     await expect(fs.readFile(supportFile, 'utf8')).resolves.toBe('keep me');
-    const status = await getAutoSkillCuratorStatus(projectRoot, now);
-    expect(status.active.map((entry) => entry.directoryName)).toEqual([
-      'auto-skill-old',
-    ]);
+    const status = await readStatus();
+    expect(names(status.active)).toEqual(['auto-skill-old']);
   });
 
   it('refuses to restore over an existing active directory', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const manifest = await writeSkill(
-      'auto-skill-old',
-      'auto-skill',
-      new Date(now.getTime() - 100 * DAY_MS),
-    );
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'old', level: 'project', filePath: manifest },
-      new Date(now.getTime() - 100 * DAY_MS),
-    );
-    const run = await runAutoSkillCurator(projectRoot, { now });
+    await writeUsedSkill('auto-skill-old', plusDays(-100));
+    const run = await curate();
     expect(run.archived).toEqual(['auto-skill-old']);
 
     // A new skill reclaims the archived directory name in the live library.
@@ -411,23 +345,15 @@ describe('auto-skill curator', () => {
     );
     await fs.writeFile(reusedManifest, 'REUSED');
 
-    await expect(
-      restoreArchivedAutoSkill(projectRoot, 'auto-skill-old', now),
-    ).rejects.toThrow('an active directory already exists');
+    await expect(restore('auto-skill-old')).rejects.toThrow(
+      'an active directory already exists',
+    );
 
     // Neither the reused active directory nor the archived copy is disturbed.
     await expect(fs.readFile(reusedManifest, 'utf8')).resolves.toBe('REUSED');
-    await expect(
-      fs.access(
-        path.join(
-          projectRoot,
-          '.qwen',
-          'archived-skills',
-          'auto-skill-old',
-          'SKILL.md',
-        ),
-      ),
-    ).resolves.toBeUndefined();
+    await expectPresent(
+      qwenPath('archived-skills', 'auto-skill-old', 'SKILL.md'),
+    );
   });
 
   it('protects recently used skills and increments durable usage', async () => {
@@ -435,34 +361,20 @@ describe('auto-skill curator', () => {
     const manifest = await writeSkill(
       'auto-skill-used',
       'auto-skill',
-      new Date(usedAt.getTime() - 200 * DAY_MS),
+      plusDays(-200, usedAt),
     );
 
-    await expect(
-      recordAutoSkillUsage(
-        projectRoot,
-        { name: 'used', level: 'project', filePath: manifest },
-        usedAt,
-      ),
-    ).resolves.toBe(true);
-    const run = await runAutoSkillCurator(projectRoot, {
+    await expect(recordUse(manifest, usedAt)).resolves.toBe(true);
+    const run = await curate({
       now: new Date(usedAt.getTime() + AUTO_SKILL_ARCHIVE_AFTER_MS - DAY_MS),
     });
 
     expect(run.archived).toEqual([]);
-    const state = JSON.parse(
-      await fs.readFile(
-        path.join(projectRoot, '.qwen', 'skill-curator.json'),
-        'utf8',
-      ),
-    ) as { skills: Record<string, { firstSeenAt: string }> };
+    const state = await readState();
     expect(state.skills['auto-skill-used']!.firstSeenAt).toBe(
       usedAt.toISOString(),
     );
-    const status = await getAutoSkillCuratorStatus(
-      projectRoot,
-      new Date(usedAt.getTime() + DAY_MS),
-    );
+    const status = await readStatus(plusDays(1, usedAt));
     expect(status.active[0]).toMatchObject({
       directoryName: 'auto-skill-used',
       useCount: 1,
@@ -471,37 +383,24 @@ describe('auto-skill curator', () => {
 
   it('treats a recent manifest edit as activity', async () => {
     const old = new Date('2026-01-01T00:00:00.000Z');
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const manifest = await writeSkill('auto-skill-edited', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'edited', level: 'project', filePath: manifest },
-      old,
-    );
+    const manifest = await writeUsedSkill('auto-skill-edited', old);
     await fs.utimes(manifest, now, now);
 
-    const run = await runAutoSkillCurator(projectRoot, { now });
+    const run = await curate();
 
     expect(run.archived).toEqual([]);
     expect(run.reactivated).toEqual([]);
   });
 
   it('reactivates a stale skill once activity resumes', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 40 * DAY_MS);
-    const manifest = await writeSkill('auto-skill-revived', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'revived', level: 'project', filePath: manifest },
-      old,
-    );
+    const manifest = await writeUsedSkill('auto-skill-revived', plusDays(-40));
 
-    const staleRun = await runAutoSkillCurator(projectRoot, { now });
+    const staleRun = await curate();
     expect(staleRun.markedStale).toEqual(['auto-skill-revived']);
     expect(staleRun.reactivated).toEqual([]);
 
     await fs.utimes(manifest, now, now);
-    const revivedRun = await runAutoSkillCurator(projectRoot, { now });
+    const revivedRun = await curate();
 
     expect(revivedRun.reactivated).toEqual(['auto-skill-revived']);
     expect(revivedRun.archived).toEqual([]);
@@ -509,189 +408,109 @@ describe('auto-skill curator', () => {
   });
 
   it('fails closed on corrupt state without moving a skill', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
     const manifest = await writeSkill(
       'auto-skill-old',
       'auto-skill',
-      new Date(now.getTime() - 100 * DAY_MS),
+      plusDays(-100),
     );
-    await fs.writeFile(
-      path.join(projectRoot, '.qwen', 'skill-curator.json'),
-      '{broken',
-    );
+    await fs.writeFile(statePath(), '{broken');
 
-    await expect(runAutoSkillCurator(projectRoot, { now })).rejects.toThrow(
-      'Invalid auto-skill curator state',
-    );
-    await expect(fs.access(manifest)).resolves.toBeUndefined();
+    await expect(curate()).rejects.toThrow('Invalid auto-skill curator state');
+    await expectPresent(manifest);
   });
 
   it('fails closed on corrupt state without restoring an archived skill', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
-    const manifest = await writeSkill('auto-skill-old', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'old', level: 'project', filePath: manifest },
-      old,
-    );
-    await runAutoSkillCurator(projectRoot, { now });
-    const archivedManifest = path.join(
-      projectRoot,
-      '.qwen',
+    await writeUsedSkill('auto-skill-old', plusDays(-100));
+    await curate();
+    const archivedManifest = qwenPath(
       'archived-skills',
       'auto-skill-old',
       'SKILL.md',
     );
-    await fs.writeFile(
-      path.join(projectRoot, '.qwen', 'skill-curator.json'),
-      '{broken',
-    );
+    await fs.writeFile(statePath(), '{broken');
 
-    await expect(
-      restoreArchivedAutoSkill(projectRoot, 'auto-skill-old', now),
-    ).rejects.toThrow('Invalid auto-skill curator state');
-    await expect(fs.access(archivedManifest)).resolves.toBeUndefined();
-    await expect(
-      fs.access(
-        path.join(projectRoot, '.qwen', 'skills', 'auto-skill-old', 'SKILL.md'),
-      ),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(restore('auto-skill-old')).rejects.toThrow(
+      'Invalid auto-skill curator state',
+    );
+    await expectPresent(archivedManifest);
+    await expectMissing(qwenPath('skills', 'auto-skill-old', 'SKILL.md'));
   });
 
   it('skips archive collisions while continuing with other packages', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
-    const liveManifest = await writeSkill(
-      'auto-skill-collision',
-      'auto-skill',
-      old,
-    );
-    const otherManifest = await writeSkill(
-      'auto-skill-other',
-      'auto-skill',
-      old,
-    );
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'collision', level: 'project', filePath: liveManifest },
-      old,
-    );
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'other', level: 'project', filePath: otherManifest },
-      old,
-    );
-    const archivedDirectory = path.join(
-      projectRoot,
-      '.qwen',
+    const old = plusDays(-100);
+    const liveManifest = await writeUsedSkill('auto-skill-collision', old);
+    const otherManifest = await writeUsedSkill('auto-skill-other', old);
+    const archivedDirectory = qwenPath(
       'archived-skills',
       'auto-skill-collision',
     );
     await fs.mkdir(archivedDirectory, { recursive: true });
     await fs.writeFile(path.join(archivedDirectory, 'sentinel'), 'preserve');
 
-    const result = await runAutoSkillCurator(projectRoot, { now });
+    const result = await curate();
 
     expect(result.skippedCollisions).toEqual(['auto-skill-collision']);
     expect(result.archived).toEqual(['auto-skill-other']);
-    await expect(fs.access(liveManifest)).resolves.toBeUndefined();
-    await expect(fs.access(otherManifest)).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
+    await expectPresent(liveManifest);
+    await expectMissing(otherManifest);
     await expect(
       fs.readFile(path.join(archivedDirectory, 'sentinel'), 'utf8'),
     ).resolves.toBe('preserve');
   });
 
   it('reports archive collisions during a dry run', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
-    const liveManifest = await writeSkill(
+    const liveManifest = await writeUsedSkill(
       'auto-skill-collision',
-      'auto-skill',
-      old,
+      plusDays(-100),
     );
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'collision', level: 'project', filePath: liveManifest },
-      old,
-    );
-    const archivedDirectory = path.join(
-      projectRoot,
-      '.qwen',
-      'archived-skills',
-      'auto-skill-collision',
-    );
-    await fs.mkdir(archivedDirectory, { recursive: true });
-
-    const result = await runAutoSkillCurator(projectRoot, {
-      dryRun: true,
-      now,
+    await fs.mkdir(qwenPath('archived-skills', 'auto-skill-collision'), {
+      recursive: true,
     });
+
+    const result = await curate({ dryRun: true });
 
     expect(result.skippedCollisions).toEqual(['auto-skill-collision']);
     expect(result.archived).toEqual([]);
-    await expect(fs.access(liveManifest)).resolves.toBeUndefined();
+    await expectPresent(liveManifest);
   });
 
   it('seeds an unseen skill on an explicit run before aging it', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
     const manifest = await writeSkill(
       'auto-skill-legacy',
       'auto-skill',
-      new Date(now.getTime() - 200 * DAY_MS),
+      plusDays(-200),
     );
 
-    const result = await runAutoSkillCurator(projectRoot, { now });
+    const result = await curate();
 
     expect(result.seeded).toEqual(['auto-skill-legacy']);
     expect(result.archived).toEqual([]);
-    await expect(fs.access(manifest)).resolves.toBeUndefined();
+    await expectPresent(manifest);
   });
 
   it('keeps pinned skills active until they are unpinned', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
-    const manifest = await writeSkill(
-      'auto-skill-important',
-      'auto-skill',
-      old,
-    );
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'important', level: 'project', filePath: manifest },
-      old,
-    );
+    await writeUsedSkill('auto-skill-important', plusDays(-100));
 
     await setAutoSkillPinned(projectRoot, 'auto-skill-important', true, now);
-    const pinnedRun = await runAutoSkillCurator(projectRoot, { now });
+    const pinnedRun = await curate();
     expect(pinnedRun.archived).toEqual([]);
-    expect(
-      (await getAutoSkillCuratorStatus(projectRoot, now)).active[0],
-    ).toMatchObject({ directoryName: 'auto-skill-important', pinned: true });
+    expect((await readStatus()).active[0]).toMatchObject({
+      directoryName: 'auto-skill-important',
+      pinned: true,
+    });
 
     await setAutoSkillPinned(projectRoot, 'auto-skill-important', false, now);
-    const unpinnedRun = await runAutoSkillCurator(projectRoot, { now });
+    const unpinnedRun = await curate();
     expect(unpinnedRun.archived).toEqual(['auto-skill-important']);
   });
 
   it('loads version 1 state written before pinning was added', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const manifest = await writeSkill('auto-skill-legacy', 'auto-skill', now);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'legacy', level: 'project', filePath: manifest },
-      now,
-    );
-    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
-    const state = JSON.parse(await fs.readFile(statePath, 'utf8')) as {
-      skills: Record<string, { pinned?: boolean }>;
-    };
+    await writeUsedSkill('auto-skill-legacy', now);
+    const state = await readState();
     delete state.skills['auto-skill-legacy']!.pinned;
-    await fs.writeFile(statePath, JSON.stringify(state));
+    await fs.writeFile(statePath(), JSON.stringify(state));
 
-    const status = await getAutoSkillCuratorStatus(projectRoot, now);
+    const status = await readStatus();
 
     expect(status.active[0]).toMatchObject({
       directoryName: 'auto-skill-legacy',
@@ -700,75 +519,30 @@ describe('auto-skill curator', () => {
   });
 
   it('ignores non-project usage records', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
     const manifest = await writeSkill('auto-skill-user', 'auto-skill', now);
 
-    await expect(
-      recordAutoSkillUsage(
-        projectRoot,
-        { name: 'user', level: 'user', filePath: manifest },
-        now,
-      ),
-    ).resolves.toBe(false);
+    await expect(recordUse(manifest, now, 'user')).resolves.toBe(false);
   });
 
   it('ignores project usage records outside the skills root', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const outsideDirectory = path.join(
-      projectRoot,
-      '.qwen',
-      'outside',
-      'auto-skill-evil',
-    );
-    const manifest = path.join(outsideDirectory, 'SKILL.md');
-    await fs.mkdir(outsideDirectory, { recursive: true });
-    await fs.writeFile(
-      manifest,
-      [
-        '---',
-        'name: evil',
-        'description: outside the managed skills root',
-        'source: auto-skill',
-        '---',
-        '',
-      ].join('\n'),
+    const manifest = await writeManifest(
+      qwenPath('outside', 'auto-skill-evil'),
+      frontmatter('evil', 'outside the managed skills root'),
     );
 
-    await expect(
-      recordAutoSkillUsage(
-        projectRoot,
-        { name: 'evil', level: 'project', filePath: manifest },
-        now,
-      ),
-    ).resolves.toBe(false);
+    await expect(recordUse(manifest, now)).resolves.toBe(false);
   });
 
   it('rejects archive directory traversal during restore', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const traversalTarget = path.join(projectRoot, '.qwen', 'outside');
-    await fs.mkdir(path.join(projectRoot, '.qwen', 'archived-skills'), {
-      recursive: true,
-    });
-    await fs.mkdir(traversalTarget, { recursive: true });
-    await fs.writeFile(
-      path.join(traversalTarget, 'SKILL.md'),
-      [
-        '---',
-        'name: outside',
-        'description: traversal target',
-        'source: auto-skill',
-        '---',
-        '',
-        '# Outside',
-      ].join('\n'),
-    );
+    const traversalTarget = qwenPath('outside');
+    await fs.mkdir(qwenPath('archived-skills'), { recursive: true });
+    await writeManifest(traversalTarget, [
+      ...frontmatter('outside', 'traversal target'),
+      '# Outside',
+    ]);
 
     await expect(
-      restoreArchivedAutoSkill(
-        projectRoot,
-        'auto-skill-placeholder/../../outside',
-        now,
-      ),
+      restore('auto-skill-placeholder/../../outside'),
     ).rejects.toThrow('Archived auto-skill not found');
     expect((await fs.lstat(traversalTarget)).isDirectory()).toBe(true);
   });
@@ -776,192 +550,126 @@ describe('auto-skill curator', () => {
   it.skipIf(process.platform === 'win32')(
     'refuses a symlinked state file',
     async () => {
-      const now = new Date('2026-07-27T00:00:00.000Z');
-      await writeSkill(
-        'auto-skill-old',
-        'auto-skill',
-        new Date(now.getTime() - 100 * DAY_MS),
-      );
-      const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
+      await writeSkill('auto-skill-old', 'auto-skill', plusDays(-100));
       const external = path.join(projectRoot, 'external-state.json');
       await fs.writeFile(external, JSON.stringify({ version: 1, skills: {} }));
-      await fs.symlink(external, statePath);
+      await fs.symlink(external, statePath());
 
       // The target is valid JSON, so this only rejects because the read path
       // refuses to follow the symlink at all.
-      await expect(getAutoSkillCuratorStatus(projectRoot, now)).rejects.toThrow(
-        'refuses unsafe path',
-      );
+      await expect(readStatus()).rejects.toThrow('refuses unsafe path');
     },
   );
 
   it('refuses a non-regular-file state file', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    await writeSkill(
-      'auto-skill-old',
-      'auto-skill',
-      new Date(now.getTime() - 100 * DAY_MS),
-    );
-    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
-    await fs.mkdir(statePath, { recursive: true });
+    await writeSkill('auto-skill-old', 'auto-skill', plusDays(-100));
+    await fs.mkdir(statePath(), { recursive: true });
 
-    await expect(
-      runAutoSkillCurator(projectRoot, { dryRun: true, now }),
-    ).rejects.toThrow('refuses unsafe path');
+    await expect(curate({ dryRun: true })).rejects.toThrow(
+      'refuses unsafe path',
+    );
   });
 
   it('fails closed on an oversized state file', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    await writeSkill(
-      'auto-skill-old',
-      'auto-skill',
-      new Date(now.getTime() - 100 * DAY_MS),
-    );
-    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
+    await writeSkill('auto-skill-old', 'auto-skill', plusDays(-100));
     // A regular file just over the 1 MiB read cap.
     await fs.writeFile(
-      statePath,
+      statePath(),
       `{"version":1,"skills":{},"pad":"${'x'.repeat(1024 * 1024)}"}`,
     );
 
-    await expect(getAutoSkillCuratorStatus(projectRoot, now)).rejects.toThrow(
+    await expect(readStatus()).rejects.toThrow(
       'Invalid auto-skill curator state',
     );
   });
 
   it('distinguishes a present but ineligible archived skill from a missing one', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const archivedDir = path.join(
-      projectRoot,
-      '.qwen',
-      'archived-skills',
-      'auto-skill-broken',
-    );
-    await fs.mkdir(archivedDir, { recursive: true });
     // A manifest that lost its frontmatter is present but not eligible.
-    await fs.writeFile(path.join(archivedDir, 'SKILL.md'), '# no frontmatter');
+    await writeManifest(qwenPath('archived-skills', 'auto-skill-broken'), [
+      '# no frontmatter',
+    ]);
 
-    await expect(
-      restoreArchivedAutoSkill(projectRoot, 'auto-skill-broken', now),
-    ).rejects.toThrow('is not an eligible managed skill');
-    await expect(
-      restoreArchivedAutoSkill(projectRoot, 'auto-skill-absent', now),
-    ).rejects.toThrow('Archived auto-skill not found');
+    await expect(restore('auto-skill-broken')).rejects.toThrow(
+      'is not an eligible managed skill',
+    );
+    await expect(restore('auto-skill-absent')).rejects.toThrow(
+      'Archived auto-skill not found',
+    );
   });
 
   it('clamps a future manifest mtime so the skill remains curatable', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 180 * DAY_MS);
-    const future = new Date(now.getTime() + 10 * 365 * DAY_MS);
-    const manifest = await writeSkill('auto-skill-future', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'future', level: 'project', filePath: manifest },
-      old,
-    );
+    const future = plusDays(10 * 365);
+    const manifest = await writeUsedSkill('auto-skill-future', plusDays(-180));
     // Stamp the manifest far in the future (clock skew, backup restore).
     await fs.utimes(manifest, future, future);
 
-    const result = await runAutoSkillCurator(projectRoot, { now });
+    const result = await curate();
 
     expect(result.archived).toEqual(['auto-skill-future']);
   });
 
   it('does not double-list a directory present in both live and archived roots', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
-    const manifest = await writeSkill('auto-skill-dup', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'dup', level: 'project', filePath: manifest },
-      old,
-    );
-    await runAutoSkillCurator(projectRoot, { now });
+    await writeUsedSkill('auto-skill-dup', plusDays(-100));
+    await curate();
 
     // Recreate the same directory name in the live library.
     await writeSkill('auto-skill-dup', 'auto-skill', now);
 
-    const status = await getAutoSkillCuratorStatus(projectRoot, now);
+    const status = await readStatus();
 
-    const allNames = [
+    const allNames = names([
       ...status.active,
       ...status.stale,
       ...status.archived,
-    ].map((entry) => entry.directoryName);
+    ]);
     const dupCount = allNames.filter((n) => n === 'auto-skill-dup').length;
     expect(dupCount).toBe(1);
-    expect(status.active.map((e) => e.directoryName)).toContain(
-      'auto-skill-dup',
-    );
-    expect(status.archived.map((e) => e.directoryName)).not.toContain(
-      'auto-skill-dup',
-    );
+    expect(names(status.active)).toContain('auto-skill-dup');
+    expect(names(status.archived)).not.toContain('auto-skill-dup');
   });
 
   it('isolates a per-skill rename failure and still persists state', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
-    const manifestA = await writeSkill('auto-skill-a', 'auto-skill', old);
-    const manifestB = await writeSkill('auto-skill-b', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'a', level: 'project', filePath: manifestA },
-      old,
-    );
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'b', level: 'project', filePath: manifestB },
-      old,
-    );
+    const old = plusDays(-100);
+    await writeUsedSkill('auto-skill-a', old);
+    await writeUsedSkill('auto-skill-b', old);
 
-    // Make the archive root a file so rename into it fails for the first
-    // skill, then fix it so the second succeeds.
-    const archiveRoot = path.join(projectRoot, '.qwen', 'archived-skills');
+    // Block rename for auto-skill-a by placing a file at its archive
+    // destination, so it fails while auto-skill-b still archives.
+    const archiveRoot = qwenPath('archived-skills');
     await fs.mkdir(archiveRoot, { recursive: true });
-    // Block rename for auto-skill-a by placing a file at its destination.
     await fs.writeFile(path.join(archiveRoot, 'auto-skill-a'), 'blocker');
 
-    const result = await runAutoSkillCurator(projectRoot, { now });
+    const result = await curate();
 
     // auto-skill-a hits a collision (lstat succeeds → skippedCollisions).
     expect(result.skippedCollisions).toContain('auto-skill-a');
     // auto-skill-b archives normally.
     expect(result.archived).toContain('auto-skill-b');
     // State was persisted (lastRunAt is set).
-    const status = await getAutoSkillCuratorStatus(projectRoot, now);
+    const status = await readStatus();
     expect(status.lastRunAt).toBeDefined();
   });
 
   it.skipIf(process.platform === 'win32')(
     'reports skippedErrors when rename fails transiently',
     async () => {
-      const now = new Date('2026-07-27T00:00:00.000Z');
-      const old = new Date(now.getTime() - 100 * DAY_MS);
-      const manifest = await writeSkill('auto-skill-err', 'auto-skill', old);
-      await recordAutoSkillUsage(
-        projectRoot,
-        { name: 'err', level: 'project', filePath: manifest },
-        old,
-      );
+      await writeUsedSkill('auto-skill-err', plusDays(-100));
 
       // Seed state so the curator proceeds past the seeding branch.
-      await runAutoSkillCurator(projectRoot, {
-        now: new Date(now.getTime() - 95 * DAY_MS),
-      });
+      await curate({ now: plusDays(-95) });
 
       // Ensure the archive root exists, then remove write permission from the
       // skills root so rename (which needs write on the source parent) fails
       // with EACCES while lstat on the destination still succeeds.
-      const skillsRoot = path.join(projectRoot, '.qwen', 'skills');
-      const archiveRoot = path.join(projectRoot, '.qwen', 'archived-skills');
-      await fs.mkdir(archiveRoot, { recursive: true });
+      const skillsRoot = qwenPath('skills');
+      await fs.mkdir(qwenPath('archived-skills'), { recursive: true });
       await fs.chmod(skillsRoot, 0o555);
 
       try {
-        const result = await runAutoSkillCurator(projectRoot, { now });
+        const result = await curate();
         expect(result.skippedErrors).toContain('auto-skill-err');
         expect(result.archived).not.toContain('auto-skill-err');
-        const status = await getAutoSkillCuratorStatus(projectRoot, now);
+        const status = await readStatus();
         expect(status.lastRunAt).toBeDefined();
       } finally {
         await fs.chmod(skillsRoot, 0o755);
@@ -970,39 +678,26 @@ describe('auto-skill curator', () => {
   );
 
   it('prunes records whose directory exists in neither root', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
-    const manifest = await writeSkill('auto-skill-gone', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'gone', level: 'project', filePath: manifest },
-      old,
-    );
+    await writeUsedSkill('auto-skill-gone', plusDays(-100));
 
     // Seed state with the skill present.
-    await runAutoSkillCurator(projectRoot, {
-      now: new Date(now.getTime() - 95 * DAY_MS),
-    });
+    await curate({ now: plusDays(-95) });
 
     // Delete the skill directory by hand.
-    await fs.rm(path.join(projectRoot, '.qwen', 'skills', 'auto-skill-gone'), {
+    await fs.rm(qwenPath('skills', 'auto-skill-gone'), {
       recursive: true,
       force: true,
     });
 
     // Run again — the record should be pruned.
-    await runAutoSkillCurator(projectRoot, { now });
+    await curate();
 
-    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
-    const state = JSON.parse(await fs.readFile(statePath, 'utf8'));
+    const state = await readState();
     expect(state.skills['auto-skill-gone']).toBeUndefined();
   });
 
   it('does not create a state file when no auto-skills exist', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    await fs.mkdir(path.join(projectRoot, '.qwen', 'skills'), {
-      recursive: true,
-    });
+    await fs.mkdir(qwenPath('skills'), { recursive: true });
 
     const result = await maybeRunAutoSkillCurator(projectRoot, now);
 
@@ -1010,8 +705,7 @@ describe('auto-skill curator', () => {
     if (result.status === 'seeded') {
       expect(result.checked).toBe(0);
     }
-    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
-    await expect(fs.lstat(statePath)).rejects.toThrow();
+    await expect(fs.lstat(statePath())).rejects.toThrow();
   });
 
   it('sanitizes directory names in pin error messages', async () => {

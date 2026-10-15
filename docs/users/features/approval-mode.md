@@ -269,9 +269,10 @@ settings.json. See [auto-mode.md](./auto-mode.md#configuring-hints).
 - **Fail-closed**: when the classifier API is unreachable, the action is
   blocked rather than allowed. After two consecutive unavailable calls,
   the next tool call falls back to manual approval.
-- **Loop guard**: after three consecutive policy blocks, the next call
-  also falls back to manual approval so the agent isn't stuck cycling on
-  a dead-end approach.
+- **Loop guard**: after three consecutive blocks — classifier policy blocks
+  and deterministic destructive-command blocks both count — the call that
+  reaches the third block also falls back to manual approval so the agent
+  isn't stuck cycling on a dead-end approach.
 
 ### Example
 
@@ -303,6 +304,9 @@ reason inline and decide whether to switch to Ask Permissions Mode for that step
       // Optional: route ALL shell commands (including read-only ones like
       // ls, cat) through the classifier for defense-in-depth.
       // "classifyAllShell": true,
+      // Optional: send MCP tool calls to the classifier by name only
+      // (arguments are forwarded by default).
+      // "mcp": { "forwardArguments": false },
     },
   },
 }

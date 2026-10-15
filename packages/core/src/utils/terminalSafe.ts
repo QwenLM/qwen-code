@@ -109,3 +109,35 @@ export function stripDisplayControlChars(text: string): string {
   }
   return out;
 }
+
+/** Max length for a background-notification label shown in the UI. */
+export const NOTIFICATION_LABEL_MAX_LENGTH = 80;
+
+/**
+ * Normalize an arbitrary label (shell command, monitor description,
+ * background-agent label) for compact single-line display surfaces.
+ *
+ * Strips display control characters ({@link stripDisplayControlChars}),
+ * collapses whitespace runs to single spaces, trims, and caps the result
+ * at {@link NOTIFICATION_LABEL_MAX_LENGTH} **code points**, appending
+ * `'...'` when truncating. The gate and the slice both measure code
+ * points, so a truncation can never split a surrogate pair (a code-unit
+ * slice could emit an unpaired surrogate), and an astral-heavy label
+ * within the cap is never falsely "truncated" into a longer string.
+ *
+ * Shared by every background-notification label surface — the registries'
+ * legacy displayText and the ACP session's structured i18n fields — so
+ * the surfaces cannot drift.
+ */
+export function truncateNotificationLabel(label: string): string {
+  const normalized = stripDisplayControlChars(label)
+    .replace(/\s+/g, ' ')
+    .trim();
+  const codePoints = [...normalized];
+  if (codePoints.length <= NOTIFICATION_LABEL_MAX_LENGTH) {
+    return normalized;
+  }
+  return (
+    codePoints.slice(0, NOTIFICATION_LABEL_MAX_LENGTH - 3).join('') + '...'
+  );
+}

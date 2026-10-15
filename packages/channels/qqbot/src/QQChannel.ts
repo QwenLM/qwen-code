@@ -22,12 +22,16 @@ import {
   truncateCodePoints,
 } from '@qwen-code/channel-base';
 import type {
+  Attachment,
   ChannelConfig,
   ChannelBaseOptions,
   ChannelAgentBridge,
+  ChannelOutputSegmentContext,
+  Envelope,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   readFileSync,
   writeFileSync,
@@ -36,16 +40,27 @@ import {
   renameSync,
   unlinkSync,
 } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
 import type {
   QQChannelConfig,
+  QQMessageAttachment,
   QQMessageEvent,
   QQGroupMessageEvent,
   GroupAddRobotEvent,
   GroupDelRobotEvent,
   GroupMsgToggleEvent,
 } from './types.js';
+import {
+  QQ_IMAGE_MAX_BYTES,
+  QQ_MAX_ATTACHMENTS,
+  QQ_VIDEO_MAX_BYTES,
+  classifyQQAttachment,
+  downloadQQAttachment,
+} from './media.js';
 import {
   getCredsFilePath,
   loadCredentials,
@@ -78,9 +93,87 @@ export class DeliveryError extends Error {
   }
 }
 
+interface QQReplyContext {
+  chatId: string;
+  msgId: string;
+  timestamp: number;
+}
+
+interface QQStreamState {
+  chatId: string;
+  buffer: string;
+  timer: ReturnType<typeof setTimeout> | null;
+  retryCount: number;
+  replyContext?: QQReplyContext;
+  sourceLabel?: string;
+}
+
 /** Validate chatId to prevent SSRF when constructing URLs. */
 export function isValidChatId(id: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
+}
+
+interface QQInboundMedia {
+  attachment: QQMessageAttachment;
+  kind: 'image' | 'video';
+}
+
+/** Attachments actually handled: the per-message cap applies everywhere. */
+function cappedMedia(media: QQInboundMedia[]): QQInboundMedia[] {
+  return media.slice(0, QQ_MAX_ATTACHMENTS);
+}
+
+/** Placeholder for a media-only message: images win when both are present. */
+function mediaPlaceholder(media: QQInboundMedia[]): string {
+  return cappedMedia(media).some((entry) => entry.kind === 'image')
+    ? '(image)'
+    : '(video)';
+}
+
+/** Truncate to a byte budget without splitting a code point. */
+function truncateToBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let result = '';
+  let bytes = 0;
+  for (const char of text) {
+    const size = Buffer.byteLength(char);
+    if (bytes + size > maxBytes) break;
+    result += char;
+    bytes += size;
+  }
+  return result;
+}
+
+function canonicalExtension(kind: 'image' | 'video', mimeType: string): string {
+  switch (mimeType) {
+    case 'image/jpeg':
+      return '.jpg';
+    case 'image/png':
+      return '.png';
+    case 'image/gif':
+      return '.gif';
+    case 'video/mp4':
+      return '.mp4';
+    default:
+      return kind === 'image' ? '.jpg' : '.mp4';
+  }
+}
+
+/**
+ * Build the on-disk name from the resolved MIME: the read tool classifies
+ * media by extension, so a sender-supplied extension must never win. The stem
+ * is capped by bytes, not code points, to stay under the 255-byte limit.
+ */
+function attachmentFileName(
+  name: string | undefined,
+  kind: 'image' | 'video',
+  mimeType: string,
+): string {
+  const base = (name ?? '').split(/[\\/]/).pop() ?? '';
+  const stem = base.replace(/\.[^.]*$/, '');
+  const cleaned = stem.replace(/[^\p{L}\p{N}._-]/gu, '_').replace(/^\.+/, '_');
+  const safeStem = truncateToBytes(cleaned, 200) || `qq_${kind}`;
+  return `${safeStem}${canonicalExtension(kind, mimeType)}`;
 }
 
 export class QQChannel extends ChannelBase {
@@ -126,6 +219,8 @@ export class QQChannel extends ChannelBase {
   /** Track the latest user messageId per chatId for proper reply (msg_id). */
   private replyMsgId: Map<string, { msgId: string; timestamp: number }> =
     new Map();
+  private replyContextByMessageId = new Map<string, QQReplyContext>();
+  private inboundReplyContext = new AsyncLocalStorage<QQReplyContext>();
   /** msg_seq counter per user messageId, for multi-block streaming. */
   private msgSeqMap: Map<string, number> = new Map();
   /** Periodic cleanup timer for expired replyMsgId entries. */
@@ -200,20 +295,24 @@ export class QQChannel extends ChannelBase {
    *   - flushedSessions tracks already-sent sessions to skip final fullText
    */
   // ── Streaming state ───────────────────────────────────────────
-  private streamState: Map<
-    string,
-    {
-      chatId: string;
-      buffer: string;
-      timer: ReturnType<typeof setTimeout> | null;
-      retryCount: number;
-    }
-  > = new Map();
+  private streamState = new Map<string, QQStreamState>();
   private flushingSessions: Set<string> = new Set();
   private pendingStreamDelete: Set<string> = new Set();
   private _reconnectId: number = 0;
-  private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
+  /**
+   * Sessions with a prompt turn currently in flight, tracked via
+   * onPromptStart/onPromptEnd.
+   *
+   * This is the discriminator the cron textChunk handler uses to tell
+   * "prompt-response chunk" from "cron/non-prompt chunk". streamState
+   * cannot serve that role (#6094): a residual entry from a finished
+   * turn's unsettled flush silently blocks cron delivery. This set is
+   * reliable because ChannelBase always brackets a prompt turn with
+   * onPromptStart and onPromptEnd (onPromptEnd runs in the prompt path's
+   * finally, even on error/cancel), independent of streaming config.
+   */
+  private activePromptSessions: Set<string> = new Set();
   private readonly qqStatePath: string;
   /**
    * Path to the global sessions.json managed by start.ts.
@@ -270,7 +369,6 @@ export class QQChannel extends ChannelBase {
       );
       this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
     }
-    this.blockStreaming = this.config.blockStreaming === 'on';
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
     // sessions path so the channel owns its own session file.
@@ -302,7 +400,12 @@ export class QQChannel extends ChannelBase {
         return;
       }
       if (!wasInCronFlow) return;
-      if (this.streamState.has(sessionId)) return;
+      // Sessions with an active prompt turn belong to the prompt path
+      // (which delivers the response itself) — never capture their chunks
+      // into the cron buffer. Keyed on activePromptSessions rather than
+      // streamState (#6094): streamState can linger after a turn ends,
+      // which would silently drop cron chunks.
+      if (this.activePromptSessions.has(sessionId)) return;
       let entry = this.cronBuffer.get(sessionId);
       if (!entry) {
         entry = { buffer: '', timer: null };
@@ -327,7 +430,7 @@ export class QQChannel extends ChannelBase {
         if (toFlush) {
           const target = this.router.getTarget(sessionId);
           if (target) {
-            this.sendMessage(target.chatId, toFlush)
+            this.sendMessageWithReplyContext(target.chatId, toFlush)
               .then(() => {
                 if (!entry!.buffer && this.cronBuffer.get(sessionId) === entry)
                   this.cronBuffer.delete(sessionId);
@@ -367,7 +470,7 @@ export class QQChannel extends ChannelBase {
                     this.cronBuffer.delete(sessionId);
                     return;
                   }
-                  this.sendMessage(retryTarget.chatId, toFlush)
+                  this.sendMessageWithReplyContext(retryTarget.chatId, toFlush)
                     .then(() => {
                       entry!.pendingRetry = '';
                       if (
@@ -420,7 +523,10 @@ export class QQChannel extends ChannelBase {
                             this.cronBuffer.delete(sessionId);
                             return;
                           }
-                          this.sendMessage(retryTarget2.chatId, toFlush)
+                          this.sendMessageWithReplyContext(
+                            retryTarget2.chatId,
+                            toFlush,
+                          )
                             .then(() => {
                               entry!.pendingRetry = '';
                               if (
@@ -599,7 +705,77 @@ export class QQChannel extends ChannelBase {
     }
   }
 
+  override async handleInbound(envelope: Envelope): Promise<void> {
+    const context = envelope.messageId
+      ? this.replyContextByMessageId.get(envelope.messageId)
+      : undefined;
+    if (!context || context.chatId !== envelope.chatId) {
+      await super.handleInbound(envelope);
+      return;
+    }
+    await this.inboundReplyContext.run(context, () =>
+      super.handleInbound(envelope),
+    );
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
+    const inboundContext = this.inboundReplyContext.getStore();
+    const latest = this.replyMsgId.get(chatId);
+    const replyContext =
+      inboundContext?.chatId === chatId
+        ? inboundContext
+        : latest
+          ? { chatId, ...latest }
+          : undefined;
+    await this.sendMessageWithReplyContext(chatId, text, replyContext);
+  }
+
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    const inboundContext = this.inboundReplyContext.getStore();
+    const latest = this.replyMsgId.get(chatId);
+    const replyContext =
+      inboundContext?.chatId === chatId
+        ? inboundContext
+        : latest
+          ? { chatId, ...latest }
+          : undefined;
+    await this.sendMessageWithReplyContext(
+      chatId,
+      text,
+      replyContext,
+      sourceLabel,
+    );
+  }
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    const messageId = this.getResponseMessageId(sessionId);
+    const replyContext = messageId
+      ? this.replyContextByMessageId.get(messageId)
+      : undefined;
+    await this.sendMessageWithReplyContext(
+      chatId,
+      text,
+      replyContext,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
+    );
+  }
+
+  private async sendMessageWithReplyContext(
+    chatId: string,
+    text: string,
+    replyContext?: QQReplyContext,
+    sourceLabel?: string,
+  ): Promise<void> {
     // <noreply> suppression
     if (text.trim() === '<noreply>') {
       process.stderr.write(
@@ -607,12 +783,13 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    const outgoingText = this.formatMarkdownAttributedText(text, sourceLabel);
+    const plainOutgoingText = this.formatAttributedText(text, sourceLabel);
 
     const route = await this.resolveRoute(chatId);
     if (!route) return;
 
-    // Look up reply context with TTL check
-    const entry = this.replyMsgId.get(chatId);
+    const entry = replyContext?.chatId === chatId ? replyContext : undefined;
     const msgId =
       entry && Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
         ? entry.msgId
@@ -621,8 +798,7 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, reply context expired, sending without msg_id\n`,
       );
-      this.msgSeqMap.delete(entry.msgId);
-      this.replyMsgId.delete(chatId);
+      this.deleteReplyContext(entry);
       this.saveQQState();
     }
 
@@ -647,7 +823,7 @@ export class QQChannel extends ChannelBase {
       // ── STEP 1: Passive markdown attempt ──
       const passiveBody: Record<string, unknown> = {
         msg_type: 2,
-        markdown: { content: text },
+        markdown: { content: outgoingText },
       };
       nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
       if (msgId) {
@@ -709,7 +885,7 @@ export class QQChannel extends ChannelBase {
           // ── STEP 2: Active markdown (msg_type: 2, NO msg_id/msg_seq) ──
           const activeMdBody: Record<string, unknown> = {
             msg_type: 2,
-            markdown: { content: text },
+            markdown: { content: outgoingText },
           };
           const activeMdResp = await sendQQMessage(
             route.base,
@@ -747,7 +923,7 @@ export class QQChannel extends ChannelBase {
 
           // ── STEP 3: Active plain-text (msg_type: 0, NO msg_id/msg_seq) ──
           const activeTextBody: Record<string, unknown> = {
-            content: text,
+            content: plainOutgoingText,
             msg_type: 0,
           };
           const activeTextResp = await sendQQMessage(
@@ -792,7 +968,7 @@ export class QQChannel extends ChannelBase {
 
         // Plain-text fallback for pure active messages (no reply context)
         const plainBody: Record<string, unknown> = {
-          content: text,
+          content: plainOutgoingText,
           msg_type: 0,
         };
         const fallbackRes = await sendQQMessage(
@@ -949,6 +1125,7 @@ export class QQChannel extends ChannelBase {
     this.detachCronHandler();
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
+    this.replyContextByMessageId.clear();
     this.msgSeqMap.clear();
     this.botOpenIdByGroup.clear();
     this.warnedSenderOpenIds.clear();
@@ -968,24 +1145,31 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
+    this.activePromptSessions.clear();
   }
 
   /**
-   * QQ Bot API V2 does not provide a typing indicator endpoint.
-   * ChannelBase calls these hooks to signal prompt start/end;
-   * they are intentionally no-ops for this channel.
+   * QQ Bot API V2 does not provide a typing indicator endpoint, but these
+   * hooks still maintain activePromptSessions — the cron textChunk
+   * discriminator (see activePromptSessions). ChannelBase always pairs the
+   * two calls per prompt turn (onPromptEnd runs in the prompt path's
+   * finally, even on error/cancel).
    */
   protected override onPromptStart(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     _messageId?: string,
-  ): void {}
+  ): void {
+    this.activePromptSessions.add(sessionId);
+  }
 
   protected override onPromptEnd(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     _messageId?: string,
-  ): void {}
+  ): void {
+    this.activePromptSessions.delete(sessionId);
+  }
 
   // ── Streaming (idle-flush with per-session buffers) ────────────
 
@@ -993,42 +1177,48 @@ export class QQChannel extends ChannelBase {
     chatId: string,
     chunk: string,
     sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): void {
-    if (this.blockStreaming) return;
     let state = this.streamState.get(sessionId);
     if (!state) {
-      state = { chatId, buffer: chunk, timer: null, retryCount: 0 } as {
-        chatId: string;
-        buffer: string;
-        timer: ReturnType<typeof setTimeout> | null;
-        retryCount: number;
+      const messageId =
+        segment?.messageId ?? this.getResponseMessageId(sessionId);
+      const replyContext = messageId
+        ? this.replyContextByMessageId.get(messageId)
+        : undefined;
+      state = {
+        chatId,
+        buffer: chunk,
+        timer: null,
+        retryCount: 0,
+        ...(replyContext ? { replyContext } : {}),
+        ...(segment?.sourceLabel ? { sourceLabel: segment.sourceLabel } : {}),
       };
       this.streamState.set(sessionId, state);
     } else {
+      state.sourceLabel ??= segment?.sourceLabel;
       state.buffer += chunk;
       if (state.timer) {
         clearTimeout(state.timer);
         state.timer = null;
       }
-      // Size-cap flush: check flushingSessions to prevent concurrent sends.
-      if (
-        state.buffer.length >=
-        (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
-      ) {
-        const buf = state.buffer;
-        state.buffer = '';
-        if (this.flushingSessions.has(sessionId)) {
-          // Send in-flight — re-buffer and let the in-flight send's .then() pick it up
-          state.buffer = buf + (state.buffer || '');
-          state.timer = setTimeout(() => {
-            this.idleFlush(sessionId, this._reconnectId);
-          }, QQChannel.IDLE_FLUSH_MS);
-          state.timer.unref?.();
-          return;
-        }
-        this.flushAndTrack(sessionId, buf, state, 'idleFlush');
+    }
+    // Size-cap flush: reserve room for the independently rendered source
+    // label and prevent concurrent sends.
+    if (state.buffer.length >= this.streamBufferLimit(state)) {
+      const buf = state.buffer;
+      state.buffer = '';
+      if (this.flushingSessions.has(sessionId)) {
+        // Send in-flight — re-buffer and let the in-flight send's .then() pick it up
+        state.buffer = buf + (state.buffer || '');
+        state.timer = setTimeout(() => {
+          this.idleFlush(sessionId, this._reconnectId);
+        }, QQChannel.IDLE_FLUSH_MS);
+        state.timer.unref?.();
         return;
       }
+      this.flushAndTrack(sessionId, buf, state, 'idleFlush');
+      return;
     }
     const reconnectId = this._reconnectId;
     state.timer = setTimeout(() => {
@@ -1071,19 +1261,19 @@ export class QQChannel extends ChannelBase {
   private flushAndTrack(
     sessionId: string,
     buffer: string,
-    state: {
-      chatId: string;
-      buffer: string;
-      timer: ReturnType<typeof setTimeout> | null;
-      retryCount: number;
-    },
+    state: QQStreamState,
     logLabel: string,
   ): void {
     this.flushingSessions.add(sessionId);
     // sendMessage throws DeliveryError for delivery failures.
     // RETRY_EXHAUSTED, ACTIVE_MSG_DISABLED, and FALLBACK_FAILED are
     // permanent. RATE_LIMITED is transient and falls through to re-buffer/retry.
-    this.sendMessage(state.chatId, buffer)
+    this.sendMessageWithReplyContext(
+      state.chatId,
+      buffer,
+      state.replyContext,
+      state.sourceLabel,
+    )
       .then(() => {
         // #3: Guard — if session died during in-flight send, touch nothing
         const current = this.streamState.get(sessionId);
@@ -1173,10 +1363,7 @@ export class QQChannel extends ChannelBase {
           if (current === state) {
             current.buffer = buffer + (current.buffer || '');
             // #3: If re-buffer exceeds max length, flush immediately
-            if (
-              current.buffer.length >=
-              (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
-            ) {
+            if (current.buffer.length >= this.streamBufferLimit(current)) {
               current.retryCount++;
               if (
                 this.maxFlushRetries > 0 &&
@@ -1259,6 +1446,7 @@ export class QQChannel extends ChannelBase {
     chatId: string,
     fullText: string,
     sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
     const state = this.streamState.get(sessionId);
     if (state?.timer) {
@@ -1274,11 +1462,26 @@ export class QQChannel extends ChannelBase {
     }
     const wasFlushed = this.flushedSessions.has(sessionId);
     const remaining = state?.buffer ?? (wasFlushed ? '' : fullText);
+    const sourceLabel =
+      segment?.sourceLabel ??
+      state?.sourceLabel ??
+      this.getResponseSourceLabel(sessionId);
     this.streamState.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     if (remaining) {
-      await super.onResponseComplete(chatId, remaining, sessionId);
+      await this.sendResponseMessage(chatId, remaining, sessionId, sourceLabel);
     }
+  }
+
+  private streamBufferLimit(state: QQStreamState): number {
+    const configured =
+      this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH;
+    if (!state.sourceLabel) return configured;
+    const attributed = this.formatMarkdownAttributedText(
+      'x',
+      state.sourceLabel,
+    );
+    return Math.max(1, configured - (attributed.length - 1));
   }
 
   override onSessionDied(sessionId: string): void {
@@ -1290,6 +1493,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    this.activePromptSessions.delete(sessionId);
     super.onSessionDied(sessionId);
   }
   // ── State Persistence (cross-server context continuation) ──────
@@ -1450,6 +1654,8 @@ export class QQChannel extends ChannelBase {
                     (o['msgId'] as string).length <= 128 &&
                     typeof o['timestamp'] === 'number' &&
                     Number.isFinite(o['timestamp']) &&
+                    o['timestamp'] >=
+                      Date.now() - QQChannel.REPLY_MSG_ID_TTL_MS &&
                     o['timestamp'] <= Date.now() + QQChannel.REPLY_MSG_ID_TTL_MS
                   );
                 })
@@ -1467,6 +1673,12 @@ export class QQChannel extends ChannelBase {
           );
         }
       }
+      this.replyContextByMessageId = new Map(
+        Array.from(this.replyMsgId, ([chatId, entry]) => [
+          entry.msgId,
+          { chatId, ...entry },
+        ]),
+      );
       if (raw.msgSeqMap) {
         const arr = raw.msgSeqMap as Array<[string, unknown]>;
         const totalRaw = Array.isArray(arr) ? arr.length : 0;
@@ -1486,6 +1698,11 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] restoreQQState: accepted ${this.msgSeqMap.size} msgSeqMap entries (rejected ${totalRaw - this.msgSeqMap.size})\n`,
           );
+        }
+      }
+      for (const msgId of this.msgSeqMap.keys()) {
+        if (!this.replyContextByMessageId.has(msgId)) {
+          this.msgSeqMap.delete(msgId);
         }
       }
       if (raw.groupActiveMsgEnabled) {
@@ -1623,17 +1840,19 @@ export class QQChannel extends ChannelBase {
 
   // ── ReplyMsgId helpers ────────────────────────────────────────
 
-  /**
-   * Set replyMsgId for a chat, cleaning up the previous entry's msgSeqMap
-   * to prevent orphaned entries accumulating over time.
-   */
   private setReplyMsgId(chatId: string, msgId: string): void {
-    const oldEntry = this.replyMsgId.get(chatId);
-    if (oldEntry && oldEntry.msgId !== msgId) {
-      this.msgSeqMap.delete(oldEntry.msgId);
-    }
-    this.replyMsgId.set(chatId, { msgId, timestamp: Date.now() });
+    const timestamp = Date.now();
+    this.replyMsgId.set(chatId, { msgId, timestamp });
+    this.replyContextByMessageId.set(msgId, { chatId, msgId, timestamp });
     this.saveQQState();
+  }
+
+  private deleteReplyContext(context: QQReplyContext): void {
+    this.replyContextByMessageId.delete(context.msgId);
+    this.msgSeqMap.delete(context.msgId);
+    if (this.replyMsgId.get(context.chatId)?.msgId === context.msgId) {
+      this.replyMsgId.delete(context.chatId);
+    }
   }
 
   /**
@@ -1646,6 +1865,12 @@ export class QQChannel extends ChannelBase {
     this.replyMsgIdCleanupTimer = setInterval(() => {
       const cutoff = Date.now() - QQChannel.REPLY_MSG_ID_TTL_MS;
       let dirty = false;
+      for (const context of this.replyContextByMessageId.values()) {
+        if (context.timestamp < cutoff) {
+          this.deleteReplyContext(context);
+          dirty = true;
+        }
+      }
       for (const [chatId, entry] of this.replyMsgId) {
         if (entry.timestamp < cutoff) {
           this.msgSeqMap.delete(entry.msgId);
@@ -2291,6 +2516,9 @@ export class QQChannel extends ChannelBase {
     isSlash: boolean;
     safeName: string;
     cleanText: string;
+    commandText: string;
+    routeText: string;
+    body: string;
     text: string;
     senderName: string;
   } | null {
@@ -2305,12 +2533,19 @@ export class QQChannel extends ChannelBase {
 
     const content = (event.content || '').trim();
     const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
+    let mentionIndex = 0;
+    const displayContent = content
+      .replace(/<@[^>]{1,64}>/g, (mention) =>
+        event.mentions?.[mentionIndex++]?.is_you ? '' : mention,
+      )
+      .trim();
     // Strip trusted tags that could be forged by users
-    const safeContent = content
+    const safeCleanText = cleanText
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
-      .replace(/\[bot]/g, '');
-    const safeCleanText = cleanText
+      .replace(/\[bot]/g, '')
+      .trim();
+    const safeDisplayText = displayContent
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '')
@@ -2324,11 +2559,13 @@ export class QQChannel extends ChannelBase {
       this.extractBotOpenId(event.mentions, chatId);
     }
 
-    if (!cleanText) return null;
+    if (!cleanText && this.inboundMedia(event).length === 0) return null;
 
     const effectiveIsAtBot = forceAtMention ?? isAtBot;
 
-    const isSlash = effectiveIsAtBot && safeCleanText.startsWith('/');
+    const rawCommandText = safeCleanText.replace(/<@[^>]{1,64}>/g, '').trim();
+    const isSlash = effectiveIsAtBot && rawCommandText.startsWith('/');
+    const commandText = sanitizePromptText(rawCommandText);
 
     // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
     // self-echoes or other bot messages. Instead, tag with [bot] prefix so the
@@ -2394,23 +2631,107 @@ export class QQChannel extends ChannelBase {
       : senderIdentity
         ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
         : '';
+    const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: `;
+    const body = sanitizePromptText(
+      this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
+    );
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
-      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
+      : `${head}${body}${suffixFromBotOpenId}`;
 
     return {
       isAtBot: effectiveIsAtBot,
       isSlash,
       safeName,
       cleanText,
+      commandText,
+      routeText: sanitizePromptText(safeDisplayText),
+      body,
       text,
       senderName,
     };
   }
 
+  /** All supported attachments of a message, in event order. */
+  private inboundMedia(event: QQMessageEvent): QQInboundMedia[] {
+    return (event.attachments ?? [])
+      .map((attachment) => ({
+        attachment,
+        kind: classifyQQAttachment(attachment.content_type),
+      }))
+      .filter((entry): entry is QQInboundMedia => entry.kind !== undefined);
+  }
+
+  private dispatchInbound(
+    envelope: Envelope,
+    media: QQInboundMedia[],
+  ): Promise<void> {
+    if (media.length === 0) return this.handleInbound(envelope);
+    return this.prepareThenHandleInbound(envelope, () =>
+      this.attachInboundMedia(envelope, media),
+    );
+  }
+
+  private async attachInboundMedia(
+    envelope: Envelope,
+    media: QQInboundMedia[],
+  ): Promise<void> {
+    const selected = cappedMedia(media);
+    if (selected.length < media.length) {
+      process.stderr.write(
+        `[QQ:${this.name}] skipping ${media.length - selected.length} attachment(s): over the per-message limit of ${QQ_MAX_ATTACHMENTS}\n`,
+      );
+    }
+    const attachments: Attachment[] = [];
+    for (const { attachment, kind } of selected) {
+      try {
+        const { buffer, mimeType } = await downloadQQAttachment(
+          attachment.url,
+          kind === 'image' ? QQ_IMAGE_MAX_BYTES : QQ_VIDEO_MAX_BYTES,
+          attachment.content_type,
+        );
+        const fileName = attachmentFileName(
+          attachment.filename,
+          kind,
+          mimeType,
+        );
+        const dir = join(tmpdir(), 'channel-files', randomUUID());
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const filePath = join(dir, fileName);
+        await writeFile(filePath, buffer, { mode: 0o600 });
+        if (kind === 'image') {
+          // The image entry carries the picture for an image-capable model; the
+          // file entry only exists so a text-only model still gets a path.
+          attachments.push({
+            type: 'image',
+            data: buffer.toString('base64'),
+            mimeType,
+            fileName,
+          });
+          attachments.push({ type: 'file', filePath, mimeType, fileName });
+          continue;
+        }
+        attachments.push({ type: 'video', filePath, mimeType, fileName });
+      } catch (err) {
+        process.stderr.write(
+          `[QQ:${this.name}] skipping ${kind} attachment: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            160,
+          )}\n`,
+        );
+      }
+    }
+    if (attachments.length > 0) envelope.attachments = attachments;
+    if (envelope.syntheticText && attachments.length === 0) {
+      envelope.text = '(User sent media but download failed)';
+    }
+  }
+
   private handleC2C(event: QQMessageEvent): void {
     if (this.isDuplicate(event.id)) return;
-    if (!event.content?.trim()) return;
+    const media = this.inboundMedia(event);
+    const rawContent = event.content ?? '';
+    if (!rawContent.trim() && media.length === 0) return;
     if (!event.author) {
       process.stderr.write(
         `[QQ:${this.name}] C2C message dropped: missing author\n`,
@@ -2438,17 +2759,21 @@ export class QQChannel extends ChannelBase {
     this.setReplyMsgId(chatId, event.id);
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
-    const cleanText = event.content.trim();
+    const cleanText = rawContent.trim();
     // Strip system-reserved tags that could be forged by users
     const safeContent = cleanText
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
     const isSlash = safeContent.startsWith('/');
-    const text = isSlash
-      ? sanitizePromptText(safeContent)
-      : `[atMention=true] [${safeName}]: ${sanitizePromptText(safeContent)}`;
-    this.handleInbound({
+    const body = sanitizePromptText(safeContent);
+    const mediaOnly = !body && media.length > 0;
+    const text = mediaOnly
+      ? mediaPlaceholder(media)
+      : isSlash || this.config.messageRoutes
+        ? body
+        : `[atMention=true] [${safeName}]: ${body}`;
+    const envelope: Envelope = {
       channelName: this.name,
       senderId: chatId,
       senderName,
@@ -2458,8 +2783,12 @@ export class QQChannel extends ChannelBase {
       isGroup: false,
       isMentioned: true,
       isReplyToBot: false,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
-    }).catch((e) =>
+      ...(mediaOnly ? { syntheticText: true as const } : {}),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
+    };
+    this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       ),
@@ -2506,7 +2835,10 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, senderName, safeName, cleanText } = result;
+    const { isSlash, text, commandText, routeText, senderName, safeName } =
+      result;
+    const media = this.inboundMedia(event);
+    const mediaOnly = result.body === '' && media.length > 0;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
     // so side effects (extractBotOpenId) are applied regardless of dedup.
@@ -2514,7 +2846,7 @@ export class QQChannel extends ChannelBase {
 
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(commandText.split(/\s/)[0], 64)}\n`,
       );
     }
 
@@ -2534,18 +2866,26 @@ export class QQChannel extends ChannelBase {
       return;
     }
     this.setReplyMsgId(chatId, event.id);
-    this.handleInbound({
+    const envelope: Envelope = {
       channelName: this.name,
       senderId,
       senderName,
       chatId,
-      text,
+      text: mediaOnly
+        ? mediaPlaceholder(media)
+        : this.config.messageRoutes
+          ? routeText
+          : text,
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: true,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
-    }).catch((e) =>
+      ...(mediaOnly ? { syntheticText: true as const } : {}),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
+    };
+    this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       ),
@@ -2585,7 +2925,17 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const { isSlash, text, senderName, isAtBot, safeName, cleanText } = result;
+    const {
+      isSlash,
+      text,
+      commandText,
+      routeText,
+      senderName,
+      isAtBot,
+      safeName,
+    } = result;
+    const media = this.inboundMedia(event);
+    const mediaOnly = result.body === '' && media.length > 0;
 
     // @-bot messages always pass through (passive reply).
     // Non-@-bot messages are subject to active-message and keyword policies.
@@ -2655,7 +3005,7 @@ export class QQChannel extends ChannelBase {
 
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(commandText.split(/\s/)[0], 64)}\n`,
       );
     }
 
@@ -2679,18 +3029,26 @@ export class QQChannel extends ChannelBase {
     // Set replyMsgId for all messages that pass the policy gate,
     // not just @-bot ones.
     this.setReplyMsgId(chatId, event.id);
-    this.handleInbound({
+    const envelope: Envelope = {
       channelName: this.name,
       chatId,
-      text,
+      text: mediaOnly
+        ? mediaPlaceholder(media)
+        : this.config.messageRoutes
+          ? routeText
+          : text,
       senderId,
       senderName,
       messageId: event.id,
       isGroup: true,
       isMentioned: isAtBot,
       isReplyToBot: isAtBot,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
-    }).catch((e) => {
+      ...(mediaOnly ? { syntheticText: true as const } : {}),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
+    };
+    this.dispatchInbound(envelope, media).catch((e) => {
       process.stderr.write(
         `[QQ:${this.name}] handleGroupAll error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       );
@@ -2741,6 +3099,12 @@ export class QQChannel extends ChannelBase {
     const replyEntry = this.replyMsgId.get(groupId);
     if (replyEntry) this.msgSeqMap.delete(replyEntry.msgId);
     this.replyMsgId.delete(groupId);
+    for (const context of this.replyContextByMessageId.values()) {
+      if (context.chatId === groupId) {
+        this.replyContextByMessageId.delete(context.msgId);
+        this.msgSeqMap.delete(context.msgId);
+      }
+    }
     this.botOpenIdByGroup.delete(groupId);
     this._lastKeywordNoMatchLog.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)

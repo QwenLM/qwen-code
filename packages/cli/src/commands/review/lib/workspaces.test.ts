@@ -54,7 +54,7 @@ describe('workspaceDirFor', () => {
     );
   });
 
-  it('honours a negation, so a separate bun workspace is not a member', () => {
+  it('honours a negation, so a separate toolchain is not a member', () => {
     // packages/desktop has its own lockfile and is not part of this npm workspace.
     // Building it from the root fails.
     expect(

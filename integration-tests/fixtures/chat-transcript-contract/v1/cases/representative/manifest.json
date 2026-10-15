@@ -1,0 +1,28 @@
+{
+  "fixtureVersion": 1,
+  "name": "representative",
+  "generatorVersion": "chat-transcript-prevalidation-v1",
+  "sources": ["daemon", "acp", "chat-records"],
+  "consumers": ["web", "tauri", "vscode", "html"],
+  "capabilities": [
+    "text-thinking-usage-images",
+    "streaming-replay-prepend",
+    "tools-plan-permission",
+    "render-action-identity",
+    "scope-generation",
+    "export-security-network-budgets"
+  ],
+  "complete": true,
+  "expectedDiagnostics": [],
+  "normalizedFields": ["clientReceivedAt", "createdAt", "updatedAt"],
+  "hashes": {
+    "daemon-events.jsonl": "ea25e535847aea996ee3062b7497272540520a9a213de7223ac705780ccb7ac7",
+    "acp-session-updates.jsonl": "2f79f50505bd17de22979d47a63e52183cde541d416e4c44eb58cd5351e6a13a",
+    "chat-records.jsonl": "b66abea928c3c65cdedc4ca1c455d86b1b0a46b90e2a6a186afefaa89e87db0e",
+    "expected-model.json": "5c8469615014fadea69fbc047d791add611e077e59f398932bfa4777e4940e67",
+    "expected-render-items.json": "d51acc8a0b6282898fec49f1870c0e78c901af5136b9866da3da874722d1db7b",
+    "expected-export.json": "23521fd1203ffa6d47b0a93ac3de6481302fc9271e9150e77496ed42abdc063c",
+    "expected-gate.json": "d87b72e7995d2d96dbf77948d443f493b81a1737c9246414fd1b16167ae2440f",
+    "expected-network.json": "ee14c9469e2f80f1262a23ca8452bc41abb9ce43a625176c1b428608c503ad11"
+  }
+}

@@ -39,6 +39,7 @@ function response(): Response {
       res.statusCode = statusCode;
       return res;
     }),
+    set: vi.fn(() => res),
     json: vi.fn(() => res),
   };
   return res as unknown as Response;
@@ -183,4 +184,90 @@ describe('requireSessionRuntime telemetry attribution', () => {
       expect(telemetryMocks.setDaemonTelemetryWorkspace).not.toHaveBeenCalled();
     },
   );
+
+  it('redacts internal workspace ids from ambiguous ownership responses', () => {
+    const primary = runtime('/workspace/primary', { primary: true });
+    const internal = {
+      ...runtime('/workspace/conversations'),
+      provenance: 'live-conversation' as const,
+    };
+    const setup = registry({
+      primary,
+      runtimes: [primary, internal],
+      resolution: { kind: 'ambiguous', runtimes: [primary, internal] },
+    });
+    const res = response();
+
+    expect(
+      requireSessionRuntime({
+        sessionId: 'duplicate-session',
+        route: 'GET /session/:id/events',
+        res,
+        workspaceRegistry: setup.registry,
+      }),
+    ).toBeUndefined();
+    expect(res.statusCode).toBe(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'ambiguous_session_owner',
+        sessionId: 'duplicate-session',
+      }),
+    );
+    expect(vi.mocked(res.json).mock.calls[0]?.[0]).not.toHaveProperty(
+      'workspaceIds',
+    );
+  });
+
+  it('reports an unavailable primary while an internal runtime is registered', () => {
+    const primary = runtime('/workspace/primary', { primary: true });
+    const internal = {
+      ...runtime('/workspace/conversations'),
+      provenance: 'live-conversation' as const,
+    };
+    const setup = registry({
+      primary,
+      runtimes: [primary, internal],
+      resolution: { kind: 'not_found' },
+    });
+    expect(
+      setup.registry.beginReplacement(setup.registry.primaryEntry, 'next'),
+    ).toBe(true);
+    const res = response();
+
+    expect(
+      requireSessionRuntime({
+        sessionId: 'primary-session',
+        route: 'POST /session/:id/prompt',
+        res,
+        workspaceRegistry: setup.registry,
+      }),
+    ).toBeUndefined();
+    expect(res.statusCode).toBe(503);
+    expect(res.set).toHaveBeenCalledWith('Retry-After', '1');
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'workspace_runtime_unavailable' }),
+    );
+  });
+
+  it('keeps ordinary workspace ids in ambiguous ownership responses', () => {
+    const primary = runtime('/workspace/primary', { primary: true });
+    const secondary = runtime('/workspace/secondary');
+    const setup = registry({
+      primary,
+      runtimes: [primary, secondary],
+      resolution: { kind: 'ambiguous', runtimes: [primary, secondary] },
+    });
+    const res = response();
+
+    requireSessionRuntime({
+      sessionId: 'duplicate-session',
+      route: 'GET /session/:id/events',
+      res,
+      workspaceRegistry: setup.registry,
+    });
+
+    expect(vi.mocked(res.json).mock.calls[0]?.[0]).toMatchObject({
+      workspaceIds: ['primary', 'secondary'],
+    });
+  });
 });

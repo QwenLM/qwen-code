@@ -8,6 +8,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_NOTIFICATION_METHOD,
+  type ActiveWorkHoldCategory,
   type ActiveWorkHoldV1,
   type ActiveWorkSnapshotV1,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -25,6 +26,8 @@ const debugLogger = createDebugLogger('ACTIVE_WORK');
 export interface ActiveWorkSource {
   readonly sessionId: string;
   collectActiveWorkHolds(): ActiveWorkHoldV1[];
+  hasRunningBackgroundTasks?(): boolean;
+  getFinishedBackgroundTurnId?(): string | undefined;
 }
 
 type SendNotification = (
@@ -51,12 +54,15 @@ export class ActiveWorkReporter {
   #coalescing = false;
   #timer: ReturnType<typeof setInterval> | undefined;
   #disposed = false;
+  readonly #enabledCategories: ReadonlySet<ActiveWorkHoldCategory>;
 
   constructor(
     private readonly send: SendNotification,
     private readonly listSources: () => Iterable<ActiveWorkSource>,
     readonly intervalMs: number,
+    enabledCategories: readonly ActiveWorkHoldCategory[],
   ) {
+    this.#enabledCategories = new Set(enabledCategories);
     this.#timer = setInterval(() => {
       this.#publish();
     }, intervalMs);
@@ -117,9 +123,16 @@ export class ActiveWorkReporter {
     try {
       sessions = [];
       for (const source of this.listSources()) {
+        const finishedBackgroundTurnId = source.getFinishedBackgroundTurnId?.();
         sessions.push({
           sessionId: source.sessionId,
-          holds: source.collectActiveWorkHolds(),
+          ...(finishedBackgroundTurnId ? { finishedBackgroundTurnId } : {}),
+          ...(source.hasRunningBackgroundTasks
+            ? { hasRunningBackgroundTasks: source.hasRunningBackgroundTasks() }
+            : {}),
+          holds: source
+            .collectActiveWorkHolds()
+            .filter((hold) => this.#enabledCategories.has(hold.category)),
         });
       }
     } catch (error) {

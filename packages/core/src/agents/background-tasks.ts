@@ -24,7 +24,11 @@
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../utils/env.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
@@ -240,6 +244,16 @@ export interface BackgroundApproval {
   respond: AgentApprovalRequestEvent['respond'];
   /** Emission timestamp (ms) — newest-first ordering in the UI. */
   at: number;
+  /**
+   * Set ONLY for approvals bridged from a NESTED agent onto this entry
+   * (see AgentTool's nested approval bridge): the nested runtime's
+   * subagentId (`<name>-<suffix>`), so the UI can say which descendant is
+   * actually waiting. Undefined for the entry's own approvals — the
+   * runtime id and the registry agentId use different suffixes, so
+   * comparing them cannot distinguish own from nested; the bridge caller
+   * declares it instead.
+   */
+  subagentId?: string;
 }
 
 /**
@@ -268,6 +282,7 @@ export interface BackgroundActivity {
  * sidecar metadata path, message queue, and resume hooks.
  */
 export interface AgentTask extends TaskBase {
+  sourceTurnId?: string;
   kind: 'agent';
   /**
    * @deprecated Read `id` instead; kept as a synonym during the back-compat
@@ -279,7 +294,9 @@ export interface AgentTask extends TaskBase {
    * Concrete model ID this agent runs with (resolved from the subagent's
    * model selector at launch time). Used to enforce per-model concurrency
    * caps (`agents.maxParallelAgentsByModel`); undefined when the model
-   * could not be resolved, in which case only the global cap applies.
+   * could not be resolved, in which case a background entry is bounded only
+   * by the global cap (foreground per-model claims are keyed by their own
+   * resolved model and excluded from the global budget).
    */
   model?: string;
   /**
@@ -315,8 +332,8 @@ export interface AgentTask extends TaskBase {
   result?: string;
   error?: string;
   /**
-   * Present only when the task is intentionally kept paused but cannot be
-   * safely resumed under the current conditions.
+   * Present when the task cannot accept input or be continued, including
+   * one-shot executors and paused tasks blocked from recovery.
    */
   resumeBlockedReason?: string;
   stats?: AgentCompletionStats;
@@ -382,11 +399,13 @@ export interface BackgroundTaskRegisterOptions {
 }
 
 export interface NotificationMeta {
+  sourceTurnId?: string;
   agentId: string;
   status: TaskStatus;
   stats?: AgentCompletionStats;
   toolUseId?: string;
   todoWorkChainId?: string;
+  label?: string;
 }
 
 export type BackgroundNotificationCallback = (
@@ -439,13 +458,19 @@ export type BackgroundActivityChangeCallback = (entry: AgentTask) => void;
  */
 export type BackgroundApprovalChangeCallback = (entry: AgentTask) => void;
 
+export type ResidentAgentContinuationResult =
+  | 'continued'
+  | 'fallback'
+  | 'capacity_wait'
+  | 'not_completed';
+
 /**
  * Session-scoped handle for a background agent whose runtime remains alive
  * after a completed turn. The handle is deliberately not part of AgentTask:
  * task state is serializable, while the live runtime is process-local.
  */
 export interface ResidentBackgroundAgent {
-  continue(message: string): boolean;
+  continue(input: AgentExternalInput): ResidentAgentContinuationResult;
   dispose(): void;
 }
 
@@ -455,10 +480,12 @@ export interface BackgroundTaskRegistryOptions {
   maxConcurrentBackgroundAgents?: number;
   /**
    * Per-model concurrency caps keyed by concrete model ID. Each value is the
-   * maximum number of background sub-agents that may run concurrently on that
-   * model. A model not present here is bounded only by the global
-   * `maxConcurrentBackgroundAgents` cap. Useful when a model has a lower
-   * concurrency capacity than the rest of the fleet.
+   * maximum number of top-level sub-agents (background and foreground
+   * alike) that may run concurrently on that model. A model not present here
+   * falls back to the global `maxConcurrentBackgroundAgents` cap for
+   * background launches and is uncapped for foreground launches — list a
+   * model here to bound its foreground fan-out. Useful when a model has a
+   * lower concurrency capacity than the rest of the fleet.
    */
   maxConcurrentBackgroundAgentsByModel?:
     | ReadonlyMap<string, number>
@@ -479,13 +506,36 @@ interface BackgroundSlotWaiter {
   readonly signal?: AbortSignal;
   /** Concrete model ID the waiter needs a slot for (per-model cap check). */
   readonly model?: string;
+  /**
+   * Owner whose notification should count this launch. Undefined preserves
+   * the legacy behavior for callers that do not provide owner information.
+   */
+  readonly ownerId: string | null | undefined;
   readonly resolve: (reservation: BackgroundSlotReservation) => void;
   readonly reject: (error: Error) => void;
   readonly onAbort: () => void;
 }
 
+interface BackgroundSlotClaim {
+  readonly model: string | undefined;
+  /** Undefined means the caller did not opt into owner tracking. */
+  readonly ownerId: string | null | undefined;
+  /**
+   * True for a top-level FOREGROUND launch that reserves only against the
+   * per-model cap. Foreground claims are counted in the per-model tally (so
+   * background and foreground share one model's cap) but excluded from the
+   * global background budget, owner-scoped outstanding-launch notifications,
+   * and headless liveness — none of which should treat a synchronous
+   * foreground run as a background launch.
+   */
+  readonly foreground?: boolean;
+}
+
 const BACKGROUND_SLOT_WAIT_CANCELLED =
   'Agent launch cancelled while waiting for a background slot.';
+
+export const FOREGROUND_MODEL_SLOT_WAIT_CANCELLED =
+  'Agent launch cancelled while waiting for a model slot.';
 
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
@@ -497,18 +547,24 @@ export class BackgroundTaskRegistry {
     Set<(settled: boolean) => void>
   >();
   private readonly waitQueue: BackgroundSlotWaiter[] = [];
-  // Maps each outstanding slot reservation to the concrete model ID it was
-  // reserved for (undefined when unresolved). A Map rather than a Set so the
-  // per-model cap can count reservations against the same model the running
-  // agents are tallied under.
+  // Waiters for a foreground per-model slot. Kept separate from `waitQueue`
+  // because a foreground waiter is admitted on per-model headroom alone and
+  // must not be gated by the global background budget that `drainWaitQueue`
+  // enforces.
+  private readonly foregroundWaitQueue: BackgroundSlotWaiter[] = [];
+  // Maps each outstanding slot reservation to the concrete model ID and the
+  // owner that initiated it. A Map rather than a Set lets concurrency checks
+  // count the model while owner-scoped notifications count launches that have
+  // not reached register() yet.
   private readonly reservedBackgroundSlots = new Map<
     symbol,
-    string | undefined
+    BackgroundSlotClaim
   >();
   private readonly maxConcurrentBackgroundAgents: number;
   // Per-model concurrency caps keyed by concrete model ID. Empty when no
-  // `agents.maxParallelAgentsByModel` is configured, in which case only the
-  // global cap is enforced.
+  // `agents.maxParallelAgentsByModel` is configured, in which case
+  // background launches fall back to the global cap and foreground launches
+  // are uncapped.
   private readonly maxConcurrentBackgroundAgentsByModel: Map<string, number>;
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
@@ -572,21 +628,27 @@ export class BackgroundTaskRegistry {
       const claimedForModel = this.getClaimedBackgroundSlotCount(model);
       if (claimedForModel >= perModelCap) {
         debugLogger.warn(
-          `Background agent per-model concurrency cap reached for ` +
-            `${JSON.stringify(model)}: ${claimedForModel}/${perModelCap}. ` +
-            `Refusing new background agent.`,
+          `Background per-model concurrency cap reached for ` +
+            `${JSON.stringify(model)}: ${claimedForModel}/${perModelCap} ` +
+            `(foreground sub-agent claims included). Refusing new background agent.`,
         );
+        const foregroundClaims = this.countForegroundClaimsOnModel(model);
+        const reason =
+          foregroundClaims > 0
+            ? `a running foreground sub-agent counts toward it. Wait for it to ` +
+              `finish or stop an agent on that model first.`
+            : `it is already held by running background agents. Wait for one to ` +
+              `finish or stop an agent on that model first.`;
         throw new Error(
-          `Cannot start background agent: maximum concurrent background agents ` +
-            `for model "${model}" (${perModelCap}) reached. Stop an existing ` +
-            `agent on that model first.`,
+          `Cannot start background agent: the concurrency cap ` +
+            `for model "${model}" (${perModelCap}) reached — ${reason}`,
         );
       }
     }
   }
 
   /** Configured per-model cap for `model`, or undefined when none applies. */
-  private resolvePerModelCap(model?: string): number | undefined {
+  resolvePerModelCap(model?: string): number | undefined {
     if (model === undefined) {
       return undefined;
     }
@@ -596,11 +658,12 @@ export class BackgroundTaskRegistry {
   async waitForBackgroundSlot(
     signal?: AbortSignal,
     model?: string,
+    ownerId?: string | null,
   ): Promise<BackgroundSlotReservation> {
     if (signal?.aborted) {
       throw new Error(BACKGROUND_SLOT_WAIT_CANCELLED);
     }
-    const reservation = this.tryReserveBackgroundSlot(model);
+    const reservation = this.tryReserveBackgroundSlot(model, ownerId);
     if (reservation) {
       return reservation;
     }
@@ -616,6 +679,7 @@ export class BackgroundTaskRegistry {
       const waiter: BackgroundSlotWaiter = {
         signal,
         model,
+        ownerId,
         resolve,
         reject,
         onAbort,
@@ -627,20 +691,117 @@ export class BackgroundTaskRegistry {
 
   tryReserveBackgroundSlot(
     model?: string,
+    ownerId?: string | null,
   ): BackgroundSlotReservation | undefined {
     if (!this.canStartBackgroundAgent(model)) {
       return undefined;
     }
-    return this.reserveBackgroundSlot(model);
+    return this.reserveBackgroundSlot(model, ownerId);
+  }
+
+  /**
+   * Reserve a per-model slot for a top-level FOREGROUND launch. Consults only
+   * the per-model cap — never the global background budget — so a foreground
+   * run is never blocked by background agents running on other models. Returns
+   * `undefined` when the model has no configured cap (the caller should not
+   * wait) or when the model's per-model cap is already full.
+   */
+  tryReserveForegroundModelSlot(
+    model: string,
+    ownerId?: string | null,
+  ): BackgroundSlotReservation | undefined {
+    const cap = this.resolvePerModelCap(model);
+    if (cap === undefined) {
+      return undefined;
+    }
+    if (this.getClaimedBackgroundSlotCount(model) >= cap) {
+      return undefined;
+    }
+    return this.reserveBackgroundSlot(model, ownerId, true);
+  }
+
+  /**
+   * Reserve a foreground per-model slot, waiting if the model's cap is full.
+   * Returns `undefined` immediately when the model has no configured cap, so
+   * the caller can treat "no cap" and "reserved" uniformly.
+   */
+  async reserveForegroundModelSlotOrWait(
+    signal: AbortSignal | undefined,
+    model: string,
+    ownerId?: string | null,
+  ): Promise<BackgroundSlotReservation | undefined> {
+    if (this.resolvePerModelCap(model) === undefined) {
+      return undefined;
+    }
+    const immediate = this.tryReserveForegroundModelSlot(model, ownerId);
+    if (immediate) {
+      return immediate;
+    }
+    return await this.waitForForegroundModelSlot(signal, model, ownerId);
+  }
+
+  /**
+   * Wait for a foreground per-model slot to free. Rejects with a
+   * foreground-specific cancellation message (not the background one) so an
+   * aborted foreground launch is not reported as a background-subsystem
+   * failure.
+   */
+  async waitForForegroundModelSlot(
+    signal: AbortSignal | undefined,
+    model: string,
+    ownerId?: string | null,
+  ): Promise<BackgroundSlotReservation> {
+    if (signal?.aborted) {
+      throw new Error(FOREGROUND_MODEL_SLOT_WAIT_CANCELLED);
+    }
+    const reservation = this.tryReserveForegroundModelSlot(model, ownerId);
+    if (reservation) {
+      return reservation;
+    }
+    return new Promise<BackgroundSlotReservation>((resolve, reject) => {
+      const onAbort = () => {
+        const index = this.foregroundWaitQueue.indexOf(waiter);
+        if (index !== -1) {
+          this.foregroundWaitQueue.splice(index, 1);
+        }
+        reject(new Error(FOREGROUND_MODEL_SLOT_WAIT_CANCELLED));
+      };
+      const waiter: BackgroundSlotWaiter = {
+        signal,
+        model,
+        ownerId,
+        resolve,
+        reject,
+        onAbort,
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.foregroundWaitQueue.push(waiter);
+    });
   }
 
   getQueuedCount(): number {
     return this.waitQueue.length;
   }
 
+  /** Number of foreground launches currently waiting on a per-model slot. */
+  getForegroundQueuedCount(): number {
+    return this.foregroundWaitQueue.length;
+  }
+
+  /**
+   * Number of slots currently claimed on `model` — running background agents
+   * plus outstanding foreground and background claims. Lets a caller render
+   * occupancy (`claimed/cap`) rather than only queue depth when a launch is
+   * blocked behind a running agent, which is the common case the queue-depth
+   * text alone cannot describe.
+   */
+  getClaimedModelSlotCount(model: string): number {
+    return this.getClaimedBackgroundSlotCount(model);
+  }
+
   releaseBackgroundSlot(reservation: BackgroundSlotReservation): void {
     if (this.reservedBackgroundSlots.delete(reservation.id)) {
-      this.drainWaitQueue();
+      this.drainQueues();
     }
   }
 
@@ -679,6 +840,10 @@ export class BackgroundTaskRegistry {
       ? ((registration as AgentTask).notified ?? false)
       : false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
+    if (!options.preserveNotificationState) {
+      entry.sourceTurnId =
+        getInvocationContext()?.promptId ?? promptIdContext.getStore();
+    }
     entry.pendingMessages = registration.pendingMessages ?? [];
     // Resolve the parent's display name at registration time — before the
     // parent can evict — so the UI's orphan annotation survives it. Owned
@@ -695,7 +860,7 @@ export class BackgroundTaskRegistry {
       wasRunningBackground &&
       (!entry.isBackgrounded || entry.status !== 'running')
     ) {
-      this.drainWaitQueue();
+      this.drainQueues();
     }
 
     // Foreground entries are paired with a synchronous tool-call result on
@@ -762,10 +927,14 @@ export class BackgroundTaskRegistry {
     this.residentAgents.set(agentId, resident);
   }
 
-  continueResidentAgent(agentId: string, message: string): boolean {
+  continueResidentAgent(
+    agentId: string,
+    message: string,
+  ): ResidentAgentContinuationResult {
     const entry = this.agents.get(agentId);
     const resident = this.residentAgents.get(agentId);
-    if (!resident || entry?.status !== 'completed') return false;
+    if (entry?.status !== 'completed') return 'not_completed';
+    if (!resident) return 'fallback';
     return resident.continue(message);
   }
 
@@ -832,7 +1001,7 @@ export class BackgroundTaskRegistry {
     }
     this.emitNotification(entry);
     this.emitStatusChange(entry);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   /**
@@ -865,7 +1034,7 @@ export class BackgroundTaskRegistry {
     this.deleteAgent(agentId);
     this.emitStatusChange(entry);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   // See complete() for the cancelled → terminal path rationale.
@@ -886,7 +1055,7 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   // Cancellation aborts the signal and marks the entry as cancelled, but
@@ -933,7 +1102,7 @@ export class BackgroundTaskRegistry {
     }
     debugLogger.info(`Background agent cancelled: ${agentId}`);
     this.emitStatusChange(entry);
-    this.drainWaitQueue();
+    this.drainQueues();
 
     // Foreground entries don't emit XML notifications and unregister
     // themselves in the tool-call's finally path, so the grace timer
@@ -944,7 +1113,7 @@ export class BackgroundTaskRegistry {
       // Session reset paths intentionally suppress the old task's terminal
       // notification so it cannot leak into a new conversation.
       entry.notified = true;
-      this.drainWaitQueue();
+      this.drainQueues();
       return;
     }
 
@@ -971,7 +1140,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   // Emit the terminal cancelled notification once the agent's natural
@@ -998,7 +1167,7 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   // Emit the terminal cancelled notification for entries that were cancelled
@@ -1018,7 +1187,7 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
-    this.drainWaitQueue();
+    this.drainQueues();
   }
 
   /**
@@ -1040,26 +1209,46 @@ export class BackgroundTaskRegistry {
   }
 
   /**
-   * Park a tool call awaiting user approval ("permission bubbling"). No-op
-   * (and the call is auto-rejected by the caller) if the entry is not a
-   * running background agent — late approvals after cancellation must not
-   * resurrect a parked prompt. Duplicate callIds are ignored so a
-   * re-emitted event can't double-list the same call.
+   * Park a tool call awaiting user approval ("permission bubbling").
+   * Returns a discriminated result — mirroring the workflow registry's
+   * `parkPendingApproval` — so the bridge can tell an expected duplicate
+   * (an already-parked call whose event the scheduler re-emitted) apart
+   * from an unparkable entry (gone or terminal), which the caller
+   * auto-rejects so the agent's reasoning loop doesn't block forever.
+   * Late approvals after cancellation must not resurrect a parked prompt;
+   * duplicate callIds are ignored so a re-emitted event can't double-list
+   * the same call.
    */
-  addPendingApproval(agentId: string, approval: BackgroundApproval): boolean {
+  addPendingApproval(
+    agentId: string,
+    approval: BackgroundApproval,
+  ): 'parked' | 'duplicate' | 'unavailable' {
     const entry = this.agents.get(agentId);
     if (!entry || !entry.isBackgrounded || entry.status !== 'running') {
-      return false;
+      return 'unavailable';
     }
     const prior = entry.pendingApprovals ?? [];
-    if (prior.some((a) => a.callId === approval.callId)) return false;
+    // Identity is (subagentId, callId), mirroring the workflow registry's
+    // source key: generated callIds (`call_qwen_N`) are only unique per
+    // conversation, so multiple nested runtimes bridged onto one entry can
+    // share a callId. Own approvals stay unstamped (undefined), so a
+    // same-call re-emission from the entry's own runtime still dedupes.
+    if (
+      prior.some(
+        (a) =>
+          a.callId === approval.callId && a.subagentId === approval.subagentId,
+      )
+    )
+      return 'duplicate';
     entry.pendingApprovals = [...prior, approval];
     debugLogger.info(
       `Parked approval for background agent ${agentId} ` +
-        `(call ${approval.callId}, ${entry.pendingApprovals.length} pending)`,
+        `(call ${approval.callId}` +
+        (approval.subagentId ? `, nested ${approval.subagentId}` : '') +
+        `, ${entry.pendingApprovals.length} pending)`,
     );
     this.emitApprovalChange(entry);
-    return true;
+    return 'parked';
   }
 
   /**
@@ -1073,15 +1262,18 @@ export class BackgroundTaskRegistry {
     callId: string,
     outcome: Parameters<BackgroundApproval['respond']>[0],
     payload?: Parameters<BackgroundApproval['respond']>[1],
+    subagentId?: string,
   ): Promise<boolean> {
     const entry = this.agents.get(agentId);
     if (!entry) return false;
-    const approval = entry.pendingApprovals?.find((a) => a.callId === callId);
+    const approval = entry.pendingApprovals?.find(
+      (a) => a.callId === callId && a.subagentId === subagentId,
+    );
     if (!approval) return false;
     // Remove before responding so a re-entrant read inside the respond
     // chain (or a racing TOOL_RESULT clear) sees the call already gone.
     entry.pendingApprovals = (entry.pendingApprovals ?? []).filter(
-      (a) => a.callId !== callId,
+      (a) => !(a.callId === callId && a.subagentId === subagentId),
     );
     this.emitApprovalChange(entry);
     try {
@@ -1095,10 +1287,16 @@ export class BackgroundTaskRegistry {
       );
     } catch (error) {
       debugLogger.error(
-        `Failed to resolve background approval for ${agentId}/${callId}:`,
+        `Failed to resolve background approval for ${agentId}/${callId}` +
+          (subagentId ? ` (nested ${subagentId})` : '') +
+          ':',
         error,
       );
-      this.fail(agentId, `Failed to resolve background approval: ${callId}`);
+      this.fail(
+        agentId,
+        `Failed to resolve background approval: ${callId}` +
+          (subagentId ? ` (nested ${subagentId})` : ''),
+      );
       entry.abortController.abort();
       return false;
     }
@@ -1112,10 +1310,16 @@ export class BackgroundTaskRegistry {
    * double-answering. Mirrors the foreground `pendingConfirmation` clear in
    * the Agent tool's TOOL_RESULT handler.
    */
-  clearPendingApproval(agentId: string, callId: string): void {
+  clearPendingApproval(
+    agentId: string,
+    callId: string,
+    subagentId?: string,
+  ): void {
     const entry = this.agents.get(agentId);
     if (!entry?.pendingApprovals?.length) return;
-    const next = entry.pendingApprovals.filter((a) => a.callId !== callId);
+    const next = entry.pendingApprovals.filter(
+      (a) => !(a.callId === callId && a.subagentId === subagentId),
+    );
     if (next.length === entry.pendingApprovals.length) return;
     entry.pendingApprovals = next;
     this.emitApprovalChange(entry);
@@ -1141,6 +1345,14 @@ export class BackgroundTaskRegistry {
   bridgeApprovalEvents(
     agentId: string,
     emitter: AgentEventEmitter,
+    options?: {
+      /**
+       * The emitter belongs to a NESTED agent whose approvals are parked
+       * on this (ancestor) entry. Stamps each parked approval with the
+       * event's subagentId so the UI can name the actual waiter.
+       */
+      nestedSource?: boolean;
+    },
   ): () => void {
     const onWaiting = (event: AgentApprovalRequestEvent) => {
       const parked = this.addPendingApproval(agentId, {
@@ -1150,16 +1362,35 @@ export class BackgroundTaskRegistry {
         confirmationDetails: event.confirmationDetails,
         respond: event.respond,
         at: event.timestamp,
+        ...(options?.nestedSource ? { subagentId: event.subagentId } : {}),
       });
-      // If the entry is already gone/terminal we couldn't park it — reject
-      // so the agent's reasoning loop doesn't block forever on this call.
-      // `.catch()` rather than try/catch: respond is async and a late
-      // rejection (frames torn down post-termination) must not escape as
-      // an unhandledRejection.
-      if (!parked) {
+      if (parked === 'duplicate') {
+        // Expected: the scheduler re-notifies the whole batch on every
+        // status transition and agent-core re-emits TOOL_WAITING_APPROVAL
+        // for every still-awaiting call, so an already-parked call's event
+        // can arrive again. Leave the parked prompt untouched — rejecting
+        // here would cancel the waiting call while its dialog is still
+        // visible, and the runtime's responded set would then no-op the
+        // user's real answer. Debug level because re-emissions are
+        // frequent while any approval is parked.
+        debugLogger.debug(
+          `Dropped re-emitted approval event for already-parked call ` +
+            `${agentId}/${event.callId}` +
+            (options?.nestedSource ? ` (nested ${event.subagentId})` : ''),
+        );
+        return;
+      }
+      if (parked === 'unavailable') {
+        // The entry is already gone/terminal — reject so the agent's
+        // reasoning loop doesn't block forever on this call. `.catch()`
+        // rather than try/catch: respond is async and a late rejection
+        // (frames torn down post-termination) must not escape as an
+        // unhandledRejection.
         void event.respond(REJECTED_OUTCOME).catch((error) => {
           debugLogger.error(
-            `Failed to reject unparkable approval ${agentId}/${event.callId}:`,
+            `Failed to reject unparkable approval ${agentId}/${event.callId}` +
+              (options?.nestedSource ? ` (nested ${event.subagentId})` : '') +
+              ':',
             error,
           );
         });
@@ -1167,8 +1398,14 @@ export class BackgroundTaskRegistry {
     };
     const onResult = (event: AgentToolResultEvent) => {
       // A result for a parked call means it settled elsewhere — clear the
-      // stale prompt (without responding again).
-      this.clearPendingApproval(agentId, event.callId);
+      // stale prompt (without responding again). Stamp the nested runtime
+      // exactly as onWaiting does so one runtime's result cannot clear a
+      // colliding callId parked by another runtime.
+      this.clearPendingApproval(
+        agentId,
+        event.callId,
+        options?.nestedSource ? event.subagentId : undefined,
+      );
     };
     emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
     emitter.on(AgentEventType.TOOL_RESULT, onResult);
@@ -1215,11 +1452,21 @@ export class BackgroundTaskRegistry {
 
   private getReservedBackgroundSlotCount(model?: string): number {
     if (model === undefined) {
-      return this.reservedBackgroundSlots.size;
+      // Global background budget: foreground per-model claims are excluded —
+      // a synchronous foreground run must not consume background capacity.
+      let count = 0;
+      for (const claim of this.reservedBackgroundSlots.values()) {
+        if (!claim.foreground) {
+          count++;
+        }
+      }
+      return count;
     }
+    // Per-model tally: foreground and background claims both count, so the
+    // two paths share one model's cap.
     let count = 0;
-    for (const slotModel of this.reservedBackgroundSlots.values()) {
-      if (slotModel === model) {
+    for (const claim of this.reservedBackgroundSlots.values()) {
+      if (claim.model === model) {
         count++;
       }
     }
@@ -1233,9 +1480,54 @@ export class BackgroundTaskRegistry {
     );
   }
 
-  private reserveBackgroundSlot(model?: string): BackgroundSlotReservation {
+  /**
+   * Number of FOREGROUND per-model claims currently held on `model`. Used to
+   * word the per-model refusal message by the real occupant: a background
+   * launch refused on a model held by a foreground sub-agent should be told to
+   * wait for that sub-agent, while one refused on a model held only by other
+   * background agents should not be sent chasing a foreground sub-agent that
+   * is not there.
+   */
+  private countForegroundClaimsOnModel(model?: string): number {
+    if (model === undefined) {
+      return 0;
+    }
+    let count = 0;
+    for (const claim of this.reservedBackgroundSlots.values()) {
+      if (claim.foreground && claim.model === model) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private getOutstandingBackgroundLaunchCount(ownerId: string | null): number {
+    let count = 0;
+    for (const waiter of this.waitQueue) {
+      if (waiter.ownerId !== undefined && waiter.ownerId === ownerId) {
+        count++;
+      }
+    }
+    for (const claim of this.reservedBackgroundSlots.values()) {
+      // Foreground per-model claims are not background launches and must not
+      // appear in owner-scoped outstanding-launch notifications.
+      if (claim.foreground) {
+        continue;
+      }
+      if (claim.ownerId !== undefined && claim.ownerId === ownerId) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private reserveBackgroundSlot(
+    model?: string,
+    ownerId?: string | null,
+    foreground?: boolean,
+  ): BackgroundSlotReservation {
     const id = Symbol('background-slot');
-    this.reservedBackgroundSlots.set(id, model);
+    this.reservedBackgroundSlots.set(id, { model, ownerId, foreground });
     return { id, model };
   }
 
@@ -1245,6 +1537,22 @@ export class BackgroundTaskRegistry {
         'Invalid background agent slot reservation; it may have been invalidated by session reset.',
       );
     }
+  }
+
+  /**
+   * Re-scan both wait queues after capacity frees. Foreground waiters are
+   * admitted first: a parked foreground launch blocks the user's
+   * synchronous turn, whereas a background waiter's caller already expects
+   * its result later as a task-notification, so the blocking call must not
+   * be starved by continuing background traffic on the same model. The
+   * background drain still runs afterward because queued background launches
+   * on other models depend on it, and a foreground-first drain cannot trip
+   * `drainWaitQueue`'s global-budget break (foreground claims are excluded
+   * from that count).
+   */
+  private drainQueues(): void {
+    this.drainForegroundWaitQueue();
+    this.drainWaitQueue();
   }
 
   private drainWaitQueue(): void {
@@ -1270,7 +1578,35 @@ export class BackgroundTaskRegistry {
         waiter.reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
         continue;
       }
-      waiter.resolve(this.reserveBackgroundSlot(waiter.model));
+      waiter.resolve(this.reserveBackgroundSlot(waiter.model, waiter.ownerId));
+    }
+  }
+
+  /**
+   * Admit foreground waiters whose model now has per-model headroom. Unlike
+   * `drainWaitQueue`, this never consults the global background budget — a
+   * foreground launch is bounded only by its model's cap.
+   */
+  private drainForegroundWaitQueue(): void {
+    for (let i = 0; i < this.foregroundWaitQueue.length; ) {
+      const waiter = this.foregroundWaitQueue[i]!;
+      const cap = this.resolvePerModelCap(waiter.model);
+      if (
+        cap === undefined ||
+        this.getClaimedBackgroundSlotCount(waiter.model) >= cap
+      ) {
+        i++;
+        continue;
+      }
+      this.foregroundWaitQueue.splice(i, 1);
+      waiter.signal?.removeEventListener('abort', waiter.onAbort);
+      if (waiter.signal?.aborted) {
+        waiter.reject(new Error(FOREGROUND_MODEL_SLOT_WAIT_CANCELLED));
+        continue;
+      }
+      waiter.resolve(
+        this.reserveBackgroundSlot(waiter.model, waiter.ownerId, true),
+      );
     }
   }
 
@@ -1279,6 +1615,11 @@ export class BackgroundTaskRegistry {
     for (const waiter of waiters) {
       waiter.signal?.removeEventListener('abort', waiter.onAbort);
       waiter.reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
+    }
+    const fgWaiters = this.foregroundWaitQueue.splice(0);
+    for (const waiter of fgWaiters) {
+      waiter.signal?.removeEventListener('abort', waiter.onAbort);
+      waiter.reject(new Error(FOREGROUND_MODEL_SLOT_WAIT_CANCELLED));
     }
     this.reservedBackgroundSlots.clear();
   }
@@ -1402,6 +1743,7 @@ export class BackgroundTaskRegistry {
     const entry = this.agents.get(agentId);
     if (
       !entry ||
+      entry.resumeBlockedReason !== undefined ||
       entry.status !== 'running' ||
       this.finishingAgents.has(agentId)
     ) {
@@ -1607,6 +1949,19 @@ export class BackgroundTaskRegistry {
     const label = this.buildDisplayLabel(entry);
     const displayLine = `Background agent "${label}" ${statusText}.`;
 
+    const ownerId = entry.parentAgentId ?? null;
+    let remaining = 0;
+    for (const candidate of this.agents.values()) {
+      if (
+        candidate.isBackgrounded &&
+        (candidate.parentAgentId ?? null) === ownerId &&
+        (candidate.status === 'running' || candidate.status === 'paused')
+      ) {
+        remaining++;
+      }
+    }
+    remaining += this.getOutstandingBackgroundLaunchCount(ownerId);
+
     const xmlParts: string[] = [
       '<task-notification>',
       `<task-id>${escapeXml(entry.agentId)}</task-id>`,
@@ -1617,6 +1972,8 @@ export class BackgroundTaskRegistry {
     xmlParts.push(
       `<status>${escapeXml(entry.status)}</status>`,
       `<summary>Agent "${escapeXml(entry.description)}" ${statusText}.</summary>`,
+      `<remaining>${remaining}</remaining>`,
+      `<all-terminal>${remaining === 0}</all-terminal>`,
     );
     if (entry.result) {
       xmlParts.push(`<result>${escapeXml(entry.result)}</result>`);
@@ -1642,10 +1999,12 @@ export class BackgroundTaskRegistry {
 
     const meta: NotificationMeta = {
       agentId: entry.agentId,
+      sourceTurnId: entry.sourceTurnId,
       status: entry.status,
       stats: entry.stats,
       toolUseId: entry.toolUseId,
       todoWorkChainId: entry.todoWorkChainId,
+      label: buildBackgroundEntryLabel(entry, { includePrefix: false }),
     };
 
     try {
@@ -1791,7 +2150,9 @@ export class BackgroundTaskRegistry {
       // an unhandledRejection).
       void approval.respond(REJECTED_OUTCOME).catch((error) => {
         debugLogger.error(
-          `Failed to auto-reject parked approval ${entry.agentId}/${approval.callId}:`,
+          `Failed to auto-reject parked approval ${entry.agentId}/${approval.callId}` +
+            (approval.subagentId ? ` (nested ${approval.subagentId})` : '') +
+            ':',
           error,
         );
       });

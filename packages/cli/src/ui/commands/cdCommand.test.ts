@@ -55,7 +55,7 @@ describe('cdCommand', () => {
           getWorkingDir: () => currentDir,
           isRestrictiveSandbox: () => false,
           relocateWorkingDirectory,
-          getGeminiClient: () => ({
+          getLlmClient: () => ({
             addWorkingDirectoryChangedContext,
           }),
         } as unknown as Config,
@@ -164,7 +164,7 @@ describe('cdCommand', () => {
           getWorkingDir: () => currentDir,
           isRestrictiveSandbox: () => true,
           relocateWorkingDirectory,
-          getGeminiClient: () => ({
+          getLlmClient: () => ({
             addWorkingDirectoryChangedContext,
           }),
         } as unknown as Config,

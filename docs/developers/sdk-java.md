@@ -142,7 +142,7 @@ public static void runTransportOptionsExample() {
             .setIncludePartialMessages(true)
             .setTurnTimeout(new Timeout(120L, TimeUnit.SECONDS))
             .setMessageTimeout(new Timeout(90L, TimeUnit.SECONDS))
-            .setAllowedTools(Arrays.asList("read_file", "write_file", "list_directory"));
+            .setAllowedTools(Arrays.asList("read_file", "write_file", "glob"));
 
     List<String> result = QwenCodeCli.simpleQuery("who are you, what are your capabilities?", options);
     result.forEach(logger::info);
@@ -315,7 +315,7 @@ The `TransportOptions` class allows configuration of how the SDK communicates wi
 - `permissionMode`: Permission mode that controls tool execution
 - `env`: Environment variables to pass to the CLI process
 - `maxSessionTurns`: Limits the number of conversation turns in a session
-- `coreTools`: List of core tools that should be available to the AI
+- `coreTools`: A non-empty allowlist of core tools. An omitted or empty list is treated as unspecified; an empty list does not disable tools. MCP and other non-core tools have separate registration and permission rules. Use `excludeTools` to exclude named tools explicitly; `allowedTools` controls approval rather than registration.
 - `excludeTools`: List of tools to exclude from being available to the AI
 - `allowedTools`: List of tools that are pre-approved for use without additional confirmation
 - `authType`: Authentication type to use for the session
@@ -344,16 +344,17 @@ The SDK uses a thread pool for managing concurrent operations with the following
 - **Keep-Alive Time**: 60 seconds
 - **Queue Capacity**: 300 tasks (using LinkedBlockingQueue)
 - **Thread Naming**: "qwen_code_cli-pool-{number}"
-- **Daemon Threads**: false
+- **Daemon Threads**: true
 - **Rejected Execution Handler**: CallerRunsPolicy
+
+Tasks still running or queued in the default pool are abandoned when the JVM exits. Callers that require completion must wait for those tasks explicitly.
 
 ## Error Handling
 
 The SDK provides specific exception types for different error scenarios:
 
-- `SessionControlException`: Thrown when there's an issue with session control (creation, initialization, etc.)
+- `SessionControlException`: Thrown when there's an issue with session control, including attempting to use a closed or unavailable session. Session construction and `start()` can throw it directly; `QwenCodeCli.newSession()` wraps lower-level creation and initialization failures in a `RuntimeException`.
 - `SessionSendPromptException`: Thrown when there's an issue sending a prompt or receiving a response
-- `SessionClosedException`: Thrown when attempting to use a closed session
 
 ## FAQ / Troubleshooting
 

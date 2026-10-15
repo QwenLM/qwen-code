@@ -15,6 +15,7 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { ChannelControlWorkspaceLimitError } from '../channel-control-capacity.js';
 import { registerWorkspaceChannelManagementRoutes } from './workspace-channel-management.js';
 
 function runtime(
@@ -123,6 +124,25 @@ const auth = (test: request.Test) =>
     .set('X-Qwen-Client-Id', 'client-1');
 
 describe('workspace Channel management routes', () => {
+  it.each([
+    '/workspace/channels/bot/start',
+    '/workspaces/secondary/channels/bot/start',
+  ])('returns 409 for capacity on %s', async (url) => {
+    const test = mount();
+    vi.mocked(test.primaryService.start).mockRejectedValue(
+      new ChannelControlWorkspaceLimitError(),
+    );
+    vi.mocked(test.secondaryService.start).mockRejectedValue(
+      new ChannelControlWorkspaceLimitError(),
+    );
+    const response = await request(test.app)
+      .post(url)
+      .set('authorization', 'Bearer secret')
+      .send({});
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('channel_control_workspace_limit_reached');
+  });
+
   it('lists catalog and sanitized instances without mutation auth', async () => {
     const { app, primaryService, secondaryService } = mount();
 
@@ -202,6 +222,20 @@ describe('workspace Channel management routes', () => {
         {
           key: 'questionCard',
           label: 'Question Card',
+          kind: 'object',
+          properties: [
+            { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+            {
+              key: 'timeoutMs',
+              label: 'Timeout (ms)',
+              kind: 'number',
+              exclusiveMinimum: 0,
+            },
+          ],
+        },
+        {
+          key: 'permissionCard',
+          label: 'Permission Card',
           kind: 'object',
           properties: [
             { key: 'enabled', label: 'Enabled', kind: 'boolean' },
@@ -302,6 +336,37 @@ describe('workspace Channel management routes', () => {
     expect(response.body.code).toBe('live_channel_management_reserved');
     expect(resolveService).not.toHaveBeenCalled();
     expect(liveService.upsert).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before internal channel reads when the activity gate is absent', async () => {
+    const primary = runtime('primary', '/work/primary');
+    const live = runtime(
+      'conversations',
+      '/work/Conversations',
+      true,
+      'live-conversation',
+    );
+    const liveService = service();
+    const resolveService = vi.fn(() => liveService);
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceChannelManagementRoutes(app, {
+      primaryRuntime: primary,
+      workspaceRegistry: createWorkspaceRegistry([primary, live]),
+      resolveService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
+      parseAndValidateClientId: () => undefined,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/conversations/channels',
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('conversation_runtime_unavailable');
+    expect(resolveService).not.toHaveBeenCalled();
+    expect(liveService.list).not.toHaveBeenCalled();
   });
 
   it('fails closed for an untrusted secondary workspace', async () => {

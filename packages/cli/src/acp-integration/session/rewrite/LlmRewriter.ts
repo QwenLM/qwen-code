@@ -57,16 +57,29 @@ export class LlmRewriter {
     // promptFile takes precedence over inline prompt
     if (rewriteConfig.promptFile) {
       const filePath = resolve(rewriteConfig.promptFile);
-      if (existsSync(filePath)) {
-        this.prompt = readFileSync(filePath, 'utf-8').trim();
-        debugLogger.info(
-          `Loaded rewrite prompt from file: ${filePath} (${this.prompt.length} chars)`,
-        );
-      } else {
+      if (!existsSync(filePath)) {
         debugLogger.warn(
           `Rewrite prompt file not found: ${filePath}, using default`,
         );
         this.prompt = DEFAULT_REWRITE_PROMPT;
+      } else {
+        // existsSync passes for directories and says nothing about
+        // readability, so the read itself can still fail (EISDIR, EACCES,
+        // ...). Degrade like the missing-file case instead of throwing,
+        // which would crash ACP session startup (#9752).
+        try {
+          this.prompt = readFileSync(filePath, 'utf-8').trim();
+          debugLogger.info(
+            `Loaded rewrite prompt from file: ${filePath} (${this.prompt.length} chars)`,
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `Rewrite prompt file could not be read: ${filePath} (${
+              error instanceof Error ? error.message : String(error)
+            }), using default`,
+          );
+          this.prompt = DEFAULT_REWRITE_PROMPT;
+        }
       }
     } else {
       this.prompt = rewriteConfig.prompt || DEFAULT_REWRITE_PROMPT;

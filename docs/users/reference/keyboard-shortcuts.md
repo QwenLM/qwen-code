@@ -34,12 +34,12 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Tab`                                                 | Autocomplete the current suggestion if one exists.                                                                                                                                                                                                                                                                        |
 | `Up Arrow`                                            | Row up, then snap to start, then history prev.                                                                                                                                                                                                                                                                            |
 | `Ctrl+A` / `Home`                                     | Move the cursor to the beginning of the line.                                                                                                                                                                                                                                                                             |
-| `Ctrl+B` / `Left Arrow`                               | Move the cursor one character to the left.                                                                                                                                                                                                                                                                                |
+| `Ctrl+B` / `Left Arrow`                               | Move the cursor one character to the left. While the `@` completion menu shows category tabs, use `Ctrl+B` (the arrow switches tabs).                                                                                                                                                                                     |
 | `Ctrl+C`                                              | Clear the input prompt                                                                                                                                                                                                                                                                                                    |
 | `Esc` (double press)                                  | Clear the input prompt.                                                                                                                                                                                                                                                                                                   |
 | `Ctrl+D` / `Delete`                                   | Delete the character to the right of the cursor.                                                                                                                                                                                                                                                                          |
 | `Ctrl+E` / `End`                                      | Move the cursor to the end of the line.                                                                                                                                                                                                                                                                                   |
-| `Ctrl+F` / `Right Arrow`                              | Move the cursor one character to the right.                                                                                                                                                                                                                                                                               |
+| `Ctrl+F` / `Right Arrow`                              | Move the cursor one character to the right. While the `@` completion menu shows category tabs, use `Ctrl+F` (the arrow switches tabs).                                                                                                                                                                                    |
 | `Ctrl+H` / `Backspace`                                | Delete the character to the left of the cursor.                                                                                                                                                                                                                                                                           |
 | `Ctrl+K`                                              | Delete from the cursor to the end of the line.                                                                                                                                                                                                                                                                            |
 | `Ctrl+Left Arrow` / `Meta+Left Arrow` / `Meta+B`      | Move the cursor one word to the left.                                                                                                                                                                                                                                                                                     |
@@ -81,14 +81,18 @@ Focus the Background tasks pill in the footer (use `Down Arrow` from an empty co
 
 ## Suggestions
 
-| Shortcut                             | Description                                                              |
-| ------------------------------------ | ------------------------------------------------------------------------ |
-| `Down Arrow` / `Ctrl+N`              | Navigate down through the suggestions.                                   |
-| `Tab` / `Enter`                      | Accept the selected suggestion.                                          |
-| `Up Arrow` / `Ctrl+P`                | Navigate up through the suggestions.                                     |
-| `Right Arrow`                        | Accept a ghost-text suggestion when the prompt is empty.                 |
-| `Ctrl+Tab` / `Ctrl+Right Arrow`      | Switch to the next completion category when category tabs are shown.     |
-| `Ctrl+Shift+Tab` / `Ctrl+Left Arrow` | Switch to the previous completion category when category tabs are shown. |
+| Shortcut                | Description                                                                                                                         |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `Down Arrow` / `Ctrl+N` | Navigate down through the suggestions.                                                                                              |
+| `Tab` / `Enter`         | Accept the selected suggestion.                                                                                                     |
+| `Up Arrow` / `Ctrl+P`   | Navigate up through the suggestions.                                                                                                |
+| `Right Arrow`           | Switch to the next completion category when category tabs are shown. Also accepts a ghost-text suggestion when the prompt is empty. |
+| `Left Arrow`            | Switch to the previous completion category when category tabs are shown.                                                            |
+
+> Note: while the `@` completion menu is showing category tabs, `Left Arrow` and
+> `Right Arrow` switch categories instead of moving the cursor. Press `Esc` to
+> dismiss the menu first if you need to move the cursor. `Alt/Option+Arrow` word
+> movement is unaffected.
 
 ## History Search
 
@@ -126,13 +130,15 @@ Active when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized H
 | `Ctrl+End`      | Jump to the bottom (and re-engage live auto-follow).                            |
 | **Mouse wheel** | Scroll history (3 lines per tick). Requires `ui.mouseTracking` (on by default). |
 
-When `ui.useTerminalBuffer` is on and `ui.mouseTracking` is enabled (the default), the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, native click-and-drag text selection is consumed by the program, so qwen-code provides its own: **drag to select text in the history viewport, double-click to select a word, triple-click to select a line.** The selection is highlighted and copied to the clipboard when you release the mouse (works locally, over SSH via OSC 52, and inside tmux). A single click clears the selection; scrolling or new output clears it too. Selection is limited to the visible viewport for now. You can still fall back to the terminal's own selection by holding `Shift` (or `Option` on macOS Terminal / iTerm) while dragging. Set `ui.mouseTracking` to `false` to stop qwen-code from capturing the mouse entirely; that restores the terminal's native right-click menu, OSC 8 hyperlink clicks, and click-and-drag selection, but the in-app viewport no longer responds to the mouse, so use the keyboard shortcuts above to scroll.
+When `ui.useTerminalBuffer` is on and `ui.mouseTracking` is enabled (the default), the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, native click-and-drag text selection is consumed by the program, so qwen-code provides its own: **drag to select text in the history viewport, double-click to select a word, triple-click to select a line.** The selection is highlighted and copied to the clipboard when you release the mouse (works locally, over SSH via OSC 52, and inside tmux). A single click clears the selection; scrolling or new output clears it too. Selection is limited to the visible viewport for now. You can still fall back to the terminal's own selection by holding `Shift` (or `Option` on macOS Terminal / iTerm) while dragging.
+
+A **plain single click** on an http(s) OSC 8 hyperlink in the viewport opens it in your default browser. Non-http(s) links (for example `mailto:`) are copied to the clipboard instead. **Right-click** on a link or an active text selection opens an in-app context menu with **Open Link**, **Copy Link Address**, or **Copy Selection**. The menu can be navigated with the arrow keys, executed with `Enter`, and dismissed with `Esc` or by clicking outside it. Set `ui.mouseTracking` to `false` to stop qwen-code from capturing the mouse entirely; that restores the terminal's native right-click menu, OSC 8 hyperlink clicks, and click-and-drag selection, but the in-app viewport no longer responds to the mouse, so use the keyboard shortcuts above to scroll.
 
 ### tmux trackpad scrolling
 
 Inside tmux, some terminals translate trackpad or wheel gestures into plain `Up Arrow` and `Down Arrow` sequences before qwen-code sees them. Those bytes are identical to real arrow-key presses, so qwen-code cannot tell whether you meant to scroll the viewport or navigate prompt history.
 
-If trackpad scrolling changes the prompt history in tmux, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+If trackpad scrolling changes the prompt history in tmux, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). If you would rather have plain `Up Arrow` / `Down Arrow` scroll the viewport while the composer is empty, set `ui.arrowKeysScrollTranscript` to `true` — input history then moves to `Ctrl+P` / `Ctrl+N` from an empty composer. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
 ## IDE Integration
 

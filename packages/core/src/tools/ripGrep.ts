@@ -19,8 +19,8 @@ import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { runRipgrep, type RipgrepRunResult } from '../utils/ripgrepUtils.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
-import type { FileFilteringOptions } from '../config/constants.js';
-import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import type { FileFilteringOptions } from '../utils/file-filtering-options.js';
+import { DEFAULT_FILE_FILTERING_OPTIONS } from '../utils/file-filtering-options.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
@@ -685,7 +685,7 @@ export class RipGrepTool extends BaseDeclarativeTool<
     super(
       RipGrepTool.Name,
       'Grep',
-      'A powerful search tool built on ripgrep\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Use Agent tool for open-ended searches requiring multiple rounds\n  - Pattern syntax: Uses ripgrep (not grep) - special regex characters need escaping (use `interface\\{\\}` to find `interface{}` in Go code)\n',
+      'A powerful search tool built on ripgrep\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Pattern syntax: Uses ripgrep (not grep) - special regex characters need escaping (use `interface\\{\\}` to find `interface{}` in Go code)\n',
       Kind.Search,
       {
         properties: {

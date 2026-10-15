@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolLifecycleEvent } from '@qwen-code/qwen-code-core';
+
 import { BaseEmitter } from './base-emitter.js';
 import { PlanEmitter } from './PlanEmitter.js';
 import type {
@@ -22,14 +24,21 @@ import type {
 import {
   formatVisionBridgeNoticeDisplay,
   isVisionBridgeNoticeDisplay,
+  toolResultBoundaryArtifact,
   ToolNames,
   Kind,
+  createToolLifecycle,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import {
+  createTranscriptToolLifecycleUpdate,
   createTranscriptToolCallResultUpdate,
   createTranscriptToolCallStartUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { sanitizeTerminalText } from '../../../ui/utils/textUtils.js';
+import { associateAcpToolResultArtifact } from '../../../nonInteractive/tool-result-boundary-diagnostics.js';
+
+const debugLogger = createDebugLogger('TOOL_CALL_EMITTER');
 
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',
@@ -51,6 +60,36 @@ const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Other]: 'other',
 };
 
+function stripBoundaryArtifactsFromRawOutput(resultDisplay: unknown): unknown {
+  if (
+    typeof resultDisplay !== 'object' ||
+    resultDisplay === null ||
+    !('type' in resultDisplay) ||
+    resultDisplay.type !== 'task_execution' ||
+    !('toolCalls' in resultDisplay) ||
+    !Array.isArray(resultDisplay.toolCalls)
+  ) {
+    return resultDisplay;
+  }
+
+  let changed = false;
+  const toolCalls = resultDisplay.toolCalls.map((toolCall) => {
+    if (
+      typeof toolCall !== 'object' ||
+      toolCall === null ||
+      !('boundaryArtifact' in toolCall)
+    ) {
+      return toolCall;
+    }
+    const rawOutputToolCall: Record<string, unknown> = { ...toolCall };
+    delete rawOutputToolCall['boundaryArtifact'];
+    changed = true;
+    return rawOutputToolCall;
+  });
+
+  return changed ? { ...resultDisplay, toolCalls } : resultDisplay;
+}
+
 /**
  * Unified tool call event emitter.
  *
@@ -65,6 +104,10 @@ const KIND_MAP: Record<Kind, ToolKind> = {
 export class ToolCallEmitter extends BaseEmitter {
   private readonly planEmitter: PlanEmitter;
   private readonly preparedCallIds = new Set<string>();
+  private readonly preparedLifecycles = new Map<
+    string,
+    ReturnType<typeof createToolLifecycle>
+  >();
 
   constructor(ctx: SessionEmitterContext) {
     super(ctx);
@@ -77,6 +120,15 @@ export class ToolCallEmitter extends BaseEmitter {
    * @param params - Tool call start parameters
    * @returns true if event was emitted, false if skipped (e.g., TodoWriteTool)
    */
+  async emitLifecycle(event: ToolLifecycleEvent): Promise<void> {
+    if (
+      this.isTodoWriteTool(event.toolName) ||
+      (hasFullSessionContext(this.ctx) && this.ctx.isDisposed?.())
+    )
+      return;
+    await this.sendUpdate(createTranscriptToolLifecycleUpdate(event));
+  }
+
   async emitStart(params: ToolCallStartParams): Promise<boolean> {
     // Skip tool_call for TodoWriteTool - plan updates sent on result
     if (this.isTodoWriteTool(params.toolName)) {
@@ -89,6 +141,14 @@ export class ToolCallEmitter extends BaseEmitter {
       return false;
     }
 
+    if (params.phase === 'preparing' && hasFullSessionContext(this.ctx)) {
+      this.preparedLifecycles.set(
+        params.callId,
+        createToolLifecycle(this.ctx.config, params.callId, params.toolName),
+      );
+    } else if (params.phase !== 'preparing') {
+      this.preparedLifecycles.delete(params.callId);
+    }
     const { title, locations, kind } = this.resolveToolMetadata(
       params.toolName,
       params.args,
@@ -111,7 +171,13 @@ export class ToolCallEmitter extends BaseEmitter {
         timestamp: params.timestamp,
         asUpdate: updatesPreparedCall,
         extra: {
+          ...(params.startedAt !== undefined
+            ? { startedAt: params.startedAt }
+            : {}),
           ...(params.phase ? { phase: params.phase } : {}),
+          ...(params.toolName === ToolNames.AGENT && !params.subagentMeta
+            ? { subagentSessionReady: false }
+            : {}),
           ...params.subagentMeta,
           provenance: provenance.provenance,
           ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
@@ -139,6 +205,15 @@ export class ToolCallEmitter extends BaseEmitter {
     if (this.isTodoWriteTool(toolName)) return;
 
     this.preparedCallIds.delete(callId);
+    const lifecycle = this.preparedLifecycles
+      .get(callId)
+      ?.finish('cancelled', 'not_started');
+    this.preparedLifecycles.delete(callId);
+    if (lifecycle) {
+      await this.emitLifecycle(lifecycle).catch((error) =>
+        debugLogger.debug('Failed to emit discarded tool lifecycle', error),
+      );
+    }
     const provenance = ToolCallEmitter.resolveToolProvenance(toolName);
     await this.sendUpdate({
       sessionUpdate: 'tool_call_update',
@@ -183,28 +258,42 @@ export class ToolCallEmitter extends BaseEmitter {
     }
 
     this.preparedCallIds.delete(params.callId);
+    this.preparedLifecycles.delete(params.callId);
     const provenance = ToolCallEmitter.resolveToolProvenance(
       params.toolName,
       params.subagentMeta,
     );
-    await this.sendUpdate(
-      createTranscriptToolCallResultUpdate({
-        toolName: params.toolName,
-        callId: params.callId,
-        success: params.success,
-        message: params.message,
-        resultDisplay: params.resultDisplay,
-        errorMessage: params.error?.message,
-        artifacts: params.artifacts,
-        contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
-        timestamp: params.timestamp,
-        extra: {
-          ...params.subagentMeta,
-          provenance: provenance.provenance,
-          ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
-        },
-      }),
+    const update = createTranscriptToolCallResultUpdate({
+      toolName: params.toolName,
+      callId: params.callId,
+      success: params.success,
+      message: params.message,
+      resultDisplay: stripBoundaryArtifactsFromRawOutput(params.resultDisplay),
+      errorMessage: params.error?.message,
+      artifacts: params.artifacts,
+      contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
+      timestamp: params.timestamp,
+      extra: {
+        ...(params.startedAt !== undefined
+          ? { startedAt: params.startedAt }
+          : {}),
+        ...(params.durationMs !== undefined
+          ? { durationMs: params.durationMs }
+          : {}),
+        ...params.subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+      },
+    });
+    associateAcpToolResultArtifact(
+      update,
+      params.boundaryArtifact ??
+        toolResultBoundaryArtifact(
+          params.persistedOutputFiles,
+          params.artifacts,
+        ),
     );
+    await this.sendUpdate(update);
   }
 
   /**
@@ -221,8 +310,10 @@ export class ToolCallEmitter extends BaseEmitter {
     toolName: string,
     error: Error,
     subagentMeta?: SubagentMeta,
+    timing?: { startedAt: number; durationMs: number },
   ): Promise<void> {
     this.preparedCallIds.delete(callId);
+    this.preparedLifecycles.delete(callId);
     const provenance = ToolCallEmitter.resolveToolProvenance(
       toolName,
       subagentMeta,
@@ -234,12 +325,51 @@ export class ToolCallEmitter extends BaseEmitter {
         success: false,
         errorMessage: error.message,
         extra: {
+          ...timing,
           ...subagentMeta,
           provenance: provenance.provenance,
           ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
         },
       }),
     );
+  }
+
+  /**
+   * Emits a progress update for a parent tool call (e.g., subagent execution).
+   * This allows standard ACP clients to show live progress inside the parent tool card,
+   * bridging the gap for clients that do not support nested tool calls.
+   *
+   * @param parentToolCallId - The tool call ID of the parent (e.g., Agent tool)
+   * @param subagentType - The type of subagent
+   * @param message - Progress message to display
+   */
+  async emitProgressUpdate(
+    parentToolCallId: string,
+    subagentType: string,
+    message: string,
+    toolName?: string,
+  ): Promise<void> {
+    if (toolName && this.isTodoWriteTool(toolName)) return;
+
+    await this.sendUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: parentToolCallId,
+      status: 'in_progress',
+      content: [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: sanitizeTerminalText(message),
+          },
+        },
+      ],
+      _meta: {
+        subagentType,
+        provenance: 'subagent',
+        subagentProgress: true,
+      },
+    });
   }
 
   /**

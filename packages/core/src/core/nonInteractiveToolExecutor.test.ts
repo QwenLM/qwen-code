@@ -63,7 +63,7 @@ describe('executeToolCall', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -461,4 +461,297 @@ describe('executeToolCall', () => {
 
     expect(response.contentLength).toBeUndefined();
   });
+
+  it('revalidates rewritten Mod arguments and reports the actual request once', async () => {
+    const request: ToolCallRequestInfo = {
+      callId: 'mod',
+      name: 'testTool',
+      args: { param1: 'original' },
+      isClientInitiated: false,
+      prompt_id: 'prompt',
+    };
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    executeFn.mockImplementation(async (args) => ({
+      llmContent: String(args.param1),
+      returnDisplay: args.param1,
+    }));
+    const completed = vi.fn();
+    const response = await executeToolCall(
+      mockConfig,
+      request,
+      abortController.signal,
+      {
+        recordToolResult: false,
+        onAllToolCallsComplete: completed,
+        modToolCall: async (e, next, signal) => {
+          const result = await next(
+            { ...e, param1: 'rewritten' },
+            signal,
+            async (_e, verdict) => verdict,
+          );
+          return { ...result, result: { output: 'wrapped' } };
+        },
+      },
+    );
+    expect(executeFn).toHaveBeenCalledWith({ param1: 'rewritten' });
+    expect(request.args).toEqual({ param1: 'original' });
+    expect(response.responseParts).toEqual([
+      {
+        functionResponse: {
+          id: 'mod',
+          name: 'testTool',
+          response: { output: 'wrapped' },
+        },
+      },
+    ]);
+    expect(response.executionStatus).toBe('success');
+    expect(completed).toHaveBeenCalledTimes(1);
+    expect(completed.mock.calls[0][0][0].request.args).toEqual({
+      param1: 'rewritten',
+    });
+    expect(completed.mock.calls[0][0][0].response).toBe(response);
+  });
+
+  it('does not execute or forge success after native validation fails', async () => {
+    const request: ToolCallRequestInfo = {
+      callId: 'mod',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt',
+    };
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    vi.spyOn(mockTool, 'build').mockImplementation(() => {
+      throw new Error('schema rejected');
+    });
+    const response = await executeToolCall(
+      mockConfig,
+      request,
+      abortController.signal,
+      {
+        modToolCall: async (e, next, signal) => {
+          await next(e, signal, async () => ({ decision: 'allow' }));
+          return { result: { output: 'forged success' } };
+        },
+      },
+    );
+    expect(executeFn).not.toHaveBeenCalled();
+    expect(response.executionStatus).toBe('not_started');
+    expect(response.error?.message).toBe('schema rejected');
+  });
+
+  it('repeats native executions but retains one outer result and actual response metadata', async () => {
+    const request: ToolCallRequestInfo = {
+      callId: 'mod',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt',
+    };
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    executeFn
+      .mockResolvedValueOnce({
+        llmContent: [{ inlineData: { mimeType: 'image/png', data: 'abc' } }],
+        returnDisplay: 'first image',
+      })
+      .mockResolvedValueOnce({
+        llmContent: [{ inlineData: { mimeType: 'image/png', data: 'def' } }],
+        returnDisplay: 'second image',
+      });
+    const completed = vi.fn();
+    const recordToolResult = vi.fn();
+    mockConfig.getChatRecordingService = () =>
+      ({ recordToolResult }) as unknown as ReturnType<
+        Config['getChatRecordingService']
+      >;
+    const response = await executeToolCall(
+      mockConfig,
+      request,
+      abortController.signal,
+      {
+        onAllToolCallsComplete: completed,
+        modToolCall: async (e, next, signal) => {
+          const one = await next(e, signal, async (_e, v) => v);
+          await next({ ...e, param1: 'second' }, signal, async (_e, v) => v);
+          return { ...one, text: 'cannot forge native text', isError: true };
+        },
+      },
+    );
+    expect(executeFn).toHaveBeenCalledTimes(2);
+    expect(response.error).toBeUndefined();
+    expect(response.responseParts[0].functionResponse?.parts).toEqual([
+      { inlineData: { mimeType: 'image/png', data: 'abc' } },
+    ]);
+    expect(recordToolResult).toHaveBeenCalledTimes(1);
+    expect(completed).toHaveBeenCalledTimes(1);
+    expect(response.resultDisplay).toBe('first image');
+    expect(completed.mock.calls[0][0][0].request.args).toEqual({
+      param1: 'second',
+    });
+  });
+
+  it.each([
+    ['validation', false],
+    ['validation', true],
+    ['permission', false],
+    ['permission', true],
+    ['execution', false],
+    ['execution', true],
+  ] as const)(
+    'retains later execution facts when returning an earlier %s failure (rewritten: %s)',
+    async (failure, rewritten) => {
+      const request: ToolCallRequestInfo = {
+        callId: 'mod',
+        name: 'testTool',
+        args: { param1: 'original' },
+        isClientInitiated: false,
+        prompt_id: 'prompt',
+      };
+      mockTool = new MockTool({
+        name: 'testTool',
+        params: {
+          type: 'object',
+          properties: { param1: { type: 'string' } },
+          required: ['param1'],
+        },
+        execute: executeFn,
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+      executeFn.mockResolvedValue({
+        llmContent: 'executed',
+        returnDisplay: 'executed',
+      });
+      if (failure === 'execution')
+        executeFn.mockRejectedValueOnce(new Error('first attempt failed'));
+      const completed = vi.fn();
+      const recordToolResult = vi.fn();
+      mockConfig.getChatRecordingService = () =>
+        ({ recordToolResult }) as unknown as ReturnType<
+          Config['getChatRecordingService']
+        >;
+      const response = await executeToolCall(
+        mockConfig,
+        request,
+        abortController.signal,
+        {
+          onAllToolCallsComplete: completed,
+          modToolCall: async (e, next, signal) => {
+            const { param1: _param1, ...invalid } = e;
+            const first = await next(
+              failure === 'validation' ? invalid : e,
+              signal,
+              async (_e, verdict) =>
+                failure === 'permission' ? { decision: 'deny' } : verdict,
+            );
+            expect(first).toMatchObject({ isError: true });
+            await next(
+              { ...e, param1: 'executed' },
+              signal,
+              async (_e, v) => v,
+            );
+            return rewritten
+              ? { ...first, result: { output: 'rewritten first result' } }
+              : first;
+          },
+        },
+      );
+
+      expect(executeFn).toHaveBeenCalledTimes(failure === 'execution' ? 2 : 1);
+      expect(executeFn).toHaveBeenLastCalledWith({ param1: 'executed' });
+      expect(response.error).toBeDefined();
+      expect(response.responseParts[0].functionResponse?.response).toEqual(
+        rewritten
+          ? { output: 'rewritten first result' }
+          : { error: expect.any(String) },
+      );
+      expect(response.executionStatus).toBe('success');
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(completed.mock.calls[0][0][0]).toMatchObject({
+        status: 'success',
+        request: { ...request, args: { param1: 'executed' } },
+        response,
+      });
+      expect(recordToolResult).toHaveBeenCalledTimes(1);
+      expect(recordToolResult).toHaveBeenCalledWith(
+        response.responseParts,
+        expect.objectContaining({
+          executionStatus: 'success',
+          status: 'success',
+        }),
+      );
+    },
+  );
+
+  it('restores reserved argument collisions and ignores forged result identity fields', async () => {
+    const request: ToolCallRequestInfo = {
+      callId: 'mod',
+      name: 'testTool',
+      args: {
+        tool: 'inner-tool',
+        tool_use_id: 'inner-id',
+        consent: 'inner-consent',
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt',
+    };
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    executeFn.mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' });
+    const response = await executeToolCall(
+      mockConfig,
+      request,
+      abortController.signal,
+      {
+        modToolCall: async (e, next, signal) => {
+          expect(e.tool).toBe('testTool');
+          expect(e['$shadowed']).toEqual(request.args);
+          await next(e, signal, async (_e, v) => v);
+          return {
+            result: {
+              functionResponse: { id: 'forged' },
+              executionStatus: 'forged',
+            },
+            ref: 900,
+            isReadOnly: true,
+          };
+        },
+      },
+    );
+    expect(executeFn).toHaveBeenCalledWith(request.args);
+    expect(response.callId).toBe('mod');
+    expect(response.responseParts[0].functionResponse?.id).toBe('mod');
+    expect(response.executionStatus).toBe('success');
+  });
+
+  it.each([false, true])(
+    'describes whether a Mod denial happened after execution (%s)',
+    async (execute) => {
+      const request: ToolCallRequestInfo = {
+        callId: 'mod',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt',
+      };
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+      executeFn.mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' });
+      const response = await executeToolCall(
+        mockConfig,
+        request,
+        abortController.signal,
+        {
+          modToolCall: async (e, next, signal) => {
+            if (execute) await next(e, signal, async (_e, v) => v);
+            return { deny: '' };
+          },
+        },
+      );
+      expect(executeFn).toHaveBeenCalledTimes(execute ? 1 : 0);
+      expect(response.executionStatus).toBe(
+        execute ? 'success' : 'not_started',
+      );
+      expect(response.error?.message).toMatch(
+        execute ? /tool ran/ : /denied by Mod/,
+      );
+    },
+  );
 });

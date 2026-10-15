@@ -9,55 +9,107 @@ import {
   parseRemoteUrl,
   matchRemotes,
   normalizeSegment,
+  hostsEquivalent,
+  isAoneCanonicalHost,
 } from './remote-match.js';
 
 describe('parseRemoteUrl', () => {
   interface ParseCase {
     name: string;
     url: string;
-    want: { host: string; owner: string; repo: string } | null;
+    want: {
+      host: string;
+      owner: string;
+      repo: string;
+      groupPath: string;
+    } | null;
   }
 
   const cases: ParseCase[] = [
     {
       name: 'scp shape',
       url: 'git@github.com:QwenLM/qwen-code.git',
-      want: { host: 'github.com', owner: 'qwenlm', repo: 'qwen-code' },
+      want: {
+        host: 'github.com',
+        owner: 'qwenlm',
+        repo: 'qwen-code',
+        groupPath: 'qwenlm/qwen-code',
+      },
     },
     {
       name: 'scp shape without .git',
       url: 'git@github.com:QwenLM/qwen-code',
-      want: { host: 'github.com', owner: 'qwenlm', repo: 'qwen-code' },
+      want: {
+        host: 'github.com',
+        owner: 'qwenlm',
+        repo: 'qwen-code',
+        groupPath: 'qwenlm/qwen-code',
+      },
     },
     {
       name: 'https shape',
       url: 'https://github.com/wenshao/qwen-code.git',
-      want: { host: 'github.com', owner: 'wenshao', repo: 'qwen-code' },
+      want: {
+        host: 'github.com',
+        owner: 'wenshao',
+        repo: 'qwen-code',
+        groupPath: 'wenshao/qwen-code',
+      },
     },
     {
       name: 'https shape with trailing slash',
       url: 'https://github.com/wenshao/qwen-code/',
-      want: { host: 'github.com', owner: 'wenshao', repo: 'qwen-code' },
+      want: {
+        host: 'github.com',
+        owner: 'wenshao',
+        repo: 'qwen-code',
+        groupPath: 'wenshao/qwen-code',
+      },
     },
     {
       name: 'https shape with userinfo',
       url: 'https://user@github.com/wenshao/qwen-code.git',
-      want: { host: 'github.com', owner: 'wenshao', repo: 'qwen-code' },
+      want: {
+        host: 'github.com',
+        owner: 'wenshao',
+        repo: 'qwen-code',
+        groupPath: 'wenshao/qwen-code',
+      },
     },
     {
       name: 'ssh scheme with port',
       url: 'ssh://git@ghe.example.com:22/team/tool.git',
-      want: { host: 'ghe.example.com', owner: 'team', repo: 'tool' },
+      want: {
+        host: 'ghe.example.com',
+        owner: 'team',
+        repo: 'tool',
+        groupPath: 'team/tool',
+      },
     },
     {
       name: 'host case is normalised',
       url: 'git@GitHub.COM:Owner/Repo.git',
-      want: { host: 'github.com', owner: 'owner', repo: 'repo' },
+      want: {
+        host: 'github.com',
+        owner: 'owner',
+        repo: 'repo',
+        groupPath: 'owner/repo',
+      },
     },
     {
-      name: 'extra path segment is not an owner/repo',
+      name: 'a nested-group path collapses to the last two segments',
       url: 'https://github.com/a/b/c.git',
-      want: null,
+      want: { host: 'github.com', owner: 'b', repo: 'c', groupPath: 'a/b/c' },
+    },
+    {
+      name: 'an Aone nested-group clone collapses and is matchable',
+      url: 'git@gitlab.alibaba-inc.com:group/subgroup/odps_src.git',
+      want: {
+        host: 'gitlab.alibaba-inc.com',
+        owner: 'subgroup',
+        repo: 'odps_src',
+        groupPath: 'group/subgroup/odps_src',
+      },
     },
     {
       name: 'bare local path',
@@ -276,5 +328,147 @@ describe('matchRemotes', () => {
       repo: 'qwen-code',
     });
     expect(matched).toEqual([]);
+  });
+
+  it('matches an Aone CR-URL web host against a git-host remote', () => {
+    // A CR URL uses code.alibaba-inc.com (web); the clone's remote uses
+    // gitlab.alibaba-inc.com (git). They are the same platform.
+    const { matched } = matchRemotes(
+      'origin\tgit@gitlab.alibaba-inc.com:maxcompute/odps_src.git (fetch)\n',
+      { owner: 'maxcompute', repo: 'odps_src', host: 'code.alibaba-inc.com' },
+    );
+    expect(matched).toEqual(['origin']);
+  });
+
+  it("a nested-group target does NOT match a different group's same-named repo", () => {
+    // The owner/repo collapse is non-injective: groupA/frontend/app and
+    // groupB/frontend/app share their last two segments. With the full
+    // group path carried, the match compares every segment and refuses the
+    // wrong group — the review-one-repo-post-to-another hazard.
+    const remoteV =
+      'origin\tgit@gitlab.alibaba-inc.com:groupB/frontend/app.git (fetch)\n';
+    const { matched } = matchRemotes(remoteV, {
+      owner: 'frontend',
+      repo: 'app',
+      host: 'code.alibaba-inc.com',
+      groupPath: 'groupA/frontend/app',
+    });
+    expect(matched).toEqual([]);
+  });
+
+  it("a nested-group target matches its own group's remote", () => {
+    const remoteV =
+      'origin\tgit@gitlab.alibaba-inc.com:groupA/frontend/app.git (fetch)\n';
+    const { matched } = matchRemotes(remoteV, {
+      owner: 'frontend',
+      repo: 'app',
+      host: 'code.alibaba-inc.com',
+      groupPath: 'groupA/frontend/app',
+    });
+    expect(matched).toEqual(['origin']);
+  });
+
+  it('without a group path the last-two rule stands (two-segment want)', () => {
+    // GitHub targets and bare numbers carry no nested path — the collapse
+    // comparison remains, so a nested-group remote still matches its last
+    // two segments.
+    const remoteV =
+      'origin\tgit@gitlab.alibaba-inc.com:groupB/frontend/app.git (fetch)\n';
+    const { matched } = matchRemotes(remoteV, {
+      owner: 'frontend',
+      repo: 'app',
+      host: 'code.alibaba-inc.com',
+    });
+    expect(matched).toEqual(['origin']);
+  });
+
+  it('a nested-group target does NOT match a two-segment remote', () => {
+    // A two-segment remote can never BE the nested target's repo — the
+    // fallback must not lend it the match (reverse direction of the
+    // same-tail hazard).
+    const remoteV =
+      'origin\tgit@gitlab.alibaba-inc.com:frontend/app.git (fetch)\n';
+    const { matched } = matchRemotes(remoteV, {
+      owner: 'frontend',
+      repo: 'app',
+      host: 'code.alibaba-inc.com',
+      groupPath: 'groupA/frontend/app',
+    });
+    expect(matched).toEqual([]);
+  });
+
+  it('a two-segment target path does NOT match a nested remote', () => {
+    // The CR URL pins an exact two-segment repo; a nested remote sharing
+    // its tail is a different project.
+    const remoteV =
+      'origin\tgit@gitlab.alibaba-inc.com:groupB/frontend/app.git (fetch)\n';
+    const { matched } = matchRemotes(remoteV, {
+      owner: 'frontend',
+      repo: 'app',
+      host: 'code.alibaba-inc.com',
+      groupPath: 'frontend/app',
+    });
+    expect(matched).toEqual([]);
+  });
+});
+
+describe('hostsEquivalent', () => {
+  it('identical hosts are equivalent', () => {
+    expect(hostsEquivalent('github.com', 'github.com')).toBe(true);
+  });
+
+  it('Aone web and git hosts are one equivalence class', () => {
+    expect(
+      hostsEquivalent('code.alibaba-inc.com', 'gitlab.alibaba-inc.com'),
+    ).toBe(true);
+    expect(
+      hostsEquivalent('gitlab.alibaba-inc.com', 'code.alibaba-inc.com'),
+    ).toBe(true);
+  });
+
+  it('different non-Aone hosts are not equivalent', () => {
+    expect(hostsEquivalent('github.com', 'gitlab.alibaba-inc.com')).toBe(false);
+    expect(hostsEquivalent('a.com', 'b.com')).toBe(false);
+  });
+
+  it('equates the alias across spelling variants (port, dot, case)', () => {
+    // The CR-URL grammar keeps `(?::\d+)?` inside the host capture, so a
+    // review recorded from `code.alibaba-inc.com:443` must still bind a
+    // submission carrying the skill-mandated `gitlab.alibaba-inc.com` —
+    // raw spelling equality died at the gate after the whole review ran.
+    expect(
+      hostsEquivalent('code.alibaba-inc.com:443', 'gitlab.alibaba-inc.com'),
+    ).toBe(true);
+    expect(
+      hostsEquivalent('CODE.ALIBABA-INC.COM', 'gitlab.alibaba-inc.com.'),
+    ).toBe(true);
+    // Same-host spellings with variants are identical too.
+    expect(hostsEquivalent('github.com:443', 'GITHUB.COM')).toBe(true);
+  });
+});
+
+describe('isAoneCanonicalHost', () => {
+  it('accepts only the canonical Aone web/git pair', () => {
+    expect(isAoneCanonicalHost('code.alibaba-inc.com')).toBe(true);
+    expect(isAoneCanonicalHost('gitlab.alibaba-inc.com')).toBe(true);
+  });
+
+  it('normalizes port, trailing dot and case like the family predicate', () => {
+    expect(isAoneCanonicalHost('CODE.ALIBABA-INC.COM')).toBe(true);
+    expect(isAoneCanonicalHost('gitlab.alibaba-inc.com:443')).toBe(true);
+    expect(isAoneCanonicalHost('code.alibaba-inc.com.')).toBe(true);
+  });
+
+  it('REJECTS the family wildcard — a GHE host is not Aone', () => {
+    // The `.alibaba-inc.com` suffix also names GitHub Enterprise
+    // instances; a write must not select a1 on a family resemblance.
+    expect(isAoneCanonicalHost('ghe.alibaba-inc.com')).toBe(false);
+    expect(isAoneCanonicalHost('github.alibaba-inc.com')).toBe(false);
+  });
+
+  it('rejects non-Aone and empty hosts', () => {
+    expect(isAoneCanonicalHost('github.com')).toBe(false);
+    expect(isAoneCanonicalHost(undefined)).toBe(false);
+    expect(isAoneCanonicalHost('')).toBe(false);
   });
 });
