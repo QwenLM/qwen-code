@@ -974,7 +974,8 @@ jobs:
           name: 'event-transport-broker-gate-reports'
           path: |-
             packages/sdk-java/managed-agent-server/target/failsafe-reports/
-            packages/sdk-java/managed-agent-server/target/event-transport-latency.json
+            packages/sdk-java/managed-agent-server/target/event-transport-latency*.json
+            packages/sdk-java/managed-agent-server/target/event-transport-latency.jfr
             ${{ runner.temp }}/rocketmq/logs/
             ${{ runner.temp }}/rocketmq/home/logs/
           retention-days: 7
