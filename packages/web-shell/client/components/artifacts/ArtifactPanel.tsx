@@ -1299,6 +1299,7 @@ export function ArtifactPanel({
               <button
                 type="button"
                 className={styles.emptyAction}
+                data-testid="right-panel-open-web-preview"
                 onClick={onOpenWebPreview}
               >
                 <span className={styles.emptyActionIcon} aria-hidden="true">
