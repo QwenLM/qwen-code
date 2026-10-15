@@ -153,8 +153,10 @@ class HostedTeamMemberCommandMySqlIT {
     // Kept below the ~295 s its waits add up to: every Hosted*IT class
     // runs in one failsafe fork, and this class's ceilings together must
     // leave that fork its budget (scripts/tests/hosted-process-ci.test.js).
-    // A case cut here still reports the wait it was in, because every
-    // wait goes through waiting(), which fails on the @Timeout's interrupt.
+    // A case cut here still reports the wait it was in: every Awaitility
+    // wait goes through waiting(), which fails on the @Timeout's
+    // interrupt, and the raw waits left (Process.waitFor, the relay
+    // hold's latch, HttpClient.send) throw on that interrupt too.
     @Timeout(240)
     void membersReadAndWriteTheBoardTheirLeadReads() throws Exception {
         boot();

@@ -5,12 +5,12 @@
 
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Parks a task on a single-thread scheduler until the caller lets it go. */
 final class SchedulerHold {
@@ -40,7 +40,9 @@ final class SchedulerHold {
             // A hold that never took is still queued: released here, it
             // returns as soon as it runs instead of parking the scheduler's
             // only thread with no caller left to let it go.
-            if (!taken) release.countDown();
+            if (!taken) {
+                release.countDown();
+            }
         }
         assertThat(taken)
                 .as("the scheduler takes the hold")
