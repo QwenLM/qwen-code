@@ -7,12 +7,14 @@
 The user approved this first-release scope on 2026-10-14. The resident branches
 are implemented. Local checks and independent worker protocol, Java data and
 Spring configuration validation have passed. The ordinary public Hosted handoff
-has passed locally with H2 and declared placement. The latest ACK trial started
-the original worker, but its first Turn failed because the resident adapter
-dropped the durable provision seed. Normal close remained blocked; the approved
-synthetic test state and all trial resources were normally cleaned up. The seed
-forwarding fix has independent local verification; the complete ACK handoff
-remains unverified. This
+has passed locally with H2 and declared placement. The latest ACK trial on
+`53f24ba09` completed two public Sessions and normal closes. Independent checks
+confirmed close replay, old-input refusal and unchanged Pod/container/PV/PVC
+identities with zero restarts (25/25 checks). File operations and retained content
+have indirect support from the fixed model's result guards; the public projection
+does not expose individual tool results, and ACK ownership rows were not directly
+inspected. Complete ACK handoff acceptance therefore remains open. All trial
+resources were normally cleaned without abandoning failed Session state. This
 document supersedes the automatic retirement
 and volume reuse requirements of the earlier K2 completion plan for this release.
 Those designs and their evidence remain future work, not acceptance evidence for
@@ -144,6 +146,17 @@ native acceptance operations are not retried through this architecture change.
 Build, typecheck, focused tests, independent validation and two clean full-diff
 audits precede a completion claim. Deployment and cloud acceptance remain separate
 from local implementation validation.
+
+The ACK run retained 46 contiguous public response records. Both Sessions reached
+`closed`; the same-key close replay returned the original operation and receipt,
+and input to the closed first Session returned `409 workspace_unavailable`.
+The fixed model emits its completion marker only after three tool messages and
+checks the first Session's unique content in the second Session's initial read.
+These guards are indirect evidence, not six captured tool results or a direct
+comparison of retained file bytes. The remaining cloud acceptance must capture
+those results and the original binding/generation and physical reservation rows.
+Ordinary cleanup does not qualify physical retirement or volume reuse; MySQL
+concurrency, restart recovery and shipping review remain separate checks.
 
 The Session lock-order canary includes the resident store's Session locks and
 the CSI inventory's Turn reads in its exact source boundary. It resolves calls
