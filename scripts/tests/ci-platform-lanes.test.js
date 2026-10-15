@@ -625,13 +625,12 @@ describe('post-merge push lane', () => {
     expect(ci.jobs.post_coverage_comment).toBeUndefined();
   });
 
-  it('scopes the concurrency group and keeps main uncancellable', () => {
+  it('scopes the concurrency group and supersedes on main', () => {
     // All three components, the way e2e-workflow.test.js pins its own.
     //
     // Event: unscoped, the group collapses onto `Qwen Code CI-refs/heads/main`
-    // and the post-merge run shares it with the nightly (60-minute lanes, no
-    // cancellation on main) and with any PR from a fork branch named literally
-    // `refs/heads/main` — a legal ref name.
+    // and the post-merge run shares it with the nightly and with any PR from a
+    // fork branch named literally `refs/heads/main` — a legal ref name.
     //
     // Repo + ref: `head_ref` alone is not unique. Two PRs with the same head
     // branch name — including from different forks, which evaluate groups in
@@ -640,15 +639,18 @@ describe('post-merge push lane', () => {
     // the most common head_ref there is. Dropping the ref half entirely would
     // collapse every PR into one group and leave this suite green.
     //
-    // cancel-in-progress: flipping it to `true` was measured to be invisible
-    // to all 1854 test:scripts tests, while consecutive merges would cancel
-    // each other — the history this repo already recorded once, when 67 of
-    // 100 push runs were cancelled and only 25 ever reported.
+    // cancel-in-progress: main is included on purpose. A shared group holds at
+    // most one running plus one pending run, and a newer pending run REPLACES
+    // the older one even while this reads `false` — so back-to-back merges were
+    // already dropping each other's run, only silently and one merge behind.
+    // Only the newest tree matters and it covers every merged change, the
+    // stance e2e.yml already takes (#5859). Pinning the literal keeps a later
+    // "make main uncancellable again" change from landing unnoticed.
     expect(String(ci.concurrency.group)).toBe(
       '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}',
     );
     expect(String(ci.concurrency['cancel-in-progress']).trim()).toBe(
-      "${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}",
+      "${{ !startsWith(github.ref, 'refs/heads/release/') }}",
     );
   });
 });
