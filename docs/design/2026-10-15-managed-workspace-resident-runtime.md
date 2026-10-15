@@ -2,11 +2,12 @@
 
 [English](2026-10-15-managed-workspace-resident-runtime.md) | [简体中文](2026-10-15-managed-workspace-resident-runtime.zh-CN.md)
 
-Status: proposal (PR0). Nothing below is implemented. Tracking issue:
+Status: Section 4.1 is implemented by PR1; the remaining sections are
+proposals. Revision 1 landed as PR0. Tracking issue:
 [#14211](https://github.com/QwenLM/qwen-code/issues/14211). Part of the
 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
-Code references are to `main` @ `b5e8a87757`; every cited file is unchanged
-since `355ac8032d`, where this design was first written.
+Code references are to `main` @ `f87698b8c6`. Line numbers were re-checked
+there after the Java formatting change on `main`.
 
 Revision 2 (after review on [#14214](https://github.com/QwenLM/qwen-code/pull/14214)):
 
@@ -39,18 +40,18 @@ storage, started ahead of demand, and retired with stop evidence when idle.
 
 ## 2. Current state
 
-Verified on `main` @ `b5e8a87757`:
+Verified on `main` @ `f87698b8c6`:
 
 | Area                              | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                           | Reference                                                                                                                                                                           |
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Isolation for bound Sessions      | Workspace files require a Session-isolated `local-process` Broker with Workspace mounts. Child Workspaces additionally require durable local workers. The default `isolation-class` is `session`.                                                                                                                                                                                                                                                   | `ManagedAgentProperties.java:153-168`, `:199-209`, `:891`; `WorkspaceRuntimeResolver.java:34-38`                                                                                    |
+| Isolation for bound Sessions      | Workspace files require a Session-isolated `local-process` Broker with Workspace mounts. Child Workspaces additionally require durable local workers. The default `isolation-class` is `session`.                                                                                                                                                                                                                                                   | `ManagedAgentProperties.java:154-169`, `:200-210`, `:892`; `WorkspaceRuntimeResolver.java:35-38`                                                                                    |
 | Placement identity                | Workspace isolation has no isolation key, so one binding serves the full scope (tenant, Workspace, generation, mount root, capability digest, kind, storage). Session isolation keys the binding by Harness Session ID. `cwdRelative` is not part of placement identity.                                                                                                                                                                            | `managed-runtime-broker-service-core.md`; `JdbcRepositorySupport` request key                                                                                                       |
 | Harness ownership                 | Several paths derive "which Harness Session owns this" from the binding's isolation key, and therefore only work for Session isolation: <br>• Harness admission fencing skips non-Session scopes. <br>• Close enumerates executions only on bindings whose isolation key is the closing Session. <br>• Hook, MCP and background original-owner recovery and release require it. <br>• Recovery maintenance checks the close fence by isolation key. | `JdbcRuntimeBindingRepository.java:912`; `JdbcToolExecutionRepository.java:110`; `RuntimeBrokerService.java:681`, `:1989`, `:3754`, `:3785`                                         |
 | One worker, many Runtime Sessions | A boot v2 worker installs one context per Runtime Session and runs each Session in its own effective directory. A later tool turn uses a new Runtime Session ID.                                                                                                                                                                                                                                                                                    | `2026-09-26-managed-context-worker.md`; `2026-09-26-managed-workspace-execution.md`                                                                                                 |
-| Warm                              | Warm is on demand only. Java warms the Session's Runtime when a Turn is dispatched, concurrently with model inference. The Harness calls the Broker's `/runtimes:warm` right before it acquires a Runtime Session for a tool turn, Hook execution or file rewind. Nothing warms ahead of demand.                                                                                                                                                    | `HarnessCoordinator.java:348`, `:862`; `RuntimeBrokerHttpServer.java:158`; `hosted-workspace-tool-turn.ts:1599`                                                                     |
-| Session close                     | `SessionLifecycleCoordinator` calls `closeWorkspace`, which runs `drainHarnessSession`. That enumerates only bindings with `isolation_class = 'session' AND isolation_key = <harness session>`, drains them, and requires `stopDrained` proof before `RELEASED`.                                                                                                                                                                                    | `SessionLifecycleCoordinator.java:409`, `:440`; `EmbeddedRuntimeBroker.java:297`; `RuntimeBrokerService.java:303`, `:379`, `:416`, `:438`; `JdbcRuntimeBindingRepository.java:1117` |
+| Warm                              | Warm is on demand only. Java warms the Session's Runtime when a Turn is dispatched, concurrently with model inference. The Harness calls the Broker's `/runtimes:warm` right before it acquires a Runtime Session for a tool turn, Hook execution or file rewind. Nothing warms ahead of demand.                                                                                                                                                    | `HarnessCoordinator.java:349`, `:863`; `RuntimeBrokerHttpServer.java:158`; `hosted-workspace-tool-turn.ts:1599`                                                                     |
+| Session close                     | `SessionLifecycleCoordinator` calls `closeWorkspace`, which runs `drainHarnessSession`. That enumerates only bindings with `isolation_class = 'session' AND isolation_key = <harness session>`, drains them, and requires `stopDrained` proof before `RELEASED`.                                                                                                                                                                                    | `SessionLifecycleCoordinator.java:410`, `:441`; `EmbeddedRuntimeBroker.java:298`; `RuntimeBrokerService.java:303`, `:379`, `:416`, `:438`; `JdbcRuntimeBindingRepository.java:1117` |
 | Worker stop                       | `LocalProcessRuntimeProvisioner.stopDrained` stops only drained, managed-context, Session-isolated bindings of the Workspace profile. `release` does nothing in durable mode.                                                                                                                                                                                                                                                                       | `LocalProcessRuntimeProvisioner.java:292`, `:309`                                                                                                                                   |
-| Stop admission                    | `WorkspaceExecutionStore.canStopDrained` and `RuntimeAdmission.requireStoppedRelease` require `local-process` and Session isolation, and match storage holders against the binding's isolation key.                                                                                                                                                                                                                                                 | `WorkspaceExecutionStore.java:441`; `RuntimeAdmission.java:42-48`                                                                                                                   |
+| Stop admission                    | `WorkspaceExecutionStore.canStopDrained` and `RuntimeAdmission.requireStoppedRelease` require `local-process` and Session isolation, and match storage holders against the binding's isolation key.                                                                                                                                                                                                                                                 | `WorkspaceExecutionStore.java:442`; `RuntimeAdmission.java:42-48`                                                                                                                   |
 | Placement while draining          | `requireRecoverablePlacement` treats a `DRAINING` binding on the same tenant and storage, directory or Workspace as blocking. It refuses a new generation with non-retryable `409 runtime_placement_recovery_required`.                                                                                                                                                                                                                             | `JdbcRuntimeBindingRepository.java:1964`; `RuntimeBindingRecord.java:368`                                                                                                           |
 | Binding-level drain               | `retireStorageBinding` drains one exact binding generation under a storage fence (used by Workspace migration).                                                                                                                                                                                                                                                                                                                                     | `RuntimeBrokerService.java:393`                                                                                                                                                     |
 | Idle reclamation                  | None for live bindings. Retention only prunes old `FAILED`/`RELEASED` rows.                                                                                                                                                                                                                                                                                                                                                                         | `runtime-broker-jdbc-retention.md`                                                                                                                                                  |
@@ -105,11 +106,11 @@ work needs, and adding parallel ones would duplicate them.
 `LocalProcessRuntimeProvisioner.KIND` public and uses it in place of the
 `"local-process"` literal at:
 
-- `ManagedAgentProperties` (`:157`, `:203`, `:884`);
-- `EmbeddedRuntimeBroker` (`:390`, `:404`, `:484`, `:500`);
-- `RuntimeRecoveryCoordinator:30`, `WorkspaceRecoveryCommand:51`,
-  `WorkspaceRuntimeResolver:35`, `WorkspaceRuntimeTransport:294`,
-  `WorkspaceExecutionStore:444`, `WorkspaceOperatorRecoveryStore:253`;
+- `ManagedAgentProperties` (`:158`, `:204`, `:885`);
+- `EmbeddedRuntimeBroker` (`:391`, `:405`, `:485`, `:501`);
+- `RuntimeRecoveryCoordinator:31`, `WorkspaceRecoveryCommand:53`,
+  `WorkspaceRuntimeResolver:36`, `WorkspaceRuntimeTransport:295`,
+  `WorkspaceExecutionStore:445`, `WorkspaceOperatorRecoveryStore:254`;
 - `RuntimeAdmission:46`.
 
 Already-constant comparisons (`RuntimeBindingRecord.java:375`,
@@ -120,14 +121,16 @@ is written independently in five places:
 
 | Site                                      | What it decides                         |
 | ----------------------------------------- | --------------------------------------- |
-| `ManagedAgentProperties.java:158`         | Workspace files configuration admission |
-| `WorkspaceRuntimeResolver.java:36`        | Workspace mount resolution              |
-| `WorkspaceExecutionStore.java:445`        | drained-stop admission                  |
+| `ManagedAgentProperties.java:159`         | Workspace files configuration admission |
+| `WorkspaceRuntimeResolver.java:37`        | Workspace mount resolution              |
+| `WorkspaceExecutionStore.java:446`        | drained-stop admission                  |
 | `RuntimeAdmission.java:47`                | stopped release                         |
 | `LocalProcessRuntimeProvisioner.java:311` | `stopDrained`                           |
 
-PR1 routes them through one policy that still admits only `session`, so PR3
-changes the rule in one place. Child Workspaces (`ManagedAgentProperties.java:204`)
+PR1 routes them through one policy,
+`WorkspaceExecutionProfile.admitsIsolationClass`, that still admits only
+`session`, so PR3
+changes the rule in one place. Child Workspaces (`ManagedAgentProperties.java:205`)
 keep their own explicit Session requirement (4.3). The Harness-ownership
 checks keyed by the isolation key are not this policy; PR1 leaves them
 untouched, and PR3 re-keys them.

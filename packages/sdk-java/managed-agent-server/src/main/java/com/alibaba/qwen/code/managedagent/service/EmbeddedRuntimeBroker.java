@@ -388,7 +388,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             ManagedAgentProperties.RuntimeBroker broker,
             HttpRuntimeTransport transport) {
         if (broker.isTrustedLocalRebootRecovery()
-                && (!broker.isDurableLocalProcess() || !"local-process".equals(broker.getProvisioner()))) {
+                && (!broker.isDurableLocalProcess() || !LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner()))) {
             if (!broker.isDurableLocalProcess()) {
                 throw new IllegalStateException("Trusted reboot recovery requires durable local-process"
                         + " provisioning; enable durable local-process"
@@ -402,7 +402,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     + " (QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false)"
                     + " for non-durable provisioners");
         }
-        if ("local-process".equals(broker.getProvisioner())) {
+        if (LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner())) {
             require(broker.getStateDirectory(),
                     "Runtime Broker state directory");
             require(broker.getNodeExecutable(), "Node.js executable");
@@ -482,7 +482,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             }
             return broker.getWorkspaceCwd();
         }
-        if (!"local-process".equals(broker.getProvisioner())) {
+        if (!LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner())) {
             return broker.getWorkspaceCwd();
         }
         try {
@@ -498,7 +498,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             ManagedAgentProperties.RuntimeBroker broker,
             String workspaceCwd) {
         String configured = broker.getWorkspaceId();
-        if (!"local-process".equals(broker.getProvisioner())
+        if (!LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner())
                 && !"kubernetes".equals(broker.getProvisioner())) {
             require(configured, "Runtime Broker workspace ID");
             return configured;

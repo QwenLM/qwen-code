@@ -2,10 +2,10 @@
 
 [English](2026-10-15-managed-workspace-resident-runtime.md) | [简体中文](2026-10-15-managed-workspace-resident-runtime.zh-CN.md)
 
-状态：提案（PR0），以下内容均未实现。跟踪 issue：
+状态：4.1 节已由 PR1 实现，其余各节仍是提案。修订 1 已作为 PR0 合入。跟踪 issue：
 [#14211](https://github.com/QwenLM/qwen-code/issues/14211)。属于 Managed Agent 提案
 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。
-代码引用基于 `main` @ `b5e8a87757`；所有被引用的文件自本设计初稿所基于的 `355ac8032d` 以来都没有变化。
+代码引用基于 `main` @ `f87698b8c6`。`main` 上的 Java 格式化改动之后，行号已在该版本上重新核对。
 
 修订 2（根据 [#14214](https://github.com/QwenLM/qwen-code/pull/14214) 的 review）：
 
@@ -34,18 +34,18 @@ worker 能跨该 Session 的多个 Turn 存活，Broker 重启后也能被接管
 
 ## 2. 现状
 
-在 `main` @ `b5e8a87757` 上核实：
+在 `main` @ `f87698b8c6` 上核实：
 
 | 方面                                 | 行为                                                                                                                                                                                                                                                                                                                                          | 引用                                                                                                                                                                                |
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 绑定 Workspace 的 Session 的隔离方式 | Workspace files 要求 Session 隔离的 `local-process` Broker 并配置 Workspace mounts；child Workspaces 还要求 durable local worker。`isolation-class` 默认为 `session`。                                                                                                                                                                        | `ManagedAgentProperties.java:153-168`、`:199-209`、`:891`；`WorkspaceRuntimeResolver.java:34-38`                                                                                    |
+| 绑定 Workspace 的 Session 的隔离方式 | Workspace files 要求 Session 隔离的 `local-process` Broker 并配置 Workspace mounts；child Workspaces 还要求 durable local worker。`isolation-class` 默认为 `session`。                                                                                                                                                                        | `ManagedAgentProperties.java:154-169`、`:200-210`、`:892`；`WorkspaceRuntimeResolver.java:35-38`                                                                                    |
 | 放置身份                             | workspace isolation 没有 isolation key，一个 binding 服务完整 scope（tenant、Workspace、generation、挂载根、capability digest、kind、storage）。session isolation 按 Harness Session ID 划分 binding。`cwdRelative` 不属于放置身份。                                                                                                          | `managed-runtime-broker-service-core.md`；`JdbcRepositorySupport` 的 request key                                                                                                    |
 | Harness 归属                         | 多条路径根据 binding 的 isolation key 推导"这属于哪个 Harness Session"，因此只适用于 session isolation：<br>• Harness 准入封锁会跳过非 Session 的 scope。<br>• close 只枚举 isolation key 等于正在关闭的 Session 的 binding 上的执行。<br>• Hook、MCP 和后台任务的原 owner 恢复与释放依赖它。<br>• 恢复维护按 isolation key 检查 close 封锁。 | `JdbcRuntimeBindingRepository.java:912`；`JdbcToolExecutionRepository.java:110`；`RuntimeBrokerService.java:681`、`:1989`、`:3754`、`:3785`                                         |
 | 一个 worker、多个 Runtime Session    | boot v2 worker 为每个 Runtime Session 安装一份 context，每个 Session 在自己的有效目录里运行。后续的 tool turn 使用新的 Runtime Session ID。                                                                                                                                                                                                   | `2026-09-26-managed-context-worker.md`；`2026-09-26-managed-workspace-execution.md`                                                                                                 |
-| Warm                                 | 只有按需 warm。Java 在 Turn dispatch 时 warm 该 Session 的 Runtime，与模型推理并行。Harness 在为 tool turn、Hook 执行或文件回退 acquire Runtime Session 之前调用 Broker 的 `/runtimes:warm`。没有任何机制提前 warm。                                                                                                                          | `HarnessCoordinator.java:348`、`:862`；`RuntimeBrokerHttpServer.java:158`；`hosted-workspace-tool-turn.ts:1599`                                                                     |
-| Session close                        | `SessionLifecycleCoordinator` 调用 `closeWorkspace`，再执行 `drainHarnessSession`。它只枚举 `isolation_class = 'session' AND isolation_key = <harness session>` 的 binding，对其 drain，并在 `RELEASED` 之前要求 `stopDrained` 证据。                                                                                                         | `SessionLifecycleCoordinator.java:409`、`:440`；`EmbeddedRuntimeBroker.java:297`；`RuntimeBrokerService.java:303`、`:379`、`:416`、`:438`；`JdbcRuntimeBindingRepository.java:1117` |
+| Warm                                 | 只有按需 warm。Java 在 Turn dispatch 时 warm 该 Session 的 Runtime，与模型推理并行。Harness 在为 tool turn、Hook 执行或文件回退 acquire Runtime Session 之前调用 Broker 的 `/runtimes:warm`。没有任何机制提前 warm。                                                                                                                          | `HarnessCoordinator.java:349`、`:863`；`RuntimeBrokerHttpServer.java:158`；`hosted-workspace-tool-turn.ts:1599`                                                                     |
+| Session close                        | `SessionLifecycleCoordinator` 调用 `closeWorkspace`，再执行 `drainHarnessSession`。它只枚举 `isolation_class = 'session' AND isolation_key = <harness session>` 的 binding，对其 drain，并在 `RELEASED` 之前要求 `stopDrained` 证据。                                                                                                         | `SessionLifecycleCoordinator.java:410`、`:441`；`EmbeddedRuntimeBroker.java:298`；`RuntimeBrokerService.java:303`、`:379`、`:416`、`:438`；`JdbcRuntimeBindingRepository.java:1117` |
 | 停止 worker                          | `LocalProcessRuntimeProvisioner.stopDrained` 只停止 Workspace profile 下已 drain、带 managed-context、Session 隔离的 binding。持久模式下 `release` 什么都不做。                                                                                                                                                                               | `LocalProcessRuntimeProvisioner.java:292`、`:309`                                                                                                                                   |
-| 停止准入                             | `WorkspaceExecutionStore.canStopDrained` 和 `RuntimeAdmission.requireStoppedRelease` 要求 `local-process` 加 Session 隔离，并按 binding 的 isolation key 匹配 storage holder。                                                                                                                                                                | `WorkspaceExecutionStore.java:441`；`RuntimeAdmission.java:42-48`                                                                                                                   |
+| 停止准入                             | `WorkspaceExecutionStore.canStopDrained` 和 `RuntimeAdmission.requireStoppedRelease` 要求 `local-process` 加 Session 隔离，并按 binding 的 isolation key 匹配 storage holder。                                                                                                                                                                | `WorkspaceExecutionStore.java:442`；`RuntimeAdmission.java:42-48`                                                                                                                   |
 | drain 期间的放置                     | `requireRecoverablePlacement` 把同 tenant、同 storage/目录/Workspace 上的 `DRAINING` binding 视为阻塞，以不可重试的 `409 runtime_placement_recovery_required` 拒绝新的 generation。                                                                                                                                                           | `JdbcRuntimeBindingRepository.java:1964`；`RuntimeBindingRecord.java:368`                                                                                                           |
 | binding 级 drain                     | `retireStorageBinding` 在 storage fence 下 drain 一个确定的 binding generation（Workspace 迁移在用）。                                                                                                                                                                                                                                        | `RuntimeBrokerService.java:393`                                                                                                                                                     |
 | 空闲回收                             | 对存活的 binding 没有。retention 只清理过期的 `FAILED`/`RELEASED` 行。                                                                                                                                                                                                                                                                        | `runtime-broker-jdbc-retention.md`                                                                                                                                                  |
@@ -92,11 +92,11 @@ PR1 是不改变任何行为的重构，不新增 provisioner 能力方法：
 的判断保持为身份判断。PR1 把 `LocalProcessRuntimeProvisioner.KIND` 改为 public，
 并用它替换以下位置的 `"local-process"` 字面量：
 
-- `ManagedAgentProperties`（`:157`、`:203`、`:884`）；
-- `EmbeddedRuntimeBroker`（`:390`、`:404`、`:484`、`:500`）；
-- `RuntimeRecoveryCoordinator:30`、`WorkspaceRecoveryCommand:51`、
-  `WorkspaceRuntimeResolver:35`、`WorkspaceRuntimeTransport:294`、
-  `WorkspaceExecutionStore:444`、`WorkspaceOperatorRecoveryStore:253`；
+- `ManagedAgentProperties`（`:158`、`:204`、`:885`）；
+- `EmbeddedRuntimeBroker`（`:391`、`:405`、`:485`、`:501`）；
+- `RuntimeRecoveryCoordinator:31`、`WorkspaceRecoveryCommand:53`、
+  `WorkspaceRuntimeResolver:36`、`WorkspaceRuntimeTransport:295`、
+  `WorkspaceExecutionStore:445`、`WorkspaceOperatorRecoveryStore:254`；
 - `RuntimeAdmission:46`。
 
 已经使用常量的比较（`RuntimeBindingRecord.java:375`、
@@ -106,14 +106,15 @@ PR1 是不改变任何行为的重构，不新增 provisioner 能力方法：
 
 | 位置                                      | 决定的事情               |
 | ----------------------------------------- | ------------------------ |
-| `ManagedAgentProperties.java:158`         | Workspace files 配置准入 |
-| `WorkspaceRuntimeResolver.java:36`        | Workspace mount 解析     |
-| `WorkspaceExecutionStore.java:445`        | drained stop 准入        |
+| `ManagedAgentProperties.java:159`         | Workspace files 配置准入 |
+| `WorkspaceRuntimeResolver.java:37`        | Workspace mount 解析     |
+| `WorkspaceExecutionStore.java:446`        | drained stop 准入        |
 | `RuntimeAdmission.java:47`                | stopped release          |
 | `LocalProcessRuntimeProvisioner.java:311` | `stopDrained`            |
 
-PR1 让它们都经过同一个策略，该策略仍然只允许 `session`，这样 PR3 只需在一处修改规则。
-child Workspaces（`ManagedAgentProperties.java:204`）保留自己显式的 Session 要求（4.3）。
+PR1 让它们都经过同一个策略 `WorkspaceExecutionProfile.admitsIsolationClass`，
+该策略仍然只允许 `session`，这样 PR3 只需在一处修改规则。
+child Workspaces（`ManagedAgentProperties.java:205`）保留自己显式的 Session 要求（4.3）。
 按 isolation key 推导 Harness 归属的检查不属于这个策略，PR1 不碰它们，由 PR3 重新建立归属关系。
 
 ### 4.2 空闲回收（PR2）
