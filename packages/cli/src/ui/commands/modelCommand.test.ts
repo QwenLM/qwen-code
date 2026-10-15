@@ -816,6 +816,14 @@ describe('modelCommand', () => {
   it('rejects typed non-runtime Qwen OAuth selections', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn();
+    // Deliberately does NOT list the selected id. The guard has to fire before
+    // the availability lookup: if it ran after, this fixture would take the
+    // "not available for auth type" branch instead of the discontinued-tier
+    // one, and a typed `qwen-max(qwen-oauth)` from the shipped registry would
+    // reach the switch's misleading "credentials expired" error.
+    const getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'qwen-plus', label: 'Qwen Plus' }]);
     mockContext = createMockCommandContext({
       invocation: {
         raw: `/model qwen-max(${AuthType.QWEN_OAUTH})`,
@@ -828,13 +836,7 @@ describe('modelCommand', () => {
             model: 'gpt-4',
             authType: AuthType.USE_OPENAI,
           }),
-          // The guard must fire before the availability lookup: a typed
-          // `coder-model(qwen-oauth)` comes from the shipped registry and
-          // would otherwise reach the switch's misleading "credentials
-          // expired" error.
-          getAvailableModelsForAuthType: vi
-            .fn()
-            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          getAvailableModelsForAuthType,
           switchModel,
         },
         settings: createMockSettings(setValue),
@@ -851,6 +853,8 @@ describe('modelCommand', () => {
       messageType: 'error',
       content: expect.stringContaining('Qwen OAuth free tier was discontinued'),
     });
+    // The ordering the comment above declares, asserted rather than assumed.
+    expect(getAvailableModelsForAuthType).not.toHaveBeenCalled();
     expect(switchModel).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalled();
   });
