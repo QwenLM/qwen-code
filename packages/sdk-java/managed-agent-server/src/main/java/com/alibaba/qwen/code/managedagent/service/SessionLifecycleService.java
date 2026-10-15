@@ -6,18 +6,19 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
-import java.util.Locale;
-import java.util.Map;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.beans.factory.annotation.Autowired;
+
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * Admits the durable close, archive and delete operations and reads them

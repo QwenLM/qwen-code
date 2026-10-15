@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
@@ -11,12 +8,16 @@ import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceProfileLifecycleTest {
     WorkspaceLifecycleStoreTest.Fixture fixture() {
@@ -221,8 +222,12 @@ class WorkspaceProfileLifecycleTest {
                 : ToolPublicationContract.sha256(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         var reference = new java.util.HashMap<String, Object>(Map.of("sessionId", "original-owner", "promptId", "turn-1",
                 "callId", "tool-1", "argsDigest", requestDigest, "dispatchMode", "deferred"));
-        if ("v3".equals(mode)) reference.put("runtimeProtocol", 3);
-        if ("publication".equals(mode)) reference.put("publicationId", "pub-1");
+        if ("v3".equals(mode)) {
+            reference.put("runtimeProtocol", 3);
+        }
+        if ("publication".equals(mode)) {
+            reference.put("publicationId", "pub-1");
+        }
         var ledger = new JdbcToolExecutionRepository(f.jdbc.getDataSource());
         var execution = ledger.findOrCreate(ToolExecutionRecord.prepared("call-1", "call-1", binding.getBindingId(), binding.getGeneration(),
                 f.session, "original-owner", "turn-1", "tool-1", requestDigest, reference));
@@ -233,8 +238,12 @@ class WorkspaceProfileLifecycleTest {
                 .put("harnessSessionId", "wrong_harness".equals(mode) ? "other-session" : f.session)
                 .put("runtimeSessionId", "wrong_runtime".equals(mode) ? "other-owner" : "original-owner")
                 .put("payloadJson", payload));
-        if ("unreferenced".equals(mode)) f.jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED'");
-        if ("corrupt".equals(mode)) f.jdbc.update("UPDATE ma_resource SET sha256 = ?", "f".repeat(64));
+        if ("unreferenced".equals(mode)) {
+            f.jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED'");
+        }
+        if ("corrupt".equals(mode)) {
+            f.jdbc.update("UPDATE ma_resource SET sha256 = ?", "f".repeat(64));
+        }
         var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
         var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
         var verifier = new WorkspaceProfileLifecycleVerifier(f.jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
@@ -262,12 +271,18 @@ class WorkspaceProfileLifecycleTest {
         reference.put("dispatchMode", legacy ? "deferred" : "deferred_v3");
         if (legacy) {
             reference.put("runtimeProtocol", 3);
-            if (!"missing_input_digest".equals(mode)) reference.put("inputDigest", "invalid_input_digest".equals(mode) ? "invalid" : "b".repeat(64));
+            if (!"missing_input_digest".equals(mode)) {
+                reference.put("inputDigest", "invalid_input_digest".equals(mode) ? "invalid" : "b".repeat(64));
+            }
         } else {
             reference.put("payloadDigest", "sha256:" + "c".repeat(64));
-            if ("deferred_v3_input".equals(mode)) reference.put("inputDigest", "b".repeat(64));
+            if ("deferred_v3_input".equals(mode)) {
+                reference.put("inputDigest", "b".repeat(64));
+            }
         }
-        if (publication) reference.put("publicationId", "pub-1");
+        if (publication) {
+            reference.put("publicationId", "pub-1");
+        }
         ledger.findOrCreate(ToolExecutionRecord.prepared("call-1", "call-1", binding.getBindingId(), binding.getGeneration(),
                 f.session, "original-owner", "turn-1", "runtime-call", "sha256:" + (legacy ? "a" : "c").repeat(64),
                 reference));
@@ -315,7 +330,9 @@ class WorkspaceProfileLifecycleTest {
         for (String field : java.util.List.of("tenantId", "sessionId", "turnId", "executionCallId", "callId", "invocationDigest", "bindingGeneration", "captureId", "revision")) {
             identity.set(field, manifest.path(field));
         }
-        if ("wrong_identity".equals(mode)) identity.put("bindingGeneration", "2");
+        if ("wrong_identity".equals(mode)) {
+            identity.put("bindingGeneration", "2");
+        }
         var envelope = outcome.putObject("envelope").put("executionStatus", "success");
         envelope.putArray("responseParts");
         envelope.putObject("capture").put("captureStatus", "open".equals(mode) ? "partial" : manifest.path("captureStatus").asText())

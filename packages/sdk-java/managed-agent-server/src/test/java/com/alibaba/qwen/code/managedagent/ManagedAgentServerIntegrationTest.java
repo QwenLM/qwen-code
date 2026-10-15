@@ -1,19 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.tuple;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.awaitility.Awaitility.await;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -41,25 +27,6 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.ArrayDeque;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Queue;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -78,6 +45,40 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
+import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-agent;MODE=MySQL;"
@@ -204,8 +205,7 @@ class ManagedAgentServerIntegrationTest {
                 ManagedWorkspaceRegistry.class);
         ManagedAgentService upgraded = new ManagedAgentService(
                 new ManagedAgentStore(jdbc, objectMapper, Clock.systemUTC(),
-                        ignored -> {
-                        }, workspaces, changed),
+                        ignored -> {}, workspaces, changed),
                 applicationContext.getBean(RequestDigests.class),
                 applicationContext.getBean(HarnessCoordinator.class),
                 harness, workspaces);
@@ -1362,9 +1362,9 @@ class ManagedAgentServerIntegrationTest {
                 store.findLatestTurns(tenant,
                         java.util.List.of(session.sessionId())))
                         .get(session.sessionId())).satisfies(event -> {
-                    assertThat(event.turnId()).isEqualTo(second.turnId());
-                    assertThat(event.type()).isEqualTo("environment.ready");
-                });
+                            assertThat(event.turnId()).isEqualTo(second.turnId());
+                            assertThat(event.type()).isEqualTo("environment.ready");
+                        });
     }
 
     @Test
@@ -1750,8 +1750,6 @@ class ManagedAgentServerIntegrationTest {
                         error -> assertThat(error.getMessage()).contains(
                                 "event epoch changed"));
     }
-
-
 
     @Test
     void boundedRetractionRemovesFullyConsumedOriginalNamespace() {
@@ -2452,7 +2450,6 @@ class ManagedAgentServerIntegrationTest {
             uncertainGates.values().forEach(CountDownLatch::countDown);
             uncertainGates.clear();
         }
-
     }
     @Test
     void preAcquireCleanupUsesCurrentLifecycleAuthorityAndDoesNotAcquire() {
@@ -2472,7 +2469,9 @@ class ManagedAgentServerIntegrationTest {
                 .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(lease));
         java.util.function.Consumer<Throwable> admissionClosed = error -> {
             Throwable cause = error;
-            while (cause.getCause() != null) cause = cause.getCause();
+            while (cause.getCause() != null) {
+                cause = cause.getCause();
+            }
             assertThat(cause).isInstanceOfSatisfying(RuntimeBrokerException.class,
                     conflict -> assertThat(conflict.getCode()).isEqualTo("runtime_admission_closed"));
         };
@@ -2510,5 +2509,4 @@ class ManagedAgentServerIntegrationTest {
             org.mockito.Mockito.verify(provisioner, org.mockito.Mockito.times(1)).provision(org.mockito.ArgumentMatchers.any(com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest.class));
         }
     }
-
 }

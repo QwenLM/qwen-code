@@ -20,9 +20,7 @@ import com.alibaba.qwen.code.managedagent.service.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-
 import jakarta.validation.Valid;
-
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
