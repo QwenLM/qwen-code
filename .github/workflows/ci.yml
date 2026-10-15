@@ -1089,30 +1089,6 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: '.github/scripts/check-workflow-size.sh'
 
-      # Keep the cheap schema guards on PRs and main while Java runs daily.
-      - name: 'Check Flyway migration versions are unique'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
-        run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
-
-      - name: 'Check the API contract version advances'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
-        env:
-          BASE_REF: '${{ github.event.pull_request.base.ref }}'
-          GH_TOKEN: '${{ github.token }}'
-          REPO: '${{ github.repository }}'
-          PR_NUMBER: '${{ github.event.pull_request.number }}'
-        run: |-
-          set -euo pipefail
-          DOCUMENT='packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
-          gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[].filename' > "${RUNNER_TEMP}/contract-pr-files.txt"
-          if ! grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"; then
-            exit 0
-          fi
-          BASE_DOCUMENT="${RUNNER_TEMP}/contract-base.json"
-          git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
-          git show "FETCH_HEAD:${DOCUMENT}" > "${BASE_DOCUMENT}" 2>/dev/null || : > "${BASE_DOCUMENT}"
-          node scripts/check-contract-version.js "${BASE_DOCUMENT}" "${DOCUMENT}"
-
       # A green lane proves the branch passes the gate AS THE BRANCH defines
       # it — the checkout above is refs/pull/N/head by deliberate trade-off —
       # not as the base defines it. #11117 flipped Prettier --write →
@@ -1131,6 +1107,30 @@ jobs:
           BASE_REF: '${{ github.event.pull_request.base.ref }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: 'node .github/scripts/check-lint-gate-freshness.mjs'
+
+      # Keep the cheap schema guards on PRs and main while Java runs daily.
+      - name: 'Check Flyway migration versions are unique'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
+        run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
+
+      - name: 'Check the API contract version advances'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
+        env:
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+          GH_TOKEN: '${{ github.token }}'
+          REPO: '${{ github.repository }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          DOCUMENT='packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | .filename, .previous_filename // empty' > "${RUNNER_TEMP}/contract-pr-files.txt"
+          if ! grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"; then
+            exit 0
+          fi
+          BASE_DOCUMENT="${RUNNER_TEMP}/contract-base.json"
+          git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
+          git show "FETCH_HEAD:${DOCUMENT}" > "${BASE_DOCUMENT}" 2>/dev/null || : > "${BASE_DOCUMENT}"
+          node scripts/check-contract-version.js "${BASE_DOCUMENT}" "${DOCUMENT}"
 
       # Advisory test-growth summary and flag; see the script header.
       - name: 'Report test growth'
