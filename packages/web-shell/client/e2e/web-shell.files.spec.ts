@@ -21,14 +21,6 @@ async function openFiles(
   const scenario = createWebShellDaemonScenario({
     workspaceCwd,
     capabilities: {
-      ...(deleteEnabled
-        ? {
-            features: [
-              'workspace_file_delete',
-              'workspace_qualified_rest_core',
-            ],
-          }
-        : {}),
       workspaceCwd: primary ? workspaceCwd : '/tmp/primary',
       workspaces: [
         {
@@ -45,6 +37,12 @@ async function openFiles(
       turnCompleteEvent('files-ready', { id: 3 }),
     ],
   });
+  if (deleteEnabled) {
+    scenario.capabilities.features.push(
+      'workspace_file_delete',
+      'workspace_qualified_rest_core',
+    );
+  }
   await page.setViewportSize({ width: 1600, height: 1000 });
   await installMockDaemon(page, scenario, { baseURL });
   const contents: Record<string, string> = {
@@ -1122,7 +1120,7 @@ test('@smoke confirms irreversible file deletion and preserves other tree state'
     .screenshot({ path: test.info().outputPath('delete-menu.png') });
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   const dialog = page.getByRole('alertdialog', { name: 'Delete file?' });
-  await expect(dialog).toContainText('README.md');
+  await expect(dialog).toContainText('/tmp/qwen-web-shell-e2e/README.md');
   await expect(dialog).toContainText('This cannot be undone.');
   await expect(dialog.getByRole('button', { name: /^cancel$/i })).toBeFocused();
   expect(calls).toHaveLength(0);
@@ -1131,6 +1129,9 @@ test('@smoke confirms irreversible file deletion and preserves other tree state'
   });
   await dialog.getByRole('button', { name: /^cancel$/i }).click();
   await expect(dialog).toBeHidden();
+  await expect(
+    browser.locator('[role="treeitem"][tabindex="0"]'),
+  ).toBeFocused();
   expect(calls).toHaveLength(0);
   await expect(
     browser.getByRole('treeitem', { name: 'README.md', exact: true }),
@@ -1139,6 +1140,9 @@ test('@smoke confirms irreversible file deletion and preserves other tree state'
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
+  await expect(
+    browser.locator('[role="treeitem"][tabindex="0"]'),
+  ).toBeFocused();
   expect(calls).toHaveLength(0);
   await openDeleteMenu(page, browser);
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
@@ -1160,6 +1164,9 @@ test('@smoke confirms irreversible file deletion and preserves other tree state'
   await expect(dialog).toBeVisible();
   finish();
   await expect(dialog).toBeHidden();
+  await expect(
+    browser.locator('[role="treeitem"][tabindex="0"]'),
+  ).toBeFocused();
   await expect(
     browser.getByRole('treeitem', { name: 'README.md', exact: true }),
   ).toBeHidden();

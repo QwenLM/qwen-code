@@ -75,7 +75,6 @@ export function WorkspaceFileBrowser({
   treeLabelRef.current = t('files.title');
   const treeRef = useRef<FileTree | undefined>(undefined);
   const deletedRef = useRef<((path: string) => void) | undefined>(undefined);
-  const transferMenuFocusRef = useRef(false);
   const [deletePath, setDeletePath] = useState<string>();
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
@@ -148,7 +147,6 @@ export function WorkspaceFileBrowser({
             const entry = entries.get(item.path);
             if (entry?.kind === 'file' || entry?.kind === 'symlink') {
               closingMenuRef.current = false;
-              transferMenuFocusRef.current = false;
               setActionError(undefined);
               setMenu({ path: item.path, kind: entry.kind, context });
             } else {
@@ -286,7 +284,6 @@ export function WorkspaceFileBrowser({
   ) => {
     const lifetime = lifetimeRef.current;
     closingMenuRef.current = true;
-    transferMenuFocusRef.current = transferFocus;
     menu?.context.close({ restoreFocus: !transferFocus });
     setMenu(undefined);
     try {
@@ -368,7 +365,7 @@ export function WorkspaceFileBrowser({
             data-file-tree-context-menu-root="true"
             onCloseAutoFocus={(event) => {
               event.preventDefault();
-              if (!transferMenuFocusRef.current) menu.context.restoreFocus();
+              menu.context.restoreFocus();
             }}
           >
             {(/\.(?:md|markdown|html?)$/i.test(menu.path) ||
@@ -445,12 +442,12 @@ export function WorkspaceFileBrowser({
         <AlertDialogContent
           onCloseAutoFocus={(event) => {
             event.preventDefault();
-            treeRef.current
-              ?.getFileTreeContainer()
-              ?.shadowRoot?.querySelector<HTMLElement>(
-                '[role="treeitem"][tabindex="0"], [role="tree"]',
-              )
-              ?.focus();
+            const root = treeRef.current?.getFileTreeContainer()?.shadowRoot;
+            (
+              root?.querySelector<HTMLElement>(
+                '[role="treeitem"][tabindex="0"]',
+              ) ?? root?.querySelector<HTMLElement>('[role="tree"]')
+            )?.focus();
           }}
         >
           <AlertDialogHeader>
@@ -458,7 +455,7 @@ export function WorkspaceFileBrowser({
             <AlertDialogDescription>
               {t('files.deleteWarning')}
               <span className="mt-2 block break-all font-medium text-foreground">
-                {safeDisplayText(deletePath)}
+                {safeDisplayText(absolutePath(deletePath ?? ''))}
               </span>
             </AlertDialogDescription>
           </AlertDialogHeader>

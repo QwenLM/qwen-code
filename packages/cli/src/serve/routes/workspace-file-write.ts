@@ -324,6 +324,7 @@ async function handlePostFileDelete(
   deps: RegisterDeps,
 ): Promise<void> {
   const ROUTE = 'POST /workspaces/:workspace/file/delete';
+  // Deletion must use the resolved runtime, never the primary fallback.
   const factory = getWorkspaceRouteContext(req)!.runtime.routeFileSystemFactory;
   const filePath = requireBodyString(deps.safeBody(req), 'path', res, ROUTE);
   if (filePath === null) return;

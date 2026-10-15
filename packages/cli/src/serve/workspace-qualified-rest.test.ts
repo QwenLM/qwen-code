@@ -430,6 +430,29 @@ async function makeWindowsSelectorHarness() {
   return { app, scratch, windowsCwd };
 }
 
+describe('workspace-qualified file deletion isolation', () => {
+  it('deletes only the secondary file and preserves the primary namesake', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/delete`)
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .send({ path: 'target.txt' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ kind: 'file_delete', path: 'target.txt' });
+      await expect(
+        fsp.stat(path.join(h.secondaryCwd, 'target.txt')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(
+        await fsp.readFile(path.join(h.primaryCwd, 'target.txt'), 'utf8'),
+      ).toBe('primary');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('workspace-qualified core REST', () => {
   it('routes file reads to the workspace selected by id', async () => {
     const h = await makeHarness();

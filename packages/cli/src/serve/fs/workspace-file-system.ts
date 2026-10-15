@@ -1675,11 +1675,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         }
         this.deps.generationGuard?.assertOpen();
         assertTrustedForIntent(this.deps.trusted, 'delete');
+        const verdict = this.ignoreVerdict(target, 'file');
         await fsp.unlink(target);
         this.deps.audit.recordAccess(this.deps.ctx, {
           intent: 'delete',
           absolute: target,
           durationMs: performance.now() - start,
+          sizeBytes: stat.size,
+          matchedIgnore: verdict.ignored ? verdict.category : undefined,
         });
         return target;
       });

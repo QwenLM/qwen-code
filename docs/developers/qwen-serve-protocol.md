@@ -227,7 +227,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
- 'workspace_file_upload',
+ 'workspace_file_upload', 'workspace_file_delete',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
@@ -364,7 +364,9 @@ written into the workspace without ever overwriting — an occupied name is
 auto-numbered (`name (1).ext`, `name (2).ext`, ...). It is also a strict
 mutation route.
 
-When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, and `/workspaces/:workspace/file/upload`.
+`workspace_file_delete` covers only `POST /workspaces/:workspace/file/delete`; no legacy-primary `/file/delete` route exists. The JSON body is `{ "path": "relative/file.txt" }`, and success returns `{ "kind": "file_delete", "path": "relative/file.txt" }`. This strict mutation route permanently removes one regular file from the selected trusted local workspace. Directories and symlinks are rejected; unsupported factories (including SSH) return 422. The capability describes protocol support, not permission to delete in every workspace. Clients must also preflight `workspace_qualified_rest_core`.
+
+When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, `/workspaces/:workspace/file/upload`, and `/workspaces/:workspace/file/delete` (the last route additionally requires `workspace_file_delete`).
 
 The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces/:workspace/agents` and `/workspaces/:workspace/agents/:agentType`. These plural routes only read or mutate project-level agents for the selected workspace; `global` and `user` scope requests return `400 { code: "global_scope_not_supported_for_workspace_route" }`. Workspace-less `/workspace/agents` routes retain their existing primary-workspace behavior and remain the only REST surface for user-level agent scope.
 
