@@ -20,6 +20,7 @@ import com.aliyun.oss.OSSClientBuilder;
 import com.aliyun.oss.common.auth.CredentialsProvider;
 import com.aliyun.oss.common.auth.CredentialsProviderFactory;
 import com.aliyun.oss.common.comm.SignVersion;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.context.annotation.Bean;
@@ -160,7 +161,7 @@ public class ToolPublicationConfiguration {
     }
 
     private static String required(String value, String label) {
-        if (value == null || value.isBlank()) {
+        if (StringUtils.isBlank(value)) {
             throw new IllegalStateException("Tool publication " + label + " is required");
         }
         return value;

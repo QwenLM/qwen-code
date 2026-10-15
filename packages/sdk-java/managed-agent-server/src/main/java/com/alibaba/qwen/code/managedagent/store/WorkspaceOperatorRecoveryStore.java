@@ -6,16 +6,15 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -69,8 +68,8 @@ public final class WorkspaceOperatorRecoveryStore {
     public String prepare(String bindingId, long generation, String expectedHolder,
             String operator, String reason) {
         if (expectedHolder == null || !expectedHolder.matches("[0-9a-f]{64}")
-                || operator == null || operator.isBlank() || operator.length() > 512
-                || reason == null || reason.isBlank() || reason.length() > 2048) {
+                || StringUtils.isBlank(operator) || operator.length() > 512
+                || StringUtils.isBlank(reason) || reason.length() > 2048) {
             throw blocked();
         }
         RuntimeBindingRecord saved = requireBinding(bindingId, generation);
@@ -330,8 +329,8 @@ public final class WorkspaceOperatorRecoveryStore {
 
     private static String digest(byte[] value) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value));
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.sha256Hex(value);
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException(error);
         }
     }

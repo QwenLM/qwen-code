@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.servlet.http.HttpServletResponse;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -91,7 +92,7 @@ public class ManagedArtifactService {
         Long watermark = null;
         Long before = null;
         String beforeId = null;
-        if (cursor != null && !cursor.isBlank()) {
+        if (StringUtils.isNotBlank(cursor)) {
             try {
                 if (cursor.length() > 2048) {
                     throw new IllegalArgumentException();
@@ -196,7 +197,7 @@ public class ManagedArtifactService {
             Artifact artifact = stored(tenant, sessionId, artifactId);
             requireContent(tenant, artifact);
             outcome = "rejected";
-            if (revision == null || revision.isBlank()) {
+            if (StringUtils.isBlank(revision)) {
                 throw badRequest("revision_required", "A fixed revision is required.");
             }
             var descriptor = artifact.descriptor();
