@@ -1,0 +1,39 @@
+export const FILES_MESSAGES_EN = {
+  'files.copyRelativePath': 'Copy relative path',
+  'files.copyAbsolutePath': 'Copy absolute path',
+  'files.reference': 'Reference',
+  'files.title': 'Files',
+  'files.description': 'Browse workspace files',
+  'files.filter': 'Filter files…',
+  'files.noMatches': 'No matches in loaded paths',
+  'files.resizeTree': 'Resize file preview and tree',
+  'files.toggleTree': 'Toggle file tree',
+  'files.emptyDirectory': 'Empty folder',
+  'files.truncated': 'Only the first 2,000 entries are shown',
+  'files.loadFailed': 'File browser could not load',
+  'files.reloadUnavailable':
+    'Reloading could lose your connection or host-page state. Close Files and reopen it after the application is refreshed.',
+  'files.close': 'Close Files',
+  'files.sourceTooLarge':
+    'This file exceeds the 4 MiB source preview limit. Use Download in the file menu to read it locally.',
+};
+
+export const FILES_MESSAGES_ZH = {
+  'files.copyRelativePath': '复制相对路径',
+  'files.copyAbsolutePath': '复制绝对路径',
+  'files.reference': '引用',
+  'files.title': '文件',
+  'files.description': '浏览工作区文件',
+  'files.filter': '筛选文件…',
+  'files.noMatches': '已加载路径内无匹配',
+  'files.resizeTree': '调整文件预览和目录树宽度',
+  'files.toggleTree': '显示或隐藏文件树',
+  'files.emptyDirectory': '空目录',
+  'files.truncated': '仅显示前 2,000 个条目',
+  'files.loadFailed': '无法加载文件浏览器',
+  'files.reloadUnavailable':
+    '重新加载可能丢失连接或宿主页面状态。请关闭文件，待应用刷新后重新打开。',
+  'files.close': '关闭文件',
+  'files.sourceTooLarge':
+    '文件超过 4 MiB 源码预览上限，请通过文件菜单下载后在本地查看。',
+};

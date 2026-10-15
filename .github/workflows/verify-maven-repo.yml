@@ -1,0 +1,124 @@
+# Populates the Maven local repository that qwen-triage.yml's verify lane
+# restores read-only (actions/cache/restore). Without this producer every
+# restore is a miss and `mvn` downloads the world on every Java PR.
+#
+# The saved tree deliberately does NOT contain this repo's own jars. Those
+# versions are fixed (not SNAPSHOT), so a jar built from main is what Maven
+# would resolve if the verify lane's sibling install failed.
+name: 'verify Maven repo producer'
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'packages/sdk-java/*/pom.xml'
+      - '.github/workflows/verify-maven-repo.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: 'write'
+  contents: 'read'
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  save:
+    name: 'Save verify Maven repo'
+    # Same runs-on and image as the verify consumer. actions/cache versions
+    # an entry by the literal path plus the compression method; a different
+    # runner or a host path can never be restored from the container.
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    container:
+      image: 'node:22-bookworm'
+      # Match the host runner UID/GID so bind-mounted files stay writable.
+      options: '--init --user node'
+    # Cold JDK + Maven + a Spring Boot resolve. The verify lane caps each
+    # sibling install at 5 minutes against a warm repo; this job is the
+    # cold one, so give it the same 45 minutes as sdk-java.yml's daemon-e2e
+    # setup tier.
+    timeout-minutes: 45
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 1
+
+      # Pins match the verify job's "Install Java toolchain" step. This copy
+      # fails the job: an empty repo must not be saved.
+      - name: 'Install Java toolchain'
+        env:
+          TEMURIN_VERSION: '21.0.12.1+1'
+          TEMURIN_SHA256: 'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94'
+          TEMURIN_URL: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz'
+          MAVEN_VERSION: '3.9.11'
+          MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
+        run: |-
+          set -euo pipefail
+          prefix="${RUNNER_TEMP:?}/verify-java"
+          rm -rf -- "$prefix"
+          work="$(mktemp -d)"
+          maven_url="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/jdk.tar.gz" "$TEMURIN_URL"
+          echo "${TEMURIN_SHA256}  $work/jdk.tar.gz" | sha256sum --check --status
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/maven.tar.gz" "$maven_url"
+          echo "${MAVEN_SHA512}  $work/maven.tar.gz" | sha512sum --check --status
+          tar -xzf "$work/jdk.tar.gz" -C "$work"
+          tar -xzf "$work/maven.tar.gz" -C "$work"
+          jdk_dir="$(find "$work" -mindepth 1 -maxdepth 1 -type d -name 'jdk-*' -print -quit)"
+          [ -n "$jdk_dir" ]
+          [ -d "$work/apache-maven-${MAVEN_VERSION}" ]
+          mkdir -p "$prefix"
+          mv -- "$jdk_dir" "$prefix/jdk"
+          mv -- "$work/apache-maven-${MAVEN_VERSION}" "$prefix/maven"
+          chmod -R a+rX "$prefix"
+          # The mvn launcher will not find this JDK on its own.
+          export JAVA_HOME="$prefix/jdk"
+          export PATH="$JAVA_HOME/bin:$prefix/maven/bin:$PATH"
+          "$prefix/jdk/bin/java" -version
+          "$prefix/maven/bin/mvn" -version
+          printf 'ok\n' > "$prefix/ready"
+          rm -rf -- "$work"
+
+      - name: 'Populate verify Maven repo'
+        run: |-
+          set -euo pipefail
+          prefix="${RUNNER_TEMP:?}/verify-java"
+          test -f "$prefix/ready"
+          export JAVA_HOME="$prefix/jdk"
+          export PATH="$JAVA_HOME/bin:$prefix/maven/bin:$PATH"
+          repo="${RUNNER_TEMP:?}/verify-maven-repo"
+          mkdir -p "$repo"
+          mvn --batch-mode --no-transfer-progress -Dmaven.repo.local="$repo" \
+            -f packages/sdk-java/qwencode/pom.xml \
+            -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+          mvn --batch-mode --no-transfer-progress -Dmaven.repo.local="$repo" \
+            -f packages/sdk-java/runtime-broker/pom.xml \
+            -DskipTests install
+          mvn --batch-mode --no-transfer-progress -Dmaven.repo.local="$repo" \
+            -f packages/sdk-java/managed-agent-server/pom.xml \
+            -DskipTests verify
+          mvn --batch-mode --no-transfer-progress -Dmaven.repo.local="$repo" \
+            -f packages/sdk-java/client/pom.xml \
+            -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true verify
+
+      # verify-maven-repo-strip-begin
+      - name: 'Drop project artifacts'
+        run: |-
+          set -euo pipefail
+          repo="${RUNNER_TEMP:?}/verify-maven-repo"
+          STRIP_ARTIFACTS=(
+            qwencode-sdk
+            qwen-managed-runtime-broker
+            qwen-managed-agent-server
+            acp-sdk
+          )
+          for artifact in "${STRIP_ARTIFACTS[@]}"; do
+            rm -rf -- "${repo}/com/alibaba/${artifact}"
+          done
+      # verify-maven-repo-strip-end
+      - name: 'Save verify Maven repo'
+        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/verify-maven-repo'
+          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml') }}"

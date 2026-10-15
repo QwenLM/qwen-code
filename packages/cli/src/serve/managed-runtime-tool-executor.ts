@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import type { RetainedFileHistoryStorage } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import { promises as fs } from 'node:fs';
 import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -187,6 +188,7 @@ export class ManagedToolConflictError extends Error {
     readonly code:
       | 'managed_runtime_identity_conflict'
       | 'managed_runtime_provider_operation_failed'
+      | 'managed_runtime_owner_hold_pending'
       | 'managed_tool_result_conflict' = 'managed_runtime_identity_conflict',
   ) {
     super(message);
@@ -202,6 +204,8 @@ export class ManagedToolUnavailableError extends Error {
 
 /** The admitted tools, keyed by name, over one configuration. */
 export interface ManagedToolSet {
+  readonly retainedFileHistory?: RetainedFileHistoryStorage;
+  readonly fileHistory?: ManagedRuntimeFileHistory;
   /**
    * The session the tools run as. A shell they start sees it as
    * QWEN_CODE_SESSION_ID, with that session's project directory.
@@ -298,7 +302,14 @@ export interface ManagedWorkerDrainObservation {
 export type ManagedShellCaptureSink = Pick<
   LocalShellResultCapture,
   keyof LocalShellResultCapture
->;
+> & {
+  /**
+   * Marks the capture's end as a platform-requested stop (#13856 A8): the
+   * finalize then carries `stopRequested`, and the record projects
+   * `cancelled`/`stop_requested` instead of a bare exit.
+   */
+  setStopRequested(): void;
+};
 
 export interface ManagedShellCapturePublisher {
   readonly hasInstalledPublication?: boolean;
@@ -510,7 +521,19 @@ export class ManagedToolExecutor {
         throw new ManagedToolUnavailableError(
           'File history Workspace is unavailable.',
         );
-      let history = this.fileHistories.get(sessionId);
+      const existingHistory = this.fileHistories.get(sessionId);
+      let history = tools.fileHistory ?? existingHistory;
+      if (tools.retainedFileHistory && !tools.fileHistory)
+        throw new ManagedToolConflictError(
+          'Retained file history requires its original composition.',
+        );
+      if (
+        tools.fileHistory &&
+        (tools.fileHistory.ownerSessionId !== ownerSessionId ||
+          tools.fileHistory.directory !== tools.directory ||
+          (existingHistory && existingHistory !== tools.fileHistory))
+      )
+        throw new ManagedToolConflictError('File history binding conflicts.');
       if (operation.action === 'bind') {
         if (!history) {
           history = new ManagedRuntimeFileHistory(
@@ -543,6 +566,7 @@ export class ManagedToolExecutor {
         throw new ManagedToolConflictError(
           'File history is not bound to this Workspace.',
         );
+      this.fileHistories.set(sessionId, history);
       if (operation.action === 'prepare') {
         mutationStarted = true;
         await history.prepare(operation.promptId, operation.paths);
@@ -772,8 +796,12 @@ export class ManagedToolExecutor {
 
   closeSessionAdmission(sessionId: string): void {
     if (this.hasActiveSession(sessionId)) {
+      // The dedicated code names the one condition a Hook release may absorb
+      // as a fence — this Session still owns unfinished work of any kind;
+      // both class defaults stay catch-alls other refusals share.
       throw new ManagedToolConflictError(
         'Managed Runtime Session still owns unfinished work.',
+        'managed_runtime_owner_hold_pending',
       );
     }
     this.closedSessions.add(sessionId);
@@ -1958,10 +1986,14 @@ export class ManagedToolExecutor {
         // does not exist yet, so resolve the deepest ancestor that does —
         // a genuinely absent path stays lexical and keeps the tool's own
         // not-found answer rather than a traversal accusation.
-        const realTarget = await realpathDeepestExisting(
-          params['file_path'] as string,
-        );
-        const realDirectory = await realpathDeepestExisting(directory);
+        // Retained storage owns no-follow admission through the original
+        // root descriptor; ambient realpaths cannot authenticate that root.
+        const realTarget = tools.retainedFileHistory
+          ? (params['file_path'] as string)
+          : await realpathDeepestExisting(params['file_path'] as string);
+        const realDirectory = tools.retainedFileHistory
+          ? directory
+          : await realpathDeepestExisting(directory);
         const relative = path.relative(realDirectory, realTarget);
         let outOfBoundary = false;
         if (
@@ -1975,6 +2007,7 @@ export class ManagedToolExecutor {
           // reachable, the behavior /1 Sessions had before containment.
           const workspaceRoot = tools.workspaceRoot;
           outOfBoundary =
+            tools.retainedFileHistory !== undefined ||
             workspaceRoot === undefined ||
             escapesSession(
               path.relative(
@@ -2126,12 +2159,24 @@ export class ManagedToolExecutor {
           return invocation.execute(entry.controller.signal);
         });
       };
-      const history = this.fileHistories.get(entry.reference.sessionId);
-      let result: ToolResult;
+      const registeredHistory = this.fileHistories.get(
+        entry.reference.sessionId,
+      );
+      const history = tools.fileHistory ?? registeredHistory;
+      const mutating = [WriteFileTool.Name, EditTool.Name].includes(
+        entry.toolName,
+      );
       if (
-        history &&
-        [WriteFileTool.Name, EditTool.Name].includes(entry.toolName)
-      ) {
+        (history &&
+          (history.directory !== tools.directory ||
+            (tools.fileHistory &&
+              history.ownerSessionId !== entry.reference.sessionId) ||
+            (registeredHistory && registeredHistory !== history))) ||
+        (mutating && tools.retainedFileHistory && !tools.fileHistory)
+      )
+        throw new ManagedToolConflictError('File history binding conflicts.');
+      let result: ToolResult;
+      if (history && mutating) {
         let outcome: { result: ToolResult } | { error: unknown };
         let invoked = false;
         try {

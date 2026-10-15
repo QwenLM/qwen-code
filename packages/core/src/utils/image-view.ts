@@ -387,6 +387,15 @@ export async function renderImageOverview(
   return renderFullFrameView(filePath, prepared, signal);
 }
 
+export async function renderImageBufferOverview(
+  bytes: Buffer,
+  label: string,
+  signal: AbortSignal,
+): Promise<ImageView> {
+  const prepared = await prepareImageBuffer(bytes, label, signal);
+  return renderFullFrameView(label, prepared, signal);
+}
+
 export async function renderNormalizedImageCrop(
   filePath: string,
   region: NormalizedRegion,

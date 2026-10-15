@@ -117,7 +117,7 @@ test('git mode chip shows popover with three modes and captures screenshots', as
   expect(sessionCreateBody(daemon)?.['worktree']).toBeUndefined();
 });
 
-test('git mode chip worktree mode sends worktree intent', async ({
+test('selecting worktree defers automatic creation until the first message', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario();
@@ -139,18 +139,9 @@ test('git mode chip worktree mode sends worktree intent', async ({
   // Click "Worktree" option (match by role; see the branch test above)
   await popover.getByRole('radio', { name: /Worktree/ }).click();
 
-  // Confirm worktree selection
-  const confirmBtn = page.locator('[data-testid="git-mode-confirm-worktree"]');
-  await expect(confirmBtn).toBeVisible();
-  // Regression guard: same focus-steal dismissal as the branch test — the
-  // confirm button flashed visible, then the popover closed before it could
-  // be clicked. Assert the popover survives the click.
-  await page.waitForTimeout(300);
-  await expect(popover).toBeVisible();
-  await expect(confirmBtn).toBeVisible();
-  await confirmBtn.click();
-
   await expect(popover).not.toBeVisible();
+  await expect(chip).toContainText('Worktree');
+  expect(sessionCreateBody(daemon)).toBeUndefined();
 
   // Send a message and verify worktree is passed
   await fillComposer(page, 'worktree task');
@@ -159,6 +150,9 @@ test('git mode chip worktree mode sends worktree intent', async ({
   await expect.poll(() => sessionCreateBody(daemon) !== undefined).toBe(true);
   expect(sessionCreateBody(daemon)?.['worktree']).toEqual({});
   expect(sessionCreateBody(daemon)?.['branch']).toBeUndefined();
+  expect(
+    daemon.requests.filter((r) => r.method === 'POST' && r.path === '/session'),
+  ).toHaveLength(1);
 });
 
 test('git mode chip default current-branch mode sends neither branch nor worktree', async ({
@@ -186,50 +180,57 @@ test('git mode chip default current-branch mode sends neither branch nor worktre
   expect(sessionCreateBody(daemon)?.['worktree']).toBeUndefined();
 });
 
-test('git mode chip clear button resets to current branch', async ({
-  page,
-}, testInfo) => {
-  const scenario = createGitWorkspaceScenario();
-  const daemon = await installScenario(
+for (const mode of ['branch', 'worktree'] as const) {
+  test(`git mode chip clear button resets ${mode} to current branch`, async ({
     page,
-    scenario,
-    String(testInfo.project.use.baseURL),
-  );
+  }, testInfo) => {
+    const scenario = createGitWorkspaceScenario();
+    const daemon = await installScenario(
+      page,
+      scenario,
+      String(testInfo.project.use.baseURL),
+    );
 
-  await page.goto('/');
+    await page.goto('/');
 
-  const chip = page.locator('[data-testid="git-mode-chip"]');
-  await expect(chip).toBeVisible({ timeout: 10_000 });
-  await chip.click();
+    const chip = page.locator('[data-testid="git-mode-chip"]');
+    await expect(chip).toBeVisible({ timeout: 10_000 });
+    await chip.click();
 
-  const popover = page.locator('[data-slot="popover-content"]');
-  await expect(popover).toBeVisible({ timeout: 5_000 });
+    const popover = page.locator('[data-slot="popover-content"]');
+    await expect(popover).toBeVisible({ timeout: 5_000 });
 
-  // Select branch mode (match by role; see the first branch test)
-  await popover.getByRole('radio', { name: /New branch/ }).click();
-  const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
-  await branchInput.fill('feat/temp');
-  await page.locator('[data-testid="git-mode-confirm-branch"]').click();
-  await expect(popover).not.toBeVisible();
+    if (mode === 'branch') {
+      await popover.getByRole('radio', { name: /New branch/ }).click();
+      const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
+      await branchInput.fill('feat/temp');
+      await page.locator('[data-testid="git-mode-confirm-branch"]').click();
+    } else {
+      await popover.getByRole('radio', { name: /Worktree/ }).click();
+    }
+    await expect(popover).not.toBeVisible();
 
-  // Chip should show the branch and have a clear button
-  await expect(chip).toContainText('feat/temp');
-  const clearBtn = page.locator('[data-testid="git-mode-clear"]');
-  await expect(clearBtn).toBeVisible();
+    await expect(chip).toContainText(
+      mode === 'branch' ? 'feat/temp' : 'Worktree',
+    );
+    expect(sessionCreateBody(daemon)).toBeUndefined();
+    const clearBtn = page.locator('[data-testid="git-mode-clear"]');
+    await expect(clearBtn).toBeVisible();
 
-  // Click clear to reset
-  await clearBtn.click();
-  await expect(chip).toContainText('main');
-  await expect(clearBtn).not.toBeVisible();
+    // Click clear to reset
+    await clearBtn.click();
+    await expect(chip).toContainText('main');
+    await expect(clearBtn).not.toBeVisible();
 
-  // Submit a message and verify neither branch nor worktree is sent
-  await fillComposer(page, 'task after clear');
-  await page.locator('[data-web-shell-composer-submit]').click();
+    // Submit a message and verify neither branch nor worktree is sent
+    await fillComposer(page, 'task after clear');
+    await page.locator('[data-web-shell-composer-submit]').click();
 
-  await expect.poll(() => sessionCreateBody(daemon) !== undefined).toBe(true);
-  expect(sessionCreateBody(daemon)?.['branch']).toBeUndefined();
-  expect(sessionCreateBody(daemon)?.['worktree']).toBeUndefined();
-});
+    await expect.poll(() => sessionCreateBody(daemon) !== undefined).toBe(true);
+    expect(sessionCreateBody(daemon)?.['branch']).toBeUndefined();
+    expect(sessionCreateBody(daemon)?.['worktree']).toBeUndefined();
+  });
+}
 
 test('git mode chip is hidden when workspace is not a git repo', async ({
   page,
