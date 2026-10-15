@@ -1303,6 +1303,63 @@ describe('package scripts', () => {
   });
 
   it('runs prepare steps in order when CI does not skip prepare', () => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-root-'));
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-bin-'));
+    const logFile = path.join(binDir, 'commands.log');
+    mkdirSync(path.join(tmpRoot, 'dist'), { recursive: true });
+    writeFileSync(path.join(tmpRoot, 'dist/review-sources.sha256'), '');
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(
+          path.join(binDir, 'husky.cmd'),
+          '@echo(husky>>"%PREPARE_LOG_FILE%"\r\n',
+        );
+        writeFileSync(
+          path.join(binDir, 'npm.cmd'),
+          '@echo(npm %*>>"%PREPARE_LOG_FILE%"\r\n',
+        );
+      } else {
+        writeFileSync(
+          path.join(binDir, 'husky'),
+          '#!/bin/sh\necho husky >> "$PREPARE_LOG_FILE"\n',
+        );
+        writeFileSync(
+          path.join(binDir, 'npm'),
+          '#!/bin/sh\necho "npm $*" >> "$PREPARE_LOG_FILE"\n',
+        );
+        chmodSync(path.join(binDir, 'husky'), 0o755);
+        chmodSync(path.join(binDir, 'npm'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/prepare.js')],
+        {
+          cwd: tmpRoot,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            PREPARE_LOG_FILE: logFile,
+            QWEN_SKIP_PREPARE: '',
+          },
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        'husky',
+        'npm run generate',
+      ]);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it('builds and bundles when dist is absent', () => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-root-'));
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-bin-'));
     const logFile = path.join(binDir, 'commands.log');
 
@@ -1333,7 +1390,7 @@ describe('package scripts', () => {
         process.execPath,
         [path.join(root, 'scripts/prepare.js')],
         {
-          cwd: root,
+          cwd: tmpRoot,
           encoding: 'utf8',
           env: {
             ...process.env,
@@ -1347,10 +1404,12 @@ describe('package scripts', () => {
       expect(result.status).toBe(0);
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
         'husky',
+        'npm run generate',
         'npm run build',
         'npm run bundle',
       ]);
     } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
       rmSync(binDir, { recursive: true, force: true });
     }
   });
@@ -1401,6 +1460,7 @@ describe('package scripts', () => {
   });
 
   it('reports the failing prepare step after earlier steps succeed', () => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-root-'));
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-late-fail-'));
     const logFile = path.join(binDir, 'commands.log');
     writeFileSync(logFile, '');
@@ -1442,7 +1502,7 @@ describe('package scripts', () => {
         process.execPath,
         [path.join(root, 'scripts/prepare.js')],
         {
-          cwd: root,
+          cwd: tmpRoot,
           encoding: 'utf8',
           env: {
             ...process.env,
@@ -1459,9 +1519,11 @@ describe('package scripts', () => {
       );
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
         'husky',
+        'npm run generate',
         'npm run build',
       ]);
     } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
       rmSync(binDir, { recursive: true, force: true });
     }
   });
