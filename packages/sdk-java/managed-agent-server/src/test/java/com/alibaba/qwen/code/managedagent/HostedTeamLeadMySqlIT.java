@@ -17,6 +17,7 @@ import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import java.io.IOException;
+import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -749,7 +750,6 @@ class HostedTeamLeadMySqlIT {
         Files.createDirectory(workspace.resolve("child"));
         // Keep initialized-root mtime distinct from birth time without relying on sleeps.
         Files.setLastModifiedTime(workspace, FileTime.fromMillis(1));
-        port = freePort();
         int harnessPort = freePort();
         int brokerPort = freePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -758,7 +758,22 @@ class HostedTeamLeadMySqlIT {
         model.setExecutor(modelThreads);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        startSpring(cli, node, decoy, workspace, harnessPort, brokerPort);
+        // freePort() lets the port go before the Spring server and the embedded
+        // broker bind to it, and a contended CI runner can hand the port out
+        // again in that gap: boot with fresh ports when the bind loses the race.
+        for (int attempt = 0; ; attempt++) {
+            port = freePort();
+            try {
+                startSpring(cli, node, decoy, workspace, harnessPort, brokerPort);
+                break;
+            } catch (RuntimeException error) {
+                if (attempt >= 2 || !bindConflict(error)) {
+                    throw error;
+                }
+                harnessPort = freePort();
+                brokerPort = freePort();
+            }
+        }
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-0', 1,"
                 + " 'storage-0', 'H4e-b1', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
@@ -892,6 +907,16 @@ class HostedTeamLeadMySqlIT {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();
         }
+    }
+
+    private static boolean bindConflict(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof BindException
+                    || String.valueOf(cause.getMessage()).contains("Address already in use")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @AfterEach

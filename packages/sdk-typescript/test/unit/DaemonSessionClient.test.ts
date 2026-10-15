@@ -2528,7 +2528,7 @@ describe('DaemonSessionClient', () => {
     }
   });
 
-  it('coalesces a prompt abort with an explicit session cancel', async () => {
+  it('keeps a mechanical prompt abort separate from a later explicit cancel', async () => {
     let eventsController:
       | ReadableStreamDefaultController<Uint8Array>
       | undefined;
@@ -2589,16 +2589,68 @@ describe('DaemonSessionClient', () => {
     const explicitCancel = session.cancel();
     await vi.waitFor(() => {
       expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
-        1,
+        2,
       );
     });
 
+    expect(
+      calls
+        .filter((call) => call.url.endsWith('/cancel'))
+        .map((call) => JSON.parse(call.body!)),
+    ).toEqual([{ _meta: { 'qwen.cancelReason': 'interrupted' } }, {}]);
     resolveCancel(new Response(null, { status: 204 }));
     await explicitCancel;
     await prompt;
     eventsController?.close();
     eventsAbort.abort();
     await eventPump;
+  });
+
+  it('sends lifecycle interruption independently of a later user cancellation', async () => {
+    let release!: () => void;
+    const { fetch, calls } = recordingFetch((request) => {
+      const body = JSON.parse(request.body ?? '{}');
+      if (body._meta?.['qwen.cancelReason'] === 'interrupted') {
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response(null, { status: 204 }));
+        });
+      }
+      return new Response(null, { status: 204 });
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: { sessionId: 's-1', workspaceCwd: '/work/a', attached: true },
+    });
+    const interruption = session.interrupt();
+    await session.cancel();
+    expect(calls.map((request) => JSON.parse(request.body ?? '{}'))).toEqual([
+      { _meta: { 'qwen.cancelReason': 'interrupted' } },
+      {},
+    ]);
+    release();
+    await interruption;
+  });
+
+  it('coalesces duplicate public cancellations with the existing request shape', async () => {
+    const { fetch } = recordingFetch(() => new Response(null, { status: 204 }));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    let release!: () => void;
+    const cancel = vi.spyOn(client, 'cancel').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const session = new DaemonSessionClient({
+      client,
+      session: { sessionId: 's-1', workspaceCwd: '/work/a', attached: true },
+    });
+    const first = session.cancel();
+    const duplicate = session.cancel();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledWith('s-1', undefined);
+    release();
+    await Promise.all([first, duplicate]);
   });
 
   it('releases a subscription prompt slot after a non-202 result', async () => {
