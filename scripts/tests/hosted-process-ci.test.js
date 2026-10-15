@@ -321,6 +321,10 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/sdk-java/managed-agent-server/target/fg8-cases/',
     );
+    // FG9's session-relay fault gates keep theirs in target/fg9-cases/.
+    expect(upload.with.path).toContain(
+      'packages/sdk-java/managed-agent-server/target/fg9-cases/',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag.
     const evidence = job.steps.find(
@@ -528,6 +532,21 @@ describe('Hosted real-process gates', () => {
     // same shape the FG7 channel letters are held to) is the honest model.
     const ceilings = ceilingsOf(
       hostedTestSource('HostedMonitorRunFaultGatesIT'),
+    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedSessionRelayFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG9 session/relay letters follow the FG8 monitor/run shape: one
+    // letter stalling to its @Timeout must still leave the fork enough
+    // healthy runtime and budget for the sibling letter to finish.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedSessionRelayFaultGatesIT'),
     );
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {

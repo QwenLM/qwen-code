@@ -381,6 +381,24 @@
             </plugin></plugins></build>
         </profile>
         <profile>
+            <id>hosted-session-relay-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedSessionRelay*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- The FG9 letters share one fork: each letter's
+                         @Timeout ceiling (600 s) plus the healthy runtime
+                         must fit, the per-ceiling relation the CI profile
+                         pins (#14164). -->
+                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
             <id>o4-mysql-gates</id>
             <build><plugins><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
