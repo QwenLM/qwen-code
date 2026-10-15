@@ -129,10 +129,16 @@ export function validateModelProvidersConfig(
 
 /**
  * Normalize a base URL for allowlist comparison: trim whitespace and
- * trailing slashes, then lowercase (hostnames are case-insensitive).
+ * trailing slashes, then lowercase the scheme and host (hostnames are
+ * case-insensitive) while leaving the path case-sensitive. Strings without
+ * a scheme keep the previous full-lowercase behavior on both sides, so
+ * comparisons remain consistent.
  */
 function normalizeBaseUrlForMatch(url: string): string {
-  return url.trim().replace(/\/+$/, '').toLowerCase();
+  const trimmed = url.trim().replace(/\/+$/, '');
+  const parts = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/]+)(.*)$/.exec(trimmed);
+  if (!parts) return trimmed.toLowerCase();
+  return `${parts[1].toLowerCase()}${parts[2].toLowerCase()}${parts[3]}`;
 }
 
 /**
@@ -140,9 +146,11 @@ function normalizeBaseUrlForMatch(url: string): string {
  *
  * A baseUrl passes when it equals an entry or extends one across a path
  * boundary: `https://corp.example` matches `https://corp.example/v1` but
- * not `https://corp.example.evil.com`. An empty or missing baseUrl never
- * passes — fail closed, so a model whose protocol default endpoint is
- * external cannot slip through an allowlist that omits it.
+ * not `https://corp.example.evil.com`. Scheme and host compare
+ * case-insensitively on both sides; the path is case-sensitive. An empty
+ * or missing baseUrl never passes — fail closed, so a model whose protocol
+ * default endpoint is external cannot slip through an allowlist that
+ * omits it.
  */
 export function isBaseUrlAllowed(
   baseUrl: string | undefined,
@@ -572,24 +580,22 @@ export class ModelRegistry {
    *   not lose the mapping); any object value REPLACES it, so passing `{}`
    *   clears the mapping. Callers that want to preserve must omit the argument,
    *   not pass `settings.providerProtocol ?? {}`.
-   * @param allowedModelBaseUrls - Updated managed endpoint allowlist.
-   *   `undefined` PRESERVES the existing policy (boot-frozen, like
-   *   providerProtocol); any array value REPLACES it.
+   *
+   * The managed endpoint allowlist is boot-frozen (like providerProtocol): a
+   * reload always re-applies the boot-time policy and cannot widen or drop it.
    */
   reloadModels(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
-    allowedModelBaseUrls?: readonly string[],
   ): void {
     const reloaded = new ModelRegistry(
       modelProvidersConfig,
       providerProtocolConfig ?? this.providerProtocolConfig,
-      allowedModelBaseUrls ?? this.allowedModelBaseUrls,
+      this.allowedModelBaseUrls,
     );
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;
     this.modelProvidersConfig = reloaded.modelProvidersConfig;
-    this.allowedModelBaseUrls = reloaded.allowedModelBaseUrls;
   }
 
   /** The raw providers config this registry was last built from. */

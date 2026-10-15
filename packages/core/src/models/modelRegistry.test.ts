@@ -1137,7 +1137,7 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
   });
 
-  it('matches allowlist entries case-insensitively and ignores trailing slashes', () => {
+  it('matches hosts case-insensitively and ignores trailing slashes', () => {
     const registry = new ModelRegistry(
       {
         custom: [{ id: 'ext', baseUrl: 'https://CORP.Example/V1/' }],
@@ -1146,6 +1146,29 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
       ['https://corp.example/'],
     );
     expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+  });
+
+  it('matches allowlist paths case-sensitively while hosts stay case-insensitive', () => {
+    // Hosts compare case-insensitively, but the path is case-sensitive:
+    // /V1 is a different endpoint path than /v1.
+    const mismatch = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'https://corp.example/V1' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      ['https://corp.example/v1'],
+    );
+    expect(mismatch.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+
+    // A byte-identical URL still matches.
+    const match = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'https://corp.example/v1' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      ['https://corp.example/v1'],
+    );
+    expect(idsOf(match, AuthType.USE_OPENAI)).toEqual(['ext']);
   });
 
   it('an empty allowlist registers no models, including the qwen-oauth built-ins', () => {
@@ -1158,7 +1181,13 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
   });
 
-  it('filters the hard-coded qwen-oauth built-ins through the allowlist', () => {
+  it('does not register the qwen-oauth built-ins when an allowlist is set', () => {
+    // Documented managed semantics, not a sentinel artifact: the built-in
+    // qwen-oauth models resolve their baseUrl to the dynamic
+    // 'DYNAMIC_QWEN_OAUTH_BASE_URL' placeholder, so no allowlist entry can
+    // ever match them. Setting model.allowedBaseUrls intentionally disables
+    // the personal Qwen login provider (its endpoint is discovered at login
+    // and cannot be listed); a deployment that needs it leaves the key unset.
     const registry = new ModelRegistry(undefined, undefined, [CORP]);
     expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
   });
@@ -1188,13 +1217,14 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual(['coder-model']);
   });
 
-  it('reloadModels preserves the allowlist when the argument is omitted', () => {
+  it('reloadModels preserves the boot-time allowlist on a providers-only reload', () => {
     const registry = new ModelRegistry(externalCustom(), { custom: 'openai' }, [
       CORP,
     ]);
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
 
-    // A providers-only reload must not drop the policy.
+    // A providers-only reload must not drop the policy: an allowed model
+    // still registers after the reload.
     registry.reloadModels(
       { custom: [{ id: 'ok', baseUrl: `${CORP}/v1` }] } as ModelProvidersConfig,
       { custom: 'openai' },
@@ -1202,14 +1232,17 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ok']);
   });
 
-  it('reloadModels applies a new allowlist when one is provided', () => {
+  it('reloadModels keeps the boot-time allowlist — reloading providers cannot widen it', () => {
     const registry = new ModelRegistry(externalCustom(), { custom: 'openai' }, [
       CORP,
     ]);
-    registry.reloadModels(externalCustom(), { custom: 'openai' }, [
-      'https://external-llm.example',
-    ]);
-    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+
+    // The policy is boot-frozen (like providerProtocol): re-registering the
+    // external endpoint through a providers-only reload must not escape the
+    // boot-time allowlist.
+    registry.reloadModels(externalCustom(), { custom: 'openai' });
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
   });
 
   it('reloadModels honors a newly-pinned empty qwen-oauth list', () => {

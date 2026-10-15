@@ -1509,18 +1509,17 @@ export class ModelsConfig {
    * @param modelProvidersConfig - The updated model providers configuration
    * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
    *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
-   * @param allowedModelBaseUrls - Updated managed endpoint allowlist;
-   *   `undefined` preserves the existing policy (boot-frozen).
+   *
+   * The managed endpoint allowlist is boot-frozen and is preserved across
+   * reloads (see {@link ModelRegistry.reloadModels}).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
-    allowedModelBaseUrls?: readonly string[],
   ): void {
     this.modelRegistry.reloadModels(
       modelProvidersConfig,
       providerProtocolConfig,
-      allowedModelBaseUrls,
     );
   }
 
