@@ -9,6 +9,8 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.O
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -287,11 +289,7 @@ public class ManagedActionStore {
             String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
             String recordKey = ManagedSchemaKeys.key(scope, "ACTION", id);
             if (previous == null) {
-                jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id,"
-                                + " workspace_id, session_id, record_kind, domain, record_id,"
-                                + " action_id, revision, action_version, state, options_json,"
-                                + " created_at, first_sequence) VALUES (?, ?, ?, ?, ?, 'ACTION',"
-                                + " 'action', ?, ?, ?, ?, ?, ?, ?, ?)",
+                jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, record_kind, domain, record_id, action_id, revision, action_version, state, options_json, gmt_create, first_sequence) VALUES (?, ?, ?, ?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, ?, ?, ?)",
                         scope, recordKey, tenantId, workspaceId, sessionId, id, id,
                         event.path("sequence").asLong(), options.path("inputRevision").asLong(),
                         state, options.toString(), options.path("createdAt").asLong(), event.path("sequence").asLong());
@@ -342,10 +340,7 @@ public class ManagedActionStore {
         for (JsonNode ref : refs) {
             String resourceId = ref.path("resourceId").asText();
             jdbc.update(
-                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                        + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                        + " resource_id, created_at) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?,"
-                        + " ?, CURRENT_TIMESTAMP(6))",
+                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                     scope, recordKey, revision, ManagedSchemaKeys.key(scope, resourceId), tenantId, workspaceId, sessionId, resourceId);
         }
     }
@@ -356,9 +351,7 @@ public class ManagedActionStore {
         }
         return jdbc
                 .query(
-                        "SELECT * FROM ma_session_record WHERE session_scope_key = ? AND"
-                                + " record_kind = 'ACTION' AND tenant_id = ? AND session_id = ? AND"
-                                + " action_id = ?",
+                        "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE session_scope_key = ? AND record_kind = 'ACTION' AND tenant_id = ? AND session_id = ? AND action_id = ?",
                         (r, row) ->
                                 new Action(
                                         r.getString("action_id"),
@@ -376,17 +369,16 @@ public class ManagedActionStore {
         List<Object> args = new ArrayList<>(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId));
         String cursor = "";
         if (before != null) {
-            cursor = " AND (created_at < ? OR created_at = ? AND action_id < ?)";
+            cursor = " AND (gmt_create < ? OR gmt_create = ? AND action_id < ?)";
             args.add(before);
             args.add(before);
             args.add(beforeId);
         }
         args.add(limit);
         return jdbc.query(
-                "SELECT * FROM ma_session_record WHERE session_scope_key = ? AND record_kind ="
-                        + " 'ACTION' AND tenant_id = ? AND session_id = ? AND state = 'requested'"
+                "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE session_scope_key = ? AND record_kind = 'ACTION' AND tenant_id = ? AND session_id = ? AND state = 'requested'"
                         + cursor
-                        + " ORDER BY created_at DESC, action_id DESC LIMIT ?",
+                        + " ORDER BY gmt_create DESC, action_id DESC LIMIT ?",
                 (r, row) ->
                         new Action(
                                 r.getString("action_id"),
@@ -514,21 +506,11 @@ public class ManagedActionStore {
         String op = "op_" + UUID.randomUUID().toString().replace("-", "");
         String operationKey = ManagedSchemaKeys.operationKey(OperationKind.ACTION_RESPONSE, scope, ManagedSchemaKeys.key(sessionId), op);
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key,"
-                    + " tenant_id, session_id, operation_id, operation_kind, actor_digest,"
-                    + " idempotency_key, idempotency_digest, request_digest, request_json, phase,"
-                    + " state, admission_stage, delivery_state, session_status_before,"
-                    + " available_at, created_at, updated_at, action_id) VALUES (?, ?, 'SESSION',"
-                    + " ?, ?, ?, ?, 'ACTION_RESPONSE', ?, ?, ?, ?, ?, 'PENDING', 'PENDING',"
-                    + " 'JAVA_DURABLE', 'PENDING', 'ACTIVE', ?, ?, ?, ?)",
+                "INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, tenant_id, session_id, operation_id, operation_kind, actor_digest, idempotency_key, idempotency_digest, request_digest, request_json, phase, state, admission_stage, delivery_state, session_status_before, available_at, gmt_create, gmt_modified, action_id) VALUES (?, ?, 'SESSION', ?, ?, ?, ?, 'ACTION_RESPONSE', ?, ?, ?, ?, ?, 'PENDING', 'PENDING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', ?, ?, ?, ?)",
                 operationKey, scope, ManagedSchemaKeys.key(sessionId), tenantId, sessionId, op,
                 actorDigest, key, ManagedSchemaKeys.key(key), requestDigest, body.toString(), now, now, now, actionId);
         jdbc.update(
-                "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
-                    + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest,"
-                    + " request_digest, state, session_id, action_id, action_version,"
-                    + " result_operation_key, created_at, updated_at) VALUES (?, 'ACTION_DECISION',"
-                    + " ?, ?, 'SESSION', ?, ?, ?, ?, ?, 'ADMITTED', ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id, scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, request_digest, state, session_id, action_id, action_version, result_operation_key, gmt_create, gmt_modified) VALUES (?, 'ACTION_DECISION', ?, ?, 'SESSION', ?, ?, ?, ?, ?, 'ADMITTED', ?, ?, ?, ?, ?, ?)",
                 ManagedSchemaKeys.receiptKey(ReceiptNamespace.ACTION_DECISION, tenantId, ReceiptScope.SESSION, actionScope, actionId),
                 ManagedSchemaKeys.key(tenantId), tenantId, actionScope, actionScope, actionId, ManagedSchemaKeys.key(actionId), decision,
                 sessionId, actionId, o.path("inputRevision").asLong(), operationKey, now, now);
@@ -568,10 +550,7 @@ public class ManagedActionStore {
 
     public List<OperationTarget> deliverable(long now) {
         return jdbc.query(
-                "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind"
-                    + " = 'ACTION_RESPONSE' AND ((delivery_state = 'PENDING' AND available_at <= ?)"
-                    + " OR (delivery_state = 'LEASED' AND claim_until < CURRENT_TIMESTAMP(6))) AND"
-                    + " state IN ('PENDING', 'RUNNING') ORDER BY available_at LIMIT 50",
+                "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind = 'ACTION_RESPONSE' AND ((delivery_state = 'PENDING' AND available_at <= ?) OR (delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + ")) AND state IN ('PENDING', 'RUNNING') ORDER BY available_at LIMIT 50",
                 (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)),
                 now);
     }
@@ -591,12 +570,7 @@ public class ManagedActionStore {
             boolean matched = "decided".equals(action.state())
                     && decisionDigest(response.body()).equals(action.decisionDigest());
             jdbc.update(
-                    "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage ="
-                            + " 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?,"
-                            + " failure_code = ?, decision_receipt_id = ?, claim_owner = NULL,"
-                            + " claim_until = NULL, updated_at = ?, completed_at = ? WHERE tenant_id ="
-                        + " ? AND session_id = ? AND operation_id = ? AND operation_kind ="
-                        + " 'ACTION_RESPONSE' AND delivery_state IN ('PENDING', 'LEASED')",
+                    "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage = 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?, failure_code = ?, decision_receipt_id = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND operation_kind = 'ACTION_RESPONSE' AND delivery_state IN ('PENDING', 'LEASED')",
                     matched ? "COMPLETED" : "FAILED",
                     "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
                     matched ? null : endedCode(action.state()),
@@ -614,13 +588,7 @@ public class ManagedActionStore {
             long now) {
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, op.tenantId(), op.sessionId());
         jdbc.update(
-                "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage ="
-                    + " 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?,"
-                    + " failure_code = ?, decision_receipt_id = ?, claim_owner = NULL, claim_until"
-                    + " = NULL, updated_at = ?, completed_at = ? WHERE tenant_id = ? AND session_id"
-                    + " = ? AND operation_id = ? AND delivery_state = 'LEASED' AND claim_owner = ?"
-                    + " AND operation_kind = 'ACTION_RESPONSE' AND claim_generation = ? AND"
-                    + " claim_until > CURRENT_TIMESTAMP(6)",
+                "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage = 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?, failure_code = ?, decision_receipt_id = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED' AND claim_owner = ? AND operation_kind = 'ACTION_RESPONSE' AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW,
                 errorCode == null ? "COMPLETED" : "FAILED",
                 "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
                 errorCode,

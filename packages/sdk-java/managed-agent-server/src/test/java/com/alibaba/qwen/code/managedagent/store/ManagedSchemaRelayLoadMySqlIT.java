@@ -93,7 +93,7 @@ class ManagedSchemaRelayLoadMySqlIT {
     }
 
     private static final String INSERT = "INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id,"
-            + " workspace_id, session_id, domain, record_id, revision, record_resource_id, delivery_state, created_at)"
+            + " workspace_id, session_id, domain, record_id, revision, record_resource_id, delivery_state, gmt_create)"
             + " VALUES (?, ?, 'tenant', 'workspace', 'sender', ?, ?, 1, 'resource', ?, ?)";
 
     private record Statement(String sql, Object[] arguments) {}

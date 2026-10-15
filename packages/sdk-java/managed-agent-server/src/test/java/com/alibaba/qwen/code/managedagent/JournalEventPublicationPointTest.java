@@ -74,7 +74,7 @@ class JournalEventPublicationPointTest {
         String storage = "storage-" + UUID.randomUUID();
         String base = "/internal/managed-session-store/v1/sessions/" + session;
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, tenant_key, session_key,"
-                + " agent_id, status, created_at, updated_at,"
+                + " agent_id, status, gmt_create, gmt_modified,"
                 + " workspace_storage_id, workspace_id, workspace_generation,"
                 + " cwd_relative, context_config_ref, context_revision,"
                 + " workspace_config_ref, workspace_policy_ref) VALUES (?, ?, ?, ?,"

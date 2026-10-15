@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jdk.jfr.Recording;
@@ -766,35 +767,19 @@ class EventTransportBrokerGate {
 
     private String session(String status) {
         String session = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id,"
-                + " agent_id, status, created_at, updated_at,"
-                + " workspace_storage_id, workspace_id, workspace_generation,"
-                + " cwd_relative, context_config_ref, context_revision,"
-                + " workspace_config_ref, workspace_policy_ref) VALUES (?, ?,"
-                + " 'qwen-code', ?, 1, 1, ?, ?, 1, '.', ?, 1, ?, ?)",
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified, workspace_storage_id, workspace_id, workspace_generation, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref) VALUES (?, ?, 'qwen-code', ?, 1, 1, ?, ?, 1, '.', ?, 1, ?, ?)",
                 TENANT, session, status, "storage-" + session, WORKSPACE,
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO ma_event_stream (tenant_id,"
-                + " session_id, stream_kind, stream_id, covered_sequence, updated_at)"
-                + " VALUES (?, ?, 'SESSION', X'', 0, 1)",
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, covered_sequence, gmt_modified) VALUES (?, ?, 'SESSION', X'', 0, 1)",
                 TENANT, session);
         return session;
     }
 
     private void head(String session, String state, long committed,
             int leaseOffsetSeconds, String writer) {
-        jdbc.update("INSERT INTO ma_session_head (tenant_id,"
-                + " workspace_id, session_id, storage_version, state,"
-                + " writer_generation, writer_id, writer_lease_until,"
-                + " journal_revision, committed_sequence, activation_epoch,"
-                + " compacted_through_revision, recovery_status, created_at,"
-                + " updated_at, tenant_key, harness_key, harness_session_id,"
-                + " head_kind) VALUES (?, ?, ?, 1, ?, 1, ?, TIMESTAMPADD("
-                + "SECOND, " + leaseOffsetSeconds + ", CURRENT_TIMESTAMP(6)),"
-                + " 3, ?, 0, 0, 'READY', CURRENT_TIMESTAMP(6),"
-                + " CURRENT_TIMESTAMP(6), ?, ?, ?, 'MANAGED_SESSION')",
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified, tenant_key, harness_key, harness_session_id, head_kind) VALUES (?, ?, ?, 1, ?, 1, ?, (" + ManagedSchemaTime.SQL_NOW + " + " + (leaseOffsetSeconds * 1000L) + "), 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'MANAGED_SESSION')",
                 TENANT, WORKSPACE, session, state, writer, committed,
                 ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(session),
                 session);
@@ -838,10 +823,7 @@ class EventTransportBrokerGate {
     private EventRecord storedPublicEvent(String session, long sequence,
             String type) {
         EventRecord event = publicEvent(session, sequence, type);
-        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id,"
-                + " sequence_id, event_id, turn_id, event_type, data_json,"
-                + " terminal, source_key, created_at) VALUES (?, ?, ?, ?, ?,"
-                + " ?, '{}', FALSE, NULL, ?)", TENANT, session, sequence,
+        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, turn_id, event_type, data_json, terminal, source_key, gmt_create) VALUES (?, ?, ?, ?, ?, ?, '{}', FALSE, NULL, ?)", TENANT, session, sequence,
                 event.eventId(), event.turnId(), type, event.createdAt());
         jdbc.update("UPDATE ma_event_stream SET last_sequence = ? WHERE"
                 + " tenant_id = ? AND session_id = ? AND stream_kind ="

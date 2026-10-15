@@ -4,6 +4,8 @@ import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -145,8 +147,7 @@ class HostedShellLifecycleRecoveryIT {
             });
             assertThat(Files.readString(root.resolve("workspace/child/lifecycle-marker.txt"))).isEqualTo("once\n");
             assertThat(models.get()).isEqualTo(2);
-            var executions = jdbc.queryForList("SELECT * FROM ma_tool_execution"
-                    + " WHERE harness_session_id = ?", session);
+            var executions = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", session);
             assertThat(executions).hasSize(1);
             assertThat(executions.getFirst().get("execution_state")).isEqualTo("SETTLED");
             assertThat(((Number) executions.getFirst().get("dispatch_generation")).longValue()).isEqualTo(1);
@@ -371,8 +372,7 @@ class HostedShellLifecycleRecoveryIT {
                 assertThat(harness.isAlive()).isTrue();
                 releaseFirst.countDown();
                 await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                        "SELECT claim_until <= CURRENT_TIMESTAMP(6) FROM ma_operation"
-                                + " WHERE operation_id = ?", Boolean.class, operation)).isTrue());
+                        "SELECT claim_until <= " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE operation_id = ?", Boolean.class, operation)).isTrue());
                 startSpring();
                 assertThat(secondPrepare.await(30, TimeUnit.SECONDS)).as("second Spring resource claim").isTrue();
                 long oldGeneration = JSON.readTree(oldRequest.get().body()).at("/authority/claimGeneration").asLong();
@@ -430,8 +430,7 @@ class HostedShellLifecycleRecoveryIT {
         }
 
         private boolean liveWriter() {
-            return Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until > CURRENT_TIMESTAMP(6)"
-                    + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session));
+            return Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session));
         }
 
         private String create(String key) throws Exception {
