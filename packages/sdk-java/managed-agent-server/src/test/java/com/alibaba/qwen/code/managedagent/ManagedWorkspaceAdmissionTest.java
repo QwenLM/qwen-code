@@ -2412,8 +2412,8 @@ class ManagedWorkspaceAdmissionTest {
                         + " target_id, actor_digest, idempotency_key,"
                         + " idempotency_digest, request_digest, request_json,"
                         + " state, phase, admission_stage, delivery_state,"
-                        + " session_status_before, available_at, created_at,"
-                        + " updated_at, completed_at) VALUES (?, ?, ?,"
+                        + " session_status_before, available_at, gmt_create,"
+                        + " gmt_modified, completed_at) VALUES (?, ?, ?,"
                         + " 'op-del', 'DELETE', ?, ?, 'SESSION', ?, ?, '',"
                         + " 'delete', ?, 'delete-digest', '{}', 'COMPLETED',"
                         + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', ?, 0, 0,"
@@ -2424,7 +2424,7 @@ class ManagedWorkspaceAdmissionTest {
                 scope, scope, tenant, sessionId, target, sessionId,
                 ManagedSchemaKeys.key("delete"), statusBefore);
         jdbc.update("UPDATE ma_session SET status = 'DELETED',"
-                        + " deleted_at = 1, updated_at = 1, version ="
+                        + " deleted_at = 1, gmt_modified = 1, version ="
                         + " version + 1 WHERE tenant_id = ? AND session_id"
                         + " = ?",
                 tenant, sessionId);

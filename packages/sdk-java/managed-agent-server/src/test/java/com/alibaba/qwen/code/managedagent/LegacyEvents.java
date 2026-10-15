@@ -77,7 +77,7 @@ final class LegacyEvents {
             String data) {
         jdbc.update("INSERT INTO managed_agent_event (tenant_id, session_id,"
                         + " sequence_id, event_id, turn_id, event_type,"
-                        + " data_json, terminal, source_key, created_at)"
+                        + " data_json, terminal, source_key, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)",
                 tenant, session, sequence, "evt_legacy_" + session + "_"
                         + sequence, turnId, type, data,

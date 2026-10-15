@@ -183,6 +183,19 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 acquire(exchange);
                 return;
             }
+            // Read-only: a reloaded Harness asks which of this Session's
+            // Runtime Sessions a live hold row still pins, to restore the
+            // close's drain obligation after a restart (#13930 R1-2).
+            if ("POST".equals(exchange.getRequestMethod())
+                    && "/tool-sessions:active-holds".equals(relative)) {
+                Map<String, Object> body = requestBody(exchange, "active holds request");
+                requireProtocol(body);
+                String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "active holds request");
+                complete(exchange, service.listActiveHoldRuntimeSessionIds(sessionId),
+                        ids -> Map.of("protocolVersion", 1, "harnessSessionId", sessionId,
+                                "heldRuntimeSessionIds", ids));
+                return;
+            }
             if ("POST".equals(exchange.getRequestMethod())
                     && "/executions:prepare".equals(relative)) {
                 executionRequest(exchange, true);

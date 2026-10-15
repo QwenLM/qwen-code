@@ -22,6 +22,7 @@ import {
   MAX_MATCH_WORK,
 } from './manifest-repository-context.js';
 import { MAX_IDENTITY_BYTES } from './repository-context.js';
+import { arePermissionBitsEnforced } from '../../../test-utils/permission-bits.js';
 
 let worktrees: string[] = [];
 
@@ -990,11 +991,12 @@ describe('manifest repository context provider', () => {
     ).toEqual(['src/a1c/x.ts', 'src/a2c/y.ts']);
   });
 
-  // Permission-based failure injection is meaningless to root, and chmod(0)
-  // does not block reads on Windows — the repo convention for this case.
-  const isRoot = process.platform === 'win32' || process.getuid?.() === 0;
+  // Permission-based failure injection is meaningless where permission bits
+  // do not bind: root with its DAC capabilities ignores them, and chmod(0)
+  // does not block reads on Windows.
+  const permissionBitsIgnored = !arePermissionBitsEnforced();
 
-  it.skipIf(isRoot)(
+  it.skipIf(permissionBitsIgnored)(
     'fails closed when a scanned directory cannot be read',
     () => {
       // An unreadable subtree must fail the review closed, the way the
