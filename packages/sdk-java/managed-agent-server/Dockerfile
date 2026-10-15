@@ -28,7 +28,7 @@ RUN mvn --batch-mode --no-transfer-progress \
     && for f in qwen-managed-agent-server-*.jar; do \
          [ -e "$f" ] || break; \
          case "$f" in \
-           *-workspace-bundle.jar|*-operator-recovery.jar|*-workspace-migration.jar) ;; \
+           *-workspace-bundle.jar|*-operator-recovery.jar|*-workspace-migration.jar|*-workspace-maintenance-recovery.jar|*-csi-session.jar|*-csi-runtime.jar) ;; \
            *) main="$f"; count=$((count+1)) ;; \
          esac; \
        done \

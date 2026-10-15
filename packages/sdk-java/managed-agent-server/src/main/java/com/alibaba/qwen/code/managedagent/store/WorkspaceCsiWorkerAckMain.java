@@ -89,6 +89,7 @@ public final class WorkspaceCsiWorkerAckMain {
         }
         var configuration = new ClientBuilderConfiguration();
         configuration.setSignatureVersion(SignVersion.V4);
+        AliyunToolPublicationObjectStore.configureClientRetries(configuration);
         return OSSClientBuilder.create().endpoint(endpoint.toString()).region(region)
                 .credentialsProvider(CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider())
                 .clientConfiguration(configuration).build();

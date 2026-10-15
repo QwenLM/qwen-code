@@ -27,7 +27,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -168,8 +169,8 @@ class ToolPublicationControllerTest {
         JdbcDataSource source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:publication-controller-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(source).load().migrate();
-        JdbcTemplate jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(source);
         DataSourceTransactionManager manager = new DataSourceTransactionManager(source);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey("0123456789abcdef0123456789abcdef");

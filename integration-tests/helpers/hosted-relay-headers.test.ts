@@ -123,7 +123,9 @@ describe('Hosted proxy header relay', () => {
     // the drivers relative to this file, never process.cwd(). Read source
     // text because importing a driver throws — each parses process.argv[2]
     // at module load. Positive pin only: a new driver hand-rolling its relay
-    // is absent from the enumerated list and still passes.
+    // is absent from the enumerated list and still passes. A new legitimate
+    // caller of the shared helper joins this list deliberately — the list
+    // itself is what this pin keeps countable.
     const dir = dirname(fileURLToPath(import.meta.url));
     const callers = readdirSync(dir)
       .filter((name) => /^hosted-.*-driver\.ts$/.test(name))
@@ -135,9 +137,31 @@ describe('Hosted proxy header relay', () => {
       'hosted-channel-fault-driver.ts',
       'hosted-latency-driver.ts',
       'hosted-process-crash-driver.ts',
+      'hosted-recovery-blocked-wedge-driver.ts',
       'hosted-shell-output-driver.ts',
       'hosted-store-failure-driver.ts',
       'hosted-workspace-tool-turn-driver.ts',
     ]);
+  });
+
+  it('pins the probe driver to certify completed turns by their transcript', () => {
+    // R3-18 sentinel: classifying a probe turn from wall clock alone lets a
+    // failed turn journal green beside a wedged one's evidence; the
+    // transcript gate is the only honest completed-path verdict — removing
+    // it must turn this pin red.
+    const source = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        'hosted-recovery-blocked-wedge-driver.ts',
+      ),
+      'utf8',
+    );
+    const completedArm = source.slice(
+      source.indexOf('async function driveProbeTurn('),
+      source.indexOf('async function wedgeEvidence('),
+    );
+    expect(completedArm).toContain('/transcript?cursor=0&limit=256');
+    expect(completedArm).toContain("event.type === 'turn_complete'");
+    expect(completedArm).toContain('event.promptId === turn.promptId');
   });
 });
