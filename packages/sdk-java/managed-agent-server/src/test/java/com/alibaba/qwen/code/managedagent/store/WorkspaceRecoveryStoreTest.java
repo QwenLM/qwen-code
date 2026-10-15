@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -405,9 +406,9 @@ class WorkspaceRecoveryStoreTest {
                 + "\"profile\":\"hosted-workspace-files/1\"}],"
                 + "\"permission_policy\":{\"approval_mode\":\"default\"}}";
         sessions.setManagedAgentDefinitionStore(
-                new ManagedAgentDefinitionStore(jdbc));
+                new ManagedAgentDefinitionStore(jdbc, new RequestDigests()));
         String pinned = new TransactionTemplate(manager).execute(status -> {
-            new ManagedAgentDefinitionStore(jdbc).create("tenant", "def",
+            new ManagedAgentDefinitionStore(jdbc, new RequestDigests()).create("tenant", "def",
                     "def-digest", agentId, definitionDigest, definitionJson,
                     1L);
             return sessions.insertWorkspaceSessionCommand("tenant", "actor",

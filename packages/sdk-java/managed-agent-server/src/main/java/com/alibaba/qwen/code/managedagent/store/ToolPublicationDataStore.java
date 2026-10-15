@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -1738,8 +1739,8 @@ public final class ToolPublicationDataStore {
 
     private static MessageDigest sha256() {
         try {
-            return MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.getSha256Digest();
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException(error);
         }
     }
@@ -2208,7 +2209,7 @@ public final class ToolPublicationDataStore {
         guard.run();
         objects.requireUnversioned();
         try (InputStream stream = retention.open(scope, publicationId, objectKey, objects, guard)) {
-            var hash = java.security.MessageDigest.getInstance("SHA-256");
+            var hash = DigestUtils.getSha256Digest();
             byte[] buffer = new byte[64 * 1024];
             long read = 0;
             for (int count; (count = stream.read(buffer)) != -1; ) {
@@ -2222,8 +2223,13 @@ public final class ToolPublicationDataStore {
             if (read != length || !HexFormat.of().formatHex(hash.digest()).equals(digest)) {
                 throw new CorruptObjectException("Publication object digest changed");
             }
-        } catch (IOException | java.security.NoSuchAlgorithmException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Publication object verification failed", error);
+        } catch (IllegalArgumentException error) {
+            if (error.getCause() instanceof NoSuchAlgorithmException cause) {
+                throw new IllegalStateException("Publication object verification failed", cause);
+            }
+            throw error;
         }
     }
 
