@@ -9,6 +9,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -95,8 +96,7 @@ public final class ExtensionRecordJournal {
     CommitTransactionRequest request(String commandId, JsonNode monitor,
             long occurredAt) {
         return request(OPERATION, commandId, bytes(monitor), occurredAt,
-                event -> {
-                }, records -> records);
+                event -> {}, records -> records);
     }
 
     /**
@@ -125,7 +125,7 @@ public final class ExtensionRecordJournal {
     public CommitTransactionRequest requestDomain(String commandId, String domain,
             JsonNode body, List<CommitResource> resources, long occurredAt) {
         return request("commitMcpRecord", commandId, bytes(body), occurredAt,
-                event -> { }, records -> records, 0, domain, resources);
+                event -> {}, records -> records, 0, domain, resources);
     }
 
     /**
@@ -183,7 +183,7 @@ public final class ExtensionRecordJournal {
         List<CommitResource> closure = new ArrayList<>(resources);
         closure.add(input);
         return request("commitMcpRecord", commandId, bytes(body), 1_000,
-                event -> { }, records -> {
+                event -> {}, records -> {
                     int cut = records.indexOf('\n') + 1;
                     return records.substring(0, cut) + lines
                             + records.substring(cut);
