@@ -112,11 +112,11 @@ class ManagedModelContextTest {
         assertThat(transactions.execute(status -> journal.commit(first)).replayed()).isTrue();
 
         assertThat(context("replay")).isEqualTo(new WebShellModelContext("second", 20L, 200L, 900));
-        var row = jdbc.queryForMap("SELECT revision, first_sequence, created_at, settled_at FROM"
+        var row = jdbc.queryForMap("SELECT revision, first_sequence, gmt_create, settled_at FROM"
                 + " ma_session_record WHERE domain = 'hosted_context_usage'");
         assertThat(((Number) row.get("revision")).longValue()).isEqualTo(second.lastSequence());
         assertThat(((Number) row.get("first_sequence")).longValue()).isEqualTo(first.lastSequence());
-        assertThat(((Number) row.get("created_at")).longValue()).isEqualTo(1_000);
+        assertThat(((Number) row.get("gmt_create")).longValue()).isEqualTo(1_000);
         assertThat(((Number) row.get("settled_at")).longValue()).isEqualTo(900);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind ="
                 + " 'SESSION_RECORD'", Integer.class)).isEqualTo(1);
@@ -296,14 +296,14 @@ class ManagedModelContextTest {
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
             jdbc.update("INSERT IGNORE INTO ma_workspace_access (tenant_id, workspace_id, actor_id,"
                     + " role) VALUES (?, ?, ?, 'READER')", tenant, WORKSPACE, "reader");
-            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, created_at, updated_at,"
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified,"
                     + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative,"
                     + " context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref)"
                     + " VALUES (?, ?, 'qwen-code', 1, 1, ?, 1, 'storage', '.', ?, 1, ?, ?)", tenant,
                     session, WORKSPACE, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         } else {
-            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, created_at, updated_at)"
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified)"
                     + " VALUES (?, ?, 'qwen-code', 1, 1)", tenant, session);
         }
         return transactions.execute(status -> new ExtensionRecordJournal(sessions, tenant, WORKSPACE, session).open());

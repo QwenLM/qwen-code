@@ -18,7 +18,6 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
-import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -69,7 +68,7 @@ public class WorkspaceCreationStore {
         String receiptKey = ManagedSchemaKeys.receiptKey(ReceiptNamespace.WORKSPACE_CREATE,
                 tenant, ReceiptScope.ACTOR, scope, key);
         String digest = ManagedSchemaKeys.key(name);
-        Map<String, Object> receipt;
+        ManagedReceipts.Receipt receipt;
         try {
             receipt = transaction.execute(status -> {
                 long now = clock.millis();
@@ -89,42 +88,42 @@ public class WorkspaceCreationStore {
             }
             requireDigest(receipt, digest);
         }
-        Details details = roots.details(Objects.requireNonNull(receipt));
-        if ("COMPLETED".equals(receipt.get("state"))) {
+        Details details = roots.details(Objects.requireNonNull(receipt).resultJson(), receiptKey);
+        if ("COMPLETED".equals(receipt.state())) {
             return replay(tenant, actor, details);
         }
-        if (!"PENDING".equals(receipt.get("state"))) {
+        if (!"PENDING".equals(receipt.state())) {
             throw WorkspaceExecutionStore.unavailable();
         }
         try {
             roots.prepare(tenant, receiptKey);
             guard.registerCreated(tenant, details.storageId(), details.registrationId());
         } catch (RuntimeException error) {
-            Map<String, Object> current = find(tenant, scope, key, false);
-            if (current != null && "COMPLETED".equals(current.get("state"))) {
+            ManagedReceipts.Receipt current = find(tenant, scope, key, false);
+            if (current != null && "COMPLETED".equals(current.state())) {
                 requireDigest(current, digest);
-                return replay(tenant, actor, roots.details(current));
+                return replay(tenant, actor, roots.details(current.resultJson(), receiptKey));
             }
             throw error;
         }
         transaction.executeWithoutResult(status -> {
-            Map<String, Object> current = find(tenant, scope, key, true);
+            ManagedReceipts.Receipt current = find(tenant, scope, key, true);
             requireDigest(Objects.requireNonNull(current), digest);
-            if ("COMPLETED".equals(current.get("state"))) {
+            if ("COMPLETED".equals(current.state())) {
                 return;
             }
-            if (!"PENDING".equals(current.get("state"))) {
+            if (!"PENDING".equals(current.state())) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             long now = clock.millis();
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
-                            + " storage_id, display_name, config_ref, policy_ref, state, created_at, updated_at)"
+                            + " storage_id, display_name, config_ref, policy_ref, state, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE', ?, ?)",
                     tenant, details.workspaceId(), details.storageId(), details.displayName(),
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF, now, now);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                             + " VALUES (?, ?, ?, 'OWNER')", tenant, details.workspaceId(), actorKey);
-            jdbc.update("UPDATE ma_request_receipt SET state = 'COMPLETED', updated_at = ?"
+            jdbc.update("UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ?"
                     + " WHERE receipt_key = ?", now, receiptKey);
         });
         return replay(tenant, actor, details);
@@ -138,13 +137,13 @@ public class WorkspaceCreationStore {
         return found;
     }
 
-    private Map<String, Object> find(String tenant, String scope, String key, boolean lock) {
+    private ManagedReceipts.Receipt find(String tenant, String scope, String key, boolean lock) {
         return ManagedReceipts.find(jdbc, ReceiptNamespace.WORKSPACE_CREATE, tenant,
                 ReceiptScope.ACTOR, scope, key, lock);
     }
 
-    private static void requireDigest(Map<String, Object> receipt, String digest) {
-        if (!digest.equals(receipt.get("request_digest"))) {
+    private static void requireDigest(ManagedReceipts.Receipt receipt, String digest) {
+        if (!digest.equals(receipt.requestDigest())) {
             throw new ApiException(HttpStatus.CONFLICT, "idempotency_conflict",
                     "Idempotency key was already used for another Workspace name.");
         }

@@ -66,7 +66,8 @@ final class WorkspaceCreationRoots {
         }
         String key = storage.substring("created-".length());
         List<Map<String, Object>> rows = jdbc.query(
-                "SELECT * FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
+                "SELECT receipt_key, tenant_id, scope_kind, scope_id, idempotency_key, state,"
+                        + " result_json FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
                         + " AND tenant_key = ?",
                 (row, index) -> ManagedSchemaRows.read(row), key,
                 ReceiptNamespace.WORKSPACE_CREATE.name(), ManagedSchemaKeys.key(tenant));
@@ -86,7 +87,7 @@ final class WorkspaceCreationRoots {
                         tenant, ReceiptScope.ACTOR, scope, idempotency))) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        Details details = details(row);
+        Details details = details((String) row.get("result_json"), key);
         if (!storage.equals(details.storageId())
                 || !("workspace-" + key).equals(details.workspaceId())) {
             throw WorkspaceExecutionStore.unavailable();
@@ -125,15 +126,15 @@ final class WorkspaceCreationRoots {
         }
     }
 
-    Details details(Map<String, Object> receipt) {
+    Details details(String resultJson, String receiptKey) {
         try {
-            Details value = JSON.readValue((String) receipt.get("result_json"), Details.class);
+            Details value = JSON.readValue(resultJson, Details.class);
             UUID.fromString(value.registrationId());
             if (StringUtils.isBlank(value.displayName())
                     || value.displayName().length() > 128
                     || value.displayName().codePoints().anyMatch(Character::isISOControl)
-                    || !("workspace-" + receipt.get("receipt_key")).equals(value.workspaceId())
-                    || !("created-" + receipt.get("receipt_key")).equals(value.storageId())) {
+                    || !("workspace-" + receiptKey).equals(value.workspaceId())
+                    || !("created-" + receiptKey).equals(value.storageId())) {
                 throw new IllegalArgumentException();
             }
             return value;
