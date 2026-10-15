@@ -2,14 +2,15 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
-import java.util.concurrent.ScheduledFuture;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+
+import java.util.concurrent.ScheduledFuture;
 
 @Configuration
 public class ManagedArtifactConfiguration {

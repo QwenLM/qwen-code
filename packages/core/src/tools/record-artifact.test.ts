@@ -140,6 +140,10 @@ describe('RecordArtifactTool', () => {
     return secret;
   }
 
+  it('does not point the model at the Artifact tool', () => {
+    expect(makeTool().description).not.toContain('Artifact tool');
+  });
+
   it('records a link artifact without touching the resource', async () => {
     const url = 'https://example.com/tables/orders';
     const metadata = { table: 'orders' };
