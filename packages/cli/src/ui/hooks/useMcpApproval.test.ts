@@ -32,6 +32,7 @@ describe('useMcpApproval', () => {
   const makeConfig = (
     servers: Record<string, MCPServerConfig>,
     approvalMode: ApprovalMode = ApprovalMode.DEFAULT,
+    disabled: (name: string) => boolean = () => false,
   ): Config => {
     const pending = new Set(
       Object.entries(servers)
@@ -43,6 +44,7 @@ describe('useMcpApproval', () => {
     return {
       getApprovalMode: () => approvalMode,
       getMcpServers: () => servers,
+      isMcpServerDisabled: disabled,
       getWorkingDir: () => dir,
       approveMcpServerForSession: approveForSession,
       isMcpServerPendingApproval: (n: string) => pending.has(n),
@@ -87,6 +89,37 @@ describe('useMcpApproval', () => {
     expect(result.current.isMcpApprovalDialogOpen).toBe(true);
     expect(result.current.currentMcpApproval?.name).toBe('a');
     expect(result.current.mcpApprovalRemaining).toBe(1);
+  });
+
+  it('never queues a gated server the config reports as disabled', () => {
+    const config = makeConfig(
+      {
+        g: { command: 'g', scope: 'project' },
+        h: { command: 'h', scope: 'project' },
+      },
+      ApprovalMode.DEFAULT,
+      (name) => name === 'g',
+    );
+    const { result } = renderHook(() => useMcpApproval(config));
+    expect(result.current.currentMcpApproval?.name).toBe('h');
+    expect(result.current.mcpApprovalRemaining).toBe(0);
+  });
+
+  it('drops a queued server from the dialog once it becomes disabled', () => {
+    let excluded = false;
+    const config = makeConfig(
+      { g: { command: 'g', scope: 'project' } },
+      ApprovalMode.DEFAULT,
+      (name) => excluded && name === 'g',
+    );
+    const { result } = renderHook(() => useMcpApproval(config));
+    expect(result.current.isMcpApprovalDialogOpen).toBe(true);
+
+    excluded = true;
+    act(() => {
+      appEvents.emit(AppEvent.McpPendingApprovalChanged);
+    });
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
   });
 
   it('shows env and header key names in the approval summary', () => {

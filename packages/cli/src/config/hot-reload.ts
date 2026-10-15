@@ -10,7 +10,6 @@ import {
   ApprovalMode,
   type Config,
   getMCPServerStatus,
-  matchesAnyServerPattern,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './settings.js';
@@ -250,11 +249,10 @@ export function registerMcpHotReload(
     // hash (issue #6 in the hot-reload review). The dialog's `computePending`
     // is the authoritative filter; this is only the "re-evaluate" nudge. See
     // #4615.
-    // Servers the effective exclusion list already rules out are not prompted:
-    // an approval could not connect them. `nextGating.pending` stays unfiltered.
-    const promptable = getPromptableMcpServers(next, cwd).filter(
-      (name) => !matchesAnyServerPattern(name, nextGating.excluded),
-    );
+    // Not filtered by the exclusion list: the event is a name-less nudge, so
+    // suppressing it would also stop the dialog from dropping a stale entry.
+    // `useMcpApproval`'s `computePending` skips disabled servers itself.
+    const promptable = getPromptableMcpServers(next, cwd);
 
     // Push the admission lists BEFORE reconcile — the discovery pass inside
     // reinitializeMcpServers reads them to skip excluded / non-allowed /
