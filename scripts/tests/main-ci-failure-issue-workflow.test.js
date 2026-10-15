@@ -22,14 +22,28 @@ describe('main CI failure issue workflow', () => {
 
   it('opens an autofix-ready issue only for failed main CI runs', () => {
     expect(workflow).toContain('workflow_run:');
-    // 'SDK Java' joined for its post-merge push run: its path filter watches
-    // the SDK's embedding surfaces too, so it fires on roughly half of recent
-    // merges to main — and a red push run is the only signal for a merge
-    // result neither PR could fail: the duplicate-V16 Flyway collision of
-    // #12940 sat unnoticed for two hours without it.
-    expect(workflow).toContain(
-      "workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI']",
-    );
+    // 'SDK Java' and 'Desktop Checks' joined when #14205 moved both suites
+    // off pull_request/push onto a daily schedule: a red scheduled run is now
+    // their only failure signal, so both ride the same deduplicated issue and
+    // autofix route as the nightly CLI checks.
+    const watchedFiles = {
+      'E2E Tests': 'e2e',
+      'SDK Java': 'sdk-java',
+      'SDK Python': 'sdk-python',
+      'Qwen Code CI': 'ci',
+      'Desktop Checks': 'desktop-packaging-check',
+    };
+    expect(yml.on.workflow_run.workflows).toEqual(Object.keys(watchedFiles));
+    // workflow_run.workflows matches the watched workflow's name: key, so a
+    // watch entry is live only while its file still carries that name —
+    // renaming one silently unhooks the suite's failure issues, and nothing
+    // else here reads the coupling for all five.
+    for (const [watchedName, watchedFile] of Object.entries(watchedFiles)) {
+      const definition = parse(
+        readFileSync(`.github/workflows/${watchedFile}.yml`, 'utf8'),
+      );
+      expect(definition.name, watchedFile).toBe(watchedName);
+    }
     expect(workflow).toContain("types: ['completed']");
     // 'Qwen Code CI' joined the list when the macOS and Windows lanes got a
     // nightly run on main: that run is their only trigger outside a
@@ -45,19 +59,24 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       "github.event.workflow_run.head_branch == 'main'",
     );
-    // Push covers the other two watched workflows AND 'Qwen Code CI''s own
-    // post-merge lane on `main` — ci.yml restored that trigger, so main's
-    // squash commits now carry Test check-runs and a red one files an issue
-    // here. Schedule is scoped to
-    // 'Qwen Code CI' — that nightly is the platform lanes' only trigger
-    // outside a pull request, and the other watched workflows' own
-    // nightlies must not dispatch the autofix agent through this watcher.
-    // A pull-request run of any of them must never open an issue — that is
-    // contributor-triggered, and the branch filter plus this clause are
-    // what keep it out. Pin the whole event clause so a connective or
-    // scope mutation fails here.
+    // Push stays admitted unscoped: it covers ci.yml's own post-merge lane
+    // on `main` (restored so main's squash commits carry Test check-runs)
+    // and any other watched workflow's push run. The schedule arm is
+    // name-scoped, and #14205 widened that scope from 'Qwen Code CI' alone
+    // to the three workflows whose only main trigger is now a schedule — the
+    // platform lanes' nightly plus the daily SDK Java and Desktop checks: a
+    // red run of any of them files an issue here. A pull-request run of a
+    // watched workflow must never open an issue — that is
+    // contributor-triggered, and the branch filter plus this clause are what
+    // keep it out. Pin the clause's three load-bearing spans — the unscoped
+    // push arm, the schedule arm's connective, and its name set — so a
+    // connective or scope mutation in any of them fails here.
+    expect(workflow).toContain("(github.event.workflow_run.event == 'push' ||");
     expect(workflow).toContain(
-      "(github.event.workflow_run.event == 'push' || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.name == 'Qwen Code CI'))",
+      "github.event.workflow_run.event == 'schedule' &&",
+    );
+    expect(workflow).toContain(
+      'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow_run.name)',
     );
     expect(workflow).not.toContain(
       "github.event.workflow_run.event == 'pull_request'",
