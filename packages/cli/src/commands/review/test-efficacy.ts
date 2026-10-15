@@ -47,6 +47,7 @@
 // applies here too: a mutant that breaks the compile is `inconclusive`, never
 // `killed`.
 
+import { getJsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import {
@@ -1846,7 +1847,7 @@ function runProbeSuite(
         env: runtimeClientEnv(),
       })
     : spawnSync(
-        process.execPath,
+        getJsInterpreterCommand(import.meta.url).command,
         [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
         {
           cwd: probeTree,

@@ -8,7 +8,10 @@ import semver from 'semver';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getPackageJson } from '../../utils/package.js';
-import { getNpmCliPath } from '../../utils/installationInfo.js';
+import {
+  getInstallationInfo,
+  getNpmCliPath,
+} from '../../utils/installationInfo.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
@@ -76,6 +79,7 @@ export function classifyUpdateCheckError(
 ): UpdateCheckFailureReason {
   if (error instanceof UpdateCheckTimeoutError) return 'timeout';
   if (error instanceof Error) {
+    if (error.name === 'TimeoutError') return 'timeout';
     if (
       'killed' in error &&
       error.killed === true &&
@@ -165,6 +169,33 @@ export async function fetchGlobalNpmUpdateInfo(
   distTag: 'latest' | 'nightly',
   run: typeof execFileAsync = execFileAsync,
 ): Promise<UpdateInfo> {
+  if (getInstallationInfo('', false).isStandalone) {
+    const registry =
+      process.env['npm_config_registry'] || 'https://registry.npmjs.org';
+    const url = new URL(
+      `-/package/${encodeURIComponent(packageName)}/dist-tags`,
+      registry.endsWith('/') ? registry : `${registry}/`,
+    );
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!response.ok)
+      throw new Error(`Registry returned HTTP ${response.status}`);
+    const tags: unknown = await response.json();
+    if (typeof tags !== 'object' || tags === null || Array.isArray(tags)) {
+      throw new Error('Invalid registry dist-tags response');
+    }
+    const latest = Reflect.get(tags, distTag);
+    if (latest !== undefined && typeof latest !== 'string') {
+      throw new Error(`Invalid registry ${distTag} version response`);
+    }
+    return {
+      latest: latest ?? currentVersion,
+      current: currentVersion,
+      type: 'latest',
+      name: packageName,
+    };
+  }
   const output = await runGlobalNpm(
     ['view', packageName, `dist-tags.${distTag}`, '--json', '--global'],
     run,

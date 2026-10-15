@@ -20,6 +20,7 @@ import {
 import * as fs from 'node:fs';
 import * as runnerPaths from './landlock-runner-path.js';
 import os from 'node:os';
+import * as runtimeInfo from '../utils/runtime-info.js';
 import path from 'node:path';
 import type {
   ProcessLaunch,
@@ -151,6 +152,12 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
   ) => (await run(bwrapPolicy, launch)).result;
 
   it('builds a literal launch, transports the payload env privately, and prepares writable masks', async () => {
+    const interpreter = path.join(installation, 'private-bun');
+    writeFileSync(interpreter, 'fixture');
+    vi.spyOn(runtimeInfo, 'getJsInterpreterCommand').mockReturnValue({
+      command: interpreter,
+      runtime: 'bun',
+    });
     const maskedPath = path.join(workspace, '.qwen', 'review-leases');
     const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
     const handle = await run({ ...policy(), maskedPaths: [maskedPath] });
@@ -158,6 +165,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
       sandboxStatus: { state: 'confirmed', exitCode: 0 },
     });
     const relayLaunch = launch.mock.calls[0][0];
+    expect(relayLaunch.executable).toBe(realpathSync(interpreter));
     const argv = relayLaunch.args;
     const admittedWorkspace = realpathSync(workspace);
     const admittedMaskedPath = path.join(

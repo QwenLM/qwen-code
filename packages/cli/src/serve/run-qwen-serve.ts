@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getJsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import {
   assertExecutionSandboxSupported,
   readOperatorSandboxSettings,
@@ -910,7 +911,7 @@ export async function verifyWorkerTlsTrust(opts: {
   const timeoutMs = opts.timeoutMs ?? 5_000;
   return new Promise((resolve) => {
     execFile(
-      process.execPath,
+      getJsInterpreterCommand(import.meta.url).command,
       [
         '--input-type=module',
         '--eval',

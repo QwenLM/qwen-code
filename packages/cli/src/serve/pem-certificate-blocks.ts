@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getJsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { spawnSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -80,7 +81,7 @@ function scanCertificateBlocks(
       if (key.toUpperCase() === 'NODE_OPTIONS') delete oracleEnv[key];
     }
     const result = spawnSync(
-      process.execPath,
+      getJsInterpreterCommand(import.meta.url).command,
       ['--no-deprecation', '--input-type=commonjs', '-e', ORACLE_SOURCE],
       {
         encoding: 'utf8',
