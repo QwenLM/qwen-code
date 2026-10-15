@@ -129,6 +129,9 @@ const EN: Messages = {
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
+  'managed.executionMode': 'Execution mode',
+  'managed.localMode': 'Local',
+  'managed.managedMode': 'Managed',
   'managed.sessions': 'Managed sessions',
   'managed.conversation': 'Managed conversation',
   'managed.new': 'New managed task',
@@ -205,7 +208,7 @@ const EN: Messages = {
   'managed.modelPreset': 'Model / Agent preset',
   'managed.modelDefault': 'Server default model',
   'managed.modelPinned':
-    'This model is fixed for the new session. Start a new session to use another model or Workspace.',
+    'Choose the initial model and Agent preset. Supported conversations can change model while idle.',
   'managed.workspaceChoose': 'Choose a Workspace',
   'managed.workspaceDirectory': 'Relative directory',
   'managed.cwd.change': 'Change directory',
@@ -242,6 +245,43 @@ const EN: Messages = {
   'managed.workspaceSharedFiles':
     'Sessions in the same Workspace share files. Directory availability is checked before execution.',
   'managed.workspaceEmpty': 'No readable Workspaces are available.',
+  'managed.newWorkspaceTitle': 'New workspace',
+  'managed.modelFixed':
+    'The model is fixed for this task. Start a new task to choose another model.',
+  'managed.model.loading': 'Loading available models…',
+  'managed.model.optionsError': 'Could not load available models.',
+  'managed.model.reload': 'Reload models',
+  'managed.model.nextTurn':
+    'Change the model while idle. Your next message uses the selected model; conversation history is kept.',
+  'managed.model.changing': 'Changing model…',
+  'managed.model.unconfirmed':
+    'The model change is not confirmed. Continue confirming the original request.',
+  'managed.model.confirm': 'Continue confirming',
+  'managed.model.busy':
+    'Finish the active task, approval or unconfirmed request before changing model.',
+  'managed.model.storage':
+    'Browser session storage is unavailable. The model change cannot start safely.',
+  'managed.model.conflict':
+    'The model has changed. Review the current selection and try again.',
+  'managed.model.failed':
+    'The model change was refused. Review the available models and try again.',
+  'managed.approvalOptionsLoading': 'Loading approval modes…',
+  'managed.approvalOptionsLoadFailed': 'Could not load approval modes.',
+  'managed.approvalOptionsInvalid':
+    'The service returned unsupported approval modes.',
+  'managed.approvalFixed':
+    'Approval mode is fixed for this task. Start a new task to choose another mode.',
+  'managed.newWorkspaceDescription':
+    'Create an empty workspace for Managed tasks.',
+  'managed.newWorkspaceName': 'Workspace name',
+  'managed.newWorkspaceNameInvalid':
+    'Use a name of 1–128 characters without control characters.',
+  'managed.newWorkspaceCreate': 'Create workspace',
+  'managed.newWorkspaceCreating': 'Creating workspace…',
+  'managed.newWorkspaceUncertain':
+    'The creation is not yet confirmed. Retry to check the same workspace.',
+  'managed.newWorkspaceResume': 'Resume workspace creation',
+  'managed.newWorkspaceClose': 'Close',
   'managed.workspaceUnsupported':
     'This service does not support Workspace binding.',
   'managed.workspacePermission':
@@ -3317,6 +3357,8 @@ const EN: Messages = {
   'contextUsage.previousReading':
     'Could not refresh. Showing a previous reading.',
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
+  'contextUsage.unknown':
+    'Context usage has not been observed for this session yet.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
   'tokenUsage.input': 'Input',
@@ -4459,6 +4501,9 @@ const ZH: Messages = {
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
+  'managed.executionMode': '执行方式',
+  'managed.localMode': '本地',
+  'managed.managedMode': '托管',
   'managed.sessions': '托管会话',
   'managed.conversation': '托管会话内容',
   'managed.new': '新建托管任务',
@@ -4527,7 +4572,8 @@ const ZH: Messages = {
   'managed.workspaceLabel': '工作区',
   'managed.modelPreset': '模型 / Agent 预设',
   'managed.modelDefault': '服务端默认模型',
-  'managed.modelPinned': '模型在新会话中固定；更换模型或工作区请新建会话。',
+  'managed.modelPinned':
+    '选择初始模型和 Agent 预设；支持的会话可在空闲时切换模型。',
   'managed.workspaceChoose': '选择工作区',
   'managed.workspaceDirectory': '相对目录',
   'managed.cwd.change': '切换目录',
@@ -4557,6 +4603,34 @@ const ZH: Messages = {
   'managed.workspaceSharedFiles':
     '同一工作区的会话共享文件；目录可用性将在执行前验证。',
   'managed.workspaceEmpty': '没有可读取的工作区。',
+  'managed.newWorkspaceTitle': '新建工作区',
+  'managed.modelFixed': '当前任务的模型已固定；如需更换，请新建任务。',
+  'managed.model.loading': '正在加载可用模型…',
+  'managed.model.optionsError': '加载可用模型失败。',
+  'managed.model.reload': '重新加载模型',
+  'managed.model.nextTurn':
+    '空闲时可切换模型；下一条消息使用所选模型，对话历史保留。',
+  'managed.model.changing': '正在切换模型…',
+  'managed.model.unconfirmed': '模型切换尚未确认，请继续确认原请求。',
+  'managed.model.confirm': '继续确认',
+  'managed.model.busy':
+    '请先完成正在执行的任务、审批或未确认请求，再切换模型。',
+  'managed.model.storage': '浏览器会话存储不可用，无法安全发起模型切换。',
+  'managed.model.conflict': '当前模型已变化，请检查选择后重试。',
+  'managed.model.failed': '模型切换被拒绝，请检查可用模型后重试。',
+  'managed.approvalOptionsLoading': '正在加载审批策略…',
+  'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
+  'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
+  'managed.approvalFixed': '当前任务的审批策略已固定；如需更换，请新建任务。',
+  'managed.newWorkspaceDescription': '为托管任务创建一个空工作区。',
+  'managed.newWorkspaceName': '工作区名称',
+  'managed.newWorkspaceNameInvalid':
+    '名称需为 1–128 个字符，不能包含控制字符。',
+  'managed.newWorkspaceCreate': '创建工作区',
+  'managed.newWorkspaceCreating': '正在创建工作区…',
+  'managed.newWorkspaceUncertain': '创建结果尚未确认，重试将查询同一个工作区。',
+  'managed.newWorkspaceResume': '继续确认工作区创建',
+  'managed.newWorkspaceClose': '关闭',
   'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',
   'managed.workspacePermission': '没有发现工作区的权限。',
   'managed.workspaceLoadFailed': '加载工作区失败。',
@@ -7484,6 +7558,7 @@ const ZH: Messages = {
   'contextUsage.loadError': '上下文使用情况加载失败。',
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
+  'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
   'tokenUsage.input': '输入',

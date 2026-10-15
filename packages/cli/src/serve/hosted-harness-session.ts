@@ -11,6 +11,11 @@ import {
   publishHostedModelRequest,
   type HostedModelRequest,
 } from './hosted-model-recovery.js';
+import {
+  parseHostedModelSelection,
+  readHostedTurnModelSelection,
+  type HostedModelSelection,
+} from './hosted-model-selection.js';
 import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import {
   findHostedApprovalContinuation,
@@ -3136,6 +3141,10 @@ async function executeHostedTurn(
                   modelScope,
                   workspaceContext,
                   agentDefinition: session.agentDefinition,
+                  modelSelection: await readHostedTurnModelSelection(
+                    session.managed,
+                    promptId,
+                  ),
                   agentInstructions: await readHostedAgentInstructions(
                     session.agentDefinition,
                     session.managed.resources,
@@ -5904,6 +5913,12 @@ export function registerHostedHarnessSessionRoutes(
     const prompt = body?.['prompt'];
     const digest = body?.['payloadDigest'];
     const deadlineMs = body?.['deadlineMs'];
+    let modelSelection: HostedModelSelection | undefined;
+    try {
+      modelSelection = parseHostedModelSelection(body?.['modelSelection']);
+    } catch {
+      return error(res, 400, 'invalid_hosted_model_selection');
+    }
     const workflowLaunch =
       Array.isArray(prompt) && prompt.length === 1
         ? parseHostedWorkflowLaunchBlock(prompt[0])
@@ -5914,6 +5929,8 @@ export function registerHostedHarnessSessionRoutes(
     // replay answers through the ordinary dedup machinery; every other
     // shape keeps the pre-change refusal.
     if (workflowLaunch !== undefined) {
+      if (modelSelection !== undefined)
+        return error(res, 400, 'invalid_hosted_model_selection');
       const journaledInputs = session.managed.authority
         .eventsInSequenceRange(1, session.managed.authority.committedSequence)
         .filter((event) => event.kind === 'input.accepted');
@@ -5974,6 +5991,17 @@ export function registerHostedHarnessSessionRoutes(
     if (existing) {
       if (existing.digest !== digest)
         return error(res, 409, 'hosted_prompt_conflict');
+      try {
+        if (
+          !isDeepStrictEqual(
+            await readHostedTurnModelSelection(session.managed, promptId),
+            modelSelection,
+          )
+        )
+          return error(res, 409, 'hosted_prompt_conflict');
+      } catch {
+        return error(res, 409, 'hosted_prompt_recovery_required');
+      }
       res.status(202).json({
         promptId,
         lastEventId: existing.lastEventId,
@@ -6118,7 +6146,15 @@ export function registerHostedHarnessSessionRoutes(
                   ),
                 ),
               );
-              if (acceptedAdmission?.['digest'] !== digest) {
+              if (
+                acceptedAdmission?.['digest'] !== digest ||
+                !isDeepStrictEqual(
+                  parseHostedModelSelection(
+                    acceptedAdmission['modelSelection'],
+                  ),
+                  modelSelection,
+                )
+              ) {
                 if (!res.headersSent) error(res, 409, 'hosted_prompt_conflict');
                 return;
               }
@@ -6256,7 +6292,13 @@ export function registerHostedHarnessSessionRoutes(
         );
         const admissionRef = await session.managed.resources.publish(
           'managed-admission',
-          Buffer.from(JSON.stringify({ promptId, digest })),
+          Buffer.from(
+            JSON.stringify({
+              promptId,
+              digest,
+              ...(modelSelection ? { modelSelection } : {}),
+            }),
+          ),
         );
         abort.signal.throwIfAborted();
         await authority.submitInput(
@@ -8254,6 +8296,10 @@ export function registerHostedHarnessSessionRoutes(
             signal: abort.signal,
             workspaceContext,
             agentDefinition: session.agentDefinition,
+            modelSelection: await readHostedTurnModelSelection(
+              session.managed,
+              promptId,
+            ),
             agentInstructions: await readHostedAgentInstructions(
               session.agentDefinition,
               session.managed.resources,

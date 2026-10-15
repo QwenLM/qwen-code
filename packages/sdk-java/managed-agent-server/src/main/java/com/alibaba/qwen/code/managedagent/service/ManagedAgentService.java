@@ -17,9 +17,14 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellContentPart;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelChangeResult;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelContext;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionModels;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
@@ -210,6 +215,50 @@ public class ManagedAgentService {
             String actorId, String idempotencyKey, String agentId,
             String agentRevision, String title, Map<String, Object> metadata,
             List<InputBlock> blocks, WorkspaceSelection selection) {
+        return createWorkspaceSession(tenantId, actorId, idempotencyKey,
+                agentId, agentRevision, title, metadata, blocks, selection, null);
+    }
+
+    public WebShellSessionOptions queryWebShellSessionOptions(
+            String tenantId, String actorId, String agentId) {
+        if (actorId == null || actorId.isEmpty()) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED,
+                    "actor_required", "A trusted actor is required.");
+        }
+        return store.workspaceSessionOptions(tenantId, agentId);
+    }
+
+    public WebShellSessionModels queryWebShellSessionModels(String tenantId, String actorId,
+            String sessionId) {
+        requireModelActor(actorId);
+        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        boolean supported = session.workspace() != null && store.workspaceFilesEnabled()
+                && !store.modelOptions().isEmpty() && harness.supportsModelSelection();
+        return new WebShellSessionModels(store.modelOptions(),
+                store.findModelSelections(tenantId, List.of(sessionId)).getOrDefault(sessionId,
+                        new WebShellModelSelection(null, 0)), supported);
+    }
+
+    public WebShellModelChangeResult changeWebShellSessionModel(String tenantId, String actorId,
+            String sessionId, String key, String modelId, long expectedRevision) {
+        requireModelActor(actorId);
+        validateIdempotencyKey(key);
+        String digest = digests.digest(Map.of("sessionId", sessionId, "modelId", modelId,
+                "expectedRevision", expectedRevision));
+        return store.changeSessionModel(tenantId, actorId, sessionId, key, digest, modelId,
+                expectedRevision, harness.supportsModelSelection());
+    }
+
+    private static void requireModelActor(String actorId) {
+        if (actorId == null || actorId.isEmpty()) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "actor_required", "A trusted actor is required");
+        }
+    }
+
+    public CommandAdmission createWorkspaceSession(String tenantId,
+            String actorId, String idempotencyKey, String agentId,
+            String agentRevision, String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode) {
         validateIdempotencyKey(idempotencyKey);
         if (actorId == null || actorId.isEmpty()) {
             throw new ApiException(HttpStatus.UNAUTHORIZED,
@@ -228,6 +277,9 @@ public class ManagedAgentService {
                 ? Map.of("default", true)
                 : Map.of("workspaceId", selection.workspaceId(),
                         "cwdRelative", selection.cwdRelative()));
+        if (approvalMode != null) {
+            semantic.put("approvalMode", approvalMode);
+        }
         String requestDigest = digests.digest(semantic);
         String payloadDigest = input.isEmpty() ? null
                 : SubmitHarnessTurn.computePayloadDigest(input);
@@ -246,10 +298,14 @@ public class ManagedAgentService {
         }
         Admission admission;
         try {
-            admission = store.insertWorkspaceSessionCommand(tenantId,
-                    actorId, idempotencyKey, requestDigest, agentId,
-                    agentRevision, effectiveTitle, input, payloadDigest,
-                    selection);
+            admission = approvalMode == null
+                    ? store.insertWorkspaceSessionCommand(tenantId,
+                            actorId, idempotencyKey, requestDigest, agentId,
+                            agentRevision, effectiveTitle, input, payloadDigest, selection)
+                    : store.insertWorkspaceSessionCommand(tenantId,
+                            actorId, idempotencyKey, requestDigest, agentId,
+                            agentRevision, effectiveTitle, input, payloadDigest,
+                            selection, approvalMode);
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
@@ -1001,6 +1057,11 @@ public class ManagedAgentService {
                 ids);
         Map<String, EventRecord> environmentEvents = store
                 .findLatestEnvironmentEvents(tenantId, latestTurns);
+        List<String> boundIds = sessions.stream().filter(session -> session.workspace() != null)
+                .map(SessionRecord::sessionId).toList();
+        Map<String, WebShellModelSelection> modelSelections = store.findModelSelections(tenantId, boundIds);
+        Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
+        boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
         // Cwd admission has no Turn execution-profile restriction. One role
         // grant read covers the workspaces of both shapes; the executable
@@ -1040,7 +1101,9 @@ public class ManagedAgentService {
                         environmentEvents.get(session.sessionId()),
                         retention(session, closed),
                         maySubmitWorkspaceTurn(session, grants, executable),
-                        mayChangeCwd(session, grants, executable)))
+                        mayChangeCwd(session, grants, executable),
+                        modelContexts.get(session.sessionId()),
+                        modelSelections.get(session.sessionId()), modelSelectionSupported))
                 .toList();
     }
 
@@ -1063,7 +1126,9 @@ public class ManagedAgentService {
 
     private WebShellSession webShellSession(SessionRecord session,
             TurnSummary latestTurn, EventRecord environmentEvent,
-            boolean retention, boolean maySubmit, boolean mayChangeCwd) {
+            boolean retention, boolean maySubmit, boolean mayChangeCwd,
+            WebShellModelContext modelContext, WebShellModelSelection modelSelection,
+            boolean modelSelectionSupported) {
         boolean visible = session.deletedAt() == null;
         boolean close = visible && supportsClose(session);
         boolean keep = visible && retention;
@@ -1086,7 +1151,11 @@ public class ManagedAgentService {
                         hasArtifacts(session),
                         hasActions(session), maySubmit, close, keep, keep,
                         visible && supportsDelete(session, retention),
-                        mayChangeCwd, foregroundShell(session)));
+                        mayChangeCwd, foregroundShell(session),
+                        visible && modelSelectionSupported && mayChangeCwd),
+                session.workspace() != null || session.agentDefinitionDigest() != null
+                        ? session.approvalMode() : null,
+                modelContext, modelSelection);
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {

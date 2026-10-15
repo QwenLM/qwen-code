@@ -1577,6 +1577,51 @@ class HostedHarnessClientTest {
                 + "\",\"capabilityDigest\":\"" + digest + "\"}}";
     }
 
+    @Test
+    void modelSelectionIsOptionalNegotiatedAndPartOfActivePromptIdentity() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"model-selection/1\"],"));
+        AtomicReference<String> sent = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/prompt", exchange -> {
+            sent.set(readBody(exchange));
+            sendSessionJson(exchange, 202, "{\"promptId\":\"" + PROMPT_ID
+                    + "\",\"lastEventId\":0,\"eventEpoch\":\"" + EVENT_EPOCH + "\"}");
+        });
+        Map<String, Object> block = Map.of("type", "text", "text", "hello");
+        String digest = SubmitHarnessTurn.computePayloadDigest(List.of(block));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            var first = SubmitHarnessTurn.builder().session(session).promptId(PROMPT_ID).addContent(block)
+                    .payloadDigest(digest).modelSelection("model-a", 1).build();
+            client.submitTurn(first);
+            assertTrue(sent.get().contains("\"modelSelection\""));
+            assertTrue(sent.get().contains("\"modelId\":\"model-a\""));
+            assertTrue(sent.get().contains("\"revision\":1"));
+            client.submitTurn(first);
+            assertThrows(DaemonException.class, () -> client.submitTurn(SubmitHarnessTurn.builder()
+                    .session(session).promptId(PROMPT_ID).addContent(block).payloadDigest(digest)
+                    .modelSelection("model-b", 2).build()));
+            assertThrows(IllegalArgumentException.class,
+                    () -> SubmitHarnessTurn.builder().modelSelection("model-a", 0));
+            assertThrows(IllegalArgumentException.class,
+                    () -> SubmitHarnessTurn.builder().modelSelection("model-a", 9_007_199_254_740_992L));
+        }
+    }
+
+    @Test
+    void refusesModelSelectionWhenTheHostDidNotAdvertiseIt() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        Map<String, Object> block = Map.of("type", "text", "text", "hello");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            var request = SubmitHarnessTurn.builder().session(session).promptId(PROMPT_ID).addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(List.of(block)))
+                    .modelSelection("model-a", 1).build();
+            assertThrows(DaemonException.class, () -> client.submitTurn(request));
+        }
+    }
+
     private static String capabilitiesJsonWithoutJournalToken(String digest,
             String bootId) {
         return "{\"v\":1,\"mode\":\"http-bridge\","
