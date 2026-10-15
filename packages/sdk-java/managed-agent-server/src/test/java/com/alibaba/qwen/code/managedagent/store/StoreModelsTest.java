@@ -1,17 +1,17 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
-class StoreModelsTest {
+import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
+class StoreModelsTest {
     // withStatus re-invokes the canonical constructor positionally, so a
     // dropped component between two same-typed neighbours still compiles and
     // silently shifts every later argument. Build a record with a distinct

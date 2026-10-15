@@ -3,31 +3,32 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.store.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.SessionResourceCollectionCollector;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionObserver;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationCollector;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionObserver;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
-import com.aliyun.oss.common.auth.CredentialsProviderFactory;
 import com.aliyun.oss.common.auth.CredentialsProvider;
+import com.aliyun.oss.common.auth.CredentialsProviderFactory;
 import com.aliyun.oss.common.comm.SignVersion;
-import java.net.URI;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.context.annotation.Bean;
 import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
+
+import java.net.URI;
 
 @Configuration
 @ConditionalOnProperty(prefix = "qwen.managed-agent.tool-publication",

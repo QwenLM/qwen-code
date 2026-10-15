@@ -3,15 +3,16 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.AttachedSession;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
+import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The owner-side half of the §11 routing decision (design

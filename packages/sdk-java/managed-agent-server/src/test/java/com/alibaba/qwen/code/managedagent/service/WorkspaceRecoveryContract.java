@@ -1,13 +1,15 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.*;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.*;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import javax.sql.DataSource;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -18,8 +20,8 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import javax.sql.DataSource;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.*;
 
 /** Same physical-holder assertions run on Spring/H2 and the MySQL integration channel. */
 public final class WorkspaceRecoveryContract {
@@ -58,7 +60,9 @@ public final class WorkspaceRecoveryContract {
             try (var lock = connection.prepareStatement("SELECT tenant_id FROM ma_tenant_guard"
                     + " WHERE tenant_key = ? AND guard_domain = 'runtime_placement' FOR UPDATE")) {
                 lock.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(fixture.tenant));
-                try (var rows = lock.executeQuery()) { assertThat(rows.next()).isTrue(); }
+                try (var rows = lock.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                }
             }
             var started = new CountDownLatch(1);
             var pending = pool.submit(() -> {
@@ -266,7 +270,9 @@ public final class WorkspaceRecoveryContract {
             connection.setAutoCommit(false);
             try (var lock = connection.prepareStatement("SELECT binding_id FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE")) {
                 lock.setString(1, original.binding().getBindingId());
-                try (var rows = lock.executeQuery()) { assertThat(rows.next()).isTrue(); }
+                try (var rows = lock.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                }
             }
             var started = new CountDownLatch(1);
             var pending = pool.submit(() -> {

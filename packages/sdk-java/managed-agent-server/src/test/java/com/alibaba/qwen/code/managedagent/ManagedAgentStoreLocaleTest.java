@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
@@ -10,17 +7,20 @@ import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.time.Clock;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 class ManagedAgentStoreLocaleTest {
-
     // Under a Turkish/Azeri default locale the default-locale fold turns
     // "FAILED" into "faıled", missing the switch arms and persisting the
     // item as still in_progress. Protocol tokens must fold with Locale.ROOT.
@@ -33,7 +33,7 @@ class ManagedAgentStoreLocaleTest {
         ManagedSchema.initialize(source);
         JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(source);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
-                new ObjectMapper(), Clock.systemUTC(), events -> { },
+                new ObjectMapper(), Clock.systemUTC(), events -> {},
                 mock(ManagedWorkspaceRegistry.class),
                 new ManagedAgentProperties());
 

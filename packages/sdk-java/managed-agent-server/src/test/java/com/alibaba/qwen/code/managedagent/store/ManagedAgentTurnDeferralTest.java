@@ -1,23 +1,23 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedAgentTurnDeferralTest {
-
     // deferTurnRetry carries the outage hold: it must free the lease so the
     // availability-gated sweep can re-offer the Turn, hold it back until
     // retry_after, and still spend the pre-admission budget so a permanent
@@ -31,7 +31,7 @@ class ManagedAgentTurnDeferralTest {
         ManagedSchema.initialize(source);
         JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(source);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
-                new ObjectMapper(), Clock.systemUTC(), events -> { },
+                new ObjectMapper(), Clock.systemUTC(), events -> {},
                 org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class),
                 new ManagedAgentProperties());
 
