@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.List;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
@@ -13,8 +14,8 @@ import java.util.function.BooleanSupplier;
  * {@code outbound} outbox entry and the target's {@code inbound} receipt,
  * both keyed by the same {@code messageId}. The shared fixtures in
  * packages/core pin the validator, and managed-session-message-record.ts
- * there replays the same cases. The domain stays disabled for submission
- * until the slice that ships its producers.
+ * there replays the same cases. H4d-b's runtime produces it: the managed
+ * send_message and the session message relay.
  */
 public final class ManagedSessionMessageRecords {
     /**

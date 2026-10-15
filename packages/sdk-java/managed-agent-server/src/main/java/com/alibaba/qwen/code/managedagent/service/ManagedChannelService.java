@@ -39,6 +39,13 @@ import com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -52,12 +59,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
 
 /**
  * H5b/H5c: the control plane's channel service. Inbound: dedupes a
@@ -363,6 +364,9 @@ public class ManagedChannelService {
     }
 
     private void reconcileClaim(ChannelClaim claim) {
+        if (!instances.reserveReconciliation(claim)) {
+            return;
+        }
         String tenantId = claim.tenantId();
         String channelId = claim.channelId();
         String deliveryId = claim.deliveryId();
@@ -375,9 +379,9 @@ public class ManagedChannelService {
                     if (!"planned".equals(state)) {
                         stepLedger(tenantId, channelId, deliveryId, state,
                                 "delivered".equals(state)
-                                        ? committedProviderReceipt(tenantId,
+                                        ? committedProviderReceipt(tenantId, claim.sessionId(),
                                                 record)
-                                        : null);
+                                        : null, claim.claimGeneration());
                     }
                 });
         Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
@@ -388,7 +392,7 @@ public class ManagedChannelService {
             // durable enough to settle. Returning here would keep the row
             // at the sweep's head forever and starve every later claim
             // behind the oldest 50 (R8 P2).
-            stepLedger(tenantId, channelId, deliveryId, "unknown", null);
+            stepLedger(tenantId, channelId, deliveryId, "unknown", null, claim.claimGeneration());
             return;
         }
         if (ledger.isEmpty() || !"sending".equals(ledger.get().state())) {
@@ -400,24 +404,24 @@ public class ManagedChannelService {
                 claim.sessionId()))) {
             // No writer is left to revise the record: the ledger, the
             // public read model, records the unknown outcome.
-            stepLedger(tenantId, channelId, deliveryId, "unknown", null);
+            stepLedger(tenantId, channelId, deliveryId, "unknown", null, claim.claimGeneration());
             return;
         }
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("operationId", UUID.randomUUID().toString());
+        body.put("operationId", ChannelInstanceStore.reconciliationOperationId(claim));
         body.put("kind", "settle_delivery");
         body.put("deliveryId", deliveryId);
         body.put("outcome", "unknown");
         Map<String, Object> result = harness.runChannelOperation(tenantId,
                 claim.sessionId(), body);
         stepLedger(tenantId, channelId, deliveryId, deliveryState(result),
-                null);
+                null, claim.claimGeneration());
     }
 
     /** The last provider receipt the committed record holds, when any. */
-    private String committedProviderReceipt(String tenantId,
+    private String committedProviderReceipt(String tenantId, String sessionId,
             ChannelInstanceStore.DeliveryRecordState record) {
-        String json = instances.readResource(tenantId,
+        String json = instances.readResource(tenantId, sessionId,
                 record.recordResourceId());
         if (json == null) {
             return null;
@@ -508,10 +512,19 @@ public class ManagedChannelService {
         // The route's Session: created as the connection's owning actor
         // under its registered Workspace selection, idempotent by the
         // route's own key, so a lost answer replays — never a second
-        // Session (decision 4).
-        String title = instance.platform() + ": "
-                + (event.subject() == null || event.subject().isBlank()
-                        ? event.senderId() : event.subject());
+        // Session (decision 4). The create route refuses C0 control
+        // characters and DEL in a title, and the producer chain sanitizes
+        // only [\r\n\0], so a TAB in a subject, in the senderId the
+        // title falls back to, or in the registered platform name would
+        // refuse the route's Session: fold them to spaces here, keeping
+        // the senderId fallback for a subject that folds to blank.
+        String subject = event.subject() == null ? null
+                : event.subject().replaceAll("[\\p{Cntrl}]", " ");
+        String title = instance.platform().replaceAll("[\\p{Cntrl}]", " ")
+                + ": "
+                + (subject == null || subject.isBlank()
+                        ? event.senderId().replaceAll("[\\p{Cntrl}]", " ")
+                        : subject);
         if (title.length() > 256) {
             title = title.substring(0, 256);
         }
@@ -527,7 +540,7 @@ public class ManagedChannelService {
 
     private ClaimedDelivery claimOne(String tenantId, String channelId,
             PendingDelivery pending) {
-        JsonNode record = readJson(instances.readResource(tenantId,
+        JsonNode record = readJson(instances.readResource(tenantId, pending.sessionId(),
                 pending.recordResourceId()), "channel delivery record");
         JsonNode firstUnsent = null;
         for (JsonNode segment : record.required("segments")) {
@@ -546,12 +559,9 @@ public class ManagedChannelService {
                 0, 0));
         Optional<ChannelClaim> existing = instances.findClaim(tenantId,
                 channelId, pending.deliveryId());
-        if (existing.isEmpty()) {
-            instances.claim(tenantId, channelId, pending.deliveryId(),
-                    pending.sessionId());
-        } else {
-            instances.touchClaim(tenantId, channelId, pending.deliveryId());
-        }
+        ChannelClaim observed = existing.isEmpty()
+                ? instances.claim(tenantId, channelId, pending.deliveryId(), pending.sessionId())
+                : instances.touchClaim(tenantId, channelId, pending.deliveryId());
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("operationId", UUID.randomUUID().toString());
         body.put("kind", "claim_delivery");
@@ -559,7 +569,7 @@ public class ManagedChannelService {
         Map<String, Object> result = harness.runChannelOperation(tenantId,
                 pending.sessionId(), body);
         stepLedger(tenantId, channelId, pending.deliveryId(), "sending",
-                null);
+                null, observed.claimGeneration());
         Map<?, ?> delivery = (Map<?, ?>) result.get("delivery");
         Map<?, ?> reply = (Map<?, ?>) result.get("reply");
         List<ClaimedSegment> segments = new ArrayList<>();
@@ -584,6 +594,11 @@ public class ManagedChannelService {
      */
     private ChannelDelivery stepLedger(String tenantId, String channelId,
             String deliveryId, String state, String providerReceipt) {
+        return stepLedger(tenantId, channelId, deliveryId, state, providerReceipt, null);
+    }
+
+    private ChannelDelivery stepLedger(String tenantId, String channelId,
+            String deliveryId, String state, String providerReceipt, Long claimGeneration) {
         ChannelDelivery current = deliveries.find(tenantId, channelId,
                 deliveryId).orElseThrow(() -> new ApiException(
                         HttpStatus.NOT_FOUND, "delivery_not_found",
@@ -597,19 +612,26 @@ public class ManagedChannelService {
             if (ChannelDeliveryRepository.isLegalStep(current.state(),
                     "sending") && ChannelDeliveryRepository.isLegalStep(
                             "sending", state)) {
-                deliveries.transition(tenantId, channelId, deliveryId,
-                        current.state(), "sending", null);
+                transitionLedger(tenantId, channelId, deliveryId,
+                        current.state(), "sending", null, claimGeneration);
                 current = deliveries.find(tenantId, channelId, deliveryId)
                         .orElseThrow();
             } else {
                 return current;
             }
         }
-        ChannelDelivery moved = deliveries.transition(tenantId, channelId,
-                deliveryId, current.state(), state, providerReceipt);
+        ChannelDelivery moved = transitionLedger(tenantId, channelId,
+                deliveryId, current.state(), state, providerReceipt, claimGeneration);
         return moved != null ? moved
                 : deliveries.find(tenantId, channelId, deliveryId)
                         .orElseThrow();
+    }
+
+    private ChannelDelivery transitionLedger(String tenantId, String channelId, String deliveryId,
+            String previous, String next, String receipt, Long generation) {
+        return generation == null
+                ? deliveries.transition(tenantId, channelId, deliveryId, previous, next, receipt)
+                : deliveries.transition(tenantId, channelId, deliveryId, previous, next, receipt, generation);
     }
 
     private Map<String, Object> submitBody(ChannelInstance instance,

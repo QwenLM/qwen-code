@@ -261,6 +261,7 @@ const workerBuild = esbuild.build({
   entryPoints: {
     fzfWorker: 'packages/core/src/utils/filesearch/fzfWorker.ts',
     'glob-search-worker': 'packages/core/src/tools/glob-search-worker.ts',
+    'mod-worker': 'packages/core/src/mods/mod-worker.ts',
   },
   bundle: true,
   outdir: 'dist',
@@ -272,6 +273,10 @@ const workerBuild = esbuild.build({
   // Bundled CJS dependencies need the same require()-shim the main bundle uses for
   // CJS interop in ESM output.
   inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  define: {
+    __dirname: '__qwen_dirname',
+    __filename: '__qwen_filename',
+  },
   banner: {
     js: `"use strict";`,
   },

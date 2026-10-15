@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
-import static org.mockito.Mockito.atLeastOnce;
-import static org.mockito.Mockito.verify;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
@@ -20,6 +14,12 @@ import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.verify;
 
 /**
  * Boots the production-default combination (`local-process` with durable
@@ -54,7 +54,6 @@ import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
                 + "${java.io.tmpdir}${file.separator}qwen-rb-default-on-state",
         "qwen.managed-agent.runtime-broker.node-executable=node",
         "qwen.managed-agent.runtime-broker.worker-entry=worker.js",
-        "qwen.managed-agent.runtime-broker.cli-entry=cli.js"
 })
 @ContextConfiguration(initializers = RuntimeBrokerDefaultOnTest.ScrubRuntimeEnv.class)
 @EnabledOnOs(OS.LINUX)

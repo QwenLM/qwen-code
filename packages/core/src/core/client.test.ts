@@ -124,6 +124,7 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { Kind } from '../tools/tools.js';
 import {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
@@ -684,6 +685,7 @@ describe('Gemini Client (client.ts)', () => {
       | 'getDeferredToolSummary'
       | 'getMcpServerInstructions'
       | 'getTool'
+      | 'getAllToolNames'
       | 'isDeferredToolRevealed'
       | 'isPermissionDeferred'
       | 'revealDeferredTool'
@@ -8384,6 +8386,524 @@ Other open files:
       // The pending queue is fully cleared on halt, same as the turn cap.
       expect(returnedTurn?.pendingToolCalls).toHaveLength(0);
     });
+    /** Text parts in `request` carrying the exploration reminder. */
+    const explorationReminders = (request: unknown[]) =>
+      request.filter(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          typeof part.text === 'string' &&
+          part.text.includes('read-only exploration phase'),
+      );
+
+    it('delivers one exploration reminder per read-only phase across tool-result continuations', async () => {
+      // Drives the real client-side wiring of ToolExplorationBudget:
+      // record on ToolCallRequest, commit on Finished, takeReminder on the
+      // next ToolResult continuation, and reset on a fresh interaction.
+      const promptId = 'prompt-exploration-budget';
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      // The production default: an unset cap is a soft allowance with the
+      // adaptive backstop, not the suite's explicit hard cap. Under the hard
+      // cap the continuations below are halted, so the reminder would never
+      // reach a request that streams.
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(
+        false,
+      );
+      // The default registry mock knows no tools, so read_file would
+      // classify as unknown and reset the phase on every call.
+      const reg = registryMock();
+      reg.getAllToolNames.mockReturnValue(['read_file']);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'read_file' ? ({ kind: Kind.Read } as never) : null,
+      );
+      // Distinct args so the consecutive-identical guard never fires.
+      const readTurn = (n: number, count: number) => {
+        const events: unknown[] = [];
+        for (let i = 0; i < count; i++) {
+          events.push(
+            toolCallRequest(`call-${n}-${i}`, 'read_file', {
+              path: `f${n}-${i}`,
+            }),
+          );
+        }
+        events.push(stopped());
+        mockTurnRunFn.mockReturnValueOnce(turnStream(...events));
+      };
+
+      installChat();
+      // First interaction: 2 reads reach the allowance of 2.
+      readTurn(1, 2);
+      await run([{ text: 'explore' }], promptId);
+
+      // Continuation 1: the reminder rides after the functionResponse parts.
+      readTurn(2, 1);
+      const cont1Events = await run(
+        [fnResponse('read_file', { ok: true })],
+        promptId,
+        {
+          type: SendMessageType.ToolResult,
+        },
+      );
+      const reminderRequest = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      const reminderIndex = reminderRequest.findIndex(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          typeof part.text === 'string' &&
+          part.text.includes('read-only exploration phase'),
+      );
+      expect(reminderIndex).toBeGreaterThanOrEqual(0);
+      const responseIndex = reminderRequest.findIndex(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'functionResponse' in part,
+      );
+      expect(reminderIndex).toBeGreaterThan(responseIndex);
+
+      // Continuation 2: still the same phase and already reminded — no
+      // second reminder even though the call count keeps growing.
+      readTurn(3, 2);
+      const cont2Events = await run(
+        [fnResponse('read_file', { ok: true })],
+        promptId,
+        {
+          type: SendMessageType.ToolResult,
+        },
+      );
+      const afterReminderRequest = mockTurnRunFn.mock
+        .lastCall?.[1] as unknown[];
+      expect(explorationReminders(afterReminderRequest)).toHaveLength(0);
+      // Both continuations streamed under the adaptive cap instead of being
+      // halted: with the explicit hard cap at 2 the observed stream of
+      // continuation 1 is a single loop_detected event, so the assertions
+      // above would ride a turn that never reached the model.
+      expect(
+        cont1Events.filter((event) => event.type === LlmEventType.LoopDetected),
+      ).toHaveLength(0);
+      expect(
+        cont2Events.filter((event) => event.type === LlmEventType.LoopDetected),
+      ).toHaveLength(0);
+
+      // A new user interaction resets the phase: the count starts over, so
+      // one read does not re-trigger the reminder at allowance 2.
+      readTurn(4, 1);
+      await run([{ text: 'new question' }], promptId);
+      const newPhaseRequest = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(explorationReminders(newPhaseRequest)).toHaveLength(0);
+      // The reset also cleared the latched one-shot flag: without it the
+      // stale count (5) and reminded flag would leak into the new turn.
+      expect(client['toolExplorationBudget']['calls']).toBe(1);
+      expect(client['toolExplorationBudget']['reminded']).toBe(false);
+    });
+
+    it('suppresses the exploration reminder when loop detection is disabled for the session', async () => {
+      const promptId = 'prompt-exploration-disabled';
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(1);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(
+        false,
+      );
+      const reg = registryMock();
+      reg.getAllToolNames.mockReturnValue(['read_file']);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'read_file' ? ({ kind: Kind.Read } as never) : null,
+      );
+      client['loopDetector'].disableForSession();
+
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-d-1', 'read_file', { path: 'a' }),
+          stopped(),
+        ),
+      );
+      await run([{ text: 'explore' }], promptId);
+
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-d-2', 'read_file', { path: 'b' }),
+          stopped(),
+        ),
+      );
+      const disabledEvents = await run(
+        [fnResponse('read_file', { ok: true })],
+        promptId,
+        {
+          type: SendMessageType.ToolResult,
+        },
+      );
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(explorationReminders(request)).toHaveLength(0);
+      // The continuation streamed under the adaptive cap: an explicit hard
+      // cap of 1 halts it, which would leave the assertion above riding a
+      // turn that never reached the model.
+      expect(
+        disabledEvents.filter(
+          (event) => event.type === LlmEventType.LoopDetected,
+        ),
+      ).toHaveLength(0);
+    });
+
+    it('rolls the exploration budget back on a retry so a discarded attempt is not double-counted', async () => {
+      const promptId = 'prompt-exploration-retry';
+      // Allowance 4 with a committed floor of 1: the first round-trip's
+      // read commits; the failed attempt adds 2 more but the retry rolls
+      // back to the floor, and the restart's two reads land at 3 — below
+      // the allowance. Without the rollback the count would be 5 and the
+      // reminder would fire on a turn that only executed 3 reads; without
+      // the commit the floor would be 0 and the restart would land at 2.
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(4);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(
+        false,
+      );
+      const reg = registryMock();
+      reg.getAllToolNames.mockReturnValue(['read_file']);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'read_file' ? ({ kind: Kind.Read } as never) : null,
+      );
+      // A retry is reachable mid-stream after counted calls: the provider
+      // can stream tool calls and still fail with a retryable error.
+      const replayedAttempt = turnStream(
+        toolCallRequest('call-a-0', 'read_file', { path: 'a0' }),
+        stopped(),
+        toolCallRequest('call-f-0', 'read_file', { path: 'f0' }),
+        toolCallRequest('call-f-1', 'read_file', { path: 'f1' }),
+        { type: LlmEventType.Retry, isContinuation: false },
+        toolCallRequest('call-b-0', 'read_file', { path: 'b0' }),
+        toolCallRequest('call-b-1', 'read_file', { path: 'b1' }),
+        stopped(),
+      );
+
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(replayedAttempt);
+      const firstEvents = await run([{ text: 'explore' }], promptId);
+
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-c-0', 'read_file', { path: 'c0' }),
+          stopped(),
+        ),
+      );
+      await run([fnResponse('read_file', { ok: true })], promptId, {
+        type: SendMessageType.ToolResult,
+      });
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      const reminders = explorationReminders(request);
+      // Rolled back to the committed floor of 1, the restart's two reads
+      // land at 3 — below the allowance of 4, so no reminder.
+      expect(reminders).toHaveLength(0);
+      // The surviving count is exactly the committed floor, the restart's
+      // reads, and this continuation's own read: dropping the rollback
+      // leaves the discarded attempt counted (6), dropping the commit
+      // loses the floor (3).
+      expect(client['toolExplorationBudget']['calls']).toBe(4);
+      // The retried attempt ran to completion without tripping the
+      // per-turn cap: the discarded attempt's calls were rolled back.
+      expect(
+        firstEvents.filter((event) => event.type === LlmEventType.LoopDetected),
+      ).toHaveLength(0);
+    });
+
+    it('does not reset the exploration budget on a per-request model fallback', async () => {
+      const promptId = 'prompt-exploration-fallback';
+      // Production can only emit ModelFallback before its own attempt's
+      // calls: the fallback chain is gated on the failed attempt having
+      // yielded no candidate output, and a streamed functionCall counts as
+      // candidate output (llm-chat). So the reachable shape spans two
+      // round-trips: the first commits its reads, the second opens with
+      // the fallback event and then streams its own reads on top of the
+      // surviving floor.
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(4);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(
+        false,
+      );
+      const reg = registryMock();
+      reg.getAllToolNames.mockReturnValue(['read_file']);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'read_file' ? ({ kind: Kind.Read } as never) : null,
+      );
+
+      installChat();
+      // Round-trip 1: one read commits the floor of 1.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-a-0', 'read_file', { path: 'a0' }),
+          stopped(),
+        ),
+      );
+      await run([{ text: 'explore' }], promptId);
+
+      // Round-trip 2 (the ToolResult continuation): the fallback event
+      // arrives before this attempt's own reads, which then count on top
+      // of the surviving floor.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          {
+            type: LlmEventType.ModelFallback,
+            fromModel: 'test-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          },
+          toolCallRequest('call-b-0', 'read_file', { path: 'b0' }),
+          toolCallRequest('call-b-1', 'read_file', { path: 'b1' }),
+          toolCallRequest('call-b-2', 'read_file', { path: 'b2' }),
+          stopped(),
+        ),
+      );
+      const fallbackEvents = await run(
+        [fnResponse('read_file', { ok: true })],
+        promptId,
+        {
+          type: SendMessageType.ToolResult,
+        },
+      );
+
+      // Round-trip 3: the reminder rides this request — the surviving
+      // count (floor 1 + round-trip 2's three reads) reached the allowance.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-c-0', 'read_file', { path: 'c0' }),
+          stopped(),
+        ),
+      );
+      const continuationEvents = await run(
+        [fnResponse('read_file', { ok: true })],
+        promptId,
+        {
+          type: SendMessageType.ToolResult,
+        },
+      );
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(explorationReminders(request)).toHaveLength(1);
+      // Floor 1 + three fallback-attempt reads = 4 at the reminder, then
+      // this continuation's own read lands on top.
+      expect(client['toolExplorationBudget']['calls']).toBe(5);
+      // The fallback round-trip and the continuation after it ran to
+      // completion rather than being halted by the per-turn cap, so the
+      // counts above describe a turn the model actually served. No fixture
+      // can make the ModelFallback rollback arm load-bearing: a fallback
+      // cannot arrive after its own attempt's calls (llm-chat only runs the
+      // chain when the failed attempt yielded no candidate output and a
+      // streamed functionCall counts as candidate output), so here the
+      // rollback is a no-op either way. The detector needs no matching arm:
+      // checkAlwaysOnSafeties ignores every non-ToolCallRequest event, which
+      // the ModelFallback cases in loopDetectionService.test.ts pin.
+      expect(
+        fallbackEvents.filter(
+          (event) => event.type === LlmEventType.LoopDetected,
+        ),
+      ).toHaveLength(0);
+      expect(
+        continuationEvents.filter(
+          (event) => event.type === LlmEventType.LoopDetected,
+        ),
+      ).toHaveLength(0);
+    });
+
+    it('counts a provider-duplicate call id once toward the exploration budget', async () => {
+      const promptId = 'prompt-exploration-duplicate';
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(
+        false,
+      );
+      const reg = registryMock();
+      reg.getAllToolNames.mockReturnValue(['read_file']);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'read_file' ? ({ kind: Kind.Read } as never) : null,
+      );
+      // The provider re-emits the same call id: the scheduler executes it
+      // once, so the budget must count it once, not twice.
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('dup', 'read_file', { path: 'a' }),
+          toolCallRequest('dup', 'read_file', { path: 'a' }),
+          stopped(),
+        ),
+      );
+      await run([{ text: 'explore' }], promptId);
+
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-2', 'read_file', { path: 'b' }),
+          stopped(),
+        ),
+      );
+      const duplicateEvents = await run(
+        [fnResponse('read_file', { ok: true })],
+        promptId,
+        {
+          type: SendMessageType.ToolResult,
+        },
+      );
+      // 1 distinct call < allowance 2: no reminder yet, and the continuation
+      // streamed under the adaptive cap rather than being halted.
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(explorationReminders(request)).toHaveLength(0);
+      expect(
+        duplicateEvents.filter(
+          (event) => event.type === LlmEventType.LoopDetected,
+        ),
+      ).toHaveLength(0);
+    });
+
+    it('counts a bridged read-only MCP tool toward the exploration budget', async () => {
+      const promptId = 'prompt-exploration-bridged';
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(
+        false,
+      );
+      // The bridge tool itself is Kind.Other; the deferred MCP target is
+      // Kind.Read. A bridged call arrives as `tool_call` with the target in
+      // `args.name` and must classify through the target, not the bridge.
+      const reg = registryMock();
+      reg.getAllToolNames.mockReturnValue(['tool_call', 'mcp__srv__describe']);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_call'
+          ? ({ kind: Kind.Other } as never)
+          : name === 'mcp__srv__describe'
+            ? ({ kind: Kind.Read } as never)
+            : null,
+      );
+
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-br-0', 'tool_call', {
+            name: 'mcp__srv__describe',
+            arguments: { dataset: 0 },
+          }),
+          toolCallRequest('call-br-1', 'tool_call', {
+            name: 'mcp__srv__describe',
+            arguments: { dataset: 1 },
+          }),
+          stopped(),
+        ),
+      );
+      await run([{ text: 'inspect the datasets' }], promptId);
+
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-br-2', 'tool_call', {
+            name: 'mcp__srv__describe',
+            arguments: { dataset: 2 },
+          }),
+          stopped(),
+        ),
+      );
+      const bridgedEvents = await run(
+        [fnResponse('tool_call', { ok: true })],
+        promptId,
+        {
+          type: SendMessageType.ToolResult,
+        },
+      );
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(explorationReminders(request)).toHaveLength(1);
+      // The bridged target's read landed in the same phase through the
+      // adaptive cap: the continuation was not halted.
+      expect(
+        bridgedEvents.filter(
+          (event) => event.type === LlmEventType.LoopDetected,
+        ),
+      ).toHaveLength(0);
+    });
+
+    it('does not reset the running exploration phase for a concurrent side query', async () => {
+      const promptId = 'prompt-exploration-side-query';
+      // Production gives the side question its own prompt id (the submission
+      // counter advances), and its tool-result continuation is submitted
+      // WITHOUT `isConcurrentSideQuery` — the prompt id, not the flag, is what
+      // separates the side turn from the interaction that owns the phase.
+      const sidePromptId = 'prompt-exploration-side-query-btw';
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(
+        false,
+      );
+      const reg = registryMock();
+      reg.getAllToolNames.mockReturnValue(['read_file', 'write_file']);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'read_file'
+          ? ({ kind: Kind.Read } as never)
+          : name === 'write_file'
+            ? ({ kind: Kind.Edit } as never)
+            : null,
+      );
+
+      installChat();
+      // The running turn reaches the allowance of 2.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-s-0', 'read_file', { path: 'a' }),
+          toolCallRequest('call-s-1', 'read_file', { path: 'b' }),
+          stopped(),
+        ),
+      );
+      await run([{ text: 'explore' }], promptId);
+
+      // A /btw side question arrives while the turn is running. It streams a
+      // mutating call, so an ungated budget would zero the phase here.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-side-0', 'write_file', { path: 'x' }),
+          stopped(),
+        ),
+      );
+      await run([{ text: '/btw unrelated question' }], sidePromptId, {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+      // The side turn's mutating call must not reset the running phase.
+      expect(client['toolExplorationBudget']['calls']).toBe(2);
+
+      // The side turn's own continuation carries no flag at all — the /btw
+      // submission is the only place the flag appears — so the prompt id is
+      // what keeps a continuation, the shape production actually submits,
+      // from being treated as the owner of this phase. Its read must not be
+      // recorded and must not drain the pending reminder either.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-side-1', 'read_file', { path: 'y' }),
+          stopped(),
+        ),
+      );
+      await run([fnResponse('write_file', { ok: true })], sidePromptId, {
+        type: SendMessageType.ToolResult,
+      });
+      expect(client['toolExplorationBudget']['calls']).toBe(2);
+      expect(
+        explorationReminders(mockTurnRunFn.mock.lastCall?.[1] as unknown[]),
+      ).toHaveLength(0);
+
+      // The exploration's own continuation still carries the reminder: the
+      // side query did not consume or suppress it.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('call-s-2', 'read_file', { path: 'c' }),
+          stopped(),
+        ),
+      );
+      const continuationEvents = await run(
+        [fnResponse('read_file', { ok: true })],
+        promptId,
+        {
+          type: SendMessageType.ToolResult,
+        },
+      );
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(explorationReminders(request)).toHaveLength(1);
+      expect(
+        continuationEvents.filter(
+          (event) => event.type === LlmEventType.LoopDetected,
+        ),
+      ).toHaveLength(0);
+    });
 
     it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {
       // Self-inflicted-regression guard for the round-4 finding: the
@@ -10979,6 +11499,90 @@ Other open files:
         expect(tel.endInteractionSpan).toHaveBeenCalledWith('ok', {
           promptId: 'prompt-stop-hook-budget',
         });
+      });
+
+      it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {
+        // The nested restart is submitted with `type: SendMessageType.Hook`,
+        // which is not an interaction-starting type, so the reset beside the
+        // Stop-hook block is the only thing that clears the read-only phase
+        // across the restart.
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        // The default registry mock knows no tools, so read_file would
+        // classify as unknown and zero the phase on every call.
+        const reg = registryMock();
+        reg.getAllToolNames.mockReturnValue(['read_file']);
+        reg.getTool.mockImplementation((name: string) =>
+          name === 'read_file' ? ({ kind: Kind.Read } as never) : null,
+        );
+        vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(100);
+        let turnIndex = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          const turnNo = turnIndex++;
+          return (async function* () {
+            // Only the first turn reads; the continuation just answers.
+            if (turnNo === 0) {
+              for (let i = 0; i < 2; i++) {
+                yield toolCallRequest(
+                  `call-${i}`,
+                  'read_file',
+                  { path: `f${i}` },
+                  'prompt-stop-hook-exploration',
+                );
+              }
+            }
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })();
+        });
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-exploration');
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        // The first turn's two reads were cleared by the restart instead of
+        // being carried into the continuation.
+        expect(client['toolExplorationBudget']['calls']).toBe(0);
+      });
+
+      it('gives a goal-permitted blocking Stop hook continuation a fresh exploration phase', async () => {
+        // A goal-permitted restart takes a separate branch from the case
+        // above, and its nested turn is likewise submitted with
+        // `type: SendMessageType.Hook`, so the reset beside that branch is
+        // again the only thing that clears the phase across the restart.
+        const { permit } = installGoalRuntime();
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        const reg = registryMock();
+        reg.getAllToolNames.mockReturnValue(['read_file']);
+        reg.getTool.mockImplementation((name: string) =>
+          name === 'read_file' ? ({ kind: Kind.Read } as never) : null,
+        );
+        vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(100);
+        let turnIndex = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          const turnNo = turnIndex++;
+          return (async function* () {
+            if (turnNo === 0) {
+              for (let i = 0; i < 2; i++) {
+                yield toolCallRequest(
+                  `call-${i}`,
+                  'read_file',
+                  { path: `f${i}` },
+                  'prompt-goal-stop-hook-exploration',
+                );
+              }
+            }
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })();
+        });
+
+        await run([{ text: 'Hi' }], 'prompt-goal-stop-hook-exploration', {
+          type: SendMessageType.UserQuery,
+          goalPermit: permit,
+          goalTurnKey: 'goal-runtime:turn-1',
+        });
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(client['toolExplorationBudget']['calls']).toBe(0);
       });
 
       it('reports stop_hook_active only when a Stop hook blocked the previous turn', async () => {

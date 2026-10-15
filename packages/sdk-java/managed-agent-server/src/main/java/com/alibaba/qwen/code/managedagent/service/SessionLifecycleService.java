@@ -10,13 +10,15 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
-import java.util.Locale;
-import java.util.Map;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.beans.factory.annotation.Autowired;
+
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * Admits the durable close, archive and delete operations and reads them
@@ -194,16 +196,11 @@ public class SessionLifecycleService {
         };
     }
 
-    // Protocol 1 settles through the Harness `/lifecycle` route and its
-    // effects receipt, both of which accept only the Files profile; any
-    // other Workspace profile (the Shell lane, and with it every H4b
-    // parent) keeps the protocol-0 close, whose child cascade runs under
-    // ordinary authorization.
     static boolean usesLifecycleProtocol(SessionRecord session,
             OperationKind kind) {
         return "ACTIVE".equals(session.status())
                 && (kind == OperationKind.CLOSE || kind == OperationKind.DELETE)
-                && LIFECYCLE_TOOL_PROFILE.equals(session.toolProfile());
+                && WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) != 0;
     }
 
     private OperationAdmission admit(String tenantId, String actorId,
@@ -216,9 +213,9 @@ public class SessionLifecycleService {
         if (session.workspace() != null) {
             boolean activeLifecycle = usesLifecycleProtocol(session, kind);
             admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest(actorId),
-                    idempotencyKey, digest, activeLifecycle ? coordinator.supportsWorkspaceLifecycle()
+                    idempotencyKey, digest, activeLifecycle ? coordinator.supportsWorkspaceLifecycle(session.toolProfile())
                             : kind == OperationKind.CLOSE && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose(),
-                    activeLifecycle ? 1 : 0);
+                    activeLifecycle ? WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) : 0);
         } else {
             sessions.requireLegacyWorkspace(tenantId, actorId, sessionId);
             admission = store.beginOperation(tenantId, sessionId, kind, actorDigest(actorId), idempotencyKey, digest);

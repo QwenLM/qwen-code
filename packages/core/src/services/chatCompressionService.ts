@@ -18,7 +18,7 @@ import {
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import { resolveModelId } from '../utils/modelId.js';
+import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
@@ -315,6 +315,41 @@ export interface CompressOptions {
    * rejected the main request.
    */
   requestPayloadTooLarge?: boolean;
+  /**
+   * Context ceiling the server itself reported when it rejected the request
+   * with a context-overflow error (#13432). `contextWindowSize` is inferred
+   * from the model id, which is exactly the number such an error contradicts
+   * (a llama.cpp `-c 262144` endpoint serving an id that resolves to the
+   * 1_000_000 catalog row). When present, reactive sizing for the main model
+   * runs against the lower of the two, but only when `requestRouteKey` names
+   * the route the side-query itself resolves to: the number carries no scope
+   * of its own, and clamping a side-query against a ceiling reported for
+   * another route or model floors the output budget at 1, which the
+   * truncation guard then drops on every send (#13876). The proactive
+   * threshold gate keeps using the inferred window. Omitted by callers with no
+   * server-reported ceiling, which leaves sizing unchanged.
+   */
+  observedServerCeiling?: number;
+  /**
+   * What `observedServerCeiling` bounds, from the wording that reported it. An
+   * `'input'` bound names the prompt/input allowance (DashScope's input
+   * range), not the context window, so `prompt + max_tokens <= ceiling` is not
+   * the server's rule and the number must not size the output budget: the
+   * slimmed estimate of a reactive run sits just under an input ceiling by
+   * construction, and clamping against it floors the budget at 1, which the
+   * truncation guard then drops on every send (#13876 keeps the input-side use
+   * of that number). Unset or `'total'` applies the ceiling as before.
+   */
+  observedServerCeilingKind?: 'input' | 'total';
+  /**
+   * Route identity of the request that reported `observedServerCeiling`
+   * (`Config.getModelRouteIdentity` of the send route). The ceiling is applied
+   * only when the side-query resolves to the active main route
+   * (`baseLlmClient.ts`'s own resolution) and this key equals that route's
+   * identity; without a key the ceiling is assumed to belong to the active main
+   * route — the route a between-sends caller would retry (#13876).
+   */
+  requestRouteKey?: string;
 }
 
 /**
@@ -659,11 +694,10 @@ export class ChatCompressionService {
           getColdInput().slimmedHistory,
           slimmingConfig.imageTokenEstimate,
         ) + Math.ceil(systemInstruction.length / CHARS_PER_TOKEN));
-    // Window the output budget clamps against: the window of the model that
-    // actually receives the side-query. Defaults to the main model's window;
-    // switched below to a distinct compaction model's window when the guard
-    // keeps that model (issue #7960).
-    let budgetWindow = contextLimit;
+    // Window of a distinct compaction model this guard keeps for the
+    // side-query (issue #7960). Left unset when the side-query runs on the
+    // main model, whose window `budgetWindow` then comes from below.
+    let compactionModelWindow: number | undefined;
     // Only check the window when the effective model differs from the main
     // model — warning about the main model being "too small" is confusing
     // when no compaction model was explicitly configured.
@@ -701,10 +735,65 @@ export class ChatCompressionService {
             .warn(`[chat-compression] ${compactionWarning}`);
           effectiveCompactionModel = config.getModel();
         } else if (window && window > 0) {
-          budgetWindow = window;
+          compactionModelWindow = window;
         }
       }
     }
+
+    // Which route the side-query is actually sent on: `runSideQuery` forwards
+    // `effectiveCompactionModel` to the send layer, where `resolveForModel`
+    // hands back the main content generator on exactly these terms
+    // (baseLlmClient.ts:861-871) — the resolved model is the main one, a
+    // spelled authType is the main one, and the `\0` endpoint pin matches the
+    // main base URL. That normalization is the only thing that makes
+    // `openai:test-model` and `test-model` one route; comparing route keys
+    // never would, because `resolvedModelIdentity` passes the model half
+    // through verbatim.
+    const [sideQuerySelector, sideQueryPin] =
+      effectiveCompactionModel.split('\0');
+    const sideQueryResolved = resolveModelId(
+      sideQuerySelector,
+      buildModelIdContext(config),
+    );
+    const sideQueryOnMainRoute =
+      (sideQueryResolved?.modelId ?? sideQuerySelector) === config.getModel() &&
+      (!sideQueryResolved?.authType ||
+        sideQueryResolved.authType === contentGeneratorConfig.authType) &&
+      (sideQueryPin === undefined ||
+        sideQueryPin === contentGeneratorConfig.baseUrl);
+    // The server-reported ceiling is scoped to the route that reported it
+    // (#13876): it is evidence about the endpoint and model the rejected
+    // request targeted, and nothing more. A per-turn model override, or a
+    // distinct compaction model, sends the side-query somewhere that number
+    // never described, and clamping there floors the output budget at 1 —
+    // which the truncation guard below then drops on every send, with `force`
+    // bypassing the failure breaker, so the session can never compact.
+    // `contextLimit` is inferred from the model id, precisely the number such
+    // an error contradicts, so when the routes do match the lower of the two
+    // governs reactive sizing (#13432). Scoped to the reactive sites only
+    // (`budgetWindow`, `sharedRequestFits`); the proactive threshold gate above
+    // kept running against the full inferred window. Only a bound the server
+    // stated on the window may size one: its input-bound wording holds the
+    // prompt to a limit `prompt + max_tokens` is allowed to exceed, and
+    // applying it here floors the output budget at 1 for every slimmed
+    // estimate that sits just under it, dropping the summary on every send
+    // (#13876).
+    const reactiveContextCeiling =
+      opts.observedServerCeiling &&
+      opts.observedServerCeilingKind !== 'input' &&
+      sideQueryOnMainRoute &&
+      (opts.requestRouteKey === undefined ||
+        opts.requestRouteKey === config.getModelRouteIdentity())
+        ? Math.min(contextLimit, opts.observedServerCeiling)
+        : contextLimit;
+    // Window the output budget clamps against: on the main route it is the
+    // main model's window, capped at any server-reported ceiling (#13432) — a
+    // registry entry resolved for that same model on that same route is the
+    // same window. When the side-query is routed elsewhere, the receiving
+    // model's own window governs (#7960).
+    const budgetWindow = sideQueryOnMainRoute
+      ? reactiveContextCeiling
+      : (compactionModelWindow ?? contextLimit);
 
     const abortSignal = signal ?? new AbortController().signal;
     abortSignal.throwIfAborted();
@@ -741,7 +830,9 @@ export class ChatCompressionService {
           .getDebugLogger()
           .debug(
             `[chat-compression] output budget clamped to ${coldOutputBudget} ` +
-              `(estimated input ${getColdInputEstimate()}, window ${budgetWindow})`,
+              `(estimated input ${getColdInputEstimate()}, ` +
+              `effectiveWindow ${budgetWindow}, ` +
+              `ceiling ${opts.observedServerCeiling ?? 'none'})`,
           );
       }
       return runSideQuery(config, {
@@ -812,11 +903,15 @@ export class ChatCompressionService {
     const hasProviderTokenCount =
       (chat.getLastPromptTokenCount?.() ?? 0) > 0 &&
       chat.isLastPromptTokenCountEstimated?.() !== true;
+    // Sized against the server-reported ceiling when there is one: the shared
+    // request re-posts the UNSLIMMED history to the endpoint that just
+    // rejected it, so the inferred window is not the limit that matters
+    // (#13432).
     const sharedRequestFits =
       sharedPromptTokenCount +
         sharedDirectiveTokenCount +
         COMPACT_MAX_OUTPUT_TOKENS <=
-      contextLimit;
+      reactiveContextCeiling;
     const canShareCache =
       usesMainModel &&
       providerSupportsCacheSharing &&
@@ -837,9 +932,11 @@ export class ChatCompressionService {
           : !hasProviderTokenCount
             ? 'no provider-reported token-count anchor'
             : !sharedRequestFits
-              ? `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
+              ? `shared request exceeds the effective context limit: ` +
+                `prompt=${sharedPromptTokenCount}, ` +
                 `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
-                `window=${contextLimit}`
+                `effectiveLimit=${reactiveContextCeiling}, window=${contextLimit}, ` +
+                `ceiling=${opts.observedServerCeiling ?? 'none'}`
               : 'payload-overflow recovery ships the slimmed cold path only';
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }

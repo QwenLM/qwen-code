@@ -1,19 +1,20 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion.VersionFlag;
+import org.junit.jupiter.api.Test;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ToolPublicationContractTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -89,6 +90,32 @@ class ToolPublicationContractTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> ToolPublicationContract.parseBytes("binding",
                 new byte[65537])).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * Replays the shared payload vectors — the digests are pinned from the
+     * TypeScript canonicalizer, so an accepted vector also proves the two
+     * implementations canonicalize the boolean marker fields byte-identically.
+     */
+    @Test
+    void acceptsAndRefusesThePublicationPayloadFamilies() throws Exception {
+        JsonNode suite = JSON.readTree(contracts().resolve(
+                "managed-tool-publication-v1.fixtures.json").toFile());
+        JsonNode base = suite.required("cases").get(0).required("value");
+        for (JsonNode vector : suite.required("payloadVectors")) {
+            ObjectNode binding = (ObjectNode) base.deepCopy();
+            binding.put("requestDigest", vector.required("requestDigest").asText());
+            ((ObjectNode) binding.get("reference")).put("argsDigest",
+                    vector.required("argsDigest").asText());
+            String payload = vector.required("payloadJson").asText();
+            if (vector.required("valid").asBoolean()) {
+                ToolPublicationContract.requirePayload(binding, payload);
+            } else {
+                assertThatThrownBy(() -> ToolPublicationContract.requirePayload(binding, payload))
+                        .as(vector.required("id").asText())
+                        .isInstanceOf(IllegalArgumentException.class);
+            }
+        }
     }
 
     @Test

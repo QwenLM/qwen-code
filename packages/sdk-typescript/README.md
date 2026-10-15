@@ -77,6 +77,10 @@ Creates a new query session with the Qwen Code.
 > [!tip]
 > If you need to configure `coreTools`, `excludeTools`, or `allowedTools`, it is **strongly recommended** to read the [permissions configuration documentation](../../docs/users/configuration/settings.md#permissions) first, especially the **Tool name aliases** and **Rule syntax examples** sections. Rule patterns such as `Bash(git *)`, `Read(.env)`, and `Edit(/src/**)` apply to `excludeTools` and `allowedTools`; `coreTools` accepts aliases but strips invocation specifiers.
 
+#### Empty core-tool allowlists
+
+An omitted or empty `coreTools` list is treated as unspecified; `coreTools: []` does **not** create a tool-free session. A non-empty list restricts core tools, not every tool category: MCP and other non-core tools have separate registration and permission rules. Use `excludeTools` to exclude named tools explicitly. `allowedTools` controls approval, not which tools are registered.
+
 ### Timeouts
 
 The SDK enforces the following default timeouts:

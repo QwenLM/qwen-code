@@ -5,6 +5,7 @@
  */
 
 import { readReportedArtifacts } from './reported-artifacts.js';
+import { isAskUserQuestionToolName } from '../constants/toolNames.js';
 import {
   isTaskExecutionMode,
   parseDaemonBackgroundTurn,
@@ -985,7 +986,7 @@ export function transcriptBlocksToDaemonMessages(
           };
           needsNewContentMessage = false;
           currentThinkingIdx = null;
-        } else if (!isTextBlockEmpty(textBlock)) {
+        } else if (textBlock.text.trim().length > 0) {
           messages.push({
             id: block.id,
             role: 'assistant',
@@ -2066,9 +2067,7 @@ function normalizeToolContent(
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {
-  if (!block.toolName) return false;
-  const normalized = block.toolName.toLowerCase();
-  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+  return !!block.toolName && isAskUserQuestionToolName(block.toolName);
 }
 
 function getToolContentText(

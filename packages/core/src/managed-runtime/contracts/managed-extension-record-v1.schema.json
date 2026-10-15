@@ -62,6 +62,7 @@
         "team_message",
         "team_plan",
         "session_message",
+        "session_command",
         "session_metadata",
         "file_history",
         "session_source"
@@ -519,6 +520,7 @@
         "team_message",
         "team_plan",
         "session_message",
+        "session_command",
         "session_metadata",
         "file_history",
         "session_source"
