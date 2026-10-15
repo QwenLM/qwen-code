@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.canonical;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.id;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.number;
@@ -439,7 +441,7 @@ public final class JdbcCsiExecutionAdmission {
             long maximumRevision, String batchId, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         DispatchCheckpoint result = null;
         try (PreparedStatement statement = read.statement(connection,
-                "SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                         + " AND workspace_id = ? AND operation = 'commitCheckpoint' ORDER BY journal_revision")) {
             JdbcRepositorySupport.setIdentity(statement, 1, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());

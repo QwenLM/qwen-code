@@ -22,6 +22,8 @@ import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -45,7 +47,6 @@ import java.security.MessageDigest;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -89,7 +90,7 @@ public class ManagedSessionStore {
                     result.getInt("storage_version"),
                     result.getLong("writer_generation"),
                     result.getString("writer_id"),
-                    result.getTimestamp("writer_lease_until"),
+                    ManagedSchemaTime.timestamp(result, "writer_lease_until"),
                     result.getString("lease_token_hash"),
                     result.getLong("journal_revision"),
                     result.getLong("committed_sequence"),
@@ -248,7 +249,7 @@ public class ManagedSessionStore {
             throw conflict("managed_session_scope_conflict", "The Managed Session Workspace binding conflicts.");
         }
         jdbc.update(
-                "UPDATE ma_session SET workspace_id = ?, workspace_storage_id = ? WHERE tenant_id ="
+                "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", workspace_id = ?, workspace_storage_id = ? WHERE tenant_id ="
                         + " ? AND session_id = ? AND session_kind = 'CONTROL'",
                 workspaceId, storage, tenantId, sessionId);
     }
@@ -363,7 +364,7 @@ public class ManagedSessionStore {
         Timestamp now = databaseNow();
         requireWriter(head, writer, generation, token, now, true);
         requireInstalledCsiWriter(csiOriginal);
-        return new PublicationWriter(databaseEpochMillis(now), databaseEpochMillis(head.writerLeaseUntil()),
+        return new PublicationWriter(epochMillis(now), epochMillis(head.writerLeaseUntil()),
                 head.journalRevision(), head.committedSequence(), head.activationEpoch(),
                 head.latestCheckpointResourceId(), head.recoveryStatus(), head.activationId(),
                 head.activationPhase(), head.activationEventEpoch(), head.activationExpiresAt(),
@@ -399,10 +400,7 @@ public class ManagedSessionStore {
         bindControlSessionStorage(tenantId, request.workspaceId(), sessionId);
         // Materialize the key before any locking read: missing-key RR locks can
         // deadlock independent tenants when both first writers insert a head.
-        jdbc.update("INSERT IGNORE INTO ma_session_head (tenant_key, harness_key, tenant_id,"
-                + " harness_session_id, session_id, head_kind, phase, created_at, updated_at)"
-                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'OPEN', CURRENT_TIMESTAMP(6),"
-                    + " CURRENT_TIMESTAMP(6))",
+        jdbc.update("INSERT IGNORE INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'OPEN', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                 tenantId, sessionId, sessionId);
         if (authority != null) {
@@ -439,41 +437,22 @@ public class ManagedSessionStore {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?,"
-                        + " storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id"
-                        + " = ?, writer_lease_until = TIMESTAMPADD(MICROSECOND, ?, CAST(? AS"
-                        + " DATETIME(6))), lease_token_hash = ?, journal_revision = 0,"
-                        + " committed_sequence = 0, activation_epoch = 0,"
-                        + " compacted_through_revision = 0, recovery_status = 'READY',"
-                        + " o3_backfill_through = 0, o3_backfill_pending = FALSE, updated_at = ?"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND"
-                        + " session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     STORAGE_VERSION,
                     request.writerId(),
-                    initialLeaseUntil.getNanos() / 1_000,
-                    wholeSeconds(initialLeaseUntil),
+                    initialLeaseUntil.getTime(),
                     tokenHash,
-                    createdAt,
+                    createdAt.getTime(),
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                     JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId);
-            return new WriterGrant(1, databaseEpochMillis(initialLeaseUntil), 0, 0, null, 0, false);
+            return new WriterGrant(1, epochMillis(initialLeaseUntil), 0, 0, null, 0, false);
         }
         try {
-            // Connector/J drops Timestamp fractions with MariaDB's handshake.
-            // Bind whole seconds for timezone conversion and add micros in SQL.
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id,"
-                        + " head_kind, tenant_id, workspace_id, session_id, storage_version, state,"
-                        + " writer_generation, writer_id, writer_lease_until, lease_token_hash,"
-                        + " journal_revision, committed_sequence, activation_epoch,"
-                        + " compacted_through_revision, recovery_status, o3_backfill_through,"
-                        + " o3_backfill_pending, created_at, updated_at) VALUES (?, ?, ?,"
-                        + " 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?,"
-                        + " TIMESTAMPADD(MICROSECOND, ?, CAST(? AS DATETIME(6))), ?, 0, 0, 0, 0,"
-                        + " 'READY', 0, FALSE, ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
                             .harnessDrainKey(tenantId),
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
@@ -484,12 +463,11 @@ public class ManagedSessionStore {
                     sessionId,
                     STORAGE_VERSION,
                     request.writerId(),
-                    initialLeaseUntil.getNanos() / 1_000,
-                    wholeSeconds(initialLeaseUntil),
+                    initialLeaseUntil.getTime(),
                     tokenHash,
-                    createdAt,
-                    createdAt);
-            return new WriterGrant(1, databaseEpochMillis(initialLeaseUntil), 0, 0,
+                    createdAt.getTime(),
+                    createdAt.getTime());
+            return new WriterGrant(1, epochMillis(initialLeaseUntil), 0, 0,
                     null, 0, false);
         } catch (DuplicateKeyException ignored) {
             // A prior acquire created the row; lock and inspect it below.
@@ -518,12 +496,9 @@ public class ManagedSessionStore {
             Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                     plusMillis(now, request.leaseMillis()));
             jdbc.update(
-                    "UPDATE ma_session_head SET writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
-                        + " CAST(? AS DATETIME(6))), updated_at = ? WHERE tenant_key = ? AND"
-                        + " harness_key = ? AND tenant_id = ? AND session_id = ?",
-                    leaseUntil.getNanos() / 1_000,
-                    wholeSeconds(leaseUntil),
-                    now,
+                    "UPDATE ma_session_head SET writer_lease_until = ?, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                    leaseUntil.getTime(),
+                    now.getTime(),
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                     JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                     tenantId,
@@ -542,28 +517,24 @@ public class ManagedSessionStore {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                 JdbcCsiActivationAdmission.qualifyColdWriter(connection, csiOriginal, csiBindings,
                         head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId(),
-                        head.writerGeneration(), head.activationEpoch(), databaseEpochMillis(head.writerLeaseUntil()),
+                        head.writerGeneration(), head.activationEpoch(), epochMillis(head.writerLeaseUntil()),
                         request.writerId());
                 return null;
             });
         }
         Timestamp leaseUntil = plusMillis(now, request.leaseMillis());
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?,"
-                    + " writer_lease_until = TIMESTAMPADD(MICROSECOND, ?, CAST(? AS DATETIME(6))),"
-                    + " lease_token_hash = ?, updated_at = ? WHERE tenant_key = ? AND harness_key ="
-                    + " ? AND tenant_id = ? AND session_id = ?",
+                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
                 generation,
                 request.writerId(),
-                leaseUntil.getNanos() / 1_000,
-                wholeSeconds(leaseUntil),
+                leaseUntil.getTime(),
                 tokenHash,
-                now,
+                now.getTime(),
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                 JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
-        return new WriterGrant(generation, databaseEpochMillis(leaseUntil),
+        return new WriterGrant(generation, epochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), false);
     }
@@ -600,14 +571,11 @@ public class ManagedSessionStore {
                 writerToken, now, !cleanup);
         Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                 plusMillis(now, request.leaseMillis()));
-        requireCsiLease(continuation, databaseEpochMillis(head.writerLeaseUntil()), databaseEpochMillis(leaseUntil));
+        requireCsiLease(continuation, epochMillis(head.writerLeaseUntil()), epochMillis(leaseUntil));
         jdbc.update(
-                "UPDATE ma_session_head SET writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
-                    + " CAST(? AS DATETIME(6))), updated_at = ? WHERE tenant_key = ? AND"
-                    + " harness_key = ? AND tenant_id = ? AND session_id = ?",
-                leaseUntil.getNanos() / 1_000,
-                wholeSeconds(leaseUntil),
-                now,
+                "UPDATE ma_session_head SET writer_lease_until = ?, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                leaseUntil.getTime(),
+                now.getTime(),
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                 JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                 tenantId,
@@ -646,9 +614,9 @@ public class ManagedSessionStore {
         requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, false);
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'SEALED', updated_at = ? WHERE tenant_key = ?"
+                "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_key = ?"
                     + " AND harness_key = ? AND tenant_id = ? AND session_id = ?",
-                now,
+                now.getTime(),
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                 JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                 tenantId,
@@ -701,11 +669,11 @@ public class ManagedSessionStore {
         requireCsiWriterCurrent(continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update(
                 "UPDATE ma_session_head SET recovery_status = ?, recovery_detail_code = ?,"
-                    + " updated_at = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
+                    + " gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                     + " AND session_id = ?",
                 request.recoveryStatus(),
                 request.recoveryDetailCode(),
-                now,
+                now.getTime(),
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                 JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                 tenantId,
@@ -914,7 +882,7 @@ public class ManagedSessionStore {
                         + " activation_id = ?, activation_phase = ?,"
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
-                        + " activation_head_revision = ?, storage_version = ?, updated_at = ?"
+                        + " activation_head_revision = ?, storage_version = ?, gmt_modified = ?"
                         + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                         + " AND session_id = ?",
                 revision, request.lastSequence(), request.commitDigest(),
@@ -928,7 +896,7 @@ public class ManagedSessionStore {
                         : fits ? activation.epoch() : null,
                 activation == null ? head.activationExpiresAt()
                         : fits ? activation.expiresAt() : null,
-                activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now, JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+                activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
@@ -1033,7 +1001,7 @@ public class ManagedSessionStore {
         }
         List<TransactionRow> rows = selectedCount == 0 ? List.of()
                 : jdbc.query(
-                        "SELECT *"
+                        "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + ""
                                 + " FROM ma_session_journal_tx"
                                 + " WHERE tenant_id = ? AND session_id = ?"
                                 + " AND journal_revision > ?"
@@ -1187,8 +1155,8 @@ public class ManagedSessionStore {
                     "INSERT INTO ma_request_receipt (receipt_key, namespace,"
                         + " tenant_key, tenant_id, scope_kind, scope_key, scope_id,"
                         + " idempotency_key, idempotency_digest, request_digest,"
-                        + " operation, state, session_id, result_json, created_at,"
-                        + " updated_at) VALUES (?, 'SESSION_COMMAND', ?, ?,"
+                        + " operation, state, session_id, result_json, gmt_create,"
+                        + " gmt_modified) VALUES (?, 'SESSION_COMMAND', ?, ?,"
                         + " 'SESSION', ?, ?, ?, ?, ?, 'CSI_RESOURCE_READ', 'OPEN',"
                         + " ?, ?, ?, ?)",
                     receipt,
@@ -1234,8 +1202,7 @@ public class ManagedSessionStore {
 
     private java.util.Map<String, Object> nativeReadReceipt(String id, boolean lock) {
         return jdbc.queryForMap(
-                "SELECT * FROM ma_request_receipt WHERE receipt_key = ?"
-                        + " AND namespace = 'SESSION_COMMAND' AND operation = 'CSI_RESOURCE_READ'"
+                "SELECT " + ManagedSchemaProjection.REQUEST_RECEIPT.columns() + " FROM ma_request_receipt WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND' AND operation = 'CSI_RESOURCE_READ'"
                         + (lock ? " FOR UPDATE" : ""),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
                         "csi-read", id));
@@ -1253,9 +1220,7 @@ public class ManagedSessionStore {
         }
         evidence.put("ended_at", endedAt).put("outcome_code", outcome);
         if (jdbc.update(
-                        "UPDATE ma_request_receipt SET state = ?, result_json = ?, updated_at = ?"
-                                + " WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'"
-                                + " AND operation = 'CSI_RESOURCE_READ' AND state = 'OPEN'",
+                        "UPDATE ma_request_receipt SET state = ?, result_json = ?, gmt_modified = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND' AND operation = 'CSI_RESOURCE_READ' AND state = 'OPEN'",
                         state,
                         evidence.toString(),
                         ToolPublicationRetentionStore.now(jdbc),
@@ -1277,7 +1242,7 @@ public class ManagedSessionStore {
 
     private ResourceRow fetchNativeResource(NativeRead admission) {
         try (var connection = jdbc.getDataSource().getConnection();
-                var statement = connection.prepareStatement("SELECT * FROM ma_resource"
+                var statement = connection.prepareStatement("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource"
                         + " WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ? AND deletion_operation_key IS NULL")) {
             statement.setQueryTimeout(10);
             String scope = sessionScopeKey(admission.head().tenantId(), admission.head().sessionId());
@@ -1395,7 +1360,7 @@ public class ManagedSessionStore {
                     "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                        + " state, created_at, last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
+                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
                         + " 'managed-agent-instructions', 1, ?, ?, 'MYSQL_INLINE', ?, ?,"
                         + " 'PUBLISHED', ?, ?)",
                     resourceKey(scopeKey, resourceId),
@@ -1408,8 +1373,8 @@ public class ManagedSessionStore {
                     digest,
                     bytes,
                     resourceId,
-                    now,
-                    now);
+                    now.getTime(),
+                    now.getTime());
         } else {
             requireResourceScope(existing, tenantId, workspaceId, sessionId, resourceId);
             verifyStoredResource(existing);
@@ -1476,7 +1441,7 @@ public class ManagedSessionStore {
                     "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                        + " state, created_at, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
                         + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
                     resourceKey(scopeKey, request.resourceId()),
                     scopeKey,
@@ -1490,8 +1455,8 @@ public class ManagedSessionStore {
                     request.digest(),
                     bytes,
                     request.resourceId(),
-                    now,
-                    now);
+                    now.getTime(),
+                    now.getTime());
         } else {
             requireResourceScope(existing, tenantId, request.workspaceId(), sessionId, request.resourceId());
             verifyStoredResource(existing);
@@ -1539,24 +1504,20 @@ public class ManagedSessionStore {
                 resource.digest(), resource.bytes());
     }
 
-    private void persistTransaction(String tenantId, String sessionId, String writerTokenHash,
-            CommitTransactionRequest request, long revision, ValidatedCommit validated, Timestamp now) {
-        jdbc.update("INSERT INTO ma_session_journal_tx"
-                        + " (tenant_id, workspace_id, session_id,"
-                        + " journal_revision, command_key_hash,"
-                        + " transaction_id, operation, command_id,"
-                        + " content_digest, first_sequence, last_sequence,"
-                        + " event_count, events_digest,"
-                        + " previous_commit_digest, commit_digest,"
-                        + " writer_generation, writer_id,"
-                        + " writer_token_hash, activation_epoch,"
-                        + " latest_checkpoint_resource_id,"
-                        + " record_encoding, record_bytes, byte_length,"
-                        + " record_digest, created_at) VALUES (?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?,"
-                        + " 'identity', ?, ?, ?, ?)",
-                tenantId, request.workspaceId(), sessionId, revision,
+    private void persistTransaction(
+            String tenantId,
+            String sessionId,
+            String writerTokenHash,
+            CommitTransactionRequest request,
+            long revision,
+            ValidatedCommit validated,
+            Timestamp now) {
+        jdbc.update(
+                "INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, events_digest, previous_commit_digest, commit_digest, writer_generation, writer_id, writer_token_hash, activation_epoch, latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'identity', ?, ?, ?, ?)",
+                tenantId,
+                request.workspaceId(),
+                sessionId,
+                revision,
                 commandKeyHash(request.operation(), request.commandId()),
                 request.transactionId(), request.operation(),
                 request.commandId(), request.contentDigest(),
@@ -1650,17 +1611,7 @@ public class ManagedSessionStore {
         HeadRow head = requireHeadForUpdate(tenant, session);
         var validated = validateCommit(request);
         Timestamp now = databaseNow();
-        String writtenAt = jdbc.queryForObject("SELECT CAST(? AS DATETIME(6))", (row, index) -> {
-            Timestamp value = row.getTimestamp(1,
-                    java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")));
-            if (value == null) {
-                throw nativeReadConflict();
-            }
-            return value.toInstant().toString();
-        }, now);
-        if (writtenAt == null) {
-            throw nativeReadConflict();
-        }
+        String writtenAt = now.toInstant().toString();
         long revision = increment(head.journalRevision(), "journal revision");
         Runnable fence = () -> {
             try {
@@ -1676,7 +1627,7 @@ public class ManagedSessionStore {
         fence.run();
         int changed = jdbc.update("UPDATE ma_session_head SET state = 'SEALED',"
                         + " journal_revision = ?, committed_sequence = ?, last_commit_digest = ?,"
-                        + " activation_phase = 'released', activation_head_revision = ?, updated_at = ?"
+                        + " activation_phase = 'released', activation_head_revision = ?, gmt_modified = ?"
                         + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'ACTIVE'"
                         + " AND journal_revision = ? AND committed_sequence = ? AND last_commit_digest = ?",
                 revision, candidate.proof().terminalSequence(), request.commitDigest(), revision, now,
@@ -1735,7 +1686,7 @@ public class ManagedSessionStore {
                                 + " workspace_id, session_id, resource_id,"
                                 + " kind, schema_version, byte_length, sha256,"
                                 + " storage_kind, inline_bytes,"
-                                + " publish_command_id, state, created_at,"
+                                + " publish_command_id, state, gmt_create,"
                                 + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
                                 + " ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?,"
                                 + " 'REFERENCED', ?, ?)",
@@ -1743,7 +1694,7 @@ public class ManagedSessionStore {
                         resource.resourceId(), resource.kind(),
                         resource.schemaVersion(), resource.byteLength(),
                         resource.digest(), input.bytes(), request.commandId(),
-                        now, now);
+                        now.getTime(), now.getTime());
             } else {
                 requireResourceScope(existing, tenantId,
                         request.workspaceId(), sessionId,
@@ -1763,7 +1714,7 @@ public class ManagedSessionStore {
             jdbc.update(
                     "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
                         + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                        + " journal_revision, resource_id, created_at) VALUES (?, 'JOURNAL', ?, ?,"
+                        + " journal_revision, resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, ?,"
                         + " ?, ?, ?, ?, ?, ?, ?)",
                     scopeKey,
                     scopeKey,
@@ -1774,7 +1725,7 @@ public class ManagedSessionStore {
                     sessionId,
                     revision,
                     resource.resourceId(),
-                    now);
+                    now.getTime());
         }
     }
 
@@ -2023,9 +1974,7 @@ public class ManagedSessionStore {
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<HeadRow> rows =
                 jdbc.query(
-                        "SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
-                            + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
-                            + " FOR UPDATE",
+                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                         headMapper,
                         JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                         JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
@@ -2093,16 +2042,16 @@ public class ManagedSessionStore {
     private void requireCsiWriterCurrent(CsiContinuation continuation, HeadRow head,
             String writerId, long generation, String token) {
         if (continuation != null) {
-            requireCsiLease(continuation, databaseEpochMillis(head.writerLeaseUntil()),
-                    databaseEpochMillis(head.writerLeaseUntil()));
+            requireCsiLease(continuation, epochMillis(head.writerLeaseUntil()),
+                    epochMillis(head.writerLeaseUntil()));
             requireWriter(head, writerId, generation, token, databaseNow(), true);
         }
     }
 
     private void requireCsiReadGrant(CsiContinuation continuation, HeadRow head, String token) {
         requireReadGrant(head, token);
-        requireCsiLease(continuation, databaseEpochMillis(head.writerLeaseUntil()),
-                databaseEpochMillis(head.writerLeaseUntil()));
+        requireCsiLease(continuation, epochMillis(head.writerLeaseUntil()),
+                epochMillis(head.writerLeaseUntil()));
     }
 
     private record CsiContinuation(JdbcCsiFilesRetirementGuard.Original original,
@@ -2145,7 +2094,7 @@ public class ManagedSessionStore {
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         var heads =
                 jdbc.query(
-                        "SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
+                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
                             + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
                             + " FOR UPDATE",
                         headMapper,
@@ -2170,7 +2119,7 @@ public class ManagedSessionStore {
     private HeadRow requireHead(String tenantId, String sessionId) {
         List<HeadRow> rows =
                 jdbc.query(
-                        "SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
+                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
                             + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
                         headMapper,
                         JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
@@ -2186,7 +2135,7 @@ public class ManagedSessionStore {
     private TransactionRow findTransactionByCommand(String tenantId,
             String sessionId, String commandKeyHash) {
         List<TransactionRow> rows = jdbc.query(
-                "SELECT * FROM ma_session_journal_tx"
+                "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND command_key_hash = ?",
                 transactionMapper, tenantId, sessionId, commandKeyHash);
@@ -2196,7 +2145,7 @@ public class ManagedSessionStore {
     private ResourceRow findResource(String scopeKey, String resourceId) {
         List<ResourceRow> rows =
                 jdbc.query(
-                        "SELECT * FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
+                        "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
                             + " AND resource_id = ? FOR UPDATE",
                         resourceMapper,
                         resourceKey(scopeKey, resourceId),
@@ -2261,7 +2210,7 @@ public class ManagedSessionStore {
                         "SELECT writer_lease_until FROM ma_session_head WHERE tenant_key = ? AND"
                             + " harness_key = ? AND tenant_id = ? AND session_id = ? AND state ="
                             + " 'ACTIVE' FOR UPDATE",
-                        (result, row) -> result.getTimestamp("writer_lease_until"),
+                        (result, row) -> ManagedSchemaTime.timestamp(result, "writer_lease_until"),
                         JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                         JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                         tenantId,
@@ -2271,8 +2220,8 @@ public class ManagedSessionStore {
     }
 
     private Timestamp databaseNow() {
-        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)",
-                Timestamp.class);
+        Timestamp now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW,
+                (row, index) -> ManagedSchemaTime.timestamp(row, 1));
         if (now == null) {
             throw new IllegalStateException("Database time is unavailable");
         }
@@ -2281,25 +2230,17 @@ public class ManagedSessionStore {
 
     private WriterGrant grant(HeadRow head, Timestamp leaseUntil,
             boolean replayed) {
-        return new WriterGrant(head.writerGeneration(), databaseEpochMillis(leaseUntil),
+        return new WriterGrant(head.writerGeneration(), epochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), replayed);
     }
 
-    private long databaseEpochMillis(Timestamp timestamp) {
-        // DATETIME uses the database zone; keep fractions outside MariaDB's bind.
-        return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(CAST(? AS DATETIME(6)))",
-                Long.class, wholeSeconds(timestamp)) * 1_000
-                + timestamp.getNanos() / 1_000_000;
+    private static long epochMillis(Timestamp timestamp) {
+        return timestamp.getTime();
     }
 
     private static Timestamp plusMillis(Timestamp timestamp, long millis) {
         return Timestamp.from(timestamp.toInstant().plusMillis(millis));
-    }
-
-    private static Timestamp wholeSeconds(Timestamp timestamp) {
-        return Timestamp.from(timestamp.toInstant()
-                .truncatedTo(ChronoUnit.SECONDS));
     }
 
     private static Timestamp laterOf(Timestamp left, Timestamp right) {
@@ -2614,12 +2555,12 @@ public class ManagedSessionStore {
     }
 
     private boolean insertSessionRoot(String tenantId, String sessionId) {
-        long now = databaseEpochMillis(databaseNow());
+        long now = epochMillis(databaseNow());
         String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
         int inserted = jdbc.update(
                 "INSERT IGNORE INTO ma_session (tenant_id, session_id, session_kind, tenant_key,"
-                    + " session_key, session_scope_key, created_at, updated_at) VALUES (?, ?,"
+                    + " session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?,"
                     + " 'CONTROL', ?, ?, ?, ?, ?)",
                 tenantId,
                 sessionId,
@@ -2637,7 +2578,7 @@ public class ManagedSessionStore {
     }
 
     private void materializeSessionRoot(String tenantId, String sessionId) {
-        long now = databaseEpochMillis(databaseNow());
+        long now = epochMillis(databaseNow());
         String tenantKey = JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?"
@@ -2645,7 +2586,7 @@ public class ManagedSessionStore {
                 tenantKey, sessionKey, sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
         jdbc.update(
                 "INSERT IGNORE INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
-                        + " updated_at) VALUES (?, ?, 'SESSION', X'', ?)",
+                        + " gmt_modified) VALUES (?, ?, 'SESSION', X'', ?)",
                 tenantId,
                 sessionId,
                 now);

@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -141,7 +143,7 @@ public final class ToolPublicationCollector {
                 String request = JSON.createObjectNode().put("version", 1).put("publicationId", publication).toString();
                 jdbc.update("INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
                                 + " publication_id, tenant_id, workspace_id, session_id, target_kind, target_key,"
-                                + " request_digest, request_json, phase, state, created_at, updated_at) VALUES (?, ?, ?,"
+                                + " request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?,"
                                 + " 'CAPTURE_GC', ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)",
                         operationKey(scope, publication), ManagedSessionStore.sessionScopeKey((String) capture.get("tenant_id"), (String) capture.get("session_id")),
                         scope, operationId(scope, publication), publication,
@@ -159,9 +161,9 @@ public final class ToolPublicationCollector {
                 return false;
             }
             long now = ToolPublicationRetentionStore.now(jdbc);
-            return jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(? / 1000.0), updated_at = ? WHERE operation_key = ?"
+            return jdbc.update("UPDATE ma_operation SET claim_until = ?, gmt_modified = ? WHERE operation_key = ?"
                         + " AND operation_kind = 'CAPTURE_GC' AND state = 'LEASED' AND claim_owner = ?"
-                        + " AND claim_generation = ? AND claim_until > FROM_UNIXTIME(? / 1000.0)",
+                        + " AND claim_generation = ? AND claim_until > ?",
                 now + CLAIM_MILLIS, now, operationKey(claim.scope(), claim.publication()),
                 owner, claim.generation(), now) == 1;
         }));
@@ -174,7 +176,7 @@ public final class ToolPublicationCollector {
                 status.setRollbackOnly();
                 return;
             }
-            jdbc.update("UPDATE ma_operation SET claim_owner = NULL, claim_until = NULL, available_at = ?,"
+            jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_owner = NULL, claim_until = NULL, available_at = ?,"
                             + " failure_code = 'collection_retry', state = 'PENDING' WHERE operation_key = ?"
                             + " AND operation_kind = 'CAPTURE_GC' AND claim_owner = ? AND claim_generation = ?",
                     ToolPublicationRetentionStore.now(jdbc) + CLAIM_MILLIS,
@@ -186,7 +188,7 @@ public final class ToolPublicationCollector {
         long time = ToolPublicationRetentionStore.now(jdbc);
         var candidates = jdbc.query("SELECT o.scope_key, o.publication_id, o.tenant_id, o.session_id FROM ma_operation o"
                         + " WHERE operation_kind = 'CAPTURE_GC' AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ?"
-                        + " AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= FROM_UNIXTIME(? / 1000.0))"
+                        + " AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?)"
                         + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = o.tenant_id AND s.session_id = o.session_id AND s.csi_guard = TRUE) ORDER BY available_at, operation_key LIMIT 32",
                 (row, index) -> ManagedSchemaRows.read(row), time, owner, time);
         for (var candidate : candidates) {
@@ -225,21 +227,21 @@ public final class ToolPublicationCollector {
                                     + " AND session_id = ?", Long.class, tenant, session);
                             next = Math.addExact(retiredAt, grace.toMillis());
                         }
-                        jdbc.update("UPDATE ma_operation SET failure_code = ?, available_at = ?, updated_at = ?"
+                        jdbc.update("UPDATE ma_operation SET failure_code = ?, available_at = ?, gmt_modified = ?"
                                 + " WHERE operation_key = ?", observed.blocker(), next, now, operationKey(scope, publication));
                         return null;
                     }
                     jdbc.update("UPDATE ma_resource SET deletion_operation_key = ? WHERE scope_key = ?"
                             + " AND publication_id = ? AND deletion_operation_key IS NULL",
                             operationKey(scope, publication), scope, publication);
-                    jdbc.update("UPDATE ma_output_capture SET retention_state = 'DELETING' WHERE scope_key = ?"
+                    jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retention_state = 'DELETING' WHERE scope_key = ?"
                             + " AND publication_id = ?", scope, publication);
                 } else if (!"DELETING".equals(capture.get("retention_state"))) {
                     return null;
                 }
                 long generation = ToolPublicationRetentionStore.number(work, "claim_generation") + 1;
                 jdbc.update("UPDATE ma_operation SET state = 'LEASED', phase = 'DELETING', claim_generation = ?,"
-                        + " claim_owner = ?, claim_until = FROM_UNIXTIME(? / 1000.0), failure_code = NULL, updated_at = ? WHERE operation_key = ?",
+                        + " claim_owner = ?, claim_until = ?, failure_code = NULL, gmt_modified = ? WHERE operation_key = ?",
                         generation, owner, now + CLAIM_MILLIS, now, operationKey(scope, publication));
                 return new Claim(scope, publication, tenant, session, generation, progress(work).path("cursor").asText(""));
             });
@@ -264,7 +266,7 @@ public final class ToolPublicationCollector {
             return null;
         }
         ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
-        var rows = jdbc.query("SELECT * FROM ma_output_capture WHERE scope_key = ?"
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_key = ?"
                 + " AND publication_id = ? FOR UPDATE", (row, index) -> ManagedSchemaRows.read(row), scope, publication);
         if (rows.size() != 1 || !tenant.equals(rows.getFirst().get("tenant_id"))
                 || !session.equals(rows.getFirst().get("session_id"))) {
@@ -275,7 +277,7 @@ public final class ToolPublicationCollector {
     }
 
     private Map<String, Object> collectionRow(String scope, String publication) {
-        var rows = jdbc.query("SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20, 3)) * 1000 AS claim_until_epoch"
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch"
                 + " FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CAPTURE_GC' FOR UPDATE",
                 (row, index) -> ManagedSchemaRows.read(row), operationKey(scope, publication));
         return rows.isEmpty() ? null : rows.getFirst();
@@ -326,15 +328,13 @@ public final class ToolPublicationCollector {
                         cursor);
         if (!remaining.isEmpty()) {
             jdbc.update(
-                    "UPDATE ma_operation SET result_json = ?, updated_at = ? WHERE operation_key ="
-                            + " ? AND claim_generation = ?",
+                    "UPDATE ma_operation SET result_json = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
                     JSON.createObjectNode().put("version", 1).put("cursor", cursor).toString(), now,
                     operationKey(claim.scope(), claim.publication()), claim.generation());
             return true;
         }
         var capture = jdbc.query(
-                                "SELECT * FROM ma_output_capture WHERE scope_key = ? AND"
-                                        + " publication_id = ? FOR UPDATE",
+                                "SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
                 (result, index) -> ManagedSchemaRows.read(result), claim.scope(), claim.publication()).getFirst();
         long collected = ToolPublicationRetentionStore.number(capture, "capture_used_bytes")
                 + ToolPublicationRetentionStore.number(capture, "producer_used_bytes")
@@ -349,16 +349,16 @@ public final class ToolPublicationCollector {
                         + " 'COLLECTED' WHERE scope_key = ? AND publication_id = ? AND"
                         + " deletion_operation_key = ?",
                 claim.scope(), claim.publication(), operationKey(claim.scope(), claim.publication()));
-        jdbc.update("UPDATE ma_output_capture SET retention_state = 'COLLECTED', collected_at = ?,"
+        jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retention_state = 'COLLECTED', collected_at = ?,"
                         + " collected_bytes = ?, released_held_bytes = ?, capture_held_bytes = 0,"
                     + " producer_held_bytes = 0, admission_held_bytes = 0, capture_used_bytes = 0,"
                     + " producer_used_bytes = 0, admission_used_bytes = 0 WHERE scope_key = ? AND"
                     + " publication_id = ?",
                 now, collected, released, claim.scope(), claim.publication());
         jdbc.update(
-                "UPDATE ma_operation SET state = 'SUCCEEDED', claim_owner = NULL, claim_until ="
-                    + " NULL, completed_at = ?, updated_at = ?, available_at = -1, result_json = ?"
-                    + " WHERE operation_key = ? AND claim_generation = ?",
+                "UPDATE ma_operation SET state = 'SUCCEEDED', claim_owner = NULL, claim_until = NULL, completed_at = ?, gmt_modified = ?, available_at = "
+                        + ManagedSchemaTime.NEVER_DUE_MILLIS
+                        + ", result_json = ? WHERE operation_key = ? AND claim_generation = ?",
                 now,
                 now,
                 JSON.createObjectNode()

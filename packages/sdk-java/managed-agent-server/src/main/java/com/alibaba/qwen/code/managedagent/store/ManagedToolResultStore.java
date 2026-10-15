@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -122,12 +124,7 @@ public class ManagedToolResultStore {
                         createdAt, createdAt});
             }
             jdbc.batchUpdate(
-                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key,"
-                        + " operation_kind, operation_id, tenant_id, workspace_id, session_id,"
-                        + " target_kind, target_key, execution_key, request_json, request_digest,"
-                        + " phase, state, created_at, updated_at) VALUES (?, ?, ?,"
-                        + " 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?,"
-                        + " 'PROJECTING', 'PENDING', ?, ?)", rows);
+                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, target_kind, target_key, execution_key, request_json, request_digest, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?, 'PROJECTING', 'PENDING', ?, ?)", rows);
         }
     }
 
@@ -157,6 +154,7 @@ public class ManagedToolResultStore {
                 String tenant = (String) candidate.get("tenant_id");
                 String workspace = (String) candidate.get("workspace_id");
                 String session = (String) candidate.get("session_id");
+                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                 if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                     return false;
                 }
@@ -183,7 +181,7 @@ public class ManagedToolResultStore {
                 } else {
                     require(after == through, "Backfill journal is incomplete");
                 }
-                jdbc.update("UPDATE ma_session_head SET o3_backfill_revision = ?,"
+                jdbc.update("UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", o3_backfill_revision = ?,"
                                 + " o3_backfill_through = ?, o3_backfill_pending = ? WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
                         after, through, after < through, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), tenant, session);
                 return true;
@@ -195,12 +193,13 @@ public class ManagedToolResultStore {
                     String tenant = (String) failed.get("tenant_id");
                     String workspace = (String) failed.get("workspace_id");
                     String session = (String) failed.get("session_id");
+                    ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                     if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                         return;
                     }
                     var current = lockBackfillHead(tenant, workspace, session);
                     if (failed.equals(current)) {
-                        jdbc.update("UPDATE ma_session_head SET o3_backfill_error = 'invalid_journal',"
+                        jdbc.update("UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", o3_backfill_error = 'invalid_journal',"
                                 + " o3_backfill_pending = FALSE WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?", ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), tenant, session);
                     }
                 });
@@ -226,10 +225,9 @@ public class ManagedToolResultStore {
             List<Map<String, Object>> rows = new ArrayList<>();
             for (String state : List.of("PENDING", "RETRYABLE", "LEASED")) {
                 String due = "LEASED".equals(state) ? "claim_until" : "available_at";
-                String epoch = "LEASED".equals(state) ? "CAST(UNIX_TIMESTAMP(r.claim_until) AS DECIMAL(20, 3)) * 1000" : "r." + due;
-                String bound = "LEASED".equals(state) ? "FROM_UNIXTIME(? / 1000.0)" : "?";
-                rows.addAll(jdbc.query("SELECT r.*, " + epoch + " AS due_at FROM ma_operation r"
-                        + " WHERE r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.state = ? AND r." + due + " <= " + bound
+                String epoch = "r." + due;
+                rows.addAll(jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns("r") + ", " + epoch + " AS due_at FROM ma_operation r"
+                        + " WHERE r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.state = ? AND r." + due + " <= ?"
                         + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = r.tenant_id"
                         + " AND s.session_id = r.session_id AND s.csi_guard = TRUE)"
                         + " ORDER BY r." + due + ", r.operation_key LIMIT 1",
@@ -245,6 +243,7 @@ public class ManagedToolResultStore {
                     status.setRollbackOnly();
                     return null;
                 }
+                ToolPublicationRetentionStore.lockSession(jdbc, tenant, (String) candidate.get("session_id"));
                 var row = lockResultRow((String) candidate.get("operation_id"));
                 if (row == null) {
                     continue;
@@ -258,8 +257,8 @@ public class ManagedToolResultStore {
                 }
                 Source source = storedSource(row);
                 long generation = Math.addExact(((Number) row.get("claim_generation")).longValue(), 1);
-                jdbc.update("UPDATE ma_operation SET state = 'LEASED', claim_generation = ?,"
-                                + " claim_until = FROM_UNIXTIME(? / 1000.0), attempt_count = attempt_count + 1"
+                jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'LEASED', claim_generation = ?,"
+                                + " claim_until = ?, attempt_count = attempt_count + 1"
                                 + " WHERE operation_key = ? AND operation_kind = 'TOOL_RESULT_PROJECTION'",
                         generation, Math.addExact(now, 60_000), row.get("operation_key"));
                 return new Claim(source, generation);
@@ -281,6 +280,8 @@ public class ManagedToolResultStore {
                 status.setRollbackOnly();
                 return;
             }
+            ToolPublicationRetentionStore.lockSession(jdbc, (String) candidate.get("tenant_id"),
+                    (String) candidate.get("session_id"));
             var row = lockResultRow(claim.source().id());
             if (row != null) {
                 requireSameSource(candidate, row);
@@ -290,7 +291,7 @@ public class ManagedToolResultStore {
     }
 
     private void settleFailure(Source source, long generation, String state, String code) {
-        jdbc.update("UPDATE ma_operation SET state = ?, failure_code = ?,"
+        jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = ?, failure_code = ?,"
                         + " claim_until = NULL, available_at = CAST(? AS DECIMAL(20, 0))"
                         + " + LEAST(300000, attempt_count * 5000) WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?"
                         + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND request_digest = ?"
@@ -310,24 +311,27 @@ public class ManagedToolResultStore {
                 status.setRollbackOnly();
                 return false;
             }
+            ToolPublicationRetentionStore.lockSession(jdbc, (String) candidate.get("tenant_id"),
+                    (String) candidate.get("session_id"));
             var row = lockResultRow(claim.source().id());
             if (row == null) {
                 return false;
             }
             requireSameSource(candidate, row);
             claimSource(claim, row);
-            return true;
+            return "LEASED".equals(row.get("state"))
+                    && ((Number) row.get("claim_generation")).longValue() == claim.generation();
         }));
     }
 
     private Map<String, Object> resultRow(String id) {
-        var rows = jdbc.query("SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20, 3)) * 1000 AS claim_until_epoch FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?", (result, index) -> ManagedSchemaRows.read(result), id);
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?", (result, index) -> ManagedSchemaRows.read(result), id);
         require(rows.size() <= 1, "Projection identity is ambiguous");
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
     private Map<String, Object> lockResultRow(String id) {
-        var rows = jdbc.query("SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20, 3)) * 1000 AS claim_until_epoch FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ? FOR UPDATE", (result, index) -> ManagedSchemaRows.read(result), id);
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ? FOR UPDATE", (result, index) -> ManagedSchemaRows.read(result), id);
         require(rows.size() <= 1, "Projection identity is ambiguous");
         return rows.isEmpty() ? null : rows.getFirst();
     }
@@ -459,9 +463,9 @@ public class ManagedToolResultStore {
                         artifact.streamId(), sequence);
                 String sessionScope = scope(source.tenantId(), source.sessionId());
                 jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
-                                + " resource_key, tenant_id, workspace_id, session_id, resource_id, created_at)"
+                                + " resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create)"
                                 + " SELECT session_scope_key, 'ARTIFACT', ?, 1, resource_key, tenant_id, workspace_id,"
-                                + " session_id, resource_id, CURRENT_TIMESTAMP(6) FROM ma_resource"
+                                + " session_id, resource_id, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource"
                                 + " WHERE scope_key = ? AND publication_id = ? AND capture_state = 'VERIFIED'"
                                 + " AND deletion_operation_key IS NULL",
                         ManagedSchemaKeys.key(sessionScope, artifact.descriptor().path("id").asText()),
@@ -480,7 +484,7 @@ public class ManagedToolResultStore {
                             "itemId", itemId, "toolCallId", projection.binding().path("modelCallId").asText(),
                             "name", "run_shell_command", "status", itemStatus,
                             "result", JSON.convertValue(descriptor, Map.class)), false, "tool-result:" + source.id() + ":1");
-            jdbc.update("UPDATE ma_operation SET state = 'READY', claim_until = NULL,"
+            jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'READY', claim_until = NULL,"
                             + " failure_code = NULL, item_id = ?, result_json = ?, policy_version = ? WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?",
                     itemId, descriptor.toString(), projection.policyVersion(), source.id());
             return true;
@@ -540,10 +544,7 @@ public class ManagedToolResultStore {
     public Optional<Artifact> findArtifact(String tenant, String session, String artifactId) {
         return jdbc
                 .query(
-                        "SELECT a.*, r.request_json FROM ma_artifact a JOIN ma_operation r ON"
-                            + " r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id ="
-                            + " a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND"
-                            + " r.session_id = ? AND a.artifact_id = ? AND r.state = 'READY'",
+                        "SELECT " + ManagedSchemaProjection.ARTIFACT.columns("a") + ", r.request_json FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND r.session_id = ? AND a.artifact_id = ? AND r.state = 'READY'",
                         this::artifact,
                         scope(tenant, session),
                         tenant,
@@ -580,10 +581,7 @@ public class ManagedToolResultStore {
         args.add(limit + 1);
         List<Artifact> rows =
                 jdbc.query(
-                        "SELECT a.*, r.request_json FROM ma_artifact a JOIN ma_operation r ON"
-                            + " r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id ="
-                            + " a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND"
-                            + " r.session_id = ? AND a.creation_sequence <= ? AND r.state = 'READY'"
+                        "SELECT " + ManagedSchemaProjection.ARTIFACT.columns("a") + ", r.request_json FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND r.session_id = ? AND a.creation_sequence <= ? AND r.state = 'READY'"
                                 + cursor
                                 + " ORDER BY a.creation_sequence DESC, a.artifact_id DESC LIMIT ?",
                         this::artifact,

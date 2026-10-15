@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -95,16 +96,14 @@ final class HostedCancellationProbe implements AutoCloseable {
     }
 
     private Map<String, Object> execution(String session) {
-        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", session);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", session);
         assertThat(rows).hasSize(1);
         return rows.getFirst();
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
-                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
-                + " AND s.storage_id = ?",
+        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                 tenant, storage);
     }
@@ -185,8 +184,7 @@ final class HostedCancellationProbe implements AutoCloseable {
     private void assertJournal(Map<String, Object> session, boolean result, boolean terminal, String phase,
             boolean cleanupConfirmed) throws Exception {
         String id = session.get("sessionId").toString();
-        var rows = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
         var events = new ArrayList<JsonNode>();
         var transactions = new HashSet<String>();
         var identities = new HashSet<String>();
@@ -238,7 +236,7 @@ final class HostedCancellationProbe implements AutoCloseable {
             assertThat(outcome.path("executionCallId").asText()).isEqualTo(execution.get("execution_call_id"));
             assertThat(outcome.path("functionResponse").path("response").path("executionStatus").asText()).isEqualTo("cancelled");
         }
-        var head = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
+        var head = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
         assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
         assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
         byte[] bytes = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"

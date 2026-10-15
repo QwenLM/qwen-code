@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -81,12 +83,10 @@ class ManagedSessionNativeReadTest {
         store = new ManagedSessionStore(jdbc);
         transactions.execute(status -> store.acquireWriter("tenant", session, TOKEN,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 300_000L)));
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
-                        + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, created_at, last_verified_at)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', ?, 'resource', 'managed-session-context', 1, ?, ?,"
-                        + " 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', CURRENT_TIMESTAMP(6), '2000-01-01 00:00:00')",
-                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey("tenant", session), "resource"),
+        jdbc.update(
+                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, 'tenant', 'workspace', ?, 'resource', 'managed-session-context', 1, ?, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", 946684800000)",
+                ManagedSessionStore.resourceKey(
+                        ManagedSessionStore.sessionScopeKey("tenant", session), "resource"),
                 ManagedSessionStore.sessionScopeKey("tenant", session), session, BYTES.length,
                 ToolPublicationContract.sha256(BYTES), BYTES);
     }
@@ -164,7 +164,7 @@ class ManagedSessionNativeReadTest {
         assertThat(old.get("state")).isEqualTo("UNKNOWN");
         assertThat(old.get("ended_at")).isNull();
         assertThat(count("ma_read_lease")).isEqualTo(1);
-        assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
+        assertThat(verifiedAt()).isEqualTo(java.time.Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
         source.closeFailure = "";
         assertThat(read().bytes()).isEqualTo(BYTES);
         assertThat(readReceipts().stream().filter(row -> old.get("read_id").equals(row.get("read_id"))).findFirst().orElseThrow())
@@ -181,7 +181,7 @@ class ManagedSessionNativeReadTest {
         assertThat(readReceipts().getFirst().get("outcome_code"))
                 .isEqualTo("tool_output_read_expired");
         assertThat(count("ma_read_lease")).isZero();
-        assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
+        assertThat(verifiedAt()).isEqualTo(java.time.Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
     }
 
     @Test
@@ -189,7 +189,7 @@ class ManagedSessionNativeReadTest {
         source.onFetch = () -> jdbc.update("UPDATE ma_session_head SET writer_generation = 2, writer_id = 'successor'");
         assertThatThrownBy(this::read).isInstanceOf(ApiException.class);
         assertThat(readReceipts().getFirst().get("state")).isEqualTo("RETURNED");
-        assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
+        assertThat(verifiedAt()).isEqualTo(java.time.Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
     }
 
     @Test
@@ -197,7 +197,7 @@ class ManagedSessionNativeReadTest {
         source.onFetch = () -> jdbc.update("UPDATE ma_resource SET inline_bytes = ?", new byte[] {0});
         assertThatThrownBy(this::read).isInstanceOf(ApiException.class);
         assertThat(readReceipts().getFirst().get("state")).isEqualTo("RETURNED");
-        assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
+        assertThat(verifiedAt()).isEqualTo(java.time.Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
     }
 
     @Test
@@ -210,7 +210,7 @@ class ManagedSessionNativeReadTest {
                 .hasMessage("owned fetch failure").satisfies(error -> assertThat(error.getSuppressed()).hasSize(1));
         assertThat(readReceipts().getFirst().get("state")).isEqualTo("OPEN");
         assertThat(count("ma_read_lease")).isEqualTo(1);
-        assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
+        assertThat(verifiedAt()).isEqualTo(java.time.Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
     }
 
     @Test
@@ -237,12 +237,11 @@ class ManagedSessionNativeReadTest {
         String ordinary = "ordinary-session";
         transactions.execute(status -> store.acquireWriter("tenant", ordinary, TOKEN,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "ordinary-writer", 60_000L)));
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
-                        + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, created_at) VALUES (?, ?, 'tenant', 'workspace', ?,"
-                        + " 'ordinary-resource', 'managed-session-context', 1, ?, ?, 'MYSQL_INLINE', ?,"
-                        + " 'ordinary-fixture', 'REFERENCED', CURRENT_TIMESTAMP(6))",
-                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey("tenant", ordinary), "ordinary-resource"),
+        jdbc.update(
+                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, 'ordinary-resource', 'managed-session-context', 1, ?, ?, 'MYSQL_INLINE', ?, 'ordinary-fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                ManagedSessionStore.resourceKey(
+                        ManagedSessionStore.sessionScopeKey("tenant", ordinary),
+                        "ordinary-resource"),
                 ManagedSessionStore.sessionScopeKey("tenant", ordinary), ordinary, BYTES.length,
                 ToolPublicationContract.sha256(BYTES), BYTES);
         assertThat(store.readOwnerResource("tenant", "workspace", ordinary, "ordinary-resource", TOKEN).bytes())
@@ -278,8 +277,7 @@ class ManagedSessionNativeReadTest {
     private java.util.List<java.util.Map<String, Object>> readReceipts() {
         return jdbc
                 .queryForList(
-                        "SELECT state, result_json FROM ma_request_receipt WHERE operation ="
-                                + " 'CSI_RESOURCE_READ' ORDER BY created_at, receipt_key")
+                        "SELECT state, result_json FROM ma_request_receipt WHERE operation = 'CSI_RESOURCE_READ' ORDER BY gmt_create, receipt_key")
                 .stream()
                 .map(
                         row -> {
@@ -320,8 +318,9 @@ class ManagedSessionNativeReadTest {
                                 : ""), Integer.class);
     }
 
-    private Object verifiedAt() {
-        return jdbc.queryForObject("SELECT last_verified_at FROM ma_resource", java.sql.Timestamp.class);
+    private Long verifiedAt() {
+        return jdbc.queryForObject(
+                "SELECT last_verified_at FROM ma_resource", Long.class);
     }
 
     private void retire() {
@@ -363,7 +362,7 @@ class ManagedSessionNativeReadTest {
                         }
                         Object result = invoke(actual, method, args);
                         if ("prepareStatement".equals(method.getName()) && args[0] instanceof String sql
-                                && sql.startsWith("SELECT * FROM ma_resource")
+                                && sql.startsWith("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource")
                                 && !TransactionSynchronizationManager.isActualTransactionActive()) {
                             fetching.set(true);
                             return statement((PreparedStatement) result);

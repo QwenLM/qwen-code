@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -236,7 +238,7 @@ public final class JdbcCsiFilesRetirementGuard {
     private static List<Slot> lockSlots(Connection connection, String tenantId, String sessionId) throws SQLException {
         List<Slot> slots = new ArrayList<>();
         try (PreparedStatement statement = statement(connection,
-                "SELECT * FROM ma_runtime_slot WHERE tenant_id = ? AND isolation_key = ?"
+                "SELECT " + ManagedSchemaProjection.RUNTIME_SLOT.columns() + " FROM ma_runtime_slot WHERE tenant_id = ? AND isolation_key = ?"
                         + " ORDER BY request_key FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
@@ -253,7 +255,7 @@ public final class JdbcCsiFilesRetirementGuard {
     private static List<Binding> lockBindings(Connection connection, String tenantId, String sessionId,
             List<Slot> slots) throws SQLException {
         List<Binding> bindings = new ArrayList<>();
-        StringBuilder sql = new StringBuilder("SELECT * FROM ma_runtime_binding"
+        StringBuilder sql = new StringBuilder("SELECT " + ManagedSchemaProjection.RUNTIME_BINDING.columns() + " FROM ma_runtime_binding"
                 + " WHERE (tenant_id = ? AND isolation_key = ?)");
         List<Object> references = new ArrayList<>();
         for (Slot slot : slots) {
@@ -330,7 +332,7 @@ public final class JdbcCsiFilesRetirementGuard {
     public static void requireSingleSession(Connection connection, Original original) throws SQLException {
         requireTransaction(connection);
         try (PreparedStatement statement = statement(connection,
-                "SELECT * FROM ma_runtime_session WHERE binding_id = ?"
+                "SELECT " + ManagedSchemaProjection.RUNTIME_SESSION.columns() + " FROM ma_runtime_session WHERE binding_id = ?"
                         + " OR (tenant_id = ? AND harness_session_id = ?)"
                         + " ORDER BY scope_key, runtime_session_id LIMIT 2 FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());

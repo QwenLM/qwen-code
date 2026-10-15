@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -63,7 +64,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     }
 
     protected void retryNow() {
-        jdbc.update("UPDATE ma_operation SET available_at = 0, claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+        jdbc.update("UPDATE ma_operation SET available_at = 0, claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
     }
 
     private String addPublication(String publication, String sessionId) {
@@ -115,16 +116,12 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         seedCaptureGc(scope, "pub-1", session);
         jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
         var evaluations = new java.util.concurrent.atomic.AtomicInteger();
-        var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
-            @Override public <T> List<T> query(String sql, RowMapper<T> mapper, Object... args) {
-                var rows = super.query(sql, mapper, args);
-                if (sql.startsWith("SELECT retired_at, recovery_protected FROM ma_session")) {
-                    evaluations.incrementAndGet();
-                }
-                return rows;
-            }
-        };
-        retention = new ToolPublicationRetentionStore(template, manager);
+        var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource());
+        retention = org.mockito.Mockito.spy(new ToolPublicationRetentionStore(template, manager));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            evaluations.incrementAndGet();
+            return invocation.callRealMethod();
+        }).when(retention).candidate(org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.any(Duration.class));
         var objects = new DeletingObjects();
         var gc = collector(template, objects, true);
         long before = ToolPublicationRetentionStore.now(jdbc);
@@ -412,9 +409,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         }
         for (String resource : List.of("message-1", "checkpoint-1")) {
             String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind,"
-                            + " schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                            + " VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                     ManagedSchemaKeys.key(resourceScope, resource), resourceScope, tenant, session, resource,
                     resource.equals("message-1") ? "managed-message" : "managed-checkpoint", scope, new byte[] {2});
         }
@@ -553,7 +548,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var objects = new DeletingObjects() {
             @Override public void deleteIfPresent(String key) {
                 assertThat(second.runOnce()).isFalse();
-                jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+                jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 assertThat(second.runOnce()).isTrue();
                 super.deleteIfPresent(key);
             }
@@ -597,7 +592,8 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var fail = new AtomicBoolean(true);
         var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override public int update(String sql, Object... args) {
-                if (sql.startsWith("UPDATE ma_output_capture SET retention_state = 'COLLECTED'") && fail.getAndSet(false)) {
+                if (sql.startsWith("UPDATE ma_output_capture SET ")
+                        && sql.contains("retention_state = 'COLLECTED'") && fail.getAndSet(false)) {
                     throw new org.springframework.dao.DataAccessResourceFailureException("SQL confirm failed");
                 }
                 return super.update(sql, args);
@@ -622,7 +618,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
                 if (expire.getAndSet(false)) {
-                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+                    jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 }
             }
         };
@@ -653,7 +649,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
                 if (expire.getAndSet(false)) {
-                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+                    jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 }
             }
         };
@@ -814,7 +810,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         jdbc.update("UPDATE ma_output_capture SET retention_state = 'DELETING' WHERE scope_key = ?", scope);
         String id = "capture-gc-" + ManagedSchemaKeys.key(scope, "pub-1");
         String operationKey = addOperation(OperationKind.CAPTURE_GC, scope, "pub-1", session, id, "LEASED");
-        jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_generation = 3, claim_until = FROM_UNIXTIME(? / 1000.0) WHERE operation_key = ?",
+        jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_generation = 3, claim_until = ? WHERE operation_key = ?",
                 ownerField.get(gc), ToolPublicationRetentionStore.now(jdbc) + 60000, operationKey);
         var before = jdbc.queryForList("SELECT * FROM ma_output_capture WHERE scope_key = ?", scope);
         var objectBefore = jdbc.queryForList("SELECT * FROM ma_resource WHERE scope_key = ?", scope);
@@ -878,7 +874,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
 
     private void insertPrivateSession(String sessionId, String profile) {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, tool_profile,"
-                        + " runtime_request_key, created_at, updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', ?, ?, 0, 0)"
+                        + " runtime_request_key, gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', ?, ?, 0, 0)"
                         + " ON DUPLICATE KEY UPDATE tool_profile = VALUES(tool_profile), runtime_request_key = VALUES(runtime_request_key)",
                 tenant, sessionId, profile, "full".equals(profile) ? "a".repeat(64) : null);
     }

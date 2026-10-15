@@ -60,6 +60,9 @@ final class WorkspaceCsiApplicationImage {
                     && hash(body).equals(delta.path("preparedCommitSha256").textValue()));
             String writtenAt = delta.path("writtenAt").textValue();
             require(writtenAt != null && Instant.parse(writtenAt).toString().equals(writtenAt));
+            Instant instant = Instant.parse(writtenAt);
+            long writtenAtMillis = instant.toEpochMilli();
+            require(writtenAtMillis >= 0 && Instant.ofEpochMilli(writtenAtMillis).equals(instant));
             Row head = sole(baseline, "ma_session_head");
             require("ACTIVE".equals(head.text("state")) && "active".equals(head.text("activation_phase")));
             long revision = Math.addExact(head.number("journal_revision"), 1L);
@@ -72,7 +75,7 @@ final class WorkspaceCsiApplicationImage {
             put(headDelta, "last_commit_digest", text(request, "commitDigest"));
             put(headDelta, "activation_phase", "released");
             put(headDelta, "activation_head_revision", revision);
-            put(headDelta, "updated_at", writtenAt);
+            put(headDelta, "gmt_modified", writtenAtMillis);
             changes.put("ma_session_head", headDelta);
             require(request.path("resources").isArray() && request.path("resources").size() == 1);
             JsonNode resource = request.path("resources").get(0);
@@ -92,8 +95,8 @@ final class WorkspaceCsiApplicationImage {
             values.put("inline_bytes", resourceBytes);
             put(values, "publish_command_id", text(request, "commandId"));
             put(values, "state", "REFERENCED");
-            put(values, "created_at", writtenAt);
-            put(values, "last_verified_at", writtenAt);
+            put(values, "gmt_create", writtenAtMillis);
+            put(values, "last_verified_at", writtenAtMillis);
             additions.put("ma_resource", row("ma_resource", values));
             values = empty(baseline, "ma_resource_ref");
             scope(values, head);
@@ -104,7 +107,7 @@ final class WorkspaceCsiApplicationImage {
             put(values, "session_scope_key", ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id")));
             put(values, "journal_revision", revision);
             put(values, "resource_id", text(resource, "resourceId"));
-            put(values, "created_at", writtenAt);
+            put(values, "gmt_create", writtenAtMillis);
             additions.put("ma_resource_ref", row("ma_resource_ref", values));
             values = empty(baseline, "ma_session_journal_tx");
             scope(values, head);
@@ -128,7 +131,7 @@ final class WorkspaceCsiApplicationImage {
             values.put("record_bytes", records);
             put(values, "byte_length", records.length);
             put(values, "record_digest", hash(records));
-            put(values, "created_at", writtenAt);
+            put(values, "gmt_create", writtenAtMillis);
             additions.put("ma_session_journal_tx", row("ma_session_journal_tx", values));
         }
         if (stage == Stage.DRAINED) {

@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
@@ -65,7 +67,7 @@ public final class ToolPublicationRetentionStore {
         lockTenant(jdbc, tenant);
         long time = now(jdbc);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key,"
-                        + " session_scope_key, created_at, updated_at) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?)"
+                        + " session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?)"
                         + " ON DUPLICATE KEY UPDATE tenant_key = VALUES(tenant_key), session_key = VALUES(session_key),"
                         + " session_scope_key = VALUES(session_scope_key)",
                 tenant, session, hash(tenant), hash(session), ManagedSessionStore.sessionScopeKey(tenant, session), time, time);
@@ -114,11 +116,7 @@ public final class ToolPublicationRetentionStore {
         }
         var heads =
                 jdbc.query(
-                        "SELECT state, recovery_status, CASE WHEN writer_lease_until >"
-                            + " CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_active FROM"
-                            + " ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key"
-                            + " = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR"
-                            + " UPDATE",
+                        "SELECT state, recovery_status, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_active FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                         ManagedSchemaKeys.key(tenant),
                         ManagedSchemaKeys.key(session),
@@ -136,7 +134,7 @@ public final class ToolPublicationRetentionStore {
             protectedRecovery = !"READY".equals(head.get("recovery_status"));
         }
         jdbc.update(
-                "UPDATE ma_session SET retirement_operation_id = ?, retirement_generation ="
+                "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retirement_operation_id = ?, retirement_generation ="
                         + " retirement_generation + 1, retired_at = ?, recovery_protected = ? WHERE"
                         + " tenant_key = ? AND session_key = ? AND retired_at IS NULL",
                 operation,
@@ -145,19 +143,15 @@ public final class ToolPublicationRetentionStore {
                 hash(tenant),
                 hash(session));
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'DELETED', writer_id = NULL, writer_lease_until"
-                    + " = NULL, lease_token_hash = NULL, latest_checkpoint_resource_id = NULL,"
-                    + " o3_backfill_pending = FALSE, updated_at = CURRENT_TIMESTAMP(6) WHERE"
-                    + " head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND"
-                    + " tenant_id = ? AND session_id = ?",
+                "UPDATE ma_session_head SET state = 'DELETED', writer_id = NULL, writer_lease_until = NULL, lease_token_hash = NULL, latest_checkpoint_resource_id = NULL, o3_backfill_pending = FALSE, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
                 ManagedSchemaKeys.key(tenant),
                 ManagedSchemaKeys.key(session),
                 tenant,
                 session);
-        jdbc.update("UPDATE ma_output_capture SET retention_state = 'RETIRING' WHERE tenant_id = ?"
+        jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retention_state = 'RETIRING' WHERE tenant_id = ?"
                 + " AND session_id = ? AND retention_state = 'PINNED'", tenant, session);
         jdbc.update(
-                "UPDATE ma_operation SET state = 'SUPPRESSED', claim_until = NULL, failure_code ="
+                "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'SUPPRESSED', claim_until = NULL, failure_code ="
                     + " 'session_retired' WHERE scope_key = ? AND tenant_id = ? AND session_id = ?"
                     + " AND operation_kind = 'TOOL_RESULT_PROJECTION' AND state <> 'READY'",
                 ManagedToolResultStore.scope(tenant, session),
@@ -216,7 +210,7 @@ public final class ToolPublicationRetentionStore {
                     (result, index) -> ManagedSchemaRows.read(result), scope, publication, slot).getFirst();
             ToolPublicationContract.require(resource.equals(current.get("resource_id"))
                     && objectKey.equals(current.get("capture_object_key")), "Publication object conflicts");
-            jdbc.update("UPDATE ma_output_capture SET quarantined = TRUE WHERE scope_key = ? AND publication_id = ?",
+            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", quarantined = TRUE WHERE scope_key = ? AND publication_id = ?",
                     scope, publication);
             jdbc.update("UPDATE ma_resource SET capture_state = 'QUARANTINED' WHERE scope_key = ?"
                     + " AND publication_id = ? AND slot_key = ? AND capture_state = 'VERIFIED'", scope, publication, slot);
@@ -468,7 +462,7 @@ public final class ToolPublicationRetentionStore {
             long time = now(jdbc);
             jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
                             + " tenant_id, session_id, workspace_id, target_kind, target_key, publication_id,"
-                            + " request_digest, request_json, state, phase, claim_generation, created_at, updated_at)"
+                            + " request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
                     originalKey, ManagedSessionStore.sessionScopeKey(tenant, session), scope, id, tenant, session,
                     key.path("workspaceId").asText(), target, publication, digest, request, time, time);
@@ -500,7 +494,7 @@ public final class ToolPublicationRetentionStore {
                 var capture = lockPublication(attempt.target());
                 ToolPublicationContract.require(List.of("PINNED", "RETIRING").contains(capture.get("retention_state")), "Publication is collected");
                 int changed = jdbc.update("UPDATE ma_operation SET state = 'RETURNED', result_json = ?, completed_at = ?,"
-                                + " updated_at = ? WHERE operation_key = ? AND scope_key = ? AND publication_id = ?"
+                                + " gmt_modified = ? WHERE operation_key = ? AND scope_key = ? AND publication_id = ?"
                                 + " AND operation_kind = 'OBJECT_PUT' AND operation_id = ? AND target_key = ?"
                                 + " AND request_digest = ? AND claim_generation = ? AND state IN ('UNKNOWN', 'IN_FLIGHT')",
                         proof, now(jdbc), now(jdbc), attempt.key(), scope, publication, attempt.id(), target,
@@ -535,7 +529,7 @@ public final class ToolPublicationRetentionStore {
     private void completePut(PutAttempt attempt, String objectKey, String digest, String request, boolean returned) {
         transactions.executeWithoutResult(status -> {
             lockPublication(attempt.target());
-            var rows = jdbc.query("SELECT * FROM ma_operation WHERE operation_key = ?"
+            var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_key = ?"
                     + " AND operation_kind = 'OBJECT_PUT' FOR UPDATE", (row, index) -> ManagedSchemaRows.read(row), attempt.key());
             ToolPublicationContract.require(rows.size() == 1, "PUT attempt is missing");
             var current = rows.getFirst();
@@ -550,7 +544,7 @@ public final class ToolPublicationRetentionStore {
                     && digest.equals(current.get("request_digest")) && request.equals(current.get("request_json"))
                     && number(current, "claim_generation") == attempt.generation()
                     && "IN_FLIGHT".equals(current.get("state")), "PUT attempt conflicts");
-            int changed = jdbc.update("UPDATE ma_operation SET state = ?, completed_at = ?, updated_at = ?"
+            int changed = jdbc.update("UPDATE ma_operation SET state = ?, completed_at = ?, gmt_modified = ?"
                     + " WHERE operation_key = ? AND operation_kind = 'OBJECT_PUT' AND claim_generation = ? AND state = 'IN_FLIGHT'",
                     returned ? "RETURNED" : "UNKNOWN", returned ? now(jdbc) : null, now(jdbc), attempt.key(), attempt.generation());
             ToolPublicationContract.require(changed == 1, "PUT attempt did not complete");

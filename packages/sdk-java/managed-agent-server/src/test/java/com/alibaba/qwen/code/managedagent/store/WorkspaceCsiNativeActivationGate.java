@@ -947,8 +947,8 @@ class WorkspaceCsiNativeActivationGate {
             byte[] bytes = "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
             jdbc.update("INSERT INTO ma_resource"
                             + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
-                            + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                            + " SELECT session_scope_key, tenant_id, workspace_id, session_id, ?, ?, 1, 2, ?, 'INLINE', ?, ?, 'STAGED', created_at"
+                            + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create)"
+                            + " SELECT session_scope_key, tenant_id, workspace_id, session_id, ?, ?, 1, 2, ?, 'INLINE', ?, ?, 'STAGED', gmt_create"
                             + " FROM ma_resource ORDER BY resource_id LIMIT 1",
                     id, kind, CsiNativeActivationProof.sha256(bytes), bytes, id);
             var before = authorityRows();

@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -19,6 +20,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -171,7 +173,7 @@ class ManagedActionResultCsiBoundaryTest {
             var source = seedResult(session, session, "LEASED");
             if (retired) {
                 jdbc.update("INSERT INTO ma_session (tenant_key, session_key, tenant_id, session_id, session_kind,"
-                        + " retirement_operation_id, retirement_generation, retired_at, recovery_protected, created_at, updated_at)"
+                        + " retirement_operation_id, retirement_generation, retired_at, recovery_protected, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, 'tenant', ?, 'CONTROL', 'retirement', 1, 0, FALSE, 0, 0)", ToolPublicationRetentionStore.hash("tenant"),
                         ToolPublicationRetentionStore.hash(session), session);
             }
@@ -202,6 +204,45 @@ class ManagedActionResultCsiBoundaryTest {
         assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM ma_session_head", Boolean.class)).isFalse();
     }
 
+    @Test
+    void projectionAdmissionRejectsOldGenerationBeforeOpeningResources() {
+        var source = seedResult("ordinary", "ordinary", "LEASED");
+        var data = mock(ToolPublicationDataStore.class);
+        var reader = mock(ManagedArtifactReader.class);
+        var policy = mock(ManagedArtifactPolicy.class);
+        var beans = new StaticListableBeanFactory();
+        beans.addBean("data", data);
+        var projector = new ManagedToolResultProjector(results, jdbc,
+                beans.getBeanProvider(ToolPublicationDataStore.class), reader, policy, new ManagedAgentProperties());
+        for (var entry : Map.of("LEASED", 2L, "READY", 1L, "RETRYABLE", 1L).entrySet()) {
+            String state = entry.getKey();
+            long generation = entry.getValue();
+            jdbc.update("UPDATE ma_operation SET state = ?, claim_generation = ? WHERE operation_id = ?",
+                    state, generation, source.id());
+            var claim = new ManagedToolResultStore.Claim(source, 1);
+            assertThat(results.admitsLegacyProjection(claim)).isFalse();
+            projector.project(claim);
+            verifyNoInteractions(data, reader, policy);
+            assertThat(jdbc.queryForMap("SELECT state, claim_generation FROM ma_operation WHERE operation_id = ?", source.id()))
+                    .containsEntry("state", state).containsEntry("claim_generation", generation);
+        }
+    }
+
+    @Test
+    void expiredMillisecondClaimIsReclaimedOnceAndFutureClaimStaysOwned() {
+        var source = seedResult("ordinary", "original", "LEASED");
+        long future = Instant.parse("2040-01-01T00:00:00.123Z").toEpochMilli();
+        jdbc.update("UPDATE ma_operation SET claim_until = ? WHERE operation_id = ?", future, source.id());
+        assertThat(results.claim()).isEmpty();
+        jdbc.update("UPDATE ma_operation SET claim_until = 1000 WHERE operation_id = ?", source.id());
+        var claim = results.claim().orElseThrow();
+        assertThat(claim.source()).isEqualTo(source);
+        assertThat(claim.generation()).isEqualTo(2L);
+        assertThat(results.claim()).isEmpty();
+        assertThat(results.admitsLegacyProjection(new ManagedToolResultStore.Claim(source, 1))).isFalse();
+        assertThat(results.admitsLegacyProjection(claim)).isTrue();
+    }
+
     private ManagedToolResultStore.Source seedResult(String session, String id, String state) {
         // Explicit historical legacy work, not original native membership.
         var source = new ManagedToolResultStore.Source(id, "tenant", "workspace", session, "execution-" + id,
@@ -212,9 +253,9 @@ class ManagedActionResultCsiBoundaryTest {
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.TOOL_RESULT_PROJECTION, scope, execution, id);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id,"
                 + " target_kind, target_key, execution_key, tenant_id, workspace_id, session_id, request_json, request_digest,"
-                + " phase, state, claim_generation, claim_until, created_at, updated_at)"
+                + " phase, state, claim_generation, claim_until, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, 'TOOL_EXECUTION', ?, ?, 'tenant', 'workspace', ?, ?, ?,"
-                + " 'PROJECTING', ?, 1, FROM_UNIXTIME(0), 0, 0)", key, scope, scope, id, execution, execution,
+                + " 'PROJECTING', ?, 1, 0, 0, 0)", key, scope, scope, id, execution, execution,
                 session, JSON.valueToTree(source).toString(), source.sourceDigest(), state);
         return source;
     }
@@ -222,12 +263,12 @@ class ManagedActionResultCsiBoundaryTest {
     private void seedHead(String session) {
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version,"
                 + " state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision,"
-                + " recovery_status, created_at, updated_at) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'workspace', ?, 1, 'ACTIVE', 1, 0, 0, 0, 0,"
-                + " 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash(session), session, session);
+                + " recovery_status, gmt_create, gmt_modified) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'workspace', ?, 1, 'ACTIVE', 1, 0, 0, 0, 0,"
+                + " 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")", WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash(session), session, session);
     }
 
     private void insertOrdinarySession(String session) {
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at, updated_at)"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified)"
                 + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', 0, 0)", session);
     }
 
@@ -238,8 +279,8 @@ class ManagedActionResultCsiBoundaryTest {
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.ACTION_RESPONSE, scope, target, id);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, target_id, tenant_id, session_id, operation_id, operation_kind, actor_digest,"
                 + " idempotency_key, idempotency_digest, request_digest, request_json, state, phase, admission_stage, delivery_state, session_status_before, claim_owner,"
-                + " claim_until, claim_generation, available_at, created_at, updated_at) VALUES (?, ?, ?, 'SESSION', ?, ?, 'tenant', ?, ?, 'ACTION_RESPONSE',"
-                + " '', ?, ?, 'digest', '{}', 'PENDING', 'PENDING', 'ADMITTED', ?, 'ACTIVE', 'owner', FROM_UNIXTIME(0), 1, ?, 0, 0)",
+                + " claim_until, claim_generation, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, 'SESSION', ?, ?, 'tenant', ?, ?, 'ACTION_RESPONSE',"
+                + " '', ?, ?, 'digest', '{}', 'PENDING', 'PENDING', 'ADMITTED', ?, 'ACTIVE', 'owner', 0, 1, ?, 0, 0)",
                 key, scope, scope, target, session, session, id, id, WorkspaceOperations.hash(id), delivery, available);
     }
 
@@ -268,7 +309,8 @@ class ManagedActionResultCsiBoundaryTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, JSON.valueToTree(rows));
         }
-        assertThat(result).hasSize(35);
+        assertThat(result.keySet()).isEqualTo(
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES);
         return result;
     }
 

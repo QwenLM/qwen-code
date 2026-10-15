@@ -682,11 +682,11 @@ jobs:
     # The step ceilings (45 + 16×10 + 20 + 50 = 275 — the Verify, admission
     # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
     # classes raised the hosted fork 900→1200 s and the L4 recovery class
-    # 1200→1800 s; the admission gates share a 2400 s fork for both witness
-    # classes)) plus ~13 minutes for the uncapped setup steps
-    # (Checkout..Install MySQL binaries, the report checks) need ~288; 290
-    # keeps a thin margin, and each arm buys its own 10 instead of sharing
-    # an envelope.
+    # 1200→1800 s, with the FG8 monitor/run letters riding inside it; the
+    # admission gates share a 2400 s fork for both witness classes)) plus
+    # ~13 minutes for the uncapped setup steps (Checkout..Install MySQL
+    # binaries, the report checks) need ~288; 290 keeps a thin margin, and
+    # each arm buys its own 10 instead of sharing an envelope.
     timeout-minutes: 290
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
@@ -741,10 +741,39 @@ jobs:
         run: |-
           cd integration-tests
           npx vitest run helpers/hosted-relay-headers.test.ts
+      # The FG8 monitor/run gates admit real background shells and watches,
+      # whose supervision needs a delegated cgroup v2 root; ubuntu-latest's
+      # kernel has the interface, and the job delegates one subtree to
+      # itself (the supervisor uses the core cgroup v2 files only, so no
+      # controller delegation is needed). Delegation containment: a process
+      # outside the subtree cannot migrate into it — the write to a unit's
+      # cgroup.procs needs the common ancestor's cgroup.procs writable, and
+      # that ancestor is root-owned here — so the Verify step's shell first
+      # moves itself in through the privileged write this step smoke-tests.
+      - name: 'Delegate a cgroup v2 root for the process gates'
+        run: |-
+          sudo mkdir -p /sys/fs/cgroup/fg8
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/fg8
+          test -f /sys/fs/cgroup/fg8/cgroup.kill
+          # Smoke-test admission the way the gates exercise it: this shell
+          # enters the delegated root through the privileged move, then a
+          # child joins a unit by a non-root write — cgroup.kill existing
+          # alone proves nothing about migration. The sleep's fds point at
+          # /dev/null so a failing line below never leaves it holding the
+          # step's stdout open for the rest of its 600 s.
+          echo $$ | sudo tee /sys/fs/cgroup/fg8/cgroup.procs
+          mkdir /sys/fs/cgroup/fg8/smoke
+          sleep 600 </dev/null >/dev/null 2>&1 & smoke=$!
+          echo "$smoke" > /sys/fs/cgroup/fg8/smoke/cgroup.procs
+          grep -q "^$smoke\$" /sys/fs/cgroup/fg8/smoke/cgroup.procs
+          echo 1 > /sys/fs/cgroup/fg8/smoke/cgroup.kill
+          wait "$smoke" || true
+          rmdir /sys/fs/cgroup/fg8/smoke
       - name: 'Verify Hosted Java, Spring and MySQL processes'
         # Must outlive the hosted-harness-mysql failsafe fork timeout (1800 s,
         # raised 900→1200 for the FG7 channel classes and 1200→1800 for the
-        # L4 recovery class after its #14125 per-commit kill) plus the wrapped
+        # L4 recovery class after its #14125 per-commit kill, then shared by
+        # the FG8 monitor/run letters) plus the wrapped
         # compile/surefire/spotbugs/checkstyle work: a step killed before its
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
@@ -753,7 +782,9 @@ jobs:
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+          QWEN_MANAGED_HOOK_CGROUP_ROOT: '/sys/fs/cgroup/fg8'
         run: >-
+          echo $$ | sudo tee /sys/fs/cgroup/fg8/cgroup.procs &&
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml
           -Phosted-harness-mysql
           -Dnode.executable="$(command -v node)"
@@ -856,6 +887,7 @@ jobs:
             packages/sdk-java/managed-agent-server/target/failsafe-reports/
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
             packages/sdk-java/managed-agent-server/target/fg7-cases/
+            packages/sdk-java/managed-agent-server/target/fg8-cases/
             packages/sdk-java/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
       # A separate artifact keeps the reports' layout: a .qwen/ path in the

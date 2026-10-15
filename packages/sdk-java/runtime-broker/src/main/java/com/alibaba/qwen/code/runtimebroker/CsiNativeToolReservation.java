@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.canonical;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.closed;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.id;
@@ -60,7 +62,7 @@ final class CsiNativeToolReservation {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = read.statement(connection,
-                    "SELECT * FROM ma_resource WHERE session_scope_key = ? AND resource_id > ?"
+                    "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id > ?"
                             + " ORDER BY resource_id LIMIT 100")) {
                 statement.setString(1, scope(original));
                 JdbcRepositorySupport.setIdentity(statement, 2, cursor);
@@ -116,7 +118,7 @@ final class CsiNativeToolReservation {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = read.statement(connection,
-                    "SELECT * FROM ma_tool_execution WHERE (binding_id = ? OR harness_session_id = ?"
+                    "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE (binding_id = ? OR harness_session_id = ?"
                             + " OR runtime_session_id = ?) AND execution_call_id_hash > ?"
                             + " ORDER BY execution_call_id_hash LIMIT 100")) {
                 JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
@@ -629,24 +631,28 @@ final class CsiNativeToolReservation {
             return;
         }
         try (PreparedStatement statement = statement(connection,
-                "INSERT INTO ma_resource"
-                        + " (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at, last_verified_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)")) {
-            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope(original), id(ref, "resourceId")));
-            statement.setString(2, scope(original));
-            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
-            JdbcRepositorySupport.setIdentity(statement, 4, original.request().getScope().getWorkspaceId());
-            JdbcRepositorySupport.setIdentity(statement, 5, original.request().getIsolationKey());
-            JdbcRepositorySupport.setIdentity(statement, 6, id(ref, "resourceId"));
-            JdbcRepositorySupport.setIdentity(statement, 7, text(ref, "kind"));
+                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)")) {
+            JdbcRepositorySupport.setStringParameter(
+                    statement,
+                    1,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            scope(original), id(ref, "resourceId")));
+            JdbcRepositorySupport.setStringParameter(statement, 2, scope(original));
+            JdbcRepositorySupport.setStringParameter(
+                    statement, 3, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setStringParameter(
+                    statement, 4, original.request().getScope().getWorkspaceId());
+            JdbcRepositorySupport.setStringParameter(
+                    statement, 5, original.request().getIsolationKey());
+            JdbcRepositorySupport.setStringParameter(statement, 6, id(ref, "resourceId"));
+            JdbcRepositorySupport.setStringParameter(statement, 7, text(ref, "kind"));
             statement.setLong(8, bytes.length);
             statement.setString(9, text(ref, "digest"));
             statement.setBytes(10, bytes);
-            JdbcRepositorySupport.setIdentity(statement, 11, id(ref, "resourceId"));
-            var now = java.sql.Timestamp.from(JdbcRepositorySupport.databaseNowPrecise(connection));
-            statement.setTimestamp(12, now);
-            statement.setTimestamp(13, now);
+            JdbcRepositorySupport.setStringParameter(statement, 11, id(ref, "resourceId"));
+            var now = JdbcRepositorySupport.databaseNowPrecise(connection);
+            JdbcRepositorySupport.setInstant(statement, 12, now);
+            JdbcRepositorySupport.setInstant(statement, 13, now);
             require(statement.executeUpdate() == 1);
         }
     }

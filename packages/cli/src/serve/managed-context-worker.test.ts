@@ -62,6 +62,7 @@ import {
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
 } from './managed-runtime-provider-protocol.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const globWorkerAssets = vi.hoisted(() => ({ directory: '' }));
 vi.mock(
@@ -874,7 +875,7 @@ describe('Managed context installation', () => {
     expect(repaired.status).toBe(200);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses a directory the worker cannot read',
     async () => {
       const root = workspace();

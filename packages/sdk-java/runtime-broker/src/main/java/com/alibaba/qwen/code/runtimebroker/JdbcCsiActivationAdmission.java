@@ -1,5 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -472,11 +476,19 @@ public final class JdbcCsiActivationAdmission {
     private static NativeHead activeNativeHead(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
             throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                "SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
-            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
-            JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
+                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND session_id = ? AND tenant_key = ? AND harness_key = ? AND harness_session_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(
+                    statement, 1, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+            statement.setString(
+                    3,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            original.request().getScope().getTenantId()));
+            statement.setString(
+                    4,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            original.request().getIsolationKey()));
+            JdbcRepositorySupport.setIdentity(statement, 5, original.request().getIsolationKey());
             try (ResultSet head = statement.executeQuery()) {
                 require(head.next() && original.request().getIsolationKey().equals(head.getString("harness_session_id"))
                         && original.request().getScope().getWorkspaceId().equals(head.getString("workspace_id"))
@@ -484,7 +496,7 @@ public final class JdbcCsiActivationAdmission {
                         && head.getInt("storage_version") == 1
                         && head.getLong("compacted_through_revision") == 0
                         && "READY".equals(head.getString("recovery_status")));
-                require(head.getTimestamp("writer_lease_until") != null);
+                require(ManagedSchemaTime.timestamp(head, "writer_lease_until") != null);
                 var history = history(connection, original, head.getLong("journal_revision"),
                         head.getLong("committed_sequence"), head.getString("last_commit_digest"), head.getString("writer_id"));
                 require(history.activation() != null && head.getLong("activation_epoch") == history.activation().epoch()
@@ -493,7 +505,7 @@ public final class JdbcCsiActivationAdmission {
                         && head.getString("writer_id").equals(history.activation().workerId()));
                 var result = new NativeHead(head.getLong("journal_revision"), head.getLong("committed_sequence"),
                         head.getString("last_commit_digest"), history.prefix(),
-                        head.getTimestamp("writer_lease_until").toInstant().toEpochMilli(), history.activation().expiresAt(), history.activation());
+                        ManagedSchemaTime.timestamp(head, "writer_lease_until").toInstant().toEpochMilli(), history.activation().expiresAt(), history.activation());
                 return result;
             }
         }
@@ -527,7 +539,7 @@ public final class JdbcCsiActivationAdmission {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = read.statement(connection,
-                    "SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                    "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                             + " AND journal_revision > ? AND journal_revision <= ? ORDER BY journal_revision LIMIT 100")) {
                 JdbcRepositorySupport.setIdentity(statement, 1, original.request().getScope().getTenantId());
                 JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
@@ -720,7 +732,7 @@ public final class JdbcCsiActivationAdmission {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = statement(connection,
-                    "SELECT * FROM ma_tool_execution WHERE (binding_id = ? OR harness_session_id = ?"
+                    "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE (binding_id = ? OR harness_session_id = ?"
                             + " OR runtime_session_id = ?) AND execution_call_id_hash > ?"
                             + " ORDER BY execution_call_id_hash LIMIT 100 FOR UPDATE")) {
                 JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
@@ -796,7 +808,7 @@ public final class JdbcCsiActivationAdmission {
     static byte[] resource(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JsonNode ref, long revision, JournalRead read) {
         try (PreparedStatement statement = read.statement(connection,
-                "SELECT r.* FROM ma_resource r JOIN ma_resource_ref x"
+                "SELECT " + ManagedSchemaProjection.RESOURCE.columns("r") + " FROM ma_resource r JOIN ma_resource_ref x"
                         + " ON x.resource_key = r.resource_key AND x.session_scope_key = r.session_scope_key"
                         + " WHERE r.resource_key = ? AND r.session_scope_key = ? AND r.tenant_id = ? AND r.workspace_id = ?"
                         + " AND r.session_id = ? AND r.resource_id = ? AND x.owner_kind = 'JOURNAL'"

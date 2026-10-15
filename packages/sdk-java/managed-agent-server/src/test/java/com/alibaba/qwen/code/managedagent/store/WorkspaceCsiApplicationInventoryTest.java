@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -85,24 +86,24 @@ class WorkspaceCsiApplicationInventoryTest {
         String resource = ManagedSessionStore.resourceKey(sessionScope(), "original-resource");
         byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,"
-                        + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,created_at)"
+                        + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
                         + " VALUES (?,?,'tenant','workspace',?,'original-resource','managed-root',1,?,?,"
-                        + "'MYSQL_INLINE',?,'REFERENCED',CURRENT_TIMESTAMP(6))",
+                        + "'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")",
                 resource, sessionScope(), session, bytes.length, sha(bytes), bytes);
         new TransactionTemplate(new DataSourceTransactionManager(source)).executeWithoutResult(status ->
                 ToolPublicationRetentionStore.lockSession(jdbc, "foreign", "foreign-session"));
         jdbc.update("INSERT INTO ma_message (tenant_id,session_id,item_id,turn_id,item_type,item_status,attributes_json,"
-                        + "first_sequence,last_sequence,created_at,updated_at,parts_json,body_resource_key)"
+                        + "first_sequence,last_sequence,gmt_create,gmt_modified,parts_json,body_resource_key)"
                         + " VALUES ('foreign','foreign-session','item','turn','message','completed','{}',1,1,1,1,'[]',?)", resource);
         jdbc.update("INSERT INTO ma_snapshot (tenant_id,session_id,snapshot_id,snapshot_version,covered_sequence,"
-                        + "projection_version,manifest_resource_key,manifest_sha256,item_count,state,created_at,retain_until)"
+                        + "projection_version,manifest_resource_key,manifest_sha256,item_count,state,gmt_create,retain_until)"
                         + " VALUES ('foreign','foreign-session','snapshot',1,1,1,?,?,0,'PUBLISHED',1,2)", resource, sha(bytes));
-        jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,artifact_refs_resource_key,updated_at)"
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,artifact_refs_resource_key,gmt_modified)"
                         + " VALUES ('foreign','foreign-session','SESSION','',?,1)", resource);
         String foreignScope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,"
-                        + "tenant_id,session_id,resource_id,created_at) VALUES (?,'MESSAGE',?,1,?,'foreign',"
-                        + "'foreign-session','original-resource',CURRENT_TIMESTAMP(6))", foreignScope, "a".repeat(64), resource);
+                        + "tenant_id,session_id,resource_id,gmt_create) VALUES (?,'MESSAGE',?,1,?,'foreign',"
+                        + "'foreign-session','original-resource'," + ManagedSchemaTime.SQL_NOW + ")", foreignScope, "a".repeat(64), resource);
         var found = inspect();
         for (String table : List.of("ma_message", "ma_snapshot", "ma_event_stream", "ma_resource_ref")) {
             assertThat(found.blockers()).as(table).anyMatch(blocker -> blocker.table().equals(table)
@@ -892,10 +893,10 @@ class WorkspaceCsiApplicationInventoryTest {
         jdbc.execute("ALTER TABLE ma_public_event ALTER COLUMN truncated BOOLEAN");
         jdbc.execute("ALTER TABLE ma_public_event ALTER COLUMN archived BOOLEAN");
         assertThat(inspect().blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
-        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, updated_at)"
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, gmt_modified)"
                 + " VALUES ('tenant', ?, 'TASK', 'task', 1, 1)", session);
         jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, stream_kind, stream_id, sequence_id, event_id,"
-                + " event_type, created_at, schema_version, projection_version, truncated, archived)"
+                + " event_type, gmt_create, schema_version, projection_version, truncated, archived)"
                 + " VALUES ('tenant', ?, 'TASK', 'task', 1, ?, 'output', 1, 1, 1, FALSE, TRUE)", session, UUID.randomUUID().toString());
         var observed = inspect();
         assertThat(observed.blockers()).anyMatch(blocker -> blocker.table().equals("ma_public_event")
@@ -916,7 +917,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void aSqlFileHistoryExtensionIsBlockedWithoutBorrowingNativeProjectionSupport() throws Exception {
         jdbc.update("INSERT INTO ma_session_record"
                 + " (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id,"
-                + " operation_hash, revision, record_resource_id, created_at, first_sequence)"
+                + " operation_hash, revision, record_resource_id, gmt_create, first_sequence)"
                 + " VALUES (?, ?, 'tenant', 'workspace', ?, 'file_history', 'history', ?, 1, 'resource', 1, 1)",
                 sessionScope(), "a".repeat(64), session, "b".repeat(64));
         var snapshot = inspect();
@@ -930,12 +931,12 @@ class WorkspaceCsiApplicationInventoryTest {
         byte[] bytes = "{\"schemaVersion\":1}".getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource"
                 + " (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
-                + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
+                + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create)"
                 + " VALUES (?, ?, 'tenant', 'workspace', ?, 'extra', 'native-fixture', 1, ?, ?, 'MYSQL_INLINE', ?,"
-                + " 'publish', 'PUBLISHED', CURRENT_TIMESTAMP(6))", ManagedSessionStore.resourceKey(sessionScope(), "extra"), sessionScope(), session, bytes.length, sha(bytes), bytes);
+                + " 'publish', 'PUBLISHED', " + ManagedSchemaTime.SQL_NOW + ")", ManagedSessionStore.resourceKey(sessionScope(), "extra"), sessionScope(), session, bytes.length, sha(bytes), bytes);
         jdbc.update("INSERT INTO ma_resource_ref"
-                + " (owner_kind, owner_key, owner_revision, resource_key, session_scope_key, tenant_id, workspace_id, session_id, journal_revision, resource_id, created_at)"
-                + " VALUES ('JOURNAL', ?, 99, ?, ?, 'foreign', 'workspace', ?, 99, 'missing', CURRENT_TIMESTAMP(6))",
+                + " (owner_kind, owner_key, owner_revision, resource_key, session_scope_key, tenant_id, workspace_id, session_id, journal_revision, resource_id, gmt_create)"
+                + " VALUES ('JOURNAL', ?, 99, ?, ?, 'foreign', 'workspace', ?, 99, 'missing', " + ManagedSchemaTime.SQL_NOW + ")",
                 sessionScope(), ManagedSessionStore.resourceKey(sessionScope(), "extra"), sessionScope(), UUID.randomUUID().toString());
         var snapshot = inspect();
         assertThat(snapshot.table("ma_resource").rows()).hasSize(1);
@@ -954,14 +955,14 @@ class WorkspaceCsiApplicationInventoryTest {
             String id = owner.equals("tenant") ? "orphan" : "original-json";
             String receipt = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.receiptKey(namespace, owner, scopeKind, owner, id);
             jdbc.update("INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id, scope_kind, scope_key, scope_id,"
-                    + " idempotency_key, idempotency_digest, actor_id, request_digest, schedule_id, result_json, state, created_at, updated_at)"
+                    + " idempotency_key, idempotency_digest, actor_id, request_digest, schedule_id, result_json, state, gmt_create, gmt_modified)"
                     + " VALUES (?, 'AUTOMATION', ?, ?, 'TENANT', ?, ?, ?, ?, 'actor', 'digest', ?, ?, 'COMPLETED', 1, 1)",
                     receipt, brokerHash(owner), owner, WorkspaceOperations.hash("TENANT", owner), owner, id, brokerHash(id),
                     owner.equals("tenant") ? "" : "unknown", owner.equals("tenant") ? "{}" : "{\"sessionId\":\"" + session + "\"}");
         }
         String channelScope = WorkspaceOperations.hash("tenant", "channel");
         jdbc.update("INSERT INTO ma_delivery (delivery_key, delivery_kind, tenant_id, channel_id, delivery_id, source_scope_key,"
-                + " segment_id, segment_ordinal, transport_state, reception_state, consumption_state, payload_json, created_at, updated_at)"
+                + " segment_id, segment_ordinal, transport_state, reception_state, consumption_state, payload_json, gmt_create, gmt_modified)"
                 + " VALUES (?, 'CHANNEL', 'tenant', 'channel', 'delivery', ?, 'segment', 0, 'RETURNED', 'PENDING', 'PENDING', '{}', 1, 1)",
                 WorkspaceOperations.hash("CHANNEL", channelScope, "delivery"), channelScope);
         var snapshot = inspect();
@@ -1037,23 +1038,23 @@ class WorkspaceCsiApplicationInventoryTest {
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version,"
                 + " state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision,"
                 + " committed_sequence, last_commit_digest, activation_epoch, compacted_through_revision, recovery_status,"
-                + " created_at, updated_at, activation_id) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'workspace', ?, 1, 'ACTIVE', 1, 'writer',"
-                + " CURRENT_TIMESTAMP, ?, 1, 1, ?, 1, 0, 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'activation')",
+                + " gmt_create, gmt_modified, activation_id) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'workspace', ?, 1, 'ACTIVE', 1, 'writer',"
+                + " " + ManagedSchemaTime.SQL_NOW + ", ?, 1, 1, ?, 1, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", 'activation')",
                 brokerHash("tenant"), brokerHash(session), session, session, "a".repeat(64), "b".repeat(64));
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
                 + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence,"
                 + " event_count, commit_digest, writer_generation, writer_id, writer_token_hash, activation_epoch,"
-                + " record_encoding, record_bytes, byte_length, record_digest, created_at)"
+                + " record_encoding, record_bytes, byte_length, record_digest, gmt_create)"
                 + " VALUES ('tenant', 'workspace', ?, 1, ?, 'transaction', 'fixture', 'command', ?, 1, 1, 1, ?, 1,"
-                + " 'writer', ?, 1, 'identity', ?, ?, ?, CURRENT_TIMESTAMP)",
+                + " 'writer', ?, 1, 'identity', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 session, "c".repeat(64), "d".repeat(64), "b".repeat(64), "a".repeat(64), record, record.length, sha(record));
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                + " state, created_at) VALUES (?, ?, 'tenant', 'workspace', ?, 'resource', 'inventory-fixture', 1, ?, ?,"
-                + " 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP)",
+                + " state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, 'resource', 'inventory-fixture', 1, ?, ?,"
+                + " 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSessionStore.resourceKey(sessionScope(), "resource"), sessionScope(), session, resource.length, sha(resource), resource);
         jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
-                + " journal_revision, resource_id, created_at) VALUES ('JOURNAL', ?, 1, ?, ?, 'tenant', 'workspace', ?, 1, 'resource', CURRENT_TIMESTAMP)",
+                + " journal_revision, resource_id, gmt_create) VALUES ('JOURNAL', ?, 1, ?, ?, 'tenant', 'workspace', ?, 1, 'resource', " + ManagedSchemaTime.SQL_NOW + ")",
                 sessionScope(), ManagedSessionStore.resourceKey(sessionScope(), "resource"), sessionScope(), session);
         for (String state : List.of("PREPARED", "DISPATCHING", "EXECUTING", "CANCEL_REQUESTED", "UNKNOWN", "ABANDONED", "SETTLED")) {
             insertExecution(state, state, binding.getBindingId(), session, brokerHash(session));
@@ -1116,7 +1117,7 @@ class WorkspaceCsiApplicationInventoryTest {
 
     @Test
     void unrelatedGlobalDefinitionsAreNotOriginalWorkForTheOpaqueSelectedRevision() throws Exception {
-        jdbc.update("INSERT INTO ma_agent_definition (tenant_id, agent_id, revision, digest, definition_json, created_at)"
+        jdbc.update("INSERT INTO ma_agent_definition (tenant_id, agent_id, revision, digest, definition_json, gmt_create)"
                 + " VALUES ('tenant', 'qwen-code', 7, 'digest', '{}', 1)");
         var snapshot = inspect();
         assertThat(snapshot.table("ma_agent_definition").rows()).isEmpty();
@@ -1127,7 +1128,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void rowsUseTheWholeFinalPrimaryKeyAndSortNumericComponentsNumerically() throws Exception {
         for (long sequence : new long[] {10, 2}) {
             jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, event_type, data_json,"
-                    + " terminal, created_at) VALUES ('tenant', ?, ?, ?, 'fixture', '{}', FALSE, 1)",
+                    + " terminal, gmt_create) VALUES ('tenant', ?, ?, ?, 'fixture', '{}', FALSE, 1)",
                     session, sequence, UUID.randomUUID().toString());
         }
         var snapshot = inspect();
@@ -1222,6 +1223,65 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
+    void timestampCellsPreserveCanonicalEpochMillisecondsAndNulls() throws Exception {
+        for (long value : new long[] {0L, Instant.parse("2040-01-01T00:00:00.123Z").toEpochMilli(),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.NEVER_DUE_MILLIS}) {
+            jdbc.update("UPDATE ma_session SET gmt_create = ?, gmt_modified = ?", value, value);
+            var snapshot = inspect();
+            var row = snapshot.table("ma_session").rows().getFirst();
+            assertThat(row.number("gmt_create")).isEqualTo(value);
+            assertThat(row.cell("gmt_create").bytes()).isEqualTo(Long.toString(value).getBytes(StandardCharsets.UTF_8));
+            assertThat(row.cell("deleted_at").isNull()).isTrue();
+            assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
+            assertThat(WorkspaceCsiApplicationInventory.expectedImage(snapshot.tables()).table("ma_session").rows().getFirst().bytes())
+                    .isEqualTo(row.bytes());
+        }
+        jdbc.execute("ALTER TABLE ma_agent_definition ALTER COLUMN gmt_create TIMESTAMP");
+        assertSchemaDrift();
+    }
+
+    @Test
+    void cutImageWritesExactMillisecondCellsAndRejectsSubmillisecondTime() throws Exception {
+        var json = new ObjectMapper();
+        com.fasterxml.jackson.databind.JsonNode fixture;
+        try (var input = getClass().getResourceAsStream("/csi-native-text-fixture.json")) {
+            fixture = json.readTree(input);
+        }
+        var original = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
+        var nativeRows = preparedNativeFixture(original, fixture);
+        var baseline = WorkspaceCsiApplicationInventory.expectedImage(original.tables().stream().map(table ->
+                List.of("ma_session_head", "ma_session_journal_tx", "ma_resource", "ma_resource_ref").contains(table.name())
+                        ? nativeRows.table(table.name()) : table).toList());
+        byte[] body = json.writeValueAsBytes(fixture.path("requests").get(32));
+        var envelope = json.createObjectNode().put("commitBodyBase64", java.util.Base64.getEncoder().encodeToString(body))
+                .put("preparedCommitSha256", sha(body)).put("baselineBase64", java.util.Base64.getEncoder().encodeToString(baseline.bytes()))
+                .put("writerTokenSha256", "a".repeat(64));
+        byte[] frozen = json.writeValueAsBytes(envelope);
+        String writtenAt = "2040-01-01T00:00:00.123Z";
+        var delta = json.createObjectNode().put("format", "qwen-csi-application-cut/1")
+                .put("retirementId", baseline.table("ma_operation").rows().getFirst().text("operation_id"))
+                .put("frozenRequestSha256", sha(frozen)).put("baselineSha256", sha(baseline.bytes()))
+                .put("preparedCommitSha256", sha(body)).put("writtenAt", writtenAt);
+        var image = WorkspaceCsiApplicationImage.expected(baseline,
+                com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.CUT, frozen, json.writeValueAsBytes(delta), null);
+        long millis = Instant.parse(writtenAt).toEpochMilli();
+        assertThat(image.table("ma_session_head").rows().getFirst().number("gmt_modified")).isEqualTo(millis);
+        for (String table : List.of("ma_resource", "ma_resource_ref", "ma_session_journal_tx")) {
+            var added = image.table(table).rows().stream().filter(row -> row.number("gmt_create") != null
+                    && row.number("gmt_create") == millis).toList();
+            assertThat(added).hasSize(1);
+            assertThat(image.table(table).rows()).hasSize(baseline.table(table).rows().size() + 1);
+            if (table.equals("ma_resource")) {
+                assertThat(added.getFirst().number("last_verified_at")).isEqualTo(millis);
+            }
+        }
+        delta.put("writtenAt", "2040-01-01T00:00:00.123001Z");
+        assertThatThrownBy(() -> WorkspaceCsiApplicationImage.expected(baseline,
+                com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.CUT, frozen, json.writeValueAsBytes(delta), null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void frozenExpectedImageAllowsOnlyTheDeclaredProgressDelta() throws Exception {
         var baseline = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         byte[] frozen = "{\"saved\":true}".getBytes(StandardCharsets.UTF_8);
@@ -1242,7 +1302,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 + " frozen_request_bytes = ?, frozen_request_sha256 = ?", frozen, sha(frozen));
         var actual = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         WorkspaceCsiApplicationImage.verify(actual, expected);
-        jdbc.update("UPDATE ma_session SET updated_at = updated_at + 1");
+        jdbc.update("UPDATE ma_session SET gmt_modified = gmt_modified + 1");
         var drift = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         assertThatThrownBy(() -> WorkspaceCsiApplicationImage.verify(drift, expected)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> WorkspaceCsiApplicationImage.expected(actual,
@@ -1482,7 +1542,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 + " binding_id, runtime_generation, harness_session_id, runtime_session_id, runtime_session_key, turn_id, tool_call_id,"
                 + " request_digest, reference_json, execution_state, execution_status, result_json, last_sequence, cancel_requested,"
                 + " dispatch_generation, record_version, settled_at, native_authorization_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                + " 'turn', 'call', 'digest', '{}', ?, 'success', '{}', 1, FALSE, 1, 1, CURRENT_TIMESTAMP, '{}')",
+                + " 'turn', 'call', 'digest', '{}', ?, 'success', '{}', 1, FALSE, 1, 1, " + ManagedSchemaTime.SQL_NOW + ", '{}')",
                 brokerHash(id), id, brokerHash("idempotency-" + id), "idempotency-" + id, bindingId, binding.getGeneration(),
                 runtimeSession, runtimeSession, runtimeKey, state);
     }
@@ -1494,7 +1554,7 @@ class WorkspaceCsiApplicationInventoryTest {
 
     private static String actionSql() {
         return "INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, session_id, domain, record_id,"
-                + " revision, created_at, record_kind, state, action_id, action_version, options_json)"
+                + " revision, gmt_create, record_kind, state, action_id, action_version, options_json)"
                 + " VALUES (?, ?, ?, ?, 'action', ?, 1, 1, 'ACTION', 'COMPLETED', ?, 1, ?)";
     }
 
@@ -1723,16 +1783,16 @@ class WorkspaceCsiApplicationInventoryTest {
 
     private void nativeChunkResource(String id, String kind, byte[] bytes) {
         jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,"
-                        + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,publish_command_id,state,created_at)"
-                        + " VALUES (?,?,'tenant','workspace',?,?,?,1,?,?,'MYSQL_INLINE',?,'publish','REFERENCED',CURRENT_TIMESTAMP(6))",
+                        + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,publish_command_id,state,gmt_create)"
+                        + " VALUES (?,?,'tenant','workspace',?,?,?,1,?,?,'MYSQL_INLINE',?,'publish','REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSessionStore.resourceKey(sessionScope(), id), sessionScope(), session, id, kind, bytes.length, sha(bytes), bytes);
     }
 
     private void foreignResource(String id, String kind, byte[] bytes) {
         String scope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
-                + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                + " VALUES (?, ?, 'foreign', 'other-workspace', 'foreign-session', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+                + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create)"
+                + " VALUES (?, ?, 'foreign', 'other-workspace', 'foreign-session', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSessionStore.resourceKey(scope, id), scope, id, kind, bytes.length, sha(bytes), bytes);
     }
 
@@ -1777,9 +1837,9 @@ class WorkspaceCsiApplicationInventoryTest {
                 .getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
                 + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence,"
-                + " event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, created_at)"
+                + " event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create)"
                 + " VALUES ('foreign', 'other-workspace', 'foreign-session', 1, ?, 'tx', 'operation', 'command', ?, 1, 1, 1, 1, 'writer', ?,"
-                + " 1, 'identity', ?, ?, ?, CURRENT_TIMESTAMP(6))", "a".repeat(64), "b".repeat(64), "c".repeat(64), records, records.length, sha(records));
+                + " 1, 'identity', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")", "a".repeat(64), "b".repeat(64), "c".repeat(64), records, records.length, sha(records));
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_journal_tx")
                 && blocker.code().equals("extra_historical_reference"));
         byte[] harmless = "{\"sessionId\":\"foreign-session\",\"payload\":{\"text\":\"ordinary\"}}\n".getBytes(StandardCharsets.UTF_8);
@@ -1820,9 +1880,9 @@ class WorkspaceCsiApplicationInventoryTest {
         String contentId = "result-" + sha((scope + ":publication-1:content:output").getBytes(StandardCharsets.UTF_8)).substring(0, 32);
         String resourceScope = ManagedSessionStore.sessionScopeKey("tenant-1", "session-1");
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, scope_key,"
-                + " publication_id, slot_key, resource_id, kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state, capture_state, operation_id, created_at)"
+                + " publication_id, slot_key, resource_id, kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state, capture_state, operation_id, gmt_create)"
                 + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'session-1', ?, 'publication-1', 'content:output', ?, 'managed-tool-result-content',"
-                + " 1, ?, ?, ?, 'MYSQL_INLINE', 'PUBLISHED', 'VERIFIED', 'publish', CURRENT_TIMESTAMP(6))",
+                + " 1, ?, ?, ?, 'MYSQL_INLINE', 'PUBLISHED', 'VERIFIED', 'publish', " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSessionStore.resourceKey(resourceScope, contentId), resourceScope, scope, contentId, raw.length, sha(raw), raw);
         assertThat(readReferences(expected).blockers()).isEmpty();
         assertThat(ToolPublicationContract.bindingDigest(contract)).isNotEqualTo(sha(bindingBytes));
@@ -1904,7 +1964,7 @@ class WorkspaceCsiApplicationInventoryTest {
             value.put("ended_at", ended).put("outcome_code", outcome);
         }
         jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
-                        + "idempotency_key,idempotency_digest,request_digest,operation,state,session_id,result_json,created_at,updated_at)"
+                        + "idempotency_key,idempotency_digest,request_digest,operation,state,session_id,result_json,gmt_create,gmt_modified)"
                         + " VALUES (?,'SESSION_COMMAND',?,'tenant','SESSION',?,?,?,?,?,'CSI_RESOURCE_READ',?,?,?,1,?)",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("csi-read", id),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("tenant"),
@@ -1977,7 +2037,7 @@ class WorkspaceCsiApplicationInventoryTest {
                     var values = new java.util.LinkedHashMap<String, byte[]>();
                     definition.columns().forEach(column -> values.put(column.name(), null));
                     for (var entry : Map.of("tenant_id", "foreign", "agent_id", "qwen-code", "revision", "7",
-                            "digest", "digest", "definition_json", json, "created_at", "1").entrySet()) {
+                            "digest", "digest", "definition_json", json, "gmt_create", "1").entrySet()) {
                         values.put(entry.getKey(), entry.getValue().getBytes(StandardCharsets.UTF_8));
                     }
                     var other = WorkspaceCsiApplicationInventory.expectedRow(definition.name(), values, WorkspaceCsiApplicationInventory.Membership.OTHER);

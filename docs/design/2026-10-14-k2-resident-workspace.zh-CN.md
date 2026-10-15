@@ -63,10 +63,16 @@ provider。无 seed 的入口保持不可用，不能重新构造或替换原凭
 `csi_phase = RESERVED` 和原 reservation 身份。过期、RPC 失败或 Pod 丢失均
 不能让其他 Workspace 或租户接管占用。
 
-canonical catalog 保留已发布 V1/V2 和主干 V3 Session 列表索引迁移。尚未发布的
-K2 退役扩展顺延为 V4，SQL 内容不变。Broker 初始化和 Flyway 都在应用后续扩展
-前验证精确 V1/V2/V3 目录形状，保留原数据和迁移历史行，再验证完整 V4 目录。
-部分修改或未知目录仍不可用。
+当前主干 schema 使用 `gmt_create` / `gmt_modified`，持久化时间采用无符号
+BIGINT Unix epoch 毫秒。K2 的完整 typed inventory、terminal 期望像和 operation
+显式投影都使用相同的物理 schema；cut 协议中的时间仍是 canonical ISO 字符串，
+且必须精确表示毫秒。旧时间目录和旧冻结像均拒绝准入，不在准入时重命名列或
+重写已保存证据。
+
+在这套新 canonical baseline 内，Broker 初始化和 Flyway 只识别精确 V1/V2/V3
+目录形状，再应用 additive K2 V4 扩展，保留匹配的数据和迁移历史行，最后验证
+完整 V4 目录。这不提供早期 DATETIME 或 legacy 目录的升级路径。部署本修订时
+使用全新数据库，保留旧二进制及数据库供历史访问。
 
 ## Session 准入与工具
 
@@ -119,6 +125,23 @@ Broker 重启恢复原持久化运行环境身份。worker 或 Pod 被替换、�
 Linux CSI 挂载或 ACK 部署。此前拒绝的 native 验收操作不借架构调整重新尝试。
 完成声明前需要构建、类型检查、聚焦测试、独立验证和两轮干净完整 diff 自审。
 部署及云上验收与本地实现验证分开记录。
+
+以下 ACK 观察属于部署的 runtime 提交 `53f24ba090d3`。后续合并主干
+`4a80f0a6adb8` 改变了数据库 baseline，须单独通过本地构建、schema 和公开
+handoff 回归验证；此前云端观察不授予这次后续合并的 ACK 验收资格。
+
+这次后续合并的本地验证通过完整 Node build、typecheck、bundle，104 项
+HTTP store、964 项 CLI consumer、84 项 Broker 和 619 项 Server 聚焦测试；
+其中两项既有 MySQL 专项按条件跳过。Checkstyle、SpotBugs、ESLint 和格式检查
+均通过。额外八项普通 claim 回归分别控制状态与代际拒绝，避免混淆两个条件。
+
+独立源编译的 1010 个生产类均与冻结产物逐字节一致。15 项常驻 H2 测试与两个
+普通公开交接均通过，零跳过。每条公开流程保留六对真实工具调用/回复，A 末读
+与 B 首读字节精确相同，并保存四/五份同 DataSource 归属快照。应用重建创建全新
+Spring、Broker、DataSource 和 repository 实例，原 worker 保持存活，仅启动一次、
+物理释放为零。实际 metadata 显示 34 张应用表加 Flyway 历史，无旧影子表，时间、
+租约和 deadline 列为 BIGINT。这只属于同 JVM 的普通 H2 验证；独立观察器缺少
+初始化器及 schema 大小写错误已保留，仅修正其自有输入后重复相同两个测试。
 
 成功的 ACK 尝试保留了 62 条连续响应。A 实际执行 Write/Edit/Read，应用 JVM
 重启后 B 实际执行 Read/Edit/Read。六对真实调用与回复全部采集，包含明确的

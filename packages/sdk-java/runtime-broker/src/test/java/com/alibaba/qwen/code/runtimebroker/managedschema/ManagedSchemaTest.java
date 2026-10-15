@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.managedschema;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -37,7 +39,7 @@ class ManagedSchemaTest {
         DataSource source = source();
         ManagedSchema.initialize(source);
         try (var connection = source.getConnection();
-                var insert = connection.prepareStatement("INSERT INTO ma_session (tenant_id, session_id, session_kind, created_at, updated_at) VALUES (?, ?, 'CONTROL', 0, 0)")) {
+                var insert = connection.prepareStatement("INSERT INTO ma_session (tenant_id, session_id, session_kind, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', 0, 0)")) {
             insert.setBytes(1, ManagedSchemaKeys.identity("tenant"));
             insert.setBytes(2, ManagedSchemaKeys.identity("session"));
             insert.executeUpdate();
@@ -175,7 +177,7 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void rejectsLostLeaseTimePrecision() throws Exception {
+    void rejectsDatetimeLeaseColumns() throws Exception {
         DataSource source = initialized();
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
@@ -343,9 +345,9 @@ class ManagedSchemaTest {
                 var statement = connection.createStatement()) {
             statement.execute(
                     "INSERT INTO ma_session_head"
-                        + " (tenant_key,harness_key,tenant_id,session_id,harness_session_id,head_kind,created_at,updated_at,o3_backfill_pending)"
+                        + " (tenant_key,harness_key,tenant_id,session_id,harness_session_id,head_kind,gmt_create,gmt_modified,o3_backfill_pending)"
                         + " VALUES ('tenant',"
-                        + "'harness','tenant','harness','harness','HARNESS',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),FALSE)");
+                        + "'harness','tenant','harness','harness','HARNESS'," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ",FALSE)");
             try (var row =
                     statement.executeQuery(
                             "SELECT journal_revision,writer_generation,activation_epoch FROM"
@@ -427,7 +429,7 @@ class ManagedSchemaTest {
                 var statement = connection.createStatement()) {
             String prefix =
                     "INSERT INTO ma_session_record"
-                        + " (session_scope_key,record_key,tenant_id,workspace_id,session_id,domain,record_id,revision,created_at,record_resource_id,hook_once_key_hash)"
+                        + " (session_scope_key,record_key,tenant_id,workspace_id,session_id,domain,record_id,revision,gmt_create,record_resource_id,hook_once_key_hash)"
                         + " VALUES ";
             statement.execute(
                     prefix
@@ -443,9 +445,9 @@ class ManagedSchemaTest {
                     () ->
                             statement.execute(
                                     "INSERT INTO ma_resource_ref"
-                                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,created_at)"
+                                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
                                         + " VALUES"
-                                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session',CURRENT_TIMESTAMP(6))"));
+                                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")"));
         }
     }
 
@@ -455,10 +457,7 @@ class ManagedSchemaTest {
                 var statement = connection.createStatement();
                 var row =
                         statement.executeQuery(
-                                "SELECT CAST(X'0102' AS BLOB) AS inline_bytes, CAST('record' AS"
-                                    + " CLOB) AS record_json, CAST('tenant ' AS VARBINARY) AS"
-                                    + " tenant_id, CAST(X'0304' AS VARBINARY) AS actor_key,"
-                                    + " CAST(CURRENT_TIMESTAMP(6) AS TIMESTAMP) AS observed_at")) {
+                                "SELECT CAST(X'0102' AS BLOB) AS inline_bytes, CAST('record' AS CLOB) AS record_json, CAST('tenant ' AS VARBINARY) AS tenant_id, CAST(X'0304' AS VARBINARY) AS actor_key, CAST(CURRENT_TIMESTAMP(6) AS TIMESTAMP) AS observed_at")) {
             assertTrue(row.next());
             var values = ManagedSchemaRows.read(row);
             org.junit.jupiter.api.Assertions.assertArrayEquals(
@@ -541,9 +540,9 @@ class ManagedSchemaTest {
                 connection.prepareStatement(
                         "INSERT INTO ma_resource"
                             + " (resource_key,session_scope_key,tenant_id,session_id,resource_id,kind,schema_version,byte_length,"
-                            + "sha256,storage_kind,inline_bytes,state,created_at,snapshot_id,snapshot_page_ordinal,snapshot_page_first_sequence,snapshot_page_last_sequence)"
+                            + "sha256,storage_kind,inline_bytes,state,gmt_create,snapshot_id,snapshot_page_ordinal,snapshot_page_first_sequence,snapshot_page_last_sequence)"
                             + " VALUES"
-                            + " (?,'scope',?,?,?,?,1,0,?,'MYSQL_INLINE',?,'REFERENCED',CURRENT_TIMESTAMP(6),?,?,?,?)")) {
+                            + " (?,'scope',?,?,?,?,1,0,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ",?,?,?,?)")) {
             statement.setString(1, key);
             statement.setBytes(2, ManagedSchemaKeys.identity("tenant"));
             statement.setBytes(3, ManagedSchemaKeys.identity("session"));
@@ -564,7 +563,7 @@ class ManagedSchemaTest {
         try (var statement =
                 connection.prepareStatement(
                         "INSERT INTO ma_session"
-                            + " (tenant_id,session_id,agent_id,session_kind,created_at,updated_at)"
+                            + " (tenant_id,session_id,agent_id,session_kind,gmt_create,gmt_modified)"
                             + " VALUES (?,?,?,?,0,0)")) {
             statement.setBytes(1, ManagedSchemaKeys.identity(tenant));
             statement.setBytes(2, ManagedSchemaKeys.identity(session));
@@ -591,7 +590,7 @@ class ManagedSchemaTest {
         statement.execute(
                 "INSERT INTO ma_operation"
                     + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,"
-                    + "target_kind,target_key,request_digest,request_json,state,phase,publication_id,created_at,updated_at)"
+                    + "target_kind,target_key,request_digest,request_json,state,phase,publication_id,gmt_create,gmt_modified)"
                     + " VALUES ('"
                         + key
                         + "','scope','"

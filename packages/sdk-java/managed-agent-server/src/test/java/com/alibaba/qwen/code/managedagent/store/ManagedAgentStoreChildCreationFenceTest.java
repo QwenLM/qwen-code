@@ -77,7 +77,7 @@ class ManagedAgentStoreChildCreationFenceTest {
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
-                        + " delivery_state, created_at)"
+                        + " delivery_state, gmt_create)"
                         + " VALUES ('DOMAIN', ?, ?, 'tenant', 'workspace', ?,"
                         + " 'child_run', ?, 'h', 1, ?, 'child_agent', ?,"
                         + " 'session', ?, 1)",
@@ -130,14 +130,14 @@ class ManagedAgentStoreChildCreationFenceTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"CLOSING", "CLOSED", "DELETED"})
     void replaysOriginalChildAfterOrdinaryParentCloses(String status) {
         StoreModels.Admission original = mint("run-before-close");
-        jdbc.update("UPDATE managed_agent_session SET status = ?"
-                + " WHERE tenant_id = 'tenant' AND session_id = ?", status, parent);
+        jdbc.update("UPDATE ma_session SET status = ?"
+                + " WHERE tenant_id = X'74656e616e74' AND session_id = ?", status, parent);
         StoreModels.Admission replay = transactions.execute(ignored -> store
                 .replayChildSessionCommand("tenant", parent, "create-run-before-close",
                         "digest-run-before-close"));
         assertThat(replay.sessionId()).isEqualTo(original.sessionId());
         assertThat(replay.replayed()).isTrue();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session",
                 Integer.class)).isEqualTo(2);
     }
 }

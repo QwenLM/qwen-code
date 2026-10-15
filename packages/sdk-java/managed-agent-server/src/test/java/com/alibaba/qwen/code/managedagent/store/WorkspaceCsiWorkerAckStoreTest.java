@@ -231,6 +231,10 @@ class WorkspaceCsiWorkerAckStoreTest {
         source.setURL(url);
         source.setUser("sa");
         source.setPassword("fixture-password");
+        return fixture(source);
+    }
+
+    static Fixture fixture(javax.sql.DataSource source) throws Exception {
         ManagedSchema.initialize(source);
         var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);

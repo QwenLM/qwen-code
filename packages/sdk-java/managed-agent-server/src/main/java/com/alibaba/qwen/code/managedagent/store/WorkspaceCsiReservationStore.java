@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -70,9 +72,9 @@ public final class WorkspaceCsiReservationStore {
             }
             jdbc.update("INSERT INTO ma_storage"
                     + " (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
-                    + " storage_kind, registration_state, registration_revision, registration_json)"
-                    + " VALUES (?, ?, ?, ?, ?, ?, 'CSI', 'REGISTERED', ?, ?)"
-                    + " ON DUPLICATE KEY UPDATE physical_key = COALESCE(physical_key, VALUES(physical_key)),"
+                    + " storage_kind, registration_state, registration_revision, registration_json, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, ?, ?, ?, ?, 'CSI', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")"
+                    + " ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN physical_key IS NULL OR registration_revision IS NULL OR registration_json IS NULL OR registration_state = 'FENCE_ONLY' THEN VALUES(gmt_modified) ELSE gmt_modified END, physical_key = COALESCE(physical_key, VALUES(physical_key)),"
                     + " registration_revision = COALESCE(registration_revision, VALUES(registration_revision)),"
                     + " registration_json = COALESCE(registration_json, VALUES(registration_json)),"
                     + " storage_kind = CASE WHEN registration_state = 'FENCE_ONLY' THEN 'CSI' ELSE storage_kind END,"
@@ -323,7 +325,7 @@ public final class WorkspaceCsiReservationStore {
     }
 
     private Retirement readRetirement(RuntimeBindingRecord binding) {
-        var rows = jdbc.query("SELECT * FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'"
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'"
                 + " AND tenant_id = ? AND target_key = ? AND target_revision = ? FOR UPDATE",
                 (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), binding.getRequest().getScope().getTenantId(),
                 WorkspaceOperations.hash(binding.getBindingId()), binding.getGeneration());
@@ -413,8 +415,7 @@ public final class WorkspaceCsiReservationStore {
     private Retirement snapshot(String operationId, WorkspaceCsiRegistration registration,
             RuntimeBindingRecord binding, Reservation reservation) {
         return snapshot(operationId, registration, binding, reservation, binding.getVersion(),
-                jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
-                        (row, index) -> Instant.ofEpochSecond(row.getLong(1), row.getLong(2) * 1000).toString()));
+                Instant.ofEpochMilli(ToolPublicationRetentionStore.now(jdbc)).toString());
     }
 
     private Retirement snapshot(String operationId, WorkspaceCsiRegistration registration,
@@ -474,7 +475,7 @@ public final class WorkspaceCsiReservationStore {
     }
 
     private WorkspaceCsiRegistration readRegistration(String aliasKey) {
-        List<WorkspaceCsiRegistration> exact = jdbc.query("SELECT * FROM ma_storage"
+        List<WorkspaceCsiRegistration> exact = jdbc.query("SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage"
                 + " WHERE alias_key = ? AND storage_kind = 'CSI' AND registration_state = 'REGISTERED' FOR UPDATE", (row, index) -> {
                     String encoded = row.getString("registration_json");
                     if (encoded == null || encoded.length() > 16 * 1024) {
@@ -501,7 +502,7 @@ public final class WorkspaceCsiReservationStore {
     }
 
     private Reservation readReservation(String physicalKey) {
-        List<Reservation> rows = jdbc.query("SELECT * FROM ma_storage_owner"
+        List<Reservation> rows = jdbc.query("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner"
                 + " WHERE storage_key = ? FOR UPDATE", (row, index) -> {
                     Reservation value = new Reservation(row.getString("csi_phase"), row.getLong("csi_revision"),
                             row.getString("csi_reservation_id"), row.getString("csi_registration_key"),

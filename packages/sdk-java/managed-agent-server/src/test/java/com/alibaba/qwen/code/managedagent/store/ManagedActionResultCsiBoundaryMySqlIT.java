@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Timeout;
@@ -54,8 +55,8 @@ class ManagedActionResultCsiBoundaryMySqlIT {
             var source = fixture.seedResult(session, "historical-private", "LEASED");
             fixture.jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version,"
                     + " state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision,"
-                    + " recovery_status, created_at, updated_at) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'workspace', ?, 1, 'ACTIVE', 1, 0, 0, 0, 0,"
-                    + " 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash(session), session, session);
+                    + " recovery_status, gmt_create, gmt_modified) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'workspace', ?, 1, 'ACTIVE', 1, 0, 0, 0, 0,"
+                    + " 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")", WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash(session), session, session);
             var claim = new ManagedToolResultStore.Claim(source, 1);
             var before = fixture.tables();
             fixture.waitAtParent(session, () -> {
@@ -212,8 +213,8 @@ class ManagedActionResultCsiBoundaryMySqlIT {
                     com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.TOOL_RESULT_PROJECTION, scope, execution, id);
             jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, target_kind,"
                     + " target_key, execution_key, tenant_id, workspace_id, session_id, request_json, request_digest, phase, state,"
-                    + " claim_generation, claim_until, created_at, updated_at) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, 'TOOL_EXECUTION',"
-                    + " ?, ?, 'tenant', 'workspace', ?, ?, ?, 'PROJECTING', ?, 1, FROM_UNIXTIME(0), 0, 0)",
+                    + " claim_generation, claim_until, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, 'TOOL_EXECUTION',"
+                    + " ?, ?, 'tenant', 'workspace', ?, ?, ?, 'PROJECTING', ?, 1, 0, 0, 0)",
                     key, scope, scope, id, execution, execution, session, JSON.valueToTree(source).toString(), source.sourceDigest(), state);
             return source;
         }

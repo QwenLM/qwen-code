@@ -36,6 +36,8 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -87,13 +89,13 @@ public class ManagedAgentStore implements AgentStateStore {
     private static final long SNAPSHOT_REFRESH_MILLIS = 5000;
     private static final String INSERT_EVENT = "INSERT INTO ma_public_event"
             + " (tenant_id, session_id, sequence_id, event_id, turn_id,"
-            + " event_type, data_json, terminal, source_key, created_at,"
+            + " event_type, data_json, terminal, source_key, gmt_create,"
             + " schema_version, projection_version, item_id, content_part_id)"
             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     private static final List<String> ACTIVE_TURN_STATES = List.of(
             "ACCEPTED", "RUNNING", "CANCELLING");
     private static final String TURN_SUMMARY_COLUMNS = "session_id,"
-            + " turn_id, status, created_at, completed_at, error_code";
+            + " turn_id, status, gmt_create, completed_at, error_code";
     // findLatestTurns joins ma_public_event, so the same projection
     // must be table-qualified there.
     private static final String QUALIFIED_TURN_SUMMARY_COLUMNS =
@@ -137,10 +139,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final ResidentWorkspaces residentWorkspaces;
     private static final String SESSION_WITH_STREAM =
-            "SELECT ma_session.*, es.last_sequence AS list_last_sequence, es.replay_floor_sequence"
-                + " AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON"
-                + " es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id"
-                + " AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
+            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
     private final RowMapper<SessionRecord> sessionMapper = (result, row) -> {
         if (result.getObject("list_last_sequence") == null || result.getObject("list_floor_sequence") == null) {
             throw new IllegalStateException("Session stream is unavailable.");
@@ -169,8 +168,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 result.getLong("harness_last_event_id"),
                 counters.lastSequence(),
                 counters.floorSequence(),
-                result.getLong("created_at"),
-                result.getLong("updated_at"),
+                result.getLong("gmt_create"),
+                result.getLong("gmt_modified"),
                 nullableLong(result, "deleted_at"),
                 result.getLong("version"),
                 readBinding(result),
@@ -185,7 +184,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             result.getString("session_id"),
                             result.getString("turn_id"),
                             result.getString("status"),
-                            result.getLong("created_at"),
+                            result.getLong("gmt_create"),
                             nullableLong(result, "completed_at"),
                             result.getString("error_code"));
     private final RowMapper<TurnRecord> turnMapper = (result, row) ->
@@ -205,8 +204,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     nullableLong(result, "retry_after"),
                     result.getString("error_code"),
                     result.getString("error_message"),
-                    result.getLong("created_at"),
-                    result.getLong("updated_at"),
+                    result.getLong("gmt_create"),
+                    result.getLong("gmt_modified"),
                     nullableLong(result, "completed_at"),
                     result.getLong("version"));
     private final RowMapper<EventRecord> eventMapper = (result, row) ->
@@ -219,7 +218,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     readMap(result.getString("data_json")),
                     result.getBoolean("terminal"),
                     result.getString("source_key"),
-                    result.getLong("created_at"),
+                    result.getLong("gmt_create"),
                     result.getInt("schema_version"),
                     result.getInt("projection_version"),
                     result.getString("item_id"),
@@ -237,8 +236,8 @@ public class ManagedAgentStore implements AgentStateStore {
                             readMap(result.getString("attributes_json")),
                             result.getLong("first_sequence"),
                             result.getLong("last_sequence"),
-                            result.getLong("created_at"),
-                            result.getLong("updated_at"),
+                            result.getLong("gmt_create"),
+                            result.getLong("gmt_modified"),
                             result.getLong("revision"),
                             readParts(
                                     result.getString("parts_json"),
@@ -597,7 +596,7 @@ public class ManagedAgentStore implements AgentStateStore {
         jdbc.update("INSERT INTO ma_session (tenant_id,"
                         + " session_id, agent_id, agent_revision,"
                         + " agent_definition_digest, title,"
-                        + " status, created_at, updated_at, workspace_id,"
+                        + " status, gmt_create, gmt_modified, workspace_id,"
                         + " workspace_generation, workspace_storage_id,"
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
@@ -621,7 +620,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         lineage, tenantId, parentSessionId));
         jdbc.update("INSERT INTO ma_event_stream"
                         + " (tenant_id, session_id, stream_kind, stream_id,"
-                        + " covered_sequence, updated_at) VALUES"
+                        + " covered_sequence, gmt_modified) VALUES"
                         + " (?, ?, 'SESSION', '', 0, ?)",
                 tenantId, sessionId, now);
         if (turnId != null) {
@@ -775,15 +774,13 @@ public class ManagedAgentStore implements AgentStateStore {
     // H2 truncates bare BINARY casts; the suffix also prevents NUL-padding aliases.
     private List<WorkspaceCommand> findWorkspaceCommand(String tenantId,
             String actorId, String idempotencyKey) {
-        Map<String, Object> row = ManagedReceipts.creation(jdbc, tenantId,
+        ManagedReceipts.Receipt row = ManagedReceipts.creation(jdbc, tenantId,
                 ManagedWorkspaceRegistry.actorKey(tenantId, actorId), idempotencyKey);
         return row == null
                 ? List.of()
                 : List.of(
                         new WorkspaceCommand(
-                                (String) row.get("request_digest"),
-                                (String) row.get("session_id"),
-                                (String) row.get("turn_id")));
+                                row.requestDigest(), row.sessionId(), row.turnId()));
     }
 
     private record WorkspaceCommand(String requestDigest, String sessionId,
@@ -813,10 +810,10 @@ public class ManagedAgentStore implements AgentStateStore {
         } catch (DuplicateKeyException existing) {
             // The independently persisted creation-mode claim cannot be overwritten by replay.
         }
-        Map<String, Object> existing = ManagedReceipts.find(jdbc, namespace, tenantId, scope,
+        ManagedReceipts.Receipt existing = ManagedReceipts.find(jdbc, namespace, tenantId, scope,
                 tenantId, idempotencyKey, true);
         if (existing == null
-                || !Boolean.valueOf(workspaceBound).equals(existing.get("workspace_bound"))) {
+                || !Boolean.valueOf(workspaceBound).equals(existing.workspaceBound())) {
             throw new ApiException(HttpStatus.CONFLICT, "idempotency_conflict",
                     "The idempotency key was reused with different content.");
         }
@@ -903,7 +900,7 @@ public class ManagedAgentStore implements AgentStateStore {
         jdbc.update("INSERT INTO ma_session (tenant_id,"
                         + " session_id, agent_id, agent_revision,"
                         + " agent_definition_digest, title,"
-                        + " status, created_at, updated_at, workspace_id,"
+                        + " status, gmt_create, gmt_modified, workspace_id,"
                         + " workspace_generation, workspace_storage_id,"
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
@@ -926,7 +923,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 actorKey, actorKey, runtimeRequestKey);
         jdbc.update("INSERT INTO ma_event_stream"
                         + " (tenant_id, session_id, stream_kind, stream_id,"
-                        + " covered_sequence, updated_at) VALUES"
+                        + " covered_sequence, gmt_modified) VALUES"
                         + " (?, ?, 'SESSION', '', 0, ?)",
                 tenantId, sessionId, now);
         if (turnId != null) {
@@ -944,8 +941,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // the column default unless bound.
         if (workspace != null || pin.digest() != null) {
             jdbc.update(
-                    "UPDATE ma_session SET approval_mode = ? WHERE tenant_id = ? AND"
-                            + " session_id = ?",
+                    "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", approval_mode = ? WHERE tenant_id = ? AND session_id = ?",
                     pin.approvalMode(),
                     tenantId,
                     sessionId);
@@ -1064,7 +1060,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 && !"CANCELLING".equals(turn.status());
         if (commandEffect) {
             int updated = jdbc.update("UPDATE ma_turn SET status ="
-                            + " 'CANCELLING', updated_at = ?, version ="
+                            + " 'CANCELLING', gmt_modified = ?, version ="
                             + " version + 1 WHERE tenant_id = ? AND"
                             + " session_id = ? AND turn_id = ? AND status IN"
                             + " ('ACCEPTED', 'RUNNING')",
@@ -1101,7 +1097,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         var retained =
                 jdbc.queryForList(
-                        "SELECT * FROM ma_operation WHERE operation_kind = 'RENAME' AND target_key"
+                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND target_key"
                             + " = ? AND idempotency_digest = ? AND tenant_id = ? AND session_id = ?"
                             + " ORDER BY target_revision DESC LIMIT 1 FOR UPDATE",
                         renameTarget(tenantId, sessionId),
@@ -1158,13 +1154,13 @@ public class ManagedAgentStore implements AgentStateStore {
         long next = Math.addExact(revision, 1);
         long now = clock.millis();
         jdbc.update(
-                "UPDATE ma_session SET title_revision = ? WHERE tenant_id = ? AND session_id = ?",
+                "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", title_revision = ? WHERE tenant_id = ? AND session_id = ?",
                 next,
                 tenantId,
                 sessionId);
         jdbc.update(
                 "UPDATE ma_operation SET state = 'SUPERSEDED', delivery_state = 'COMPLETED', phase"
-                    + " = 'SUPERSEDED', updated_at = ? WHERE operation_kind = 'RENAME' AND"
+                    + " = 'SUPERSEDED', gmt_modified = ? WHERE operation_kind = 'RENAME' AND"
                     + " target_key = ? AND target_revision < ? AND state <> 'COMPLETED'",
                 now,
                 renameTarget(tenantId, sessionId),
@@ -1174,7 +1170,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
                     + " target_key, target_revision, idempotency_key, idempotency_digest,"
                     + " request_digest, request_json, state, phase, delivery_state, available_at,"
-                    + " created_at, updated_at) VALUES (?, ?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
+                    + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
                     + " ?, ?, ?, ?, ?, 'PENDING', 'ADMITTED', 'PENDING', ?, ?, ?)",
                 renameKey(tenantId, sessionId, next),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
@@ -1241,7 +1237,7 @@ public class ManagedAgentStore implements AgentStateStore {
         requireLegacySessionForUpdate(tenantId, sessionId);
         var rows =
                 jdbc.queryForList(
-                        "SELECT * FROM ma_operation WHERE operation_key = ? AND operation_kind ="
+                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_key = ? AND operation_kind ="
                             + " 'RENAME' AND tenant_id = ? AND session_id = ? FOR UPDATE",
                         renameKey(tenantId, sessionId, delivery.revision()),
                         tenantId,
@@ -1279,8 +1275,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     "The title delivery claim was lost.");
         }
         jdbc.update(
-                "UPDATE ma_request_receipt SET state = 'PENDING' WHERE receipt_key = ? AND"
-                    + " namespace = 'SESSION_COMMAND' AND state = 'FAILED'",
+                "UPDATE ma_request_receipt SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'PENDING' WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND' AND state = 'FAILED'",
                 ManagedReceipts.commandKey(tenantId, "RENAME_SESSION", delivery.idempotencyKey()));
         SessionRecord session =
                 completeSessionMutation(
@@ -1293,7 +1288,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         bootId);
         jdbc.update(
                 "UPDATE ma_operation SET state = 'COMPLETED', phase = 'COMPLETED', delivery_state ="
-                    + " 'COMPLETED', claim_owner = NULL, claim_until = NULL, updated_at = ?,"
+                    + " 'COMPLETED', claim_owner = NULL, claim_until = NULL, gmt_modified = ?,"
                     + " completed_at = ? WHERE operation_key = ?",
                 clock.millis(),
                 clock.millis(),
@@ -1307,9 +1302,7 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         requireLegacySessionForUpdate(tenantId, sessionId);
         if (jdbc.queryForObject(
-                        "SELECT COUNT(*) FROM ma_operation WHERE operation_key = ? AND"
-                            + " operation_kind = 'RENAME' AND state = 'RUNNING' AND claim_owner = ?"
-                            + " AND claim_until > CURRENT_TIMESTAMP(6)",
+                        "SELECT COUNT(*) FROM ma_operation WHERE operation_key = ? AND operation_kind = 'RENAME' AND state = 'RUNNING' AND claim_owner = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         Integer.class,
                         renameKey(tenantId, sessionId, revision),
                         owner)
@@ -1321,30 +1314,14 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public List<RenameDelivery> deliverableRenames(long now) {
         jdbc.update(
-                "UPDATE ma_operation SET state = 'UNKNOWN', delivery_state = 'BLOCKED', updated_at"
-                    + " = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase ="
-                    + " 'SUBMITTED' AND claim_until <= CURRENT_TIMESTAMP(6) AND EXISTS (SELECT 1"
-                    + " FROM ma_session private_scope WHERE private_scope.tenant_id ="
-                    + " ma_operation.tenant_id AND private_scope.session_id ="
-                    + " ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100",
+                "UPDATE ma_operation SET state = 'UNKNOWN', delivery_state = 'BLOCKED', gmt_modified = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'SUBMITTED' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100",
                 now);
         jdbc.update(
-                "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase ="
-                    + " 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL,"
-                    + " updated_at = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND"
-                    + " phase = 'PREPARING' AND claim_until <= CURRENT_TIMESTAMP(6) AND EXISTS"
-                    + " (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id ="
-                    + " ma_operation.tenant_id AND private_scope.session_id ="
-                    + " ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100",
+                "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase = 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'PREPARING' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100",
                 now,
                 now);
         return jdbc.query(
-                "SELECT * FROM ma_operation WHERE operation_kind = 'RENAME' AND delivery_state ="
-                    + " 'PENDING' AND state = 'PENDING' AND available_at <= ? AND EXISTS (SELECT 1"
-                    + " FROM ma_session private_scope WHERE private_scope.tenant_id ="
-                    + " ma_operation.tenant_id AND private_scope.session_id ="
-                    + " ma_operation.session_id AND private_scope.csi_guard = FALSE) ORDER BY"
-                    + " available_at LIMIT 100",
+                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND delivery_state = 'PENDING' AND state = 'PENDING' AND available_at <= ? AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) ORDER BY available_at LIMIT 100",
                 this::renameDelivery,
                 now);
     }
@@ -1357,16 +1334,9 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         int claimed =
                 jdbc.update(
-                        "UPDATE ma_operation SET state = 'RUNNING', delivery_state = 'LEASED',"
-                            + " phase = 'PREPARING', claim_owner = ?, claim_until ="
-                            + " TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)),"
-                            + " claim_generation = claim_generation + 1, attempt_count ="
-                            + " attempt_count + 1, updated_at = ? WHERE operation_key = ? AND"
-                            + " operation_kind = 'RENAME' AND ((state = 'PENDING' AND available_at"
-                            + " <= ?) OR (state = 'RUNNING' AND phase = 'PREPARING' AND claim_until"
-                            + " <= CURRENT_TIMESTAMP(6)))",
+                        "UPDATE ma_operation SET state = 'RUNNING', delivery_state = 'LEASED', phase = 'PREPARING', claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?), claim_generation = claim_generation + 1, attempt_count = attempt_count + 1, gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'RENAME' AND ((state = 'PENDING' AND available_at <= ?) OR (state = 'RUNNING' AND phase = 'PREPARING' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + "))",
                         owner,
-                        Math.multiplyExact(lease.toMillis(), 1000),
+                        lease.toMillis(),
                         now,
                         renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision()),
                         now);
@@ -1375,7 +1345,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         return jdbc
                 .query(
-                        "SELECT * FROM ma_operation WHERE operation_key = ? AND operation_kind ="
+                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_key = ? AND operation_kind ="
                             + " 'RENAME'",
                         this::renameDelivery,
                         renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision()))
@@ -1387,10 +1357,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void markRenameSubmitted(RenameDelivery delivery, String owner) {
         int changed =
                 jdbc.update(
-                        "UPDATE ma_operation SET phase = 'SUBMITTED', updated_at = ? WHERE"
-                            + " operation_key = ? AND operation_kind = 'RENAME' AND state ="
-                            + " 'RUNNING' AND phase = 'PREPARING' AND claim_owner = ? AND"
-                            + " claim_generation = ? AND claim_until > CURRENT_TIMESTAMP(6)",
+                        "UPDATE ma_operation SET phase = 'SUBMITTED', gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'PREPARING' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         clock.millis(),
                         renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision()),
                         owner,
@@ -1410,7 +1377,7 @@ public class ManagedAgentStore implements AgentStateStore {
         requireLegacyMutation(delivery.tenantId(), delivery.sessionId());
         String key = renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision());
         jdbc.update(
-                "UPDATE ma_operation SET state = 'UNKNOWN', delivery_state = 'BLOCKED', updated_at"
+                "UPDATE ma_operation SET state = 'UNKNOWN', delivery_state = 'BLOCKED', gmt_modified"
                     + " = ? WHERE operation_key = ? AND operation_kind = 'RENAME' AND state ="
                     + " 'RUNNING' AND phase = 'SUBMITTED' AND claim_owner = ? AND claim_generation"
                     + " = ?",
@@ -1421,7 +1388,7 @@ public class ManagedAgentStore implements AgentStateStore {
         jdbc.update(
                 "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase ="
                     + " 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL,"
-                    + " updated_at = ? WHERE operation_key = ? AND operation_kind = 'RENAME' AND"
+                    + " gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'RENAME' AND"
                     + " state = 'RUNNING' AND phase = 'PREPARING' AND claim_owner = ? AND"
                     + " claim_generation = ?",
                 availableAt,
@@ -1503,7 +1470,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 validateMutationStatus(session, kind);
                 jdbc.update(
                         "UPDATE ma_request_receipt SET state = 'PENDING', mutation_attempt_sequence"
-                            + " = ?, updated_at = ? WHERE receipt_key = ? AND namespace ="
+                            + " = ?, gmt_modified = ? WHERE receipt_key = ? AND namespace ="
                             + " 'SESSION_COMMAND'",
                         session.lastSequence(),
                         clock.millis(),
@@ -1522,7 +1489,8 @@ public class ManagedAgentStore implements AgentStateStore {
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, null, "PENDING", session.status(),
                 commandActorKey(tenantId, actorId), now);
-        jdbc.update("UPDATE ma_request_receipt SET mutation_attempt_sequence"
+        jdbc.update("UPDATE ma_request_receipt SET gmt_modified = " + ManagedSchemaTime.SQL_NOW
+                        + ", mutation_attempt_sequence"
                         + " = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
                 session.lastSequence(), ManagedReceipts.commandKey(tenantId, operation, idempotencyKey));
         // Older retired commands may have left their requested event behind.
@@ -1586,7 +1554,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 jdbc.update("UPDATE ma_session SET title = ?,"
                                 + " harness_boot_id ="
                                 + " COALESCE(harness_boot_id, ?),"
-                                + " updated_at = ?, version = version + 1"
+                                + " gmt_modified = ?, version = version + 1"
                                 + " WHERE tenant_id = ? AND session_id = ?",
                         title, harnessBootId, now, tenantId, sessionId);
                 data = Map.of("sessionId", sessionId,
@@ -1594,13 +1562,13 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             // An archived Session was closed first, so it stays closed.
             case UNARCHIVE -> jdbc.update("UPDATE ma_session SET"
-                            + " status = 'CLOSED', updated_at = ?, version ="
+                            + " status = 'CLOSED', gmt_modified = ?, version ="
                             + " version + 1 WHERE tenant_id = ? AND"
                             + " session_id = ?",
                     now, tenantId, sessionId);
         }
         jdbc.update(
-                "UPDATE ma_request_receipt SET state = 'COMPLETED', updated_at = ? WHERE"
+                "UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ? WHERE"
                     + " receipt_key = ? AND namespace = 'SESSION_COMMAND'",
                 now,
                 ManagedReceipts.commandKey(tenantId, operation, idempotencyKey));
@@ -1619,7 +1587,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // Keep the digest and receipt for replay and concurrent completion.
         // A completed outcome must never be overwritten by a failing sibling.
         jdbc.update("UPDATE ma_request_receipt SET state = 'FAILED',"
-                        + " updated_at = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'"
+                        + " gmt_modified = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'"
                         + " AND session_id = ? AND state = 'PENDING'",
                 clock.millis(), ManagedReceipts.commandKey(tenantId, operation, idempotencyKey), sessionId);
     }
@@ -1761,7 +1729,7 @@ public class ManagedAgentStore implements AgentStateStore {
         Map<String, Object> data = Map.of("sessionId", sessionId);
         appendEvent(tenantId, sessionId, null, "session.unarchive.requested", data, false,
                 mutationSource(namespace, scopedKey, "requested"), now);
-        jdbc.update("UPDATE ma_session SET status = 'CLOSED', updated_at = ?, version = version + 1"
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED', gmt_modified = ?, version = version + 1"
                 + " WHERE tenant_id = ? AND session_id = ?", now, tenantId, sessionId);
         appendEvent(tenantId, sessionId, null, "session.unarchived", data, false,
                 mutationSource(namespace, scopedKey, "completed"), now);
@@ -1785,7 +1753,7 @@ public class ManagedAgentStore implements AgentStateStore {
             OperationKind kind, String actorDigest, String idempotencyKey) {
         return jdbc
                 .query(
-                        "SELECT * FROM ma_operation WHERE scope_key = ? AND operation_kind = ? AND"
+                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE scope_key = ? AND operation_kind = ? AND"
                             + " target_key = ? AND actor_digest = ? AND idempotency_digest = ?",
                         (result, row) -> {
                             if (!tenantId.equals(result.getString("tenant_id"))
@@ -1810,7 +1778,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private Optional<OperationRecord> findSessionOperation(String tenantId, String sessionId, String operationId, boolean lock) {
         return jdbc
                 .query(
-                        "SELECT * FROM ma_operation WHERE scope_key = ? AND operation_kind IN "
+                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
                                 + " AND target_key = ? AND operation_id = ?"
                                 + (lock ? " FOR UPDATE" : ""),
@@ -1968,7 +1936,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
                     + " actor_digest, idempotency_key, request_digest, state, admission_stage,"
                     + " delivery_state, session_status_before, receipt_id, available_at,"
-                    + " created_at, updated_at, completed_at, lifecycle_protocol_version) VALUES"
+                    + " gmt_create, gmt_modified, completed_at, lifecycle_protocol_version) VALUES"
                     + " (?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'JAVA_DURABLE',"
                     + " ?, ?, ?, ?, ?, ?, ?, ?)",
                 sessionOperationKey(tenantId, sessionId, kind, operationId),
@@ -2014,7 +1982,7 @@ public class ManagedAgentStore implements AgentStateStore {
             });
         }
         jdbc.update("UPDATE ma_session SET status = ?,"
-                        + " updated_at = ?, version = version + 1 WHERE"
+                        + " gmt_modified = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ?",
                 archive ? "ARCHIVED" : pendingStatus(kind), now, tenantId,
                 sessionId);
@@ -2111,7 +2079,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
                     + " actor_digest, idempotency_key, request_digest, state, admission_stage,"
                     + " delivery_state, session_status_before, target_cwd_relative,"
-                    + " expected_context_revision, actor_key, available_at, created_at, updated_at)"
+                    + " expected_context_revision, actor_key, available_at, gmt_create, gmt_modified)"
                     + " VALUES (?, ?, ?, 'SESSION', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?,"
                     + " 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?, ?, ?, ?)",
                 sessionOperationKey(tenantId, sessionId, OperationKind.CWD_CHANGE, operationId),
@@ -2167,8 +2135,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         Boolean leaseLive =
                 jdbc.queryForObject(
-                        "SELECT claim_until > CURRENT_TIMESTAMP(6) FROM"
-                                + " ma_operation WHERE scope_key = ? AND operation_kind IN "
+                        "SELECT claim_until > " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ? FOR UPDATE",
@@ -2211,7 +2178,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     "UPDATE ma_operation SET phase = 'FAILED', state ="
                             + " 'FAILED', delivery_state = 'CONFIRMED',"
                             + " failure_code = ?, claim_owner = NULL,"
-                            + " claim_until = NULL, updated_at = ?,"
+                            + " claim_until = NULL, gmt_modified = ?,"
                             + " completed_at = ? WHERE scope_key = ? AND operation_kind IN "
                             + SESSION_OPERATION_KINDS
                             + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
@@ -2228,7 +2195,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         long result = expected + 1;
         jdbc.update("UPDATE ma_session SET cwd_relative = ?,"
-                        + " context_revision = ?, updated_at = ?, version ="
+                        + " context_revision = ?, gmt_modified = ?, version ="
                         + " version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ?",
                 operation.targetCwdRelative(), result, now, tenantId,
@@ -2236,7 +2203,7 @@ public class ManagedAgentStore implements AgentStateStore {
         jdbc.update(
                 "UPDATE ma_operation SET phase = 'COMPLETED', state = 'COMPLETED', delivery_state ="
                     + " 'CONFIRMED', receipt_id = ?, result_context_revision = ?, claim_owner ="
-                    + " NULL, claim_until = NULL, updated_at = ?, completed_at = ? WHERE scope_key"
+                    + " NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE scope_key"
                     + " = ? AND operation_kind IN "
                         + SESSION_OPERATION_KINDS
                         + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
@@ -2273,13 +2240,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         "UPDATE ma_operation SET phase = 'FAILED', state ="
                                 + " 'FAILED', delivery_state = 'CONFIRMED',"
                                 + " failure_code = ?, claim_owner = NULL,"
-                                + " claim_until = NULL, updated_at = ?,"
+                                + " claim_until = NULL, gmt_modified = ?,"
                                 + " completed_at = ? WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
-                                + " operation_id = ? AND state = 'RUNNING' AND delivery_state ="
-                                + " 'LEASED' AND claim_owner = ? AND claim_generation = ? AND"
-                                + " claim_until > CURRENT_TIMESTAMP(6)",
+                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         failureCode,
                         now,
                         now,
@@ -2363,8 +2327,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     + " target_kind, target_key, target_id, phase, request_json,"
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
                     + " actor_digest, idempotency_key, request_digest, state, admission_stage,"
-                    + " delivery_state, session_status_before, task_id, available_at, created_at,"
-                    + " updated_at) VALUES (?, ?, ?, 'SESSION', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
+                    + " delivery_state, session_status_before, task_id, available_at, gmt_create,"
+                    + " gmt_modified) VALUES (?, ?, ?, 'SESSION', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
                     + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?, ?)",
                 sessionOperationKey(tenantId, sessionId, OperationKind.TASK_CANCEL, operationId),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
@@ -2418,13 +2382,7 @@ public class ManagedAgentStore implements AgentStateStore {
                                 limit));
         if (targets.size() < limit) {
             targets.addAll(jdbc.query(
-                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE"
-                                + " operation_kind = 'TASK_CANCEL' AND delivery_state = 'LEASED'"
-                                + " AND claim_until < CURRENT_TIMESTAMP(6) AND EXISTS (SELECT 1"
-                                + " FROM ma_session private_scope WHERE private_scope.tenant_id ="
-                                + " ma_operation.tenant_id AND private_scope.session_id ="
-                                + " ma_operation.session_id AND private_scope.csi_guard = FALSE)"
-                                + " ORDER BY claim_until LIMIT ?",
+                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind = 'TASK_CANCEL' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
                     operationTargetMapper, limit - targets.size()));
         }
         return List.copyOf(targets);
@@ -2456,8 +2414,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // reconciliation can never rewrite an outcome already recorded.
         String claim = owner == null
                 ? " AND state = 'RECOVERY_BLOCKED' AND delivery_state = 'BLOCKED'"
-                : " AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ?"
-                        + " AND claim_generation = ? AND claim_until > CURRENT_TIMESTAMP(6)";
+                : " AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "";
         List<Object> arguments = new ArrayList<>();
         String update = switch (outcome.status()) {
             case "completed" -> {
@@ -2468,7 +2425,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " admission_stage = 'HARNESS_CONFIRMED',"
                         + " delivery_state = 'CONFIRMED', receipt_id = ?,"
                         + " failure_code = NULL, claim_owner = NULL,"
-                        + " claim_until = NULL, updated_at = ?,"
+                        + " claim_until = NULL, gmt_modified = ?,"
                         + " completed_at = ?";
             }
             case "failed" -> {
@@ -2483,7 +2440,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " admission_stage = 'JAVA_DURABLE',"
                         + " delivery_state = 'BLOCKED', failure_code = ?,"
                         + " available_at = ?, claim_owner = NULL,"
-                        + " claim_until = NULL, updated_at = ?,"
+                        + " claim_until = NULL, gmt_modified = ?,"
                         + " completed_at = ?";
             }
             case "recovery_blocked" -> {
@@ -2496,7 +2453,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " admission_stage = 'JAVA_DURABLE',"
                         + " delivery_state = 'BLOCKED', failure_code = ?,"
                         + " available_at = ?, claim_owner = NULL,"
-                        + " claim_until = NULL, updated_at = ?,"
+                        + " claim_until = NULL, gmt_modified = ?,"
                         + " attempt_count = attempt_count + 1";
             }
             default -> throw new IllegalArgumentException(
@@ -2727,11 +2684,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (targets.size() < limit) {
             targets.addAll(
                     jdbc.query(
-                            "SELECT tenant_id, session_id, operation_id FROM ma_operation o WHERE"
-                                + " operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE')"
-                                + " AND state = 'RUNNING' AND delivery_state = 'LEASED' AND"
-                                + " claim_until < CURRENT_TIMESTAMP(6) AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = o.tenant_id AND s.session_id = o.session_id AND s.csi_guard = TRUE) ORDER BY claim_until LIMIT"
-                                + " ?",
+                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE') AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
                             operationTargetMapper,
                             limit - targets.size()));
         }
@@ -2748,22 +2701,11 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = lifecycleDatabaseTime();
         int updated =
                 jdbc.update(
-                        "UPDATE ma_operation SET phase = 'RUNNING', state = 'RUNNING',"
-                            + " delivery_state = 'LEASED', claim_owner = ?, claim_until ="
-                            + " TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)),"
-                            + " claim_generation = claim_generation + 1, updated_at = ? WHERE"
-                            + " scope_key = ? AND operation_kind IN "
+                        "UPDATE ma_operation SET phase = 'RUNNING', state = 'RUNNING', delivery_state = 'LEASED', claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?), claim_generation = claim_generation + 1, gmt_modified = ? WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
-                                + " operation_id = ? AND state IN ('PENDING', 'RUNNING',"
-                                + " 'RECOVERY_BLOCKED') AND (((delivery_state = 'PENDING' OR"
-                                + " (delivery_state = 'BLOCKED' AND (operation_kind = 'CLOSE' OR"
-                                + " (operation_kind = 'DELETE' AND (session_status_before IN"
-                                + " ('CLOSED', 'ARCHIVED') OR lifecycle_protocol_version IN (1,"
-                                + " 2)))))) AND available_at <= ?) OR (delivery_state = 'LEASED'"
-                                + " AND claim_until < CURRENT_TIMESTAMP(6)))",
+                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED') AND (((delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND (operation_kind = 'CLOSE' OR (operation_kind = 'DELETE' AND (session_status_before IN ('CLOSED', 'ARCHIVED') OR lifecycle_protocol_version IN (1, 2)))))) AND available_at <= ?) OR (delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + "))",
                         owner,
-                        Math.multiplyExact(leaseDuration.toMillis(), 1000),
+                        leaseDuration.toMillis(),
                         now,
                         ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         sessionOperationTarget(sessionId),
@@ -2803,8 +2745,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 .orElseThrow(() -> new IllegalStateException("Session operation is unavailable"));
         Boolean leaseLive =
                 jdbc.queryForObject(
-                        "SELECT claim_until > CURRENT_TIMESTAMP(6) FROM ma_operation"
-                                + " WHERE scope_key = ? AND operation_kind IN "
+                        "SELECT claim_until > " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ? FOR UPDATE",
@@ -2843,7 +2784,7 @@ public class ManagedAgentStore implements AgentStateStore {
         switch (operation.kind()) {
             case CLOSE, ARCHIVE -> jdbc.update("UPDATE ma_session"
                             + " SET status = ?, harness_event_epoch = NULL,"
-                            + " harness_last_event_id = 0, updated_at = ?,"
+                            + " harness_last_event_id = 0, gmt_modified = ?,"
                             + " version = version + 1 WHERE tenant_id = ? AND"
                             + " session_id = ?",
                     operation.kind() == OperationKind.CLOSE ? "CLOSED"
@@ -2852,14 +2793,14 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " status = 'DELETED', harness_boot_id = NULL,"
                             + " harness_event_epoch = NULL,"
                             + " harness_last_event_id = 0, deleted_at = ?,"
-                            + " updated_at = ?, version = version + 1 WHERE"
+                            + " gmt_modified = ?, version = version + 1 WHERE"
                             + " tenant_id = ? AND session_id = ?",
                     now, now, tenantId, sessionId);
         }
         jdbc.update(
                 "UPDATE ma_operation SET failure_code = NULL, phase = 'COMPLETED', state ="
                     + " 'COMPLETED', admission_stage = ?, delivery_state = 'CONFIRMED', receipt_id"
-                    + " = ?, claim_owner = NULL, claim_until = NULL, updated_at = ?, completed_at ="
+                    + " = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at ="
                     + " ? WHERE scope_key = ? AND operation_kind IN "
                         + SESSION_OPERATION_KINDS
                         + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
@@ -2898,15 +2839,10 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = lifecycleDatabaseTime();
         int updated =
                 jdbc.update(
-                        "UPDATE ma_operation SET claim_until = TIMESTAMPADD(MICROSECOND, ?,"
-                            + " CURRENT_TIMESTAMP(6)), updated_at = ? WHERE scope_key = ? AND"
-                            + " operation_kind IN "
+                        "UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?), gmt_modified = ? WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
-                                + " operation_id = ? AND state = 'RUNNING' AND delivery_state ="
-                                + " 'LEASED' AND claim_owner = ? AND claim_generation = ? AND"
-                                + " claim_until > CURRENT_TIMESTAMP(6)",
-                        Math.multiplyExact(duration.toMillis(), 1000),
+                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
+                        duration.toMillis(),
                         now,
                         ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         sessionOperationTarget(sessionId),
@@ -2924,9 +2860,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private void syncLifecycleClaim(String tenantId, String sessionId, String operationId) {
         var rows =
                 jdbc.queryForList(
-                        "SELECT lifecycle_protocol_version, claim_generation,"
-                            + " FLOOR(UNIX_TIMESTAMP(claim_until) * 1000.0) AS claim_lease_until"
-                            + " FROM ma_operation WHERE scope_key = ? AND operation_kind IN "
+                        "SELECT lifecycle_protocol_version, claim_generation, FLOOR(claim_until) AS claim_lease_until FROM ma_operation WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ?",
@@ -2940,10 +2874,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 && WorkspaceToolProfiles.lifecycleProtocol(version.intValue())) {
             var row = rows.getFirst();
             jdbc.update(
-                    "UPDATE ma_session_head SET claim_generation = ?, claim_lease_until = ? WHERE"
-                        + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND"
-                        + " harness_session_id = ? AND operation_id = ? AND (phase ="
-                        + " 'LIFECYCLE_ONLY' OR ? = 2 AND phase = 'DRAINING')",
+                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_generation = ?, claim_lease_until = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND (phase = 'LIFECYCLE_ONLY' OR ? = 2 AND phase = 'DRAINING')",
                     row.get("claim_generation"),
                     row.get("claim_lease_until"),
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
@@ -2966,13 +2897,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         "UPDATE ma_operation SET phase = 'RECOVERY_BLOCKED', state ="
                             + " 'RECOVERY_BLOCKED', delivery_state = 'BLOCKED', failure_code = ?,"
                             + " available_at = ?, claim_owner = NULL, claim_until = NULL,"
-                            + " updated_at = ?, attempt_count = attempt_count + 1 WHERE scope_key ="
+                            + " gmt_modified = ?, attempt_count = attempt_count + 1 WHERE scope_key ="
                             + " ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
-                                + " operation_id = ? AND state = 'RUNNING' AND delivery_state ="
-                                + " 'LEASED' AND claim_owner = ? AND claim_generation = ? AND"
-                                + " claim_until > CURRENT_TIMESTAMP(6)",
+                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         failureCode,
                         Math.addExact(now, Math.max(0, availableAt - clock.millis())),
                         now,
@@ -2985,9 +2913,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         generation);
         if (updated == 1) {
             jdbc.update(
-                    "UPDATE ma_session_head SET claim_lease_until = NULL WHERE tenant_key = ? AND"
-                        + " harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND"
-                        + " operation_id = ? AND claim_generation = ?",
+                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                     JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                     tenantId,
@@ -3011,12 +2937,9 @@ public class ManagedAgentStore implements AgentStateStore {
                 jdbc.update(
                         "UPDATE ma_operation SET delivery_state = 'PENDING', claim_owner = NULL,"
                             + " claim_until = NULL, attempt_count = attempt_count + 1, available_at"
-                            + " = ?, updated_at = ? WHERE scope_key = ? AND operation_kind IN "
+                            + " = ?, gmt_modified = ? WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
-                                + " operation_id = ? AND state = 'RUNNING' AND delivery_state ="
-                                + " 'LEASED' AND claim_owner = ? AND claim_generation = ? AND"
-                                + " claim_until > CURRENT_TIMESTAMP(6)",
+                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         availableAt,
                         now,
                         ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
@@ -3028,9 +2951,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         claimGeneration);
         if (updated == 1) {
             jdbc.update(
-                    "UPDATE ma_session_head SET claim_lease_until = NULL WHERE tenant_key = ? AND"
-                        + " harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND"
-                        + " operation_id = ? AND claim_generation = ?",
+                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                     JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                     tenantId,
@@ -3062,7 +2983,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private Optional<CommandRecord> findCommand(String tenantId,
             String operation, String idempotencyKey, boolean forUpdate) {
-        Map<String, Object> row = ManagedReceipts.command(jdbc, tenantId, operation, idempotencyKey, forUpdate);
+        ManagedReceipts.Receipt row = ManagedReceipts.command(jdbc, tenantId, operation, idempotencyKey, forUpdate);
         if (row == null) {
             return Optional.empty();
         }
@@ -3071,14 +2992,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         tenantId,
                         operation,
                         idempotencyKey,
-                        (String) row.get("request_digest"),
-                        (String) row.get("session_id"),
-                        (String) row.get("turn_id"),
-                        (String) row.get("state"),
-                        (String) row.get("session_status_before"),
-                        (byte[]) row.get("actor_id"),
-                        ((Number) row.get("created_at")).longValue(),
-                        ((Number) row.get("updated_at")).longValue()));
+                        row.requestDigest(), row.sessionId(), row.turnId(), row.state(),
+                        row.sessionStatusBefore(), row.actorKey(), row.createdAt(), row.updatedAt()));
     }
 
     public Optional<SessionRecord> findSession(String tenantId,
@@ -3107,12 +3022,12 @@ public class ManagedAgentStore implements AgentStateStore {
         arguments.add(tenantId);
         arguments.add(actorId == null ? null
                 : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
-        // Keyset on the immutable created_at: updated_at moves on every
+        // Keyset on the immutable gmt_create: gmt_modified moves on every
         // event append, so a row can slide backwards into already-visited
         // pages and silently vanish from a paged listing.
         String cursorClause = "";
         if (beforeCreatedAt != null && beforeSessionId != null) {
-            cursorClause = " AND (ma_session.created_at < ? OR (ma_session.created_at = ?"
+            cursorClause = " AND (ma_session.gmt_create < ? OR (ma_session.gmt_create = ?"
                     + " AND ma_session.session_id < ?))";
             arguments.add(beforeCreatedAt);
             arguments.add(beforeCreatedAt);
@@ -3121,19 +3036,19 @@ public class ManagedAgentStore implements AgentStateStore {
         arguments.add(limit + 1);
         List<SessionRecord> rows =
                 jdbc.query(
-                        "SELECT ma_session.*, COALESCE(es.last_sequence, 0) AS list_last_sequence,"
+                        "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", COALESCE(es.last_sequence, 0) AS list_last_sequence,"
                             + " COALESCE(es.replay_floor_sequence, 0) AS list_floor_sequence FROM"
                             + " ma_session LEFT JOIN ma_event_stream es ON es.tenant_id ="
                             + " ma_session.tenant_id AND es.session_id = ma_session.session_id AND"
                             + " es.stream_kind = 'SESSION' AND es.stream_id = X'' WHERE"
                             + " ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id = ? AND"
-                            + " status <> 'DELETED' AND (workspace_id IS NULL OR EXISTS (SELECT 1"
+                            + " ma_session.status <> 'DELETED' AND (ma_session.workspace_id IS NULL OR EXISTS (SELECT 1"
                             + " FROM ma_workspace_access wa WHERE wa.tenant_id ="
                             + " ma_session.tenant_id AND wa.workspace_id = ma_session.workspace_id"
                             + " AND wa.actor_id = ? AND wa.role IN ('READER', 'OPERATOR',"
                             + " 'OWNER')))"
                                 + cursorClause
-                                + " ORDER BY ma_session.created_at DESC, ma_session.session_id DESC"
+                                + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
                         sessionListMapper,
                         arguments.toArray());
@@ -3147,7 +3062,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public Optional<TurnRecord> findTurn(String tenantId, String sessionId,
             String turnId) {
         List<TurnRecord> rows = jdbc.query(
-                "SELECT * FROM ma_turn WHERE tenant_id = ? AND"
+                "SELECT " + ManagedSchemaProjection.TURN.columns() + " FROM ma_turn WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ?",
                 turnMapper, tenantId, sessionId, turnId);
         return rows.stream().findFirst();
@@ -3167,7 +3082,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " WHERE tenant_id = ? AND session_id IN ("
                         + placeholders(sessionIds.size()) + ") AND status IN"
                         + " ('ACCEPTED', 'RUNNING', 'CANCELLING') ORDER BY"
-                        + " created_at DESC",
+                        + " gmt_create DESC",
                 turnSummaryMapper, arguments.toArray());
         Map<String, TurnSummary> result = new HashMap<>(
                 sessionIds.size() * 2);
@@ -3194,12 +3109,12 @@ public class ManagedAgentStore implements AgentStateStore {
                                 + QUALIFIED_TURN_SUMMARY_COLUMNS
                                 + " FROM ma_turn turn_record JOIN (SELECT event.session_id,"
                                 + " event.turn_id FROM ma_public_event event JOIN (SELECT"
-                                + " session_id, MAX(sequence_id) AS max_sequence FROM"
-                                + " ma_public_event WHERE stream_kind = 'SESSION' AND stream_id ="
-                                + " X'' AND tenant_id = ? AND session_id IN ("
+                                + " accepted.session_id, MAX(accepted.sequence_id) AS max_sequence FROM"
+                                + " ma_public_event accepted WHERE accepted.stream_kind = 'SESSION' AND accepted.stream_id ="
+                                + " X'' AND accepted.tenant_id = ? AND accepted.session_id IN ("
                                 + placeholders(sessionIds.size())
-                                + ") AND event_type = 'turn.accepted' GROUP BY"
-                                + " session_id) latest ON latest.session_id ="
+                                + ") AND accepted.event_type = 'turn.accepted' GROUP BY"
+                                + " accepted.session_id) latest ON latest.session_id ="
                                 + " event.session_id AND latest.max_sequence ="
                                 + " event.sequence_id WHERE event.tenant_id = ?)"
                                 + " latest_turn ON latest_turn.session_id ="
@@ -3224,7 +3139,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 sessionId));
         String before = "";
         if (beforeCreatedAt != null) {
-            before = " AND (created_at < ? OR (created_at = ? AND"
+            before = " AND (gmt_create < ? OR (gmt_create = ? AND"
                     + " turn_id < ?))";
             arguments.add(beforeCreatedAt);
             arguments.add(beforeCreatedAt);
@@ -3233,7 +3148,7 @@ public class ManagedAgentStore implements AgentStateStore {
         arguments.add(limit + 1);
         List<TurnSummary> rows = jdbc.query("SELECT " + TURN_SUMMARY_COLUMNS
                         + " FROM ma_turn WHERE tenant_id = ? AND"
-                        + " session_id = ?" + before + " ORDER BY created_at"
+                        + " session_id = ?" + before + " ORDER BY gmt_create"
                         + " DESC, turn_id DESC LIMIT ?",
                 turnSummaryMapper, arguments.toArray());
         boolean hasMore = rows.size() > limit;
@@ -3258,7 +3173,7 @@ public class ManagedAgentStore implements AgentStateStore {
             long afterSequence, int limit) {
         requireSession(tenantId, sessionId);
         return jdbc.query(
-                "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id = X''"
+                "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id = X''"
                     + " AND tenant_id = ? AND session_id = ? AND sequence_id > ? ORDER BY"
                     + " sequence_id ASC LIMIT ?",
                 eventMapper,
@@ -3284,7 +3199,7 @@ public class ManagedAgentStore implements AgentStateStore {
             if (pairs.length() > 0) {
                 pairs.append(" OR ");
             }
-            pairs.append("(session_id = ? AND turn_id = ?)");
+            pairs.append("(environment.session_id = ? AND environment.turn_id = ?)");
             arguments.add(turn.sessionId());
             arguments.add(turn.turnId());
         }
@@ -3293,13 +3208,13 @@ public class ManagedAgentStore implements AgentStateStore {
         // Turn, selected in SQL instead of shipping every match per pair.
         List<EventRecord> rows =
                 jdbc.query(
-                        "SELECT event.* FROM ma_public_event event JOIN (SELECT session_id,"
-                            + " MAX(sequence_id) AS max_sequence FROM ma_public_event WHERE"
-                            + " stream_kind = 'SESSION' AND stream_id = X'' AND tenant_id = ? AND"
-                            + " event_type IN ('environment.provisioning', 'environment.ready',"
+                        "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns("event") + " FROM ma_public_event event JOIN (SELECT environment.session_id,"
+                            + " MAX(environment.sequence_id) AS max_sequence FROM ma_public_event environment WHERE"
+                            + " environment.stream_kind = 'SESSION' AND environment.stream_id = X'' AND environment.tenant_id = ? AND"
+                            + " environment.event_type IN ('environment.provisioning', 'environment.ready',"
                             + " 'environment.failed') AND ("
                                 + pairs
-                                + ") GROUP BY session_id) latest ON latest.session_id ="
+                                + ") GROUP BY environment.session_id) latest ON latest.session_id ="
                                 + " event.session_id AND latest.max_sequence = event.sequence_id"
                                 + " WHERE event.stream_kind = 'SESSION' AND event.stream_id = X''"
                                 + " AND event.tenant_id = ?",
@@ -3316,7 +3231,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId, long throughSequence) {
         requireSession(tenantId, sessionId);
         return jdbc.query(
-                "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id = X''"
+                "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id = X''"
                     + " AND tenant_id = ? AND session_id = ? AND sequence_id <= ? AND event_type"
                     + " NOT IN ('turn.accepted', 'item.output_text.delta', 'item.reasoning.delta',"
                     + " 'item.tool_call.updated', 'item.tool_result.updated') ORDER BY sequence_id"
@@ -3333,7 +3248,7 @@ public class ManagedAgentStore implements AgentStateStore {
         List<EventRecord> rows =
                 beforeSequence == null
                         ? jdbc.query(
-                                "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
+                                "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
                                     + " stream_id = X'' AND tenant_id = ? AND session_id = ? ORDER"
                                     + " BY sequence_id DESC LIMIT ?",
                                 eventMapper,
@@ -3341,7 +3256,7 @@ public class ManagedAgentStore implements AgentStateStore {
                                 sessionId,
                                 limit + 1)
                         : jdbc.query(
-                                "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
+                                "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
                                     + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND"
                                     + " sequence_id < ? ORDER BY sequence_id DESC LIMIT ?",
                                 eventMapper,
@@ -3420,20 +3335,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public List<ReplayFloorTarget> findReplayFloorTargets(int limit) {
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_event_stream s JOIN ma_snapshot p ON"
-                    + " p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.snapshot_id"
-                    + " = s.current_snapshot_id WHERE s.stream_kind = 'SESSION' AND s.stream_id ="
-                    + " X'' AND p.covered_sequence > s.replay_floor_sequence AND NOT EXISTS (SELECT"
-                    + " 1 FROM ma_snapshot older WHERE older.tenant_id = s.tenant_id AND"
-                    + " older.session_id = s.session_id AND older.state = 'PUBLISHED' AND"
-                    + " older.retain_until > ? AND older.covered_sequence <="
-                    + " s.replay_floor_sequence) AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN"
-                    + " ma_public_event e ON e.tenant_id = t.tenant_id AND e.session_id ="
-                    + " t.session_id AND e.turn_id = t.turn_id WHERE t.tenant_id = s.tenant_id AND"
-                    + " t.session_id = s.session_id AND t.status IN ('ACCEPTED', 'RUNNING',"
-                    + " 'CANCELLING') AND e.stream_kind = 'SESSION' AND e.stream_id = X'' AND"
-                    + " e.event_type = 'turn.accepted' AND e.sequence_id <= s.replay_floor_sequence"
-                    + " + 1) AND NOT EXISTS (SELECT 1 FROM ma_session guarded WHERE guarded.tenant_id = s.tenant_id AND guarded.session_id = s.session_id AND guarded.csi_guard = TRUE) ORDER BY s.updated_at ASC LIMIT ?",
+                "SELECT s.tenant_id, s.session_id FROM ma_event_stream s JOIN ma_snapshot p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.snapshot_id = s.current_snapshot_id WHERE s.stream_kind = 'SESSION' AND s.stream_id = X'' AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = s.tenant_id AND private_scope.session_id = s.session_id AND private_scope.csi_guard = FALSE) AND p.covered_sequence > s.replay_floor_sequence AND NOT EXISTS (SELECT 1 FROM ma_snapshot older WHERE older.tenant_id = s.tenant_id AND older.session_id = s.session_id AND older.state = 'PUBLISHED' AND older.retain_until > ? AND older.covered_sequence <= s.replay_floor_sequence) AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND e.stream_kind = 'SESSION' AND e.stream_id = X'' AND e.event_type = 'turn.accepted' AND e.sequence_id <= s.replay_floor_sequence + 1) ORDER BY s.gmt_modified ASC LIMIT ?",
                 (row, index) ->
                         new ReplayFloorTarget(
                                 row.getString("tenant_id"), row.getString("session_id")),
@@ -3496,13 +3398,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // enough; without it a caught-up idle session would stay stale
         // forever.
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON"
-                    + " p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind"
-                    + " = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND"
-                    + " s.csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.projection_pending ="
-                    + " TRUE AND (p.last_sequence > p.covered_sequence OR (p.snapshot_stale_since"
-                    + " IS NOT NULL AND p.snapshot_stale_since <= ?)) ORDER BY p.updated_at ASC"
-                    + " LIMIT ?",
+                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.projection_pending = TRUE AND (p.last_sequence > p.covered_sequence OR (p.snapshot_stale_since IS NOT NULL AND p.snapshot_stale_since <= ?)) ORDER BY p.gmt_modified ASC LIMIT ?",
                 (result, row) ->
                         new MaterializationTarget(
                                 result.getString("tenant_id"), result.getString("session_id")),
@@ -3526,7 +3422,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         List<EventRecord> events =
                 jdbc.query(
-                        "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
+                        "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
                             + " = X'' AND tenant_id = ? AND session_id = ? AND sequence_id > ?"
                             + " ORDER BY sequence_id ASC LIMIT ?",
                         eventMapper,
@@ -3556,7 +3452,7 @@ public class ManagedAgentStore implements AgentStateStore {
         boolean refresh = snapshotRefreshRequired(tenantId, sessionId, nextCovered, now,
                 events.stream().anyMatch(EventRecord::terminal));
         jdbc.update(
-                "UPDATE ma_event_stream SET covered_sequence = ?, updated_at = ?,"
+                "UPDATE ma_event_stream SET covered_sequence = ?, gmt_modified = ?,"
                     + " snapshot_stale_since = COALESCE(snapshot_stale_since, ?) WHERE tenant_id ="
                     + " ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
                 nextCovered,
@@ -3575,21 +3471,13 @@ public class ManagedAgentStore implements AgentStateStore {
     public void deferMaterializationTarget(String tenantId,
             String sessionId) {
         requireLegacyMutation(tenantId, sessionId);
-        jdbc.update("UPDATE ma_event_stream SET updated_at"
-                        + " = ? WHERE tenant_id = ? AND session_id = ? AND"
-                        + " stream_kind = 'SESSION' AND stream_id = X''",
+        jdbc.update("UPDATE ma_event_stream SET gmt_modified = ? WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
                 clock.millis(), tenantId, sessionId);
     }
 
     public List<DispatchTarget> findDispatchable(long now, int limit) {
-        return jdbc.query("SELECT tenant_id, session_id, turn_id FROM"
-                        + " ma_turn t WHERE EXISTS (SELECT 1 FROM ma_session s"
-                        + " WHERE s.tenant_id = t.tenant_id AND s.session_id = t.session_id AND s.csi_guard = FALSE) AND status IN"
-                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
-                        + " (dispatch_lease_until IS NULL OR"
-                        + " dispatch_lease_until < ?) AND (retry_after IS"
-                        + " NULL OR retry_after <= ?)"
-                        + " ORDER BY updated_at ASC LIMIT ?",
+        return jdbc.query(
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -3603,7 +3491,7 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
                         + " dispatch_owner = ?, dispatch_lease_until = ?,"
-                        + " updated_at = ?, version = version + 1 WHERE"
+                        + " gmt_modified = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ? AND turn_id = ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
                         + " 'CANCELLING') AND (dispatch_lease_until IS NULL"
@@ -3620,12 +3508,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String turnId, String owner, Duration leaseDuration) {
         requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
-        return jdbc.update("UPDATE ma_turn SET"
-                        + " dispatch_lease_until = ?, version = version + 1"
-                        + " WHERE tenant_id = ? AND session_id = ? AND"
-                        + " turn_id = ? AND dispatch_owner = ? AND status IN"
-                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
-                        + " dispatch_lease_until >= ?",
+        return jdbc.update("UPDATE ma_turn SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", dispatch_lease_until = ?, version = version + 1 WHERE tenant_id = ? AND session_id = ? AND turn_id = ? AND dispatch_owner = ? AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND dispatch_lease_until >= ?",
                 now + leaseDuration.toMillis(), tenantId, sessionId, turnId,
                 owner, now) == 1;
     }
@@ -3634,7 +3517,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void releaseTurnLease(String tenantId, String sessionId,
             String turnId, String owner) {
         requireLegacyMutation(tenantId, sessionId);
-        jdbc.update("UPDATE ma_turn SET dispatch_owner = NULL,"
+        jdbc.update("UPDATE ma_turn SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, version = version +"
                         + " 1 WHERE tenant_id = ? AND session_id = ? AND"
                         + " turn_id = ? AND dispatch_owner = ? AND status IN"
@@ -3655,7 +3538,7 @@ public class ManagedAgentStore implements AgentStateStore {
         requireLegacyMutation(tenantId, sessionId);
         jdbc.update("UPDATE ma_turn SET retry_count = retry_count"
                         + " + 1, retry_after = ?, dispatch_owner = NULL,"
-                        + " dispatch_lease_until = NULL, updated_at = ?,"
+                        + " dispatch_lease_until = NULL, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND dispatch_owner"
                         + " = ? AND status IN ('ACCEPTED', 'RUNNING',"
@@ -3686,7 +3569,7 @@ public class ManagedAgentStore implements AgentStateStore {
             return false;
         }
         jdbc.update("UPDATE ma_session SET harness_boot_id = ?,"
-                        + " updated_at = ?, version = version + 1 WHERE"
+                        + " gmt_modified = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ?",
                 harnessBootId, now, tenantId, sessionId);
         return true;
@@ -3716,7 +3599,7 @@ public class ManagedAgentStore implements AgentStateStore {
             return false;
         }
         int updated = jdbc.update("UPDATE ma_session SET"
-                        + " harness_boot_id = ?, updated_at = ?, version ="
+                        + " harness_boot_id = ?, gmt_modified = ?, version ="
                         + " version + 1 WHERE tenant_id = ? AND session_id"
                         + " = ? AND harness_boot_id = ?",
                 harnessBootId, now, tenantId, sessionId,
@@ -3730,7 +3613,7 @@ public class ManagedAgentStore implements AgentStateStore {
         requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
-                        + " submission_attempted = TRUE, updated_at = ?,"
+                        + " submission_attempted = TRUE, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -3755,7 +3638,7 @@ public class ManagedAgentStore implements AgentStateStore {
         requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
-                        + " submission_attempted = FALSE, updated_at = ?,"
+                        + " submission_attempted = FALSE, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -3778,7 +3661,7 @@ public class ManagedAgentStore implements AgentStateStore {
         int updated = jdbc.update("UPDATE ma_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " harness_last_event_id = ?, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -3789,7 +3672,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException("Turn dispatch lease was lost");
         }
         int sessionUpdated = jdbc.update("UPDATE ma_session SET harness_event_epoch ="
-                        + " ?, harness_last_event_id = ?, updated_at = ?,"
+                        + " ?, harness_last_event_id = ?, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ?",
                 eventEpoch, lastEventId, now, tenantId, sessionId);
@@ -3833,7 +3716,7 @@ public class ManagedAgentStore implements AgentStateStore {
         int updated = jdbc.update("UPDATE ma_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " harness_last_event_id = ?, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -3845,7 +3728,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException("Turn dispatch lease was lost");
         }
         int sessionUpdated = jdbc.update("UPDATE ma_session SET harness_event_epoch ="
-                        + " ?, harness_last_event_id = ?, updated_at = ?,"
+                        + " ?, harness_last_event_id = ?, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND (harness_event_epoch = ? OR"
                         + " (harness_event_epoch IS NULL AND ? IS NULL))",
@@ -3887,7 +3770,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 Long.class, tenantId, sessionId);
         List<EventRecord> deltas =
                 jdbc.query(
-                        "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
+                        "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
                             + " = X'' AND tenant_id = ? AND session_id = ? AND turn_id = ? AND"
                             + " event_type IN ('item.output_text.delta', 'item.reasoning.delta')"
                             + " ORDER BY sequence_id ASC",
@@ -3974,7 +3857,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     sessionId);
             List<EventRecord> deltas =
                     jdbc.query(
-                            "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
+                            "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
                                 + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND"
                                 + " turn_id = ? AND event_type IN ('item.output_text.delta',"
                                 + " 'item.reasoning.delta') ORDER BY sequence_id ASC",
@@ -4057,7 +3940,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 turnId);
         List<EventRecord> events =
                 jdbc.query(
-                        "SELECT * FROM ma_public_event WHERE tenant_id = ? AND session_id = ? AND"
+                        "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE tenant_id = ? AND session_id = ? AND"
                                 + " stream_kind = 'SESSION' AND stream_id = X'' AND turn_id = ? AND"
                                 + " sequence_id <= ? AND event_type IN ('item.output_text.delta',"
                                 + " 'item.reasoning.delta', 'turn.completed', 'turn.failed',"
@@ -4120,8 +4003,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 };
             }
             jdbc.update(
-                    "UPDATE ma_message SET first_sequence = ?, last_sequence = ?, created_at = ?,"
-                            + " updated_at = ?, item_status = ?, revision = revision + 1 WHERE"
+                    "UPDATE ma_message SET first_sequence = ?, last_sequence = ?, gmt_create = ?,"
+                            + " gmt_modified = ?, item_status = ?, revision = revision + 1 WHERE"
                             + " tenant_id = ? AND session_id = ? AND item_id = ?",
                     first,
                     last,
@@ -4135,7 +4018,7 @@ public class ManagedAgentStore implements AgentStateStore {
         flushParts(tenantId, sessionId, parts);
         jdbc.update(
                 "UPDATE ma_event_stream SET projection_version = projection_version + 1,"
-                    + " snapshot_stale_since = ?, updated_at = ? WHERE tenant_id = ? AND session_id"
+                    + " snapshot_stale_since = ?, gmt_modified = ? WHERE tenant_id = ? AND session_id"
                     + " = ? AND stream_kind = 'SESSION' AND stream_id = X''",
                 now,
                 now,
@@ -4223,7 +4106,7 @@ public class ManagedAgentStore implements AgentStateStore {
             long lastSourceId, long now) {
         return jdbc.update("UPDATE ma_turn SET"
                         + " harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " harness_last_event_id = ?, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -4239,7 +4122,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " harness_event_epoch = ?,"
                         + " harness_last_event_id = ?, status = ?,"
                         + " error_code = ?, error_message = ?,"
-                        + " completed_at = ?, updated_at = ?,"
+                        + " completed_at = ?, gmt_modified = ?,"
                         + " dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, version ="
                         + " version + 1 WHERE tenant_id = ? AND"
@@ -4273,11 +4156,11 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         jdbc.update("UPDATE ma_session SET harness_event_epoch ="
                         + " ?, harness_last_event_id = ?,"
-                        + " updated_at = ?, version = version + 1 WHERE"
+                        + " gmt_modified = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ?",
                 eventEpoch, lastSourceId, now, tenantId, sessionId);
         jdbc.update(
-                "UPDATE ma_event_stream SET last_sequence = ?, updated_at = ? WHERE tenant_id = ?"
+                "UPDATE ma_event_stream SET last_sequence = ?, gmt_modified = ? WHERE tenant_id = ?"
                     + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
                 next,
                 now,
@@ -4319,7 +4202,7 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET status ="
                         + " 'CANCELLED',"
-                        + " completed_at = ?, updated_at = ?,"
+                        + " completed_at = ?, gmt_modified = ?,"
                         + " dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, version ="
                         + " version + 1 WHERE tenant_id = ? AND"
@@ -4348,7 +4231,7 @@ public class ManagedAgentStore implements AgentStateStore {
         int updated = jdbc.update("UPDATE ma_turn SET status ="
                         + " 'FAILED',"
                         + " error_code = ?, error_message = ?, completed_at ="
-                        + " ?, updated_at = ?, dispatch_owner = NULL,"
+                        + " ?, gmt_modified = ?, dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, version = version +"
                         + " 1 WHERE tenant_id = ? AND session_id = ? AND"
                         + " turn_id = ? AND dispatch_owner = ? AND status IN"
@@ -4404,7 +4287,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " WHERE scope_key = ? AND operation_kind = 'DELETE'"
                         + " AND target_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND session_status_before IS NOT NULL"
-                        + " ORDER BY created_at DESC LIMIT 1",
+                        + " ORDER BY gmt_create DESC LIMIT 1",
                 (rows, row) -> rows.getString(1),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 sessionOperationTarget(sessionId), tenantId, sessionId)
@@ -4587,7 +4470,7 @@ public class ManagedAgentStore implements AgentStateStore {
         };
         jdbc.update("UPDATE ma_message SET item_status = ?,"
                         + " last_sequence = CASE WHEN last_sequence < ?"
-                        + " THEN ? ELSE last_sequence END, updated_at = ?,"
+                        + " THEN ? ELSE last_sequence END, gmt_modified = ?,"
                         + " revision = revision + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND item_status"
                         + " = 'in_progress'",
@@ -4600,7 +4483,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String role, String status, Map<String, Object> attributes) {
         int updated = jdbc.update("UPDATE ma_message SET"
                         + " item_status = ?, attributes_json = ?,"
-                        + " last_sequence = ?, updated_at = ?, revision ="
+                        + " last_sequence = ?, gmt_modified = ?, revision ="
                         + " revision + 1 WHERE tenant_id = ? AND session_id"
                         + " = ? AND item_id = ?",
                 status, writeJson(attributes), event.sequence(),
@@ -4610,8 +4493,8 @@ public class ManagedAgentStore implements AgentStateStore {
             jdbc.update("INSERT INTO ma_message (tenant_id,"
                             + " session_id, item_id, turn_id, item_type,"
                             + " item_role, item_status, attributes_json, parts_json,"
-                            + " first_sequence, last_sequence, created_at,"
-                            + " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]',"
+                            + " first_sequence, last_sequence, gmt_create,"
+                            + " gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]',"
                             + " ?, ?, ?, ?)",
                     event.tenantId(), event.sessionId(), itemId,
                     event.turnId(), type, role, status,
@@ -4687,12 +4570,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 resource = ManagedSessionStore.resourceKey(scope, id);
                 try {
                     jdbc.update(
-                            "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
-                                + " session_id, resource_id, kind, schema_version, byte_length,"
-                                + " sha256, storage_kind, inline_bytes, state, created_at,"
-                                + " last_verified_at) VALUES (?, ?, ?, ?, ?,"
-                                + " 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?,"
-                                + " 'REFERENCED', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+                            "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                             resource,
                             scope,
                             tenantId,
@@ -4704,7 +4582,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 } catch (DuplicateKeyException duplicate) {
                     List<Boolean> matching =
                             jdbc.query(
-                                    "SELECT * FROM ma_resource WHERE resource_key = ? FOR UPDATE",
+                                    "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? FOR UPDATE",
                                     (row, index) ->
                                             scope.equals(row.getString("session_scope_key"))
                                                     && tenantId.equals(row.getString("tenant_id"))
@@ -4733,10 +4611,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     }
                 }
                 jdbc.update(
-                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                            + " owner_revision, resource_key, tenant_id, session_id, resource_id,"
-                            + " created_at) VALUES (?, 'MESSAGE', ?, ?, ?, ?, ?, ?,"
-                            + " CURRENT_TIMESTAMP(6))",
+                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES (?, 'MESSAGE', ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                         scope,
                         owner,
                         revision,
@@ -4817,7 +4692,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private List<ItemRecord> snapshotItems(String tenantId, String sessionId, Runnable checkLease) {
         return withParts(
                 jdbc.query(
-                        "SELECT * FROM ma_message WHERE tenant_id = ? AND session_id = ?"
+                        "SELECT " + ManagedSchemaProjection.MESSAGE.columns() + " FROM ma_message WHERE tenant_id = ? AND session_id = ?"
                                 + " ORDER BY first_sequence ASC, item_id ASC",
                         (row, index) -> {
                             if (index % 100 == 0 || row.getString("body_resource_key") != null) {
@@ -4830,7 +4705,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private List<ItemRecord> allItems(String tenantId, String sessionId) {
-        return withParts(jdbc.query("SELECT * FROM ma_message WHERE"
+        return withParts(jdbc.query("SELECT " + ManagedSchemaProjection.MESSAGE.columns() + " FROM ma_message WHERE"
                         + " tenant_id = ? AND session_id = ? ORDER BY"
                         + " first_sequence ASC",
                 itemMapper, tenantId, sessionId));
@@ -4913,7 +4788,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private TurnRecord requireTurnForUpdate(String tenantId,
             String sessionId, String turnId) {
         try {
-            return jdbc.queryForObject("SELECT * FROM ma_turn"
+            return jdbc.queryForObject("SELECT " + ManagedSchemaProjection.TURN.columns() + " FROM ma_turn"
                             + " WHERE tenant_id = ? AND session_id = ? AND"
                             + " turn_id = ? FOR UPDATE",
                     turnMapper, tenantId, sessionId, turnId);
@@ -4928,7 +4803,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String payloadDigest, long now) {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, created_at, updated_at) VALUES"
+                        + " status, gmt_create, gmt_modified) VALUES"
                         + " (?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?)",
                 tenantId, sessionId, turnId, promptId, writeJson(input),
                 payloadDigest, now, now);
@@ -5151,7 +5026,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 EventIdentity.PROJECTION_VERSION, identity.itemId(),
                 identity.contentPartId());
         jdbc.update("UPDATE ma_event_stream SET last_sequence = ?,"
-                        + " updated_at = ? WHERE tenant_id = ? AND session_id = ?"
+                        + " gmt_modified = ? WHERE tenant_id = ? AND session_id = ?"
                         + " AND stream_kind = 'SESSION' AND stream_id = X''",
                 next, now, tenantId, sessionId);
         jdbc.update(INSERT_EVENT, event.tenantId(), event.sessionId(),
@@ -5171,7 +5046,7 @@ public class ManagedAgentStore implements AgentStateStore {
             long fromSequence) {
         List<EventRecord> events =
                 jdbc.query(
-                        "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
+                        "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
                             + " = X'' AND tenant_id = ? AND session_id = ? AND sequence_id >= ?"
                             + " ORDER BY sequence_id ASC",
                         eventMapper,

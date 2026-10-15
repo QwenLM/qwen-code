@@ -185,6 +185,8 @@ class SessionRowLockOrderTest {
                                     "ManagedExtensionRecordStore.storedRow/2")),
                     Map.entry("ManagedExtensionRecords.java",
                             Set.of("ManagedExtensionRecords.require/2")),
+                    Map.entry("ManagedSchemaJdbcTemplate.java",
+                            Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
                     Map.entry("ManagedSessionStore.java",
                             Set.of("ManagedSessionStore.sha256/1",
                                     "ManagedSessionStore.storedTransaction/1",

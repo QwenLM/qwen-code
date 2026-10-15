@@ -80,12 +80,19 @@ to RELEASED and never writes the physical owner. It retains
 reservation identity. No expiration, failed RPC or lost Pod permits another
 Workspace or tenant to take ownership.
 
-The canonical catalog preserves published V1/V2 and main's V3 Session-list
-index migration. The unpublished K2 retirement extension moves to V4 without
-changing its SQL. Both Broker initialization and Flyway recognize the exact
-V1/V2/V3 catalog shapes before applying pending extensions, preserve existing
-rows and migration-history entries, and validate the complete V4 catalog. A
-partially modified or unknown catalog remains unavailable.
+The current main schema uses `gmt_create` / `gmt_modified` and unsigned BIGINT
+Unix epoch milliseconds for persisted timestamps. K2's complete typed inventory,
+terminal expected image and operation projection use that same physical schema;
+cut protocol timestamps remain canonical ISO strings and must represent exact
+milliseconds. Old timestamp catalogs and old frozen images are refused, without
+renaming columns or rewriting saved evidence during admission.
+
+Within this new canonical baseline, Broker initialization and Flyway recognize
+only the exact V1/V2/V3 shapes before applying the additive K2 V4 extension. They
+preserve matching rows and migration-history entries, then validate the complete
+V4 catalog. This is not an upgrade path for the earlier DATETIME or legacy
+catalogs. Deploy this revision with a fresh database and retain the old binary
+and database for historical access.
 
 ## Session admission and tools
 
@@ -149,6 +156,29 @@ native acceptance operations are not retried through this architecture change.
 Build, typecheck, focused tests, independent validation and two clean full-diff
 audits precede a completion claim. Deployment and cloud acceptance remain separate
 from local implementation validation.
+
+The ACK observations below apply to deployed runtime commit `53f24ba090d3`.
+The later merge of main `4a80f0a6adb8` changes the database baseline and is verified
+separately with local build, schema and public handoff regressions. The earlier
+cloud observations do not establish ACK qualification of that later merge.
+
+Local verification of that later merge passed the full Node build, typecheck and
+bundle, 104 HTTP-store tests, 964 CLI consumer tests, 84 focused Broker tests and
+619 focused Server tests, with two existing MySQL-only tests skipped. Checkstyle,
+SpotBugs, ESLint and formatting checks passed. An additional eight-test ordinary
+claim regression run separately controls state and generation rejection.
+
+Independent source compilation reproduced all 1010 frozen production classes
+byte for byte. Fifteen resident H2 tests and both ordinary public handoff tests
+passed without skips. Each public flow captured six actual tool call/reply pairs
+and exact A-final/B-first read bytes, with four/five same-DataSource ownership
+snapshots. Application reconstruction used fresh Spring, Broker, DataSource and
+repository instances while the original worker stayed alive, with one start and
+zero physical releases. Actual metadata showed 34 application tables plus Flyway
+history, no shadow legacy tables, and BIGINT timestamp/lease/deadline columns.
+These are ordinary same-JVM H2 checks; the independent observer's missing
+initializer and schema-case mistakes were preserved and corrected only in its
+own inputs before repeating the same two tests.
 
 The successful ACK attempt retained 62 contiguous response records. A performed
 Write/Edit/Read; B performed Read/Edit/Read after the application JVM restarted.
