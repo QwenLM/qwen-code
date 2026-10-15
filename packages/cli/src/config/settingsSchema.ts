@@ -386,6 +386,17 @@ const SETTINGS_SCHEMA = {
           'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
         showInDialog: false,
       },
+      subSessionCompletionTtlHours: {
+        type: 'integer',
+        label: 'Sub-Session Completion TTL (Hours)',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 24,
+        minimum: 0,
+        description:
+          'How long a completed sub-session stays in the session roster before the daemon removes it (live entry plus persisted transcript, making it not continuable). 0 keeps completed sub-sessions forever. A revived sub-session (a new prompt after completion) restarts the TTL from its latest activity; running sub-sessions are never removed.',
+        showInDialog: false,
+      },
     },
   },
 

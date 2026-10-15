@@ -33,6 +33,16 @@
  *
  * The sub-session is fire-and-forget w.r.t. lifecycle: it is NOT kept resident,
  * so once idle the bridge's reaper closes it; its transcript persists.
+ *
+ * Roster hygiene on top of that: after a sub-session's turn reaches a terminal
+ * state, the completion TTL (`serve.subSessionCompletionTtlHours`, default
+ * 24h, `0` = keep forever) starts its clock. When it expires, the launcher
+ * closes the live entry (if the reaper has not already) and removes the
+ * persisted transcript/catalog row that would otherwise keep the finished
+ * thread in the session list forever. A revived sub-session (a new prompt
+ * after completion) restarts its clock from the latest activity; running
+ * sub-sessions are never removal candidates. Once removed, the session is not
+ * continuable, consistent with retained-state expiry.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -52,6 +62,7 @@ import type {
   AcpSessionBridge,
   BridgeBackgroundNotification,
   BridgeSession,
+  BridgeSessionSummary,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   CreateSubSessionInfo,
@@ -140,6 +151,17 @@ const MAX_NAME_LENGTH = 60;
  * only ever discards long-reaped sessions. */
 export const MAX_TRACKED_SPAWNED_SESSIONS = 1024;
 
+/** Default completion TTL: a finished sub-session stays in the session roster
+ * for 24 hours before the launcher removes it. Overridable via
+ * `serve.subSessionCompletionTtlHours`; `0` keeps completed sub-sessions
+ * forever (the pre-TTL behavior). */
+export const DEFAULT_SUB_SESSION_COMPLETION_TTL_MS = 24 * 60 * 60_000;
+
+/** How often the launcher looks for expired completed sub-sessions. TTL
+ * precision is not user-visible at hour scale, so a five-minute cadence keeps
+ * each sweep to a handful of map lookups and (at removal) file ops. */
+const COMPLETION_TTL_SWEEP_INTERVAL_MS = 5 * 60_000;
+
 export interface SubSessionLauncher {
   /** The `onCreateSubSession` callback wired into the bridge. Returns a Promise
    * the child's tool awaits. */
@@ -172,6 +194,13 @@ export interface CreateSubSessionLauncherOptions {
   /** Workspace-wide concurrency cap; defaults to
    * {@link MAX_CONCURRENT_SUB_SESSIONS_TOTAL}. */
   maxConcurrentTotal?: number;
+  /** Completion TTL for auto-removal of finished sub-sessions; defaults to
+   * {@link DEFAULT_SUB_SESSION_COMPLETION_TTL_MS}. `0` disables auto-removal
+   * (completed sub-sessions stay in the roster forever). */
+  completionTtlMs?: number;
+  /** Sweep cadence for the completion TTL; defaults to
+   * {@link COMPLETION_TTL_SWEEP_INTERVAL_MS}. Exposed for tests. */
+  completionTtlSweepIntervalMs?: number;
 }
 
 type IsolatedWorkspace = NonNullable<
@@ -745,12 +774,21 @@ export function createSubSessionLauncher(
     opts.maxConcurrentTotal ?? MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
     MAX_TRACKED_SPAWNED_SESSIONS,
   );
+  const completionTtlMs =
+    opts.completionTtlMs ?? DEFAULT_SUB_SESSION_COMPLETION_TTL_MS;
+  const completionTtlSweepIntervalMs =
+    opts.completionTtlSweepIntervalMs ?? COMPLETION_TTL_SWEEP_INTERVAL_MS;
   const inflight = new Map<string, number>();
   // Ids of the sub-sessions this launcher spawned — the depth-1 gate reads it.
   // Insertion-ordered and evicted FIFO past the cap so a long-lived daemon
   // can't accumulate ids forever; an evicted id belongs to a sub-session old
   // enough to have been idle-reaped long ago.
   const spawnedSessionIds = new Set<string>();
+  // Timestamps at which tracked sub-sessions reached a terminal turn state —
+  // the completion TTL input. Bounded with `spawnedSessionIds` (evicted in
+  // step); a finished id whose transcript the rollback cleanup already
+  // removed simply no-ops on removal.
+  const completedAt = new Map<string, number>();
   // Shared AbortController — stop() aborts it, tearing down every active
   // subscription (first-turn awaits AND sent-mode background drains). This
   // prevents shutdown from waiting up to 5 min per in-flight session.
@@ -773,6 +811,109 @@ export function createSubSessionLauncher(
       const oldest = spawnedSessionIds.values().next().value;
       if (oldest === undefined) break;
       spawnedSessionIds.delete(oldest);
+      completedAt.delete(oldest);
+    }
+  };
+
+  /** Terminal turn outcomes. The first-turn observer's non-terminal
+   * reportings — 'timeout' (wall-clock ceiling: the turn may still be
+   * running), 'incomplete' (stream closed before the turn ended) and
+   * 'shutdown' (daemon going away) — are no evidence the sub-session is
+   * done, so they never start the TTL clock. */
+  const isTerminalTurnStopReason = (stopReason: string): boolean =>
+    stopReason !== 'timeout' &&
+    stopReason !== 'incomplete' &&
+    stopReason !== 'shutdown';
+
+  const markCompleted = (sessionId: string): void => {
+    if (completionTtlMs <= 0) return;
+    completedAt.set(sessionId, Date.now());
+  };
+
+  /** Remove a TTL-expired completed sub-session: close the live entry (it
+   * may already be gone — the idle reaper wins that race all the time),
+   * remove the persisted transcript/catalog row that keeps the finished
+   * thread in the session list, and advance the catalog clock. Mirrors the
+   * rollback cleanup of a failed launch. Any failure keeps the entry in
+   * `completedAt` so the next sweep retries. */
+  const removeExpiredSubSession = async (sessionId: string): Promise<void> => {
+    const bridge = getBridge();
+    if (!bridge) return;
+    try {
+      await bridge.closeSession(sessionId, undefined, {
+        reason: 'sub_session_completion_ttl',
+        agentCloseTimeoutMs: ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+      });
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) {
+        // Already gone (idle-reaped) — proceed to the persisted row.
+      } else {
+        log.debug('sub-session: TTL close failed', sessionId, error);
+        return;
+      }
+    }
+    try {
+      const removeTranscript = () =>
+        new SessionService(boundWorkspace).removeSession(sessionId);
+      const transcriptRemoved = runtimeBaseDir
+        ? await Storage.runWithResolvedRuntimeBaseDir(
+            runtimeBaseDir,
+            removeTranscript,
+          )
+        : await removeTranscript();
+      if (transcriptRemoved) bridge.markSessionCatalogChanged();
+    } catch (error) {
+      log.debug('sub-session: TTL transcript removal failed', sessionId, error);
+      return;
+    }
+    completedAt.delete(sessionId);
+    writeStderrLine(
+      `qwen serve: removed completed sub-session ${sessionId} from the roster ` +
+        `(completion TTL ${Math.round(completionTtlMs / 60_000)}min expired)`,
+    );
+  };
+
+  /** One sweep over the tracked sub-sessions. Activity after a recorded
+   * completion (a revived turn) restarts the clock from the latest activity;
+   * running sessions are never removal candidates; a spawned-but-unmarked
+   * session whose live entry the reaper already closed is provably terminal
+   * (the reaper only closes work-free sessions), so its clock starts now. */
+  const sweepCompletedSubSessions = async (): Promise<void> => {
+    if (stopAc.signal.aborted || completionTtlMs <= 0) return;
+    const now = Date.now();
+    for (const sessionId of [...spawnedSessionIds]) {
+      if (stopAc.signal.aborted) return;
+      const bridge = getBridge();
+      if (!bridge) return;
+      let due = completedAt.get(sessionId);
+      let summary: BridgeSessionSummary | undefined;
+      try {
+        summary = bridge.getSessionSummary(sessionId);
+      } catch (error) {
+        if (!(error instanceof SessionNotFoundError)) {
+          log.debug('sub-session: TTL summary failed', sessionId, error);
+          continue;
+        }
+      }
+      if (summary !== undefined) {
+        const lastActivity = Date.parse(summary.updatedAt ?? summary.createdAt);
+        if (due !== undefined && Number.isFinite(lastActivity)) {
+          if (lastActivity > due) {
+            due = lastActivity;
+            completedAt.set(sessionId, due);
+          }
+        }
+        if (summary.hasActivePrompt) continue; // running — never remove
+        if (due === undefined) continue;
+      } else if (due === undefined) {
+        // No live entry: the reaper only closes sessions holding no work, so
+        // the turn is long over. Start the clock now — the TTL bounds the
+        // extra lifetime of turns whose completion the observer missed.
+        due = now;
+        completedAt.set(sessionId, due);
+      }
+      if (now - due < completionTtlMs) continue;
+      await removeExpiredSubSession(sessionId);
     }
   };
 
@@ -1039,6 +1180,9 @@ export function createSubSessionLauncher(
                     `concurrency slot (the sub-session may still be running)`,
                 );
               }
+              if (isTerminalTurnStopReason(completion.stopReason)) {
+                markCompleted(sessionId);
+              }
               if (notifySentCompletion) {
                 notification = buildSentCompletionNotification(
                   sessionId,
@@ -1049,6 +1193,11 @@ export function createSubSessionLauncher(
               }
             } catch (err) {
               if (stopAc.signal.aborted) return;
+              // Terminal: the turn's promise rejected (dispatch failure) or
+              // the event stream threw — the sub-session's turn is over and
+              // this launch will not observe it again, so the TTL clock
+              // starts here.
+              markCompleted(sessionId);
               if (!notifySentCompletion) return;
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
@@ -1120,6 +1269,9 @@ export function createSubSessionLauncher(
           firstTurn,
           turnError,
         ]);
+        if (isTerminalTurnStopReason(stopReason)) {
+          markCompleted(sessionId);
+        }
         return {
           sessionId,
           result,
@@ -1256,10 +1408,33 @@ export function createSubSessionLauncher(
     }
   };
 
+  // `unref` so the sweeper alone never keeps the daemon process alive;
+  // stop() clears it. Overlapping sweeps are serialized: a removal can wait
+  // out `agentCloseTimeoutMs`, and a second sweep on the same id would
+  // double-close/double-remove.
+  let completionTtlSweeper: ReturnType<typeof setInterval> | undefined;
+  let completionTtlSweepInFlight = false;
+  if (completionTtlMs > 0) {
+    completionTtlSweeper = setInterval(() => {
+      if (completionTtlSweepInFlight) return;
+      completionTtlSweepInFlight = true;
+      void sweepCompletedSubSessions().finally(() => {
+        completionTtlSweepInFlight = false;
+      });
+    }, completionTtlSweepIntervalMs);
+    if (typeof completionTtlSweeper.unref === 'function') {
+      completionTtlSweeper.unref();
+    }
+  }
+
   return {
     launch,
     stop: () => {
       stopAc.abort(); // tears down every active subscription → releases slots
+      if (completionTtlSweeper !== undefined) {
+        clearInterval(completionTtlSweeper);
+        completionTtlSweeper = undefined;
+      }
     },
   };
 }

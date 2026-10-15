@@ -41,6 +41,12 @@
           "default": 24,
           "minimum": 1,
           "maximum": 1024
+        },
+        "subSessionCompletionTtlHours": {
+          "description": "How long a completed sub-session stays in the session roster before the daemon removes it (live entry plus persisted transcript, making it not continuable). 0 keeps completed sub-sessions forever. A revived sub-session (a new prompt after completion) restarts the TTL from its latest activity; running sub-sessions are never removed.",
+          "type": "integer",
+          "default": 24,
+          "minimum": 0
         }
       }
     },

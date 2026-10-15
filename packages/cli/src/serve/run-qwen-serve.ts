@@ -1859,6 +1859,36 @@ export function subSessionConcurrencyCapsFromSettings(
 }
 
 /**
+ * Reads the optional `serve.subSessionCompletionTtlHours` override. Only
+ * non-negative integers (hours) are honored; anything else falls back to the
+ * launcher's built-in default (24h), with a warning for present-but-invalid
+ * values — same contract as the concurrency caps. `0` is a VALID value: it
+ * disables auto-removal (completed sub-sessions stay in the roster forever).
+ * An absent key returns no override, so the built-in default applies.
+ */
+export function subSessionCompletionTtlMsFromSettings(
+  serve: {
+    subSessionCompletionTtlHours?: unknown;
+  },
+  onWarning: (message: string) => void = writeStderrLine,
+): {
+  completionTtlMs?: number;
+} {
+  const value = serve.subSessionCompletionTtlHours;
+  if (value === undefined) return {};
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
+    return { completionTtlMs: value * 60 * 60_000 };
+  }
+  onWarning(
+    `qwen serve: ignoring invalid serve.subSessionCompletionTtlHours ` +
+      `(${JSON.stringify(value)}); expected a non-negative integer in hours ` +
+      `(0 keeps completed sub-sessions forever), falling back to the ` +
+      `built-in default.`,
+  );
+  return {};
+}
+
+/**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
  *
@@ -6106,6 +6136,9 @@ async function runQwenServeImpl(
       ...subSessionConcurrencyCapsFromSettings(
         runtimeBootSettings?.merged.serve ?? {},
       ),
+      ...subSessionCompletionTtlMsFromSettings(
+        runtimeBootSettings?.merged.serve ?? {},
+      ),
     });
     const attachmentsRoots = sessionAttachmentsRoots(
       boundWorkspace,
@@ -6718,6 +6751,9 @@ async function runQwenServeImpl(
         boundWorkspace: workspaceInput.cwd,
         runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         ...subSessionConcurrencyCapsFromSettings(
+          secondarySettings?.merged.serve ?? {},
+        ),
+        ...subSessionCompletionTtlMsFromSettings(
           secondarySettings?.merged.serve ?? {},
         ),
       });
@@ -7416,6 +7452,9 @@ async function runQwenServeImpl(
             }
           : {}),
         ...subSessionConcurrencyCapsFromSettings(
+          wsSettings?.merged.serve ?? {},
+        ),
+        ...subSessionCompletionTtlMsFromSettings(
           wsSettings?.merged.serve ?? {},
         ),
       });
