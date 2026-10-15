@@ -411,7 +411,8 @@ export const DEFAULT_COMMAND_OPTIONS = {
   },
   'max-session-turns': {
     type: 'number' as const,
-    description: 'Maximum number of session turns (must be an integer)',
+    description:
+      'Maximum number of session turns (must be an integer). A one-shot run exits with code 53 when exceeded. In stream-json input sessions the counter is cumulative: once exhausted, every later turn fails until a new session is started.',
   },
   'max-wall-time': {
     type: 'string' as const,

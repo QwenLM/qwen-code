@@ -319,7 +319,10 @@ class Session {
     this.config
       .getBackgroundTaskRegistry()
       .setNotificationCallback((displayText, modelText, meta) => {
-        if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
+        if (
+          this.drainNotifications === null &&
+          (this.isShuttingDown || this.sessionAbortController.signal.aborted)
+        ) {
           return;
         }
         this.enqueueTaskNotification({
@@ -931,6 +934,7 @@ class Session {
   private setupSignalHandlers(): void {
     this.shutdownHandler = () => {
       debugLogger.info('[Session] Shutdown signal received');
+      this.drainNotifications ??= [];
       this.isShuttingDown = true;
       this.abortSession();
     };
@@ -989,17 +993,18 @@ class Session {
   private async shutdown(): Promise<void> {
     debugLogger.debug('[Session] Shutting down');
 
+    this.drainNotifications ??= [];
     this.isShuttingDown = true;
     this.abortSession();
     this.abortTaskRegistries();
     this.stopMonitorCallbacks();
-    this.stopBackgroundTaskCallbacks();
 
     // Wait for all pending work
     await this.waitForAllPendingWork();
     this.stopMonitorCallbacks();
-    this.stopBackgroundTaskCallbacks();
     this.abortTaskRegistries();
+    this.stopBackgroundTaskCallbacks();
+    this.flushDrainNotifications();
 
     this.finishShutdown();
   }
@@ -1009,14 +1014,22 @@ class Session {
 
     // Retain terminal notifications for the SDK after EOF, without starting
     // another model turn. Work accepted before EOF keeps its normal queue.
-    this.drainNotifications = [];
+    this.drainNotifications ??= [];
     this.stopMonitorCallbacks();
     this.abortTaskRegistries();
     await this.waitForAllPendingWork();
     this.stopMonitorCallbacks();
     this.abortTaskRegistries();
     this.stopBackgroundTaskCallbacks();
-    for (const item of this.drainNotifications) {
+    this.flushDrainNotifications();
+
+    this.finishShutdown();
+  }
+
+  private flushDrainNotifications(): void {
+    const notifications = this.drainNotifications ?? [];
+    this.drainNotifications = null;
+    for (const item of notifications) {
       if (
         item.monitorId &&
         item.sdkNotification.status === 'running' &&
@@ -1030,8 +1043,6 @@ class Session {
         item.sdkNotification,
       );
     }
-
-    this.finishShutdown();
   }
 
   private abortTaskRegistries(): void {
