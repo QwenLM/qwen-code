@@ -1219,6 +1219,7 @@ export function createDaemonSessionActions({
         controller: ctrl,
         replayedTurnEvents: new Map(),
       });
+      let admissionError = false;
       try {
         // Normalize images once and pass the same array to both calls
         const normalizedImages: Array<{ data: string; mimeType: string }> = (
@@ -1322,8 +1323,10 @@ export function createDaemonSessionActions({
           accepted = await session.submitPrompt(
             promptRequest as Parameters<typeof session.submitPrompt>[0],
             ctrl.signal,
+            ...(options?.beforeDispatch ? [options.beforeDispatch] : []),
           );
         } catch (error) {
+          admissionError = true;
           publishStandaloneWorkingDirectoryError(sessionId, error);
           const definiteRejection = isDefinitePromptAdmissionRejection(error);
           if (definiteRejection) {
@@ -1342,6 +1345,19 @@ export function createDaemonSessionActions({
             );
           }
           throw error;
+        } finally {
+          setConnection((current) => {
+            const clientId = session.clientId;
+            if (
+              sessionRef.current !== session ||
+              current.sessionId !== session.sessionId ||
+              !clientId ||
+              current.clientId === clientId
+            ) {
+              return current;
+            }
+            return { ...current, clientId };
+          });
         }
         if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
           store.appendLocalUserMessage(
@@ -1385,6 +1401,7 @@ export function createDaemonSessionActions({
           if (sessionRef.current?.sessionId === sessionId) {
             store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
           }
+          if (options?.source === 'mcp-app' && admissionError) throw error;
           return { stopReason: 'cancelled' };
         }
         if (isDaemonTurnError(error)) {
@@ -1392,6 +1409,9 @@ export function createDaemonSessionActions({
         }
         if (sessionRef.current?.sessionId === sessionId) {
           store.dispatch({ type: 'assistant.done', reason: 'error' });
+        }
+        if (options?.source === 'mcp-app' && admissionError) {
+          throw error;
         }
         throw dispatchActionError(
           addNotice,
@@ -1648,9 +1668,10 @@ export function createDaemonSessionActions({
       options?.onAdmissionStarted?.();
       let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
       try {
-        accepted = await session.submitPrompt(
-          promptRequest as Parameters<typeof session.submitPrompt>[0],
-        );
+        const request = promptRequest as Parameters<
+          typeof session.submitPrompt
+        >[0];
+        accepted = await session.submitPrompt(request);
       } catch (error) {
         publishStandaloneWorkingDirectoryError(session.sessionId, error);
         const definiteRejection = isDefinitePromptAdmissionRejection(error);

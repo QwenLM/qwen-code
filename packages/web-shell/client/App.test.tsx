@@ -42,6 +42,8 @@ import {
   type SessionSourcesResult,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
+import { PromptDispatchCancelledError } from './utils/promptAdmission';
+import type { McpAppPromptSubmission } from './hooks/useMcpAppMessages';
 import type { ArtifactPanel } from './components/artifacts/ArtifactPanel';
 import type { WebShellSettingsOptions } from './settings';
 import type { WebShellModelManagementOptions } from './modelManagement';
@@ -61,6 +63,19 @@ import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
+
+type McpAppMessageHost = Parameters<
+  typeof import('./hooks/useMcpAppMessages').useMcpAppMessages
+>[0];
+const mcpAppMessageHost = vi.hoisted(() => ({
+  current: undefined as McpAppMessageHost | undefined,
+}));
+vi.mock('./hooks/useMcpAppMessages', () => ({
+  useMcpAppMessages: (host: McpAppMessageHost) => {
+    mcpAppMessageHost.current = host;
+    return { context: undefined, review: null };
+  },
+}));
 
 type StreamingState = 'idle' | 'responding';
 
@@ -11743,6 +11758,7 @@ function makePlanPermissionBlock() {
 }
 
 beforeEach(() => {
+  mcpAppMessageHost.current = undefined;
   testState.turnChoices = [];
   testState.turnLocations.clear();
   testState.provisionalTurns = [];
@@ -11776,6 +11792,7 @@ beforeEach(() => {
     })),
   });
   mockConnection.sessionId = 'session-1';
+  mockConnection.clientId = 'client-1';
   mockConnection.sessionContext = undefined;
   mockConnection.context = undefined;
   mockConnection.workspaceCwd = '/tmp/project';
@@ -25769,6 +25786,501 @@ describe('App session callbacks', () => {
     });
   });
 
+  describe('MCP App prompt admission', () => {
+    function submission(controller = new AbortController()) {
+      const owner = mcpAppMessageHost.current!.captureOwner();
+      return {
+        signal: controller.signal,
+        isCurrent: () => owner.isCurrent(),
+        onDispatched: vi.fn(),
+        onAdmitted: vi.fn(),
+      } satisfies McpAppPromptSubmission;
+    }
+
+    it('runs host preparation and passes the real receipt without waiting for the turn or touching the draft', async () => {
+      const turn = deferred<void>();
+      const prepareSubmit = vi.fn(async () => ({
+        prompt: 'prepared analysis',
+      }));
+      const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+      mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+        options.onAdmissionStarted();
+        options.beforeDispatch?.('client-1');
+        options.onAdmitted({ promptId: 'accepted-app-prompt' });
+        return turn.promise;
+      });
+      renderApp({ prepareSubmit, onSubmitBefore });
+      await flush();
+      const controller = new AbortController();
+      const request = submission(controller);
+      let result!: Promise<unknown>;
+      act(() => {
+        result = mcpAppMessageHost.current!.submit(
+          'Analyze selected failures',
+          request,
+        );
+      });
+      await flush();
+
+      expect(prepareSubmit).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        prompt: 'Analyze selected failures',
+        inputAnnotations: [],
+        source: 'mcp-app',
+      });
+      expect(onSubmitBefore).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        prompt: 'prepared analysis',
+        source: 'mcp-app',
+      });
+      expect(request.onDispatched).toHaveBeenCalledOnce();
+      expect(request.onAdmitted).toHaveBeenCalledWith({
+        promptId: 'accepted-app-prompt',
+      });
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+        'prepared analysis',
+        expect.objectContaining({
+          optimisticUserMessage: undefined,
+          source: 'mcp-app',
+        }),
+      );
+      expect(testState.prompt).toBe('hello');
+      expect(editorClear).not.toHaveBeenCalled();
+      expect(editorCommit).not.toHaveBeenCalled();
+      expect(mockFollowup.clear).not.toHaveBeenCalled();
+      controller.abort();
+      expect(mockSessionActions.cancel).not.toHaveBeenCalled();
+      await act(async () => {
+        turn.resolve();
+        await result;
+      });
+    });
+
+    it.each([
+      'abort',
+      'owner',
+      'recovery',
+      'client',
+      'session',
+      'write-block',
+    ] as const)(
+      'does not dispatch after %s invalidates an asynchronous preparation',
+      async (change) => {
+        const prepared = deferred<void>();
+        const prepareSubmit = vi.fn(() => prepared.promise);
+        const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+        const { rerender } = renderApp({ prepareSubmit, onSubmitBefore });
+        await flush();
+        const controller = new AbortController();
+        const request = submission(controller);
+        let result!: Promise<unknown>;
+        act(() => {
+          result = mcpAppMessageHost.current!.submit(
+            'Analyze failures',
+            request,
+          );
+        });
+        expect(prepareSubmit).toHaveBeenCalledOnce();
+        act(() => {
+          if (change === 'abort') controller.abort();
+          if (change === 'owner') testState.ownerVersion += 1;
+          if (change === 'recovery') testState.recoveryVersion += 1;
+          if (change === 'client') mockConnection.clientId = 'client-2';
+          if (change === 'session') mockConnection.sessionId = 'session-2';
+          if (change === 'write-block') mockConnection.loadingTranscript = true;
+          rerender({ prepareSubmit, onSubmitBefore });
+        });
+        if (change === 'write-block') {
+          act(() => {
+            mockConnection.loadingTranscript = false;
+            rerender({ prepareSubmit, onSubmitBefore });
+          });
+        }
+        await act(async () => {
+          prepared.resolve();
+          await result;
+        });
+
+        expect(onSubmitBefore).not.toHaveBeenCalled();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(request.onDispatched).not.toHaveBeenCalled();
+        expect(request.onAdmitted).not.toHaveBeenCalled();
+        expect(editorClear).not.toHaveBeenCalled();
+        expect(editorCommit).not.toHaveBeenCalled();
+        expect(mockFollowup.clear).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['abort', 'recovery', 'client'] as const)(
+      'checks %s again at the final transport boundary',
+      async (change) => {
+        const ready = deferred<void>();
+        const daemonDispatch = vi.fn();
+        mockSessionActions.sendPrompt.mockImplementationOnce(
+          async (_text, options) => {
+            await ready.promise;
+            options.onAdmissionStarted();
+            options.beforeDispatch?.('client-1');
+            daemonDispatch();
+          },
+        );
+        const { rerender } = renderApp();
+        await flush();
+        const controller = new AbortController();
+        const request = submission(controller);
+        let result!: Promise<unknown>;
+        act(() => {
+          result = mcpAppMessageHost.current!.submit(
+            'Analyze failures',
+            request,
+          );
+        });
+        await flush();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+        act(() => {
+          if (change === 'abort') controller.abort();
+          if (change === 'recovery') testState.recoveryVersion += 1;
+          if (change === 'client') mockConnection.clientId = 'client-2';
+          rerender();
+        });
+        await act(async () => {
+          ready.resolve();
+          await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+        });
+        expect(daemonDispatch).not.toHaveBeenCalled();
+        expect(request.onDispatched).not.toHaveBeenCalled();
+        expect(
+          sessionCatalogController.promptAdmissionUncertain,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['prepareSubmit', 'onSubmitBefore'] as const)(
+      'propagates %s rejection without dispatching or restoring App text into the draft',
+      async (hook) => {
+        const rejected = vi.fn().mockRejectedValue(new Error('Host refused'));
+        renderApp({ [hook]: rejected, onToast: vi.fn() });
+        await flush();
+        const request = submission();
+        await act(async () => {
+          await expect(
+            mcpAppMessageHost.current!.submit('Analyze failures', request),
+          ).rejects.toThrow('Host refused');
+        });
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(request.onDispatched).not.toHaveBeenCalled();
+        expect(request.onAdmitted).not.toHaveBeenCalled();
+        expect(testState.prompt).toBe('hello');
+        expect(editorClear).not.toHaveBeenCalled();
+        expect(editorCommit).not.toHaveBeenCalled();
+        expect(mockFollowup.clear).not.toHaveBeenCalled();
+      },
+    );
+
+    describe.each(['initial', 'retry'] as const)(
+      '%s SDK dispatch',
+      (attempt) => {
+        it.each(['sdk-client', 'rpc-cancel', 'owner-recovery'] as const)(
+          'refuses transport after %s changes beyond the admission-start notification',
+          async (change) => {
+            const ready = deferred<void>();
+            const daemonDispatch = vi.fn();
+            let dispatchClientId: string | undefined = 'client-1';
+            mockSessionActions.sendPrompt.mockImplementationOnce(
+              async (_text, options) => {
+                options.onAdmissionStarted();
+                if (attempt === 'retry') {
+                  options.beforeDispatch(dispatchClientId);
+                  daemonDispatch();
+                }
+                await ready.promise;
+                options.beforeDispatch(dispatchClientId);
+                daemonDispatch();
+                options.onAdmitted({ promptId: 'must-not-be-admitted' });
+              },
+            );
+            const { rerender } = renderApp();
+            await flush();
+            const controller = new AbortController();
+            const request = submission(controller);
+            let result!: Promise<unknown>;
+            act(() => {
+              result = mcpAppMessageHost.current!.submit(
+                'Analyze failures',
+                request,
+              );
+            });
+            await flush();
+            const sentAttempts = attempt === 'retry' ? 1 : 0;
+            expect(request.onDispatched).toHaveBeenCalledTimes(sentAttempts);
+            expect(daemonDispatch).toHaveBeenCalledTimes(sentAttempts);
+            act(() => {
+              if (change === 'sdk-client')
+                dispatchClientId = 'client-recovered';
+              if (change === 'rpc-cancel') controller.abort();
+              if (change === 'owner-recovery') testState.recoveryVersion += 1;
+              rerender();
+            });
+            expect(mockConnection.clientId).toBe('client-1');
+            await act(async () => {
+              ready.resolve();
+              await expect(result).rejects.toMatchObject({
+                name: 'AbortError',
+              });
+            });
+            expect(daemonDispatch).toHaveBeenCalledTimes(sentAttempts);
+            expect(request.onAdmitted).not.toHaveBeenCalled();
+            expect(
+              sessionCatalogController.promptAdmissionUncertain,
+            ).not.toHaveBeenCalled();
+            expect(testState.prompt).toBe('hello');
+          },
+        );
+      },
+    );
+
+    it('permits each SDK dispatch with the same live client and notifies each actual attempt', async () => {
+      const daemonDispatch = vi.fn();
+      mockSessionActions.sendPrompt.mockImplementationOnce(
+        async (_text, options) => {
+          options.onAdmissionStarted();
+          options.beforeDispatch('client-1');
+          daemonDispatch();
+          await Promise.resolve();
+          options.beforeDispatch('client-1');
+          daemonDispatch();
+          options.onAdmitted({ promptId: 'accepted-retry' });
+        },
+      );
+      renderApp();
+      await flush();
+      const request = submission();
+      await act(async () => {
+        await mcpAppMessageHost.current!.submit('Analyze failures', request);
+      });
+      expect(daemonDispatch).toHaveBeenCalledTimes(2);
+      expect(request.onDispatched).toHaveBeenCalledTimes(2);
+      expect(request.onAdmitted).toHaveBeenCalledWith({
+        promptId: 'accepted-retry',
+      });
+    });
+
+    it.each(['streaming', 'active', 'goal'] as const)(
+      'refuses a known %s session without enqueuing the App text',
+      async (busy) => {
+        if (busy === 'streaming') testState.streamingState = 'responding';
+        if (busy === 'active') testState.sessionHasActivePrompt = true;
+        if (busy === 'goal') mockConnection.goalState = activeGoalSnapshot();
+        const prepareSubmit = vi.fn();
+        renderApp({ prepareSubmit });
+        await flush();
+        await expect(
+          mcpAppMessageHost.current!.submit('Analyze failures', submission()),
+        ).rejects.toThrow();
+        expect(prepareSubmit).not.toHaveBeenCalled();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+        expect(testState.prompt).toBe('hello');
+      },
+    );
+
+    it('leaves dispatch without a receipt distinguishable from admission', async () => {
+      mockSessionActions.sendPrompt.mockImplementationOnce(
+        async (_text, options) => {
+          options.onAdmissionStarted();
+          options.beforeDispatch?.('client-1');
+          throw new TypeError('Lost response');
+        },
+      );
+      renderApp();
+      await flush();
+      const request = submission();
+      await act(async () => {
+        await expect(
+          mcpAppMessageHost.current!.submit('Analyze failures', request),
+        ).rejects.toThrow('Lost response');
+      });
+      expect(request.onDispatched).toHaveBeenCalledOnce();
+      expect(request.onAdmitted).not.toHaveBeenCalled();
+      expect(
+        sessionCatalogController.promptAdmissionUncertain,
+      ).toHaveBeenCalledWith('/tmp/project');
+      expect(testState.prompt).toBe('hello');
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+
+    it('does not take an accepted App prompt back into an empty composer on cancellation', async () => {
+      const turn = deferred<void>();
+      mockSessionActions.sendPrompt.mockImplementationOnce((text, options) => {
+        testState.blocks = [{ id: 'app-user', kind: 'user', text }];
+        options.onAdmissionStarted();
+        options.beforeDispatch?.('client-1');
+        options.onAdmitted({ promptId: 'app-prompt' });
+        return turn.promise;
+      });
+      mockSessionActions.cancel.mockImplementationOnce(async () =>
+        turn.resolve(),
+      );
+      testState.prompt = '';
+      renderApp();
+      await flush();
+      let result!: Promise<unknown>;
+      act(() => {
+        result = mcpAppMessageHost.current!.submit(
+          'Analyze failures',
+          submission(),
+        );
+      });
+      await flush();
+      await act(async () => {
+        testState.latestChatEditorProps!.onCancel!();
+        await result;
+        for (const listener of testState.promptSettledListeners) {
+          listener({
+            sessionId: 'session-1',
+            promptId: 'app-prompt',
+            outcome: 'cancelled',
+            originatorClientId: 'client-1',
+          });
+        }
+      });
+      await flush();
+      expect(testState.prompt).toBe('');
+      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+    });
+
+    it.each(['working_directory_missing', 'working_directory_compromised'])(
+      'refuses App messages in a session with %s',
+      async (errorCode) => {
+        const prepareSubmit = vi.fn();
+        mockConnection.standaloneSession = { errorCode };
+        renderApp({ prepareSubmit });
+        await flush();
+        await expect(
+          mcpAppMessageHost.current!.submit('Analyze failures', submission()),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+        expect(prepareSubmit).not.toHaveBeenCalled();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['veto', 'rejected'])(
+      'preserves the earlier composer retry after an App request is %s',
+      async (reason) => {
+        mockSessionActions.sendPrompt.mockImplementationOnce(
+          async (text, options) => {
+            testState.blocks = [{ id: 'composer-user', kind: 'user', text }];
+            options.onAdmissionStarted();
+            options.onAdmitted({ promptId: 'composer-prompt' });
+          },
+        );
+        const { rerender } = renderApp();
+        await flush();
+        const files = [
+          {
+            name: 'failure.log',
+            media_type: 'text/plain',
+            text: 'original evidence',
+          },
+        ];
+        await act(async () => {
+          testState.latestChatEditorProps!.onSubmit(
+            'original composer text',
+            undefined,
+            files,
+          );
+        });
+        await flush();
+        act(() => {
+          testState.blocks = [
+            ...testState.blocks,
+            {
+              id: 'composer-error',
+              kind: 'error',
+              source: 'turn_error',
+              message: 'Network error',
+            },
+          ];
+          rerender();
+        });
+        await flush();
+        mockSessionActions.sendPrompt.mockImplementationOnce(
+          async (_text, options) => {
+            options.onAdmissionStarted();
+            if (reason === 'veto')
+              throw new PromptDispatchCancelledError('Source changed');
+            options.beforeDispatch('client-1');
+            throw new DaemonHttpError(403, {}, 'Denied');
+          },
+        );
+        await act(async () => {
+          await expect(
+            mcpAppMessageHost.current!.submit('App analysis', submission()),
+          ).rejects.toThrow();
+        });
+        expect(
+          sessionCatalogController.promptAdmissionUncertain,
+        ).not.toHaveBeenCalled();
+        await act(async () => {
+          window.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'y', ctrlKey: true }),
+          );
+        });
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(3);
+        expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+          'original composer text',
+          expect.objectContaining({ files, retry: true }),
+        );
+      },
+    );
+
+    it('does not retry an earlier composer prompt for a later App turn error', async () => {
+      mockSessionActions.sendPrompt.mockImplementation(
+        async (text, options) => {
+          testState.blocks = [
+            ...testState.blocks,
+            { id: `user-${text}`, kind: 'user', text },
+          ];
+          options.onAdmissionStarted();
+          options.beforeDispatch?.('client-1');
+          options.onAdmitted({ promptId: `prompt-${text}` });
+        },
+      );
+      const { container, rerender } = renderApp();
+      await flush();
+      await clickSubmit(container);
+      await flush();
+      testState.prompt = 'unfinished draft';
+      await act(async () => {
+        await mcpAppMessageHost.current!.submit(
+          'Analyze failures',
+          submission(),
+        );
+      });
+      act(() => {
+        testState.blocks = [
+          ...testState.blocks,
+          {
+            kind: 'error',
+            source: 'turn_error',
+            id: 'app-error',
+            message: 'Network error',
+          },
+        ];
+        rerender();
+      });
+      await flush();
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'y', ctrlKey: true }),
+        );
+      });
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      expect(testState.prompt).toBe('unfinished draft');
+    });
+  });
+
   it('gates direct submissions and dispatches compatible submit events', async () => {
     const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
     const onSessionChange = vi.fn();
@@ -25787,6 +26299,12 @@ describe('App session callbacks', () => {
       'hello',
       expect.objectContaining({ retry: undefined }),
     );
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.at(-1)?.[1],
+    ).not.toHaveProperty('beforeDispatch');
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.at(-1)?.[1],
+    ).not.toHaveProperty('source');
     expect(editorCommit).toHaveBeenCalledTimes(1);
     expect(editorClear).not.toHaveBeenCalled();
     expect(onSessionChange).toHaveBeenCalledWith({
