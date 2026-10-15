@@ -81,6 +81,7 @@ class HostedPublicWorkspaceIT {
     private boolean shell;
     private String shellDecision = "allow";
     private boolean durableClose;
+    private boolean resident;
     private boolean shellLifecycleV2;
     private Map<String, byte[]> publicationObjects;
     private String shellFault;
@@ -691,6 +692,136 @@ class HostedPublicWorkspaceIT {
                 + " WHERE session_id = ? AND turn_id = ?", String.class,
                 session, turnId);
     }
+    @Test
+    @EnabledOnOs(OS.MAC)
+    @Timeout(180)
+    void residentPublicCloseHandsRetainedFilesToTheNextSession() throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("ordinary H2 scope only").isNull();
+        resident = true;
+        var roots = boot();
+        register("workspace-0", "storage-0");
+        var fixture = spring.getBean(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.class);
+        var bindingRepository = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
+        var runtimeSessions = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class);
+        var state = spring.getBean(com.alibaba.qwen.code.managedagent.store.AgentStateStore.class);
+        String first = residentSession("G0_RESIDENT_FIRST", "resident-first");
+        assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-first-" + tenant);
+        var context = state.requireSession(tenant, first).workspace();
+        var residentMapping = new com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces(
+                spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
+                        .getRuntimeBroker().getResidentWorkspaces());
+        var original = bindingRepository.findActive(residentMapping.request(context));
+        var oldContexts = runtimeSessions.findByBinding(original.getBindingId(), original.getGeneration(), null, 100);
+        assertThat(oldContexts).isNotEmpty();
+        assertThat(oldContexts).allSatisfy(row -> assertThat(row.getSession().getHarnessSessionId()).isEqualTo(first));
+        JsonNode bindingBefore = com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
+        JsonNode slotBefore = com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey());
+        JsonNode storageBefore = com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage WHERE alias_key = ?",
+                spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
+                        .getRuntimeBroker().getResidentWorkspaces().getFirst().registration().aliasKey());
+        var registration = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
+                .getRuntimeBroker().getResidentWorkspaces().getFirst().registration();
+        var expectedOwner = (com.fasterxml.jackson.databind.node.ObjectNode) com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+                "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0);
+        assertThat(expectedOwner.path("holder_key").isNull()).isTrue();
+        assertThat(expectedOwner.path("runtime_session_id").isNull()).isTrue();
+        Map<String, Object> nextBody = Map.of("agent_id", "qwen-code", "input", List.of(),
+                "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
+        assertThat(request("POST", "/v1/agents/sessions", nextBody, "busy-before-close", "actor", 409)
+                .path("error").path("code").asText()).isEqualTo("workspace_busy");
+        String operation = closeResidentSession(first, "resident-close");
+        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?", String.class, tenant, first)).isEqualTo("CLOSED");
+        assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
+                Integer.class, tenant, first, operation)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                String.class, tenant, first)).isEqualTo("SEALED");
+        assertThat(runtimeSessions.findByBinding(original.getBindingId(), original.getGeneration(), null, 100))
+                .allSatisfy(row -> assertThat(row.getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.RELEASED));
+        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId())).isEqualTo(bindingBefore);
+        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey())).isEqualTo(slotBefore);
+        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage WHERE alias_key = ?", registration.aliasKey())).isEqualTo(storageBefore);
+        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0)).isEqualTo(expectedOwner);
+        assertThat(bindingRepository.findById(original.getBindingId()).getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY);
+        assertThat(bindingRepository.findById(original.getBindingId()).isDrainRequested()).isFalse();
+        assertThat(fixture.workerAlive()).isTrue(); assertThat(fixture.physicalReleases).hasValue(0);
+        assertThat(request("POST", "/v1/agents/sessions/" + first + "/close", null,
+                "resident-close", "actor", 202).path("id").asText()).isEqualTo(operation);
+        com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.assertConflict(() -> new com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport()
+                .activateWorkspace(original, oldContexts.getFirst(), context, true).toCompletableFuture().join());
+        com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.assertConflict(() -> spring.getBean(EmbeddedRuntimeBroker.class).service()
+                .acquire(first, oldContexts.getFirst().getRuntimeSessionId(), oldContexts.getFirst().getSession().getTurnKind())
+                .toCompletableFuture().join());
+        String second = residentSession("G0_RESIDENT_SECOND", "resident-second");
+        assertThat(second).isNotEqualTo(first);
+        var retained = bindingRepository.findActive(residentMapping.request(state.requireSession(tenant, second).workspace()));
+        assertThat(retained.getBindingId()).isEqualTo(original.getBindingId());
+        assertThat(retained.getGeneration()).isEqualTo(original.getGeneration());
+        assertThat(retained.getRequest()).isEqualTo(original.getRequest());
+        assertThat(retained.getProvisionSeed()).isEqualTo(original.getProvisionSeed());
+        assertThat(retained.hasSameLease(original.getLease())).isTrue();
+        assertThat(retained.getResourceHandle()).isEqualTo(original.getResourceHandle());
+        assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-second-" + tenant);
+        assertThat(decoy.resolve("child/proof.txt")).doesNotExist();
+        assertThat(fixture.starts).hasValue(1); assertThat(fixture.physicalReleases).hasValue(0);
+        assertThat(fixture.workerAlive()).isTrue();
+        JsonNode bindingBeforeSecondClose = com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+                "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
+        closeResidentSession(second, "resident-second-close");
+        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, second)).isEqualTo("CLOSED");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                String.class, tenant, second)).isEqualTo("SEALED");
+        assertThat(runtimeSessions.findByBinding(original.getBindingId(), original.getGeneration(), null, 100))
+                .allSatisfy(row -> assertThat(row.getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.RELEASED));
+        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+                "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId())).isEqualTo(bindingBeforeSecondClose);
+        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+                "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey())).isEqualTo(slotBefore);
+        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+                "SELECT * FROM ma_storage WHERE alias_key = ?", registration.aliasKey())).isEqualTo(storageBefore);
+        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+                "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0)).isEqualTo(expectedOwner);
+        assertThat(bindingRepository.findById(original.getBindingId()).getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY);
+        assertThat(bindingRepository.findById(original.getBindingId()).isDrainRequested()).isFalse();
+        assertThat(fixture.starts).hasValue(1); assertThat(fixture.physicalReleases).hasValue(0);
+        assertThat(fixture.workerAlive()).isTrue();
+        assertThat(modelFailure.get()).isNull();
+    }
+
+    private String closeResidentSession(String session, String key) throws Exception {
+        String operation = request("POST", "/v1/agents/sessions/" + session + "/close", null,
+                key, "actor", 202).path("id").asText();
+        try {
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(request("GET",
+                    "/v1/agents/sessions/" + session + "/operations/" + operation, null, null, "actor", 200)
+                    .path("status").asText()).isEqualTo("completed"));
+        } catch (RuntimeException | AssertionError cause) {
+            throw new AssertionError("Resident close failed: " + Files.readString(temporary.resolve("harness.log")), cause);
+        }
+        return operation;
+    }
+
+    private String residentSession(String prompt, String key) throws Exception {
+        String session = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code",
+                "input", List.of(Map.of("type", "input_text", "text", prompt)),
+                "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")), key, "actor", 202).path("id").asText();
+        await().atMost(Duration.ofSeconds(35)).failFast(() -> {
+            if ("FAILED".equals(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?", String.class, session))) {
+                throw new AssertionError("Resident turn failed: " + Files.readString(temporary.resolve("harness.log")));
+            }
+        }).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?", String.class, session)).isEqualTo("COMPLETED");
+        });
+        String journal = String.join("\n", jdbc.query("SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision",
+                (row, n) -> new String(row.getBytes(1), StandardCharsets.UTF_8), tenant, session));
+        assertThat(journal).contains("tool_result");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution e JOIN ma_runtime_binding b"
+                + " ON b.binding_id = e.binding_id WHERE b.tenant_id = ? AND e.harness_session_id = ?"
+                + " AND e.execution_state = 'SETTLED'", Long.class, tenant, session)).isEqualTo(3);
+        assertThat(request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200).toString()).contains("G0_DONE");
+        return session;
+    }
 
     private List<Path> boot() throws Exception {
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath();
@@ -1106,7 +1237,8 @@ class HostedPublicWorkspaceIT {
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
                 + "Linux".equals(System.getProperty("os.name")));
-        for (int i = 0; i < roots.size(); i++) {
+        if (resident) com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.arguments(arguments, tenant, roots.getFirst());
+        for (int i = 0; !resident && i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
             arguments.add(prefix + "storage-id=storage-" + i);
@@ -1115,6 +1247,8 @@ class HostedPublicWorkspaceIT {
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
                 .initializers(context -> {
                     context.getBeanFactory().registerSingleton("g0Authentication", authentication());
+                    if (resident) com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.install(context,
+                            List.of(node, cli.toString(), "managed-runtime-worker"), temporary.resolve("broker"));
                     if (shellLifecycleV2) {
                         publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
                         var acl = new com.aliyun.oss.model.AccessControlList();
@@ -1326,6 +1460,8 @@ class HostedPublicWorkspaceIT {
             boolean runShell = shell && prompt.get().contains("G0_SHELL");
             boolean foregroundOnly = runShell && shellLifecycleV2;
             if (!runShell && step == 3) assertThat(results.get(2).toString()).contains("after");
+            boolean residentSecond = resident && prompt.get().contains("G0_RESIDENT_SECOND");
+            if (residentSecond && step >= 1) assertThat(results.getFirst().toString()).contains("after-first-" + tenant);
             if (runShell && shellFault == null && !foregroundOnly && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
             if (runShell && shellFault == null && !foregroundOnly && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
             if (runShell && shellFault == null && step >= (foregroundOnly ? 1 : 3) && "allow".equals(shellDecision)) {
@@ -1338,16 +1474,20 @@ class HostedPublicWorkspaceIT {
             boolean toolCall = step < (shellFault != null || foregroundOnly ? 1 : 3);
             if (toolCall) {
                 String name = runShell ? (!foregroundOnly && shellFault == null && step == 0 ? "monitor" : "run_shell_command")
-                        : List.of("write_file", "edit", "read_file").get(step);
+                        : (residentSecond ? List.of("read_file", "edit", "read_file")
+                                : List.of("write_file", "edit", "read_file")).get(step);
                 Map<String, Object> args = runShell ? switch (foregroundOnly ? 2 : step) {
                     case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
                     case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
                     default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");
                 } : switch (step) {
                     case 0 -> Map.of("file_path", "proof.txt", "content", "before");
-                    case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", "after");
+                    case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", resident ? "after-first-" + tenant : "after");
                     default -> Map.of("file_path", "proof.txt");
                 };
+                if (residentSecond) args = step == 1
+                        ? Map.of("file_path", "proof.txt", "old_string", "after-first-" + tenant, "new_string", "after-second-" + tenant)
+                        : Map.of("file_path", "proof.txt");
                 if (shellFault != null) {
                     String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
                             + " process.stdout.write(Buffer.alloc(1024 * 1024, 0x61), () => {"

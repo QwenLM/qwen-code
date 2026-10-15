@@ -110,6 +110,38 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void originalCleanupPreservesTheLifecycleClaimForReleaseAdmission() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            var authority = new RuntimeLifecycleAuthority("close-operation", 3);
+            var observed = new AtomicReference<RuntimeLifecycleAuthority>();
+            var repository = (RuntimeBindingRepository) Proxy.newProxyInstance(
+                    RuntimeBindingRepository.class.getClassLoader(), new Class<?>[] {RuntimeBindingRepository.class},
+                    (proxy, method, args) -> {
+                        if ("requireHarnessRecovery".equals(method.getName())) {
+                            observed.set((RuntimeLifecycleAuthority) args[2]);
+                            if (!authority.equals(args[2])) {
+                                throw new RuntimeBrokerException(409, "runtime_admission_closed", "Claim required", false);
+                            }
+                            return false;
+                        }
+                        try { return method.invoke(fixture.bindingRepository, args); }
+                        catch (java.lang.reflect.InvocationTargetException error) { throw error.getCause(); }
+                    });
+            try (var broker = new RuntimeBrokerService(fixture.resolver, fixture.provisioner, fixture.transport,
+                    repository, fixture.sessionRepository, fixture.executionRepository, "claim-test",
+                    Duration.ofMinutes(1), Duration.ofMinutes(1))) {
+                var original = join(broker.acquire("harness", "runtime", "bootstrap"));
+                assertTrue(join(broker.releaseOriginal("harness", "runtime", original.getBindingId(),
+                        original.getRuntimeGeneration(), authority)));
+                assertSame(authority, observed.get());
+                assertEquals(1, fixture.transport.releaseCalls.get());
+                assertEquals(RuntimeSessionRecord.State.RELEASED,
+                        fixture.sessionRepository.findById(SESSION_SCOPE, "runtime").getState());
+            }
+        }
+    }
+
+    @Test
     void cleanupBeforeAcquireRemainsAvailableAfterAdmissionCloses() {
         for (var state : List.of(RuntimeBindingRecord.State.READY, RuntimeBindingRecord.State.DRAINING)) {
             try (Fixture fixture = new Fixture(SESSION_SCOPE)) {

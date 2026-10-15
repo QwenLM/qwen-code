@@ -234,6 +234,79 @@ class ResidentWorkspacesTest {
     }
 
     @Test
+    void originalCleanupReleasesOnlyTheSavedResidentSessionAndReplaysWithoutAnotherRelease() {
+        var session = create("original").sessionId();
+        var request = residents.request(context);
+        var original = ready(request);
+        var record = active(original, session);
+        var before = storage.inspect(mapping.registration());
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING' WHERE session_id = ?", session);
+        bindings.requestHarnessDrain("tenant", session);
+        var releases = new AtomicInteger();
+        try (var broker = broker(original, releases, true)) {
+            assertThat(broker.releaseOriginal(session, record.getRuntimeSessionId(), original.getBindingId(),
+                    original.getGeneration()).toCompletableFuture().join()).isTrue();
+            var released = runtimeSessions.findById(request.getScope(), record.getRuntimeSessionId());
+            assertThat(released.getState()).isEqualTo(RuntimeSessionRecord.State.RELEASED);
+            assertThat(broker.releaseOriginal(session, record.getRuntimeSessionId(), original.getBindingId(),
+                    original.getGeneration()).toCompletableFuture().join()).isTrue();
+            assertThat(runtimeSessions.findById(request.getScope(), record.getRuntimeSessionId()).getVersion())
+                    .isEqualTo(released.getVersion());
+        }
+        assertThat(releases).hasValue(1);
+        assertThat(bindings.findActive(request).getState()).isEqualTo(RuntimeBindingRecord.State.READY);
+        assertThat(bindings.findActive(request).getVersion()).isEqualTo(original.getVersion());
+        assertThat(bindings.findActive(request).isDrainRequested()).isFalse();
+        assertThat(storage.inspect(mapping.registration())).isEqualTo(before);
+    }
+
+    @Test
+    void originalResidentCleanupRejectsUnknownAndMismatchedOwnersWithoutCreatingATombstone() {
+        var session = create("original").sessionId();
+        var original = ready(residents.request(context));
+        var record = active(original, session);
+        var before = storage.inspect(mapping.registration());
+        var releases = new AtomicInteger();
+        String missing = UUID.randomUUID().toString();
+        try (var broker = broker(original, releases, true)) {
+            for (var call : List.<Runnable>of(
+                    () -> broker.releaseOriginal(session, missing, original.getBindingId(), original.getGeneration()).toCompletableFuture().join(),
+                    () -> broker.releaseOriginal("foreign", record.getRuntimeSessionId(), original.getBindingId(), original.getGeneration()).toCompletableFuture().join(),
+                    () -> broker.releaseOriginal(session, record.getRuntimeSessionId(), "foreign", original.getGeneration()).toCompletableFuture().join(),
+                    () -> broker.releaseOriginal(session, record.getRuntimeSessionId(), original.getBindingId(), original.getGeneration() + 1).toCompletableFuture().join())) {
+                assertThatThrownBy(call::run).hasCauseInstanceOf(RuntimeBrokerException.class);
+            }
+        }
+        assertThat(releases).hasValue(0);
+        assertThat(runtimeSessions.findById(original.getRequest().getScope(), missing)).isNull();
+        assertThat(runtimeSessions.findById(original.getRequest().getScope(), record.getRuntimeSessionId()).getVersion())
+                .isEqualTo(record.getVersion());
+        assertThat(bindings.findActive(original.getRequest()).getVersion()).isEqualTo(original.getVersion());
+        assertThat(storage.inspect(mapping.registration())).isEqualTo(before);
+    }
+
+    @Test
+    void unconfirmedOriginalCleanupKeepsTheResidentSessionAndReservationHolding() {
+        var session = create("original").sessionId();
+        var original = ready(residents.request(context));
+        var record = active(original, session);
+        var before = storage.inspect(mapping.registration());
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING' WHERE session_id = ?", session);
+        bindings.requestHarnessDrain("tenant", session);
+        var releases = new AtomicInteger();
+        try (var broker = broker(original, releases, false)) {
+            assertThatThrownBy(() -> broker.releaseOriginal(session, record.getRuntimeSessionId(), original.getBindingId(),
+                    original.getGeneration()).toCompletableFuture().join()).hasCauseInstanceOf(RuntimeBrokerException.class);
+        }
+        assertThat(releases).hasValue(1);
+        assertThat(runtimeSessions.findById(original.getRequest().getScope(), record.getRuntimeSessionId()).getState())
+                .isEqualTo(RuntimeSessionRecord.State.RELEASING);
+        assertThatThrownBy(() -> create("next")).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(storage.inspect(mapping.registration())).isEqualTo(before);
+        assertThat(bindings.findActive(original.getRequest()).getVersion()).isEqualTo(original.getVersion());
+    }
+
+    @Test
     void uncertainReleaseKeepsBothHandoffAndCompletionClosed() {
         var session = create("original").sessionId();
         var request = residents.request(context);

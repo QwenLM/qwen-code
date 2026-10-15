@@ -97,6 +97,17 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository,
+                workspaceExecutionStore, publications, publicationData, jdbc, manager, null);
+    }
+
+    EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications, ToolPublicationDataStore publicationData,
+            org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.transaction.PlatformTransactionManager manager,
+            RuntimeProvisioner residentProvisioner) {
         this.store = store;
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
@@ -133,11 +144,21 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         RuntimeProvisioner baseProvisioner;
         if (resident) {
             if (!(bindingRepository instanceof com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository original)
-                    || jdbc == null || manager == null || workspaceExecutionStore == null) {
+                    || jdbc == null || manager == null || workspaceExecutionStore == null
+                    || !original.usesDataSource(jdbc.getDataSource())) {
                 throw new IllegalStateException("Resident Workspace requires original JDBC authority");
             }
-            baseProvisioner = new ResidentWorkspaceProvisioner(properties, jdbc, manager, original);
+            if (residentProvisioner != null
+                    && !"kubernetes-workspace".equals(residentProvisioner.kind())) {
+                throw new IllegalArgumentException("Resident provisioner kind differs");
+            }
+            baseProvisioner = residentProvisioner == null
+                    ? new ResidentWorkspaceProvisioner(properties, jdbc, manager, original)
+                    : residentProvisioner;
         } else {
+            if (residentProvisioner != null) {
+                throw new IllegalArgumentException("Resident provisioner requires resident configuration");
+            }
             if (!broker.getResidentWorkspaces().isEmpty()) {
                 throw new IllegalStateException("Resident mappings require kubernetes-workspace provisioner");
             }

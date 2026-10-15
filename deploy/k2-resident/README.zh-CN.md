@@ -11,6 +11,9 @@ Read、Write 和 Edit。Session 关闭会结算并撤销原上下文，下一个
 Hosted Harness、Session store、Broker token 和凭据加密配置。Kubernetes token
 和 CA 配置指向服务端读取的本地文件，凭据不应写入此模板或 worker Workspace。
 
+Session store 和 Broker 的全局 `workspace-id` 必须像示例中一样保持相等，这是现有
+Hosted 启动契约的要求；各公开 Workspace 仍解析自己的注册身份。
+
 启用映射前，使用现有注册 operator 登记精确 CSI registration，并在 Workspace
 registry 登记匹配的租户/Workspace、代数和存储。Workspace config/policy 分别
 使用 `managed-runtime-tools/1` 和 `preapproved-workspace-tools/1`，再给可信

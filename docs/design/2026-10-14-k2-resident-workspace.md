@@ -79,6 +79,12 @@ Harness Session in the exact shared binding. It settles and releases them using
 the existing release protocol, verifies no active original context remains, and
 never calls binding drain, Pod deletion or physical storage release.
 
+Original cleanup accepts a resident binding only with its already persisted
+Runtime Session, matching binding, generation, Scope and Harness owner. Missing
+resident owners cannot create a cleanup tombstone. The original lifecycle claim
+is passed to release admission, and completed cleanup replays without another
+worker release. The legacy Session-isolated tombstone path remains available.
+
 An uncertain release leaves the Session unfinished and storage claimed. A new
 Session remains blocked. Broker restart recovers the original saved runtime
 identity; worker or Pod replacement, missing resources, changed mount, container
@@ -111,6 +117,22 @@ native acceptance operations are not retried through this architecture change.
 Build, typecheck, focused tests, independent validation and two clean full-diff
 audits precede a completion claim. Deployment and cloud acceptance remain separate
 from local implementation validation.
+
+The ordinary public lifecycle integration test uses real Spring HTTP, H2,
+Hosted Harness, journal writers and worker/provider processes on macOS. A
+package-private Broker constructor accepts an explicit test placement provider;
+every public constructor retains the production CSI provisioner and JDBC checks.
+The fixture uses boot 2, an ordinary directory and a declared synthetic placement
+handle. It does not emulate CSI boot 3 or qualify a Pod, mount or physical release.
+The second Session must read the first Session's unique bytes before editing
+them; both Sessions close through the public API and must seal their journals
+and release their original Runtime Sessions while retaining the shared binding
+and complete physical ownership rows.
+
+Warm and acquisition HTTP responses carry the original resolved Scope's
+isolation class, including the resident profile. Hosted validates this field
+alongside the capability digest; it does not infer isolation from a profile name
+or substitute a default when the field is missing.
 
 ## Deferred work
 

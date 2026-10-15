@@ -63,6 +63,11 @@ Session。幂等创建返回原准入结果。第一版的子 Session 不能共�
 共享绑定中属于原 Harness Session 的 Runtime Session，使用现有释放协议结算
 并关闭它们，验证没有原活动上下文；不调用绑定排空、Pod 删除或物理存储释放。
 
+原始清理只有在已持久化 Runtime Session 的绑定、代数、Scope 和 Harness 归属
+全部匹配时才接受常驻绑定；原 owner 缺失时不能新建清理 tombstone。原生命周期
+claim 传给释放准入，已完成清理的重放不会再次调用 worker 释放。旧 Session
+隔离的 tombstone 路径保留。
+
 释放结果未知时 Session 保持未完成，存储保持占用，新 Session 继续被阻止。
 Broker 重启恢复原持久化运行环境身份。worker 或 Pod 被替换、资源缺失、挂载
 变化、容器重启或恢复不确定均让 Workspace 保持不可用。本版不自动替换或转移
@@ -90,6 +95,18 @@ Broker 重启恢复原持久化运行环境身份。worker 或 Pod 被替换、�
 Linux CSI 挂载或 ACK 部署。此前拒绝的 native 验收操作不借架构调整重新尝试。
 完成声明前需要构建、类型检查、聚焦测试、独立验证和两轮干净完整 diff 自审。
 部署及云上验收与本地实现验证分开记录。
+
+普通公开生命周期联调在 macOS 使用真实 Spring HTTP、H2、Hosted Harness、日志
+writer 和 worker/provider 进程。Broker 的包私有构造器接受明确的测试放置 provider；
+所有公开构造器保留生产 CSI provisioner 和 JDBC 检查。夹具采用 boot 2、普通目录
+及明示的合成放置 handle，不模拟 CSI boot 3，也不验证 Pod、挂载或物理释放。
+第二个 Session 必须在编辑前先读到第一个 Session 的唯一文件字节；两个 Session
+都通过公开 API 关闭，封存日志并释放各自原 Runtime Session，同时保留共享绑定
+及完整物理归属行。
+
+预热和获取的 HTTP 响应包含原始已解析 Scope 的隔离级别，也覆盖常驻配置。
+Hosted 将其与能力摘要一并校验，不从配置名推测隔离方式，也不在字段缺失时
+代入默认值。
 
 ## 延后工作
 

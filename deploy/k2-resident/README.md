@@ -14,6 +14,10 @@ token and credential-encryption settings separately. The Kubernetes token and CA
 settings name local files read by the server; credentials do not belong in this
 template or the worker Workspace.
 
+Keep the Session store's global `workspace-id` equal to the Broker's global
+`workspace-id`, as in the example. The existing Hosted startup contract requires
+this match; each public Workspace still resolves its own registered identity.
+
 Before enabling the mapping, register the exact CSI registration with the
 existing registration operator and register the matching tenant/Workspace,
 generation and storage in the Workspace registry. Use `managed-runtime-tools/1`

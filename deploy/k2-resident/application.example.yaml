@@ -5,6 +5,8 @@ qwen:
     harness:
       workspace-files-enabled: true
       workspace-shell-enabled: false
+    session-store:
+      workspace-id: 'resident-default'
     runtime-broker:
       enabled: true
       provisioner: 'kubernetes-workspace'
