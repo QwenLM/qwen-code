@@ -27,6 +27,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -127,7 +128,7 @@ class WorkspaceRuntimeTest {
         var stopped = fixture.bindings().compareAndSet(fixture.binding(), fixture.binding().withDrainReceipt(receipt));
         var releasing = fixture.bindings().beginSessionRelease(fixture.sessions(), fixture.executions(), fixture.session());
         switch (fault) {
-            case "expired" -> jdbc.update("UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE binding_id = ?", stopped.getBindingId());
+            case "expired" -> jdbc.update("UPDATE ma_runtime_binding SET operation_lease_until = 946684800000 WHERE binding_id = ?", stopped.getBindingId());
             case "takeover" -> {
                 fixture.bindings().releaseOperation(stopped.getBindingId(), stopped.getOperationOwner(), stopped.getOperationGeneration());
                 assertThat(fixture.bindings().claimOperation(stopped.getBindingId(), "other", Duration.ofMinutes(5))).isNotNull();
@@ -156,12 +157,12 @@ class WorkspaceRuntimeTest {
         assertThatThrownBy(() -> new WorkspaceRuntimeProvisioner(local, null, authority).stopDrained(stopped)
                 .toCompletableFuture().join()).hasCauseInstanceOf(RuntimeBrokerException.class);
         verify(local, never()).stopDrained(any());
-        var before = jdbc.queryForList("SELECT * FROM ma_storage_owner WHERE holder_key IS NOT NULL");
+        var before = jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE holder_key IS NOT NULL");
         assertThatThrownBy(() -> fixture.bindings().completeStoppedSessionRelease(fixture.sessions(),
                 fixture.executions(), releasing, stopped)).isInstanceOf(RuntimeBrokerException.class);
         assertThat(fixture.sessions().findById(releasing.getSession().getScope(), releasing.getRuntimeSessionId()).getState())
                 .isEqualTo(RuntimeSessionRecord.State.RELEASING);
-        assertThat(jdbc.queryForList("SELECT * FROM ma_storage_owner WHERE holder_key IS NOT NULL")).isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE holder_key IS NOT NULL")).isEqualTo(before);
     }
 
     @Test
@@ -739,14 +740,14 @@ class WorkspaceRuntimeTest {
         verify(fixture.http(), never()).control(any(), any(), any());
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", session.tenantId());
         String storageKey = com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage.key(session.tenantId(), session.workspace().getStorageId());
-        var originalHolder = jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", storageKey);
+        var originalHolder = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ?", storageKey);
         when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
         for (String kind : List.of("mcp-status", "mcp-cancel", "mcp-release")) {
             Map<String, Object> operation = mcpControl(session, kind);
             transport.control(fixture.lease(), runtimeSession, operation).toCompletableFuture().join();
             verify(fixture.http()).control(fixture.lease(), runtimeSession, operation);
         }
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", storageKey)).isEqualTo(originalHolder);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ?", storageKey)).isEqualTo(originalHolder);
         jdbc.update("UPDATE ma_storage_owner SET holder_key = 'another-owner' WHERE storage_key = ?", storageKey);
         assertBusy(() -> transport.control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-status")));
     }

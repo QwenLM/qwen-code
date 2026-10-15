@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -672,7 +673,7 @@ class WorkspaceCsiNativeActivationGateTest {
     }
 
     private List<Map<String, Object>> head() {
-        return jdbc.queryForList("SELECT * FROM ma_session_head");
+        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head");
     }
 
     private void generate(boolean conversation) throws Exception {

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -226,7 +227,7 @@ public final class WorkspaceOperatorRecoveryStore {
     }
 
     private Map<String, Object> row(String recoveryId, boolean lock) {
-        List<Map<String, Object>> rows = jdbc.query("SELECT * FROM ma_operation WHERE operation_kind = ?"
+        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = ?"
                 + " AND operation_id = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> WorkspaceOperations.operation(row), KIND.name(), recoveryId.getBytes(StandardCharsets.UTF_8));
         if (rows.size() != 1) {
@@ -236,7 +237,7 @@ public final class WorkspaceOperatorRecoveryStore {
     }
 
     private Map<String, Object> findBindingOperation(RuntimeBindingRecord binding, boolean lock) {
-        List<Map<String, Object>> rows = jdbc.query("SELECT * FROM ma_operation WHERE operation_kind = ?"
+        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = ?"
                 + " AND tenant_id = ? AND target_key = ? AND target_revision = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> WorkspaceOperations.operation(row), KIND.name(), binding.getRequest().getScope().getTenantId(),
                 WorkspaceOperations.hash(binding.getBindingId()), binding.getGeneration());

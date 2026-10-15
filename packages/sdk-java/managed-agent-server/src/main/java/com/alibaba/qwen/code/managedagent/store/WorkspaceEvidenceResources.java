@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -16,7 +18,7 @@ final class WorkspaceEvidenceResources {
         String digest = digest(bytes);
         String resourceId = "workspace-proof:" + ownerKey + ":" + digest;
         String resourceKey = WorkspaceOperations.hash(scope, resourceId);
-        List<byte[]> existing = jdbc.query("SELECT * FROM ma_resource WHERE resource_key = ? FOR UPDATE", (row, index) -> {
+        List<byte[]> existing = jdbc.query("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? FOR UPDATE", (row, index) -> {
             if (!tenant.equals(row.getString("tenant_id")) || !workspace.equals(row.getString("workspace_id"))
                     || !session.equals(row.getString("session_id")) || !resourceId.equals(row.getString("resource_id"))
                     || !"managed-workspace-proof".equals(row.getString("kind")) || !"REFERENCED".equals(row.getString("state"))
@@ -26,18 +28,12 @@ final class WorkspaceEvidenceResources {
             return row.getBytes("inline_bytes");
         }, resourceKey);
         if (existing.isEmpty()) {
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
-                    + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                    + " state, created_at, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, 'managed-workspace-proof', 1, ?, ?,"
-                    + " 'MYSQL_INLINE', ?, ?, 'REFERENCED', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, 'managed-workspace-proof', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                     resourceKey, scope, tenant, workspace, session, resourceId, bytes.length, digest, bytes, ownerKey);
         } else if (existing.size() != 1 || !Arrays.equals(existing.getFirst(), bytes)) {
             throw new IllegalStateException("Workspace proof resource conflicts");
         }
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
-                + " tenant_id, workspace_id, session_id, resource_id, created_at)"
-                + " VALUES (?, 'OPERATION_WORK', ?, 1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))"
-                + " ON DUPLICATE KEY UPDATE owner_key = owner_key", scope, ownerKey, resourceKey, tenant, workspace, session, resourceId);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'OPERATION_WORK', ?, 1, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE owner_key = owner_key", scope, ownerKey, resourceKey, tenant, workspace, session, resourceId);
         return resourceKey;
     }
 

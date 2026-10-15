@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -407,9 +408,7 @@ public final class ToolPublicationAdmissionStore {
             }
             var receipt = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
                     writerToken, request, authority);
-            jdbc.update("UPDATE ma_output_capture SET producer_phase = 'REFERENCED',"
-                            + " admission_held_bytes = admission_used_bytes, receipt_sequence = ?,"
-                            + " receipt_revision = ?, accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
+            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
                     request.lastSequence(), receipt.journalRevision(),
                     "committed".equals(outcome.path("decision").asText())
                             && "complete".equals(outcome.path("envelope").path("capture").path("captureStatus").asText()),
@@ -497,10 +496,7 @@ public final class ToolPublicationAdmissionStore {
         require("PUBLISHED".equals(row.get("state")), "Receipt resource cannot be referenced");
         boolean inline = bytes.length <= ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
         require(inline || objectKey != null, "Large receipt resource has no object");
-        int changed = jdbc.update("UPDATE ma_resource SET storage_kind = ?, inline_bytes = ?, object_key = ?,"
-                        + " publish_command_id = ?, state = 'REFERENCED', last_verified_at = CURRENT_TIMESTAMP(6)"
-                        + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED'"
-                        + " AND capture_state = 'VERIFIED'",
+        int changed = jdbc.update("UPDATE ma_resource SET storage_kind = ?, inline_bytes = ?, object_key = ?, publish_command_id = ?, state = 'REFERENCED', last_verified_at = " + ManagedSchemaTime.SQL_NOW + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED' AND capture_state = 'VERIFIED'",
                 inline ? "MYSQL_INLINE" : "TOOL_PUBLICATION", inline ? bytes : null,
                 inline ? null : objectKey, request.commandId(), scopeKey, resourceId);
         require(changed == 1, "Receipt resource changed during publication");

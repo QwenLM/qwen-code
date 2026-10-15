@@ -8,17 +8,14 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
+import java.sql.Types;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.Calendar;
-import java.util.TimeZone;
 import javax.sql.DataSource;
 
 final class JdbcRepositorySupport {
-    private static final TimeZone UTC = TimeZone.getTimeZone("UTC");
-
     private JdbcRepositorySupport() {
     }
 
@@ -90,7 +87,7 @@ final class JdbcRepositorySupport {
                     throw new SQLException(
                             "database returned invalid clock precision");
                 }
-                return Instant.ofEpochSecond(epochSeconds, micros * 1_000L);
+                return Instant.ofEpochSecond(epochSeconds, micros / 1_000L * 1_000_000L);
             }
         }
     }
@@ -104,16 +101,24 @@ final class JdbcRepositorySupport {
     static void setInstant(PreparedStatement statement, int index,
             Instant value) throws SQLException {
         if (value == null) {
-            statement.setTimestamp(index, null);
+            statement.setNull(index, Types.BIGINT);
         } else {
-            statement.setTimestamp(index, Timestamp.from(value),
-                    utcCalendar());
+            long millis;
+            try {
+                millis = value.toEpochMilli();
+            } catch (ArithmeticException error) {
+                throw new SQLException("Managed timestamp exceeds the epoch millisecond range", error);
+            }
+            if (millis < 0) {
+                throw new SQLException("Managed timestamp precedes the epoch");
+            }
+            statement.setLong(index, millis);
         }
     }
 
     static Instant getInstant(ResultSet result, String column)
             throws SQLException {
-        Timestamp timestamp = result.getTimestamp(column, utcCalendar());
+        var timestamp = ManagedSchemaTime.timestamp(result, column);
         return timestamp == null ? null : timestamp.toInstant();
     }
 
@@ -210,10 +215,6 @@ final class JdbcRepositorySupport {
             throw new IllegalStateException("SHA-256 is unavailable",
                     exception);
         }
-    }
-
-    private static Calendar utcCalendar() {
-        return Calendar.getInstance(UTC);
     }
 
     private static void rollback(Connection connection,
