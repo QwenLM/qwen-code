@@ -1,19 +1,19 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
-
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 // Scale witness for JDK 21 virtual-thread carrier exhaustion in the
 // hosted-SSE fan-out — the same pinning class as #13388, but not the
@@ -59,7 +59,8 @@ class SessionEventHubPinningTest {
                         + "; a pin-capable shape would still have a"
                         + " carrier for the probe");
         SessionEventHub hub = new SessionEventHub();
-        int carriers = ForkJoinPool.getCommonPoolParallelism();
+        int carriers = Integer.getInteger("jdk.virtualThreadScheduler.parallelism",
+                Runtime.getRuntime().availableProcessors());
         List<SessionEventHub.Subscription> subscriptions =
                 new ArrayList<>();
         for (int index = 0; index < SUBSCRIBERS; index++) {

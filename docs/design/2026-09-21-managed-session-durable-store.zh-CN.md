@@ -13,7 +13,7 @@
 Hosted Managed Session 不再把 Runtime 本地 JSONL 作为生产权威，而采用混合长期存储：
 
 - MySQL 保存私有日志头、writer generation 与 lease、幂等事务回执、已提交记录的精确字节、资源引用、恢复状态，以及不超过 64 KiB 的不可变资源正文。
-- OSS 保存超过 64 KiB 的不可变资源正文，例如较大消息、checkpoint、工具结果、文件历史和恢复产物。
+- OSS 保存超过 64 KiB 的不可变资源正文，例如 checkpoint、工具结果、文件历史和恢复产物。message-commit 投影发布的超限正文不等待 OSS 路径：写入方将其按序切分为 inline 的 `managed-message-part` 资源，并由一份 `managed-message-chunks` 清单引用——与 Hook 消息快照已有的形态相同——通过准入的最终纯文本长回答因此无需 OSS 即可提交。
 - TypeScript Harness 仍是 Session 语义权威：由它校验并生成 Managed 记录。Java 存储模块只负责物理提交和 fencing，不运行 Agent Loop，也不生成私有记录。
 - 如为兼容或诊断生成本地 JSONL，它只是可丢弃缓存/导出格式，不是第二权威；Harness Pod 本地盘丢失不能导致 Session 丢失。
 - 独立 CLI 和开发部署继续使用现有本地文件后端。Session 创建时只选择一个后端，不对两个权威做双写。
@@ -147,7 +147,13 @@ interface ManagedSessionResourceStore {
 - `LocalManagedSessionResourceStore` 继续作为本地资源适配器。
 - `HttpManagedSessionJournalStore` 与 `HttpManagedSessionResourceStore` 在 hosted 模式调用 Java 内部 API。
 
-远端 resource adapter 将不超过 64 KiB 的资源暂存在 Harness 中，直到所属 journal 事务把资源与引用原子写入 MySQL。较大资源在该事务之前发布到 OSS。两条路径返回相同的 `DurableRef`，reader 不从 ref 猜测物理位置。v1 使用固定阈值，避免形成按部署变化的行为矩阵；以后只有通过带 storage version 的兼容决策才能调整。
+远端 resource adapter 将不超过 64 KiB 的资源暂存在 Harness 中，直到所属 journal 事务把资源与引用原子写入 MySQL。较大资源在该事务之前发布到 OSS。在资源层，Hook 消息快照超过 61,440 字节时切分，message-commit 正文超过 65,536 字节时切分为有序 inline parts（`managed-hook-message-part` / `managed-message-part`），每片最多 61,440 字节，并由切分清单引用。这些路径在事务预算内不需要 OSS。tool turn 准入、工具拒绝及恢复 Shell 历史的守卫保持不变，可能在消息投影前拒绝记录。Turn 结果、压缩摘要和扩展 domain 正文仍按单资源发布，保留现有 inline 上限。两条路径返回相同的 `DurableRef`，reader 不从 ref 猜测物理位置。v1 使用固定阈值，避免形成按部署变化的行为矩阵；以后只有通过带 storage version 的兼容决策才能调整。
+
+message-commit 投影发布的序列化 `ChatRecord` 正文不超过 65,536 UTF-8 字节时沿用 `managed-message`。更大的正文使用 schema version 1 的 `managed-message-chunks` 资源，内容为 `{ parts: DurableRef[] }`；有序的 `managed-message-part` 每片最多保存 61,440 原始字节。完整 JSON 文档按字节偏移切分，拼接后才统一解码，因此保留多字节字符和所有记录字段。分片与清单进入同一 journal 事务的引用闭包。服务端 8 MiB 的 inline 资源总预算包含正文分片和清单，因此不承诺支持整整 8 MiB 的消息正文；超限事务仍被原子拒绝。该上限约束提交的资源，不约束暂存堆内存：被拒绝或部分发布的资源可能保留到 writer seal；暂存清理由独立资源生命周期工作跟进。本地 Managed Session 也使用相同分片格式，即使文件适配器没有 inline 大小守卫，仍承担每片持久 I/O；默认的 legacy CLI 路径不受影响。
+
+所有消息消费方使用同一重组助手：冷热历史投影、Hosted 事件 envelope、Workspace 恢复和本地 Runtime 回执对账。对账先读取完整工具结果记录，再检查调用 ID，因此重开已结算批次时不会为分片记录再次追加结果。分片顺序读取，因为恢复 worker 的 RPC 只允许一个请求在途；每次资源读取校验字节长度和摘要。缺片或损坏使整次读取失败。HTTP 事务适配器与 CSI 只读快照校验器共用资源依赖遍历，包含消息清单及其分片；快照历史也使用同一重组助手。原始分片不能单独当 JSON 解析。消息 UUID、parent UUID 和 delta 身份保持一致，已流式输出正文的最终记录不会再次追加全文。新读取方兼容历史单资源消息。新增资源 kind 不改变 journal 事件、公开 API 或 SQL 表结构，但旧 Harness/恢复工具无法读取分片记录；开始写入前统一升级所有消费方，之后不要回退读取方。
+
+打包栈回归入口为 `npm run test:e2e:managed-agent-server -- --big-output`。它以分段前缀各不相同的确定性 192,000 个 UTF-16 code unit / 224,000 字节模型回答（避开 provider 的累积流启发式）和 8,000 字符对照回答，运行真实 MySQL 与 Java 存储，比较模型原文、公开 delta 和持久记录，删除两个 owner 的本地 home，并核对替换 owner 的模型请求包含完整首条回答。每个 Turn 只接受一次成功终态。Workspace 恢复测试还通过实际单请求 RPC 完成 bundle 捕获与校验，并拒绝缺片或摘要损坏。
 
 远端提交一次接收一个完整 Managed 事务：通常是一至三条 event record 加一条 commit marker，并带上待提交的 inline resources。Java 保存 UTF-8 JSONL 精确字节及 SHA-256，不解析或重新序列化私有事件正文；它只校验外层 scope、大小、记录数量、sequence 范围、引用列表、lease 和摘要链。
 
@@ -334,23 +340,24 @@ MySQL 不可用时停止接受新私有提交并实施有界背压。在 durable
 
 ## 13. 验收矩阵
 
-| 场景                                     | 必需结果                                                                             |
-| ---------------------------------------- | ------------------------------------------------------------------------------------ |
-| 两个 Harness worker 同时取得同一 Session | 只有一个 generation 可提交；旧 worker 在任何字节可见前收到 conflict                  |
-| Commit 成功但 HTTP 响应丢失              | 原 command ID 与 digest 返回原回执，不重复 sequence 或内容                           |
-| 相同幂等键但内容不同                     | conflict 并告警，两份 payload 都不能覆盖另一份                                       |
-| Object 上传后、SQL 提交前崩溃            | Session 看不到该 Object；它是可安全回收的孤儿                                        |
-| 资源为 64 KiB 或 64 KiB 加 1 字节        | 前者使用 `MYSQL_INLINE`，后者使用 `OSS_OBJECT`；两者使用相同 `DurableRef` 和摘要校验 |
-| SQL 提交后、cache/SSE 前崩溃             | 恢复读到已提交事务；cache 和公共投影追赶但不重写事务                                 |
-| Harness Pod 与本地盘删除                 | 新 Harness 恢复 journal、checkpoint 和全部引用资源                                   |
-| 资源缺失或摘要不符                       | `BLOCKED_RESOURCE`；不从空状态或未经证明的旧状态继续                                 |
-| 工具结果未知                             | `BLOCKED_EXECUTION`；不自动重复调用工具                                              |
-| owner 在提交 `await_runtime` 后崩溃      | 替代 owner 只启动一次同一 Broker execution，消费其回执并只产生一个公共终态事件       |
-| Workspace 快照/挂载缺失                  | 历史仍可读，执行状态为 `BLOCKED_WORKSPACE`                                           |
-| 伪造 tenant 或 Session scope             | 返回 Object URL 或私有字节前拒绝请求                                                 |
-| MySQL 或 OSS 不可用                      | 有界背压和明确失败，不发出虚假 durable ACK                                           |
-| 本地 cache 损坏或缺失                    | 重建或忽略；以 durable head 与 resource digest 为准                                  |
-| 活动工作期间删除 Session                 | 封闭准入，execution 结算或阻塞，提交 tombstone，再安全回收资源                       |
+| 场景                                     | 必需结果                                                                                                                                                             |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 两个 Harness worker 同时取得同一 Session | 只有一个 generation 可提交；旧 worker 在任何字节可见前收到 conflict                                                                                                  |
+| Commit 成功但 HTTP 响应丢失              | 原 command ID 与 digest 返回原回执，不重复 sequence 或内容                                                                                                           |
+| 相同幂等键但内容不同                     | conflict 并告警，两份 payload 都不能覆盖另一份                                                                                                                       |
+| Object 上传后、SQL 提交前崩溃            | Session 看不到该 Object；它是可安全回收的孤儿                                                                                                                        |
+| 资源为 64 KiB 或 64 KiB 加 1 字节        | 前者使用 `MYSQL_INLINE`，后者使用 `OSS_OBJECT`；两者使用相同 `DurableRef` 和摘要校验（message-commit 正文则以 inline parts 加清单提交；Hook 快照超过 60 KiB 时切分） |
+| 通过准入的最终纯文本 assistant 消息      | 模型原文、公开 delta、持久 ChatRecord 与恢复后的模型历史完全相同；一次成功终态，不重复追加最终全文                                                                   |
+| SQL 提交后、cache/SSE 前崩溃             | 恢复读到已提交事务；cache 和公共投影追赶但不重写事务                                                                                                                 |
+| Harness Pod 与本地盘删除                 | 新 Harness 恢复 journal、checkpoint 和全部引用资源                                                                                                                   |
+| 资源缺失或摘要不符                       | `BLOCKED_RESOURCE`；不从空状态或未经证明的旧状态继续                                                                                                                 |
+| 工具结果未知                             | `BLOCKED_EXECUTION`；不自动重复调用工具                                                                                                                              |
+| owner 在提交 `await_runtime` 后崩溃      | 替代 owner 只启动一次同一 Broker execution，消费其回执并只产生一个公共终态事件                                                                                       |
+| Workspace 快照/挂载缺失                  | 历史仍可读，执行状态为 `BLOCKED_WORKSPACE`                                                                                                                           |
+| 伪造 tenant 或 Session scope             | 返回 Object URL 或私有字节前拒绝请求                                                                                                                                 |
+| MySQL 或 OSS 不可用                      | 有界背压和明确失败，不发出虚假 durable ACK                                                                                                                           |
+| 本地 cache 损坏或缺失                    | 重建或忽略；以 durable head 与 resource digest 为准                                                                                                                  |
+| 活动工作期间删除 Session                 | 封闭准入，execution 结算或阻塞，提交 tombstone，再安全回收资源                                                                                                       |
 
 ## 14. 待确认的部署参数
 

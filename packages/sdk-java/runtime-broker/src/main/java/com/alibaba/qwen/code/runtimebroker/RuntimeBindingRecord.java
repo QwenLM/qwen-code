@@ -238,6 +238,15 @@ public final class RuntimeBindingRecord {
         return request;
     }
 
+    RuntimeBindingRecord withLifecycleAuthority(RuntimeLifecycleAuthority authority) {
+        RuntimeProvisionRequest scoped = new RuntimeProvisionRequest(request.getScope().withLifecycleAuthority(authority),
+                request.getIsolationKey(), request.getProvisionerKind(), request.getStorageId());
+        return new RuntimeBindingRecord(bindingId, scoped, provisionSeed, generation, state, lease,
+                resourceHandle, attestationGeneration, drainRequested, operationOwner, operationLeaseUntil,
+                operationGeneration, version, lastHealthAt, lastReconciledAt, lastActiveAt,
+                lossEvidence, stopEvidence, drainReceipt);
+    }
+
     public RuntimeProvisionSeed getProvisionSeed() {
         return provisionSeed;
     }
@@ -411,7 +420,12 @@ public final class RuntimeBindingRecord {
             throw new IllegalArgumentException("Recovery evidence cannot be overwritten");
         }
         if ((state == State.LOST && replacement.state != State.LOST
-                && !(replacement.state == State.RELEASED && replacement.drainReceipt != null))
+                && !(replacement.state == State.RELEASED && replacement.drainReceipt != null)
+                && !(replacement.state == State.DRAINING && drainRequested
+                        && replacement.request.getScope().getLifecycleAuthority() != null
+                        && replacement.drainReceipt != null && replacement.drainReceipt.matches(this)
+                        && hasSameLease(replacement.lease)
+                        && Objects.equals(resourceHandle, replacement.resourceHandle)))
                 || state == State.OPERATOR_RECOVERY
                         && replacement.state != State.OPERATOR_RECOVERY
                         && replacement.state != State.LOST) {

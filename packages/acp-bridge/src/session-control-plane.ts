@@ -162,11 +162,11 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
-  DAEMON_AGENT_RUN_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -179,14 +179,18 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
+  USER_CANCEL_ABORT_REASON,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   activeWorkCloseRetryDelayMs,
+  getPromptCancelAbortReason,
   isValidTrustedModelPrompt,
   sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
@@ -2127,7 +2131,7 @@ function extractPromptText(
       return record['text'];
     }
   }
-  return hasImage ? '[image]' : '';
+  return hasImage ? IMAGE_ONLY_PROMPT_TEXT : '';
 }
 
 function liveTurnStatus(
@@ -3762,7 +3766,12 @@ export function createSessionControlPlane(
       'qwen-code.daemon.acp_channel.unsettled_session_count': unsettled.length,
     });
     for (const entry of unsettled) {
-      void bridgeApi.cancelSession(entry.sessionId).catch(() => undefined);
+      void bridgeApi
+        .cancelSession(entry.sessionId, {
+          sessionId: entry.sessionId,
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+        })
+        .catch(() => undefined);
     }
     // Terminating the channel starts its exit check (see
     // `onChannelTerminationStart`).
@@ -4160,7 +4169,12 @@ export function createSessionControlPlane(
           entry.backgroundTurn ||
           entry.goalTurnActive
         ) {
-          void bridgeApi.cancelSession(sessionId).catch(() => undefined);
+          void bridgeApi
+            .cancelSession(sessionId, {
+              sessionId,
+              _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+            })
+            .catch(() => undefined);
         }
       }
     }
@@ -4272,9 +4286,18 @@ export function createSessionControlPlane(
     pending: PendingPromptEntry,
     notification: CancelNotification,
   ): Promise<void> => {
-    if (pending.cancelForwardInitial) {
+    const reason =
+      getPromptCancelAbortReason(notification._meta) ===
+      USER_CANCEL_ABORT_REASON
+        ? 'user'
+        : 'interrupted';
+    if (
+      pending.cancelForwardInitial &&
+      !(pending.cancelForwardReason === 'interrupted' && reason === 'user')
+    ) {
       return pending.cancelForwardInitial;
     }
+    const previousDrain = pending.cancelForwardDrain;
     const initial = (async () => {
       try {
         const extension = entry.connection
@@ -4324,13 +4347,16 @@ export function createSessionControlPlane(
       throw error;
     });
     pending.cancelForwardInitial = initial;
+    pending.cancelForwardReason = reason;
     // The same-revision extension resolves only after cancellation is handled
     // (or the target prompt has already settled). ACP-compatible custom agents
     // that do not implement it receive one standard session/cancel notification.
     // The FIFO tail awaits this promise so no extension request remains in flight
     // when prompt ownership advances, except when the prompt deadline invokes the
     // documented DAEMON-003 overlap policy.
-    pending.cancelForwardDrain = initial;
+    pending.cancelForwardDrain = previousDrain
+      ? Promise.allSettled([previousDrain, initial]).then(() => {})
+      : initial;
     void initial.catch(() => {});
     return initial;
   };
@@ -4887,7 +4913,12 @@ export function createSessionControlPlane(
           entry.workspaceChangeFence === undefined
         )
           return;
-        void bridgeApi.cancelSession(sessionId).catch(() => undefined);
+        void bridgeApi
+          .cancelSession(sessionId, {
+            sessionId,
+            _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+          })
+          .catch(() => undefined);
       },
     );
     const connection = harness.createConnection(client, channel);
@@ -5403,6 +5434,7 @@ export function createSessionControlPlane(
     onNewSessionAbandoned?: (settlement: Promise<void>) => void,
     selection?: BridgeExecutionSelection,
     startupConfig?: SessionStartupConfig,
+    mcpServers?: BridgeSpawnRequest['mcpServers'],
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -5487,7 +5519,7 @@ export function createSessionControlPlane(
             // for any ACP request, not only prompts.
             const request = telemetry.injectPromptContext({
               cwd: boundWorkspace,
-              mcpServers: [],
+              mcpServers: mcpServers ?? [],
               _meta: {
                 ...sessionSourceRequestMeta(
                   sourceType,
@@ -6917,6 +6949,7 @@ export function createSessionControlPlane(
       throwOnFailure?: boolean;
       requireFlush?: boolean;
       timeoutMs?: number;
+      cancelReason?: 'user';
     },
   ): Promise<boolean> => {
     if (!ci || ci.channel !== entry.channel) {
@@ -6940,6 +6973,7 @@ export function createSessionControlPlane(
             opts?.timeoutMs ?? initTimeoutMs,
           ),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
+          ...(opts?.cancelReason ? { cancelReason: opts.cancelReason } : {}),
         },
       );
       const observedCloseRequest = opts?.timeoutMs
@@ -7753,6 +7787,8 @@ export function createSessionControlPlane(
     BridgeRestoredSession,
     | 'compactedReplay'
     | 'liveJournal'
+    | 'lifecycleReplay'
+    | 'lifecycleReplayIncomplete'
     | 'lastEventId'
     | 'eventEpoch'
     | 'replayDegraded'
@@ -8009,9 +8045,56 @@ export function createSessionControlPlane(
               compactedReplay = [...page.events, turnErrorEvent];
             }
           }
+          const lifecycleSnapshot = entry.events.snapshotReplay();
+          const lifecycleReplay: BridgeEvent[] = [];
+          let lifecycleReplayIncomplete =
+            lifecycleSnapshot === undefined ||
+            lifecycleSnapshot.degraded === true;
+          if (lifecycleSnapshot) {
+            for (const event of [
+              ...lifecycleSnapshot.compactedTurns,
+              ...lifecycleSnapshot.liveJournal,
+            ]) {
+              if (event.type === 'history_truncated')
+                lifecycleReplayIncomplete = true;
+              if (event.type !== 'session_update' || !isRecord(event.data))
+                continue;
+              const update = isRecord(event.data['update'])
+                ? event.data['update']
+                : event.data;
+              const meta = update['_meta'];
+              if (!isRecord(meta)) continue;
+              if (
+                !isRecord(meta['executionLifecycle']) &&
+                !isRecord(meta['toolLifecycle'])
+              )
+                continue;
+              lifecycleReplay.push({
+                v: 1,
+                type: 'session_update',
+                ...(event.id !== undefined ? { id: event.id } : {}),
+                data: {
+                  _meta: {
+                    ...(isRecord(meta['executionLifecycle'])
+                      ? { executionLifecycle: meta['executionLifecycle'] }
+                      : {}),
+                    ...(isRecord(meta['toolLifecycle'])
+                      ? { toolLifecycle: meta['toolLifecycle'] }
+                      : {}),
+                  },
+                },
+              });
+            }
+          }
+          if (lifecycleReplay.length > 1024) {
+            lifecycleReplay.splice(0, lifecycleReplay.length - 1024);
+            lifecycleReplayIncomplete = true;
+          }
           return {
             compactedReplay,
             liveJournal: [],
+            lifecycleReplay,
+            lifecycleReplayIncomplete,
             lastEventId,
             eventEpoch,
             ...(page.partial === true ? { partial: true as const } : {}),
@@ -8863,12 +8946,11 @@ export function createSessionControlPlane(
               const request = telemetry.injectPromptContext({
                 sessionId: req.sessionId,
                 cwd: workspaceKey,
-                // Restore path drops per-request `mcpServers` (matches
-                // `doSpawn`); daemon-wide MCP comes from settings on
-                // the agent side. The SDK's `RestoreSessionRequest`
-                // intentionally has no `mcpServers` field for the
-                // same reason.
-                mcpServers: [],
+                // Daemon-wide MCP comes from settings on the agent
+                // side. Only a daemon-internal caller sets
+                // `req.mcpServers` (the SDK's `RestoreSessionRequest`
+                // intentionally has no such field).
+                mcpServers: req.mcpServers ?? [],
                 _meta: {
                   ...sessionSourceRequestMeta(
                     req.sourceType,
@@ -8912,7 +8994,7 @@ export function createSessionControlPlane(
             const request = telemetry.injectPromptContext({
               sessionId: req.sessionId,
               cwd: workspaceKey,
-              mcpServers: [],
+              mcpServers: req.mcpServers ?? [],
               _meta: {
                 ...sessionSourceRequestMeta(
                   req.sourceType,
@@ -9245,9 +9327,25 @@ export function createSessionControlPlane(
             workspaceAccess: 'metadata-only',
           })),
         );
-        const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
+      } else {
+        artifactRestoreWarnings.push(
+          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
+        );
+      }
+      const legacyOnlyDrop = entry.artifacts.consumeLegacyOnlyRestore();
+      for (const warning of artifactRestoreWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
+      const artifactRestoreFailed =
+        legacyOnlyDrop ||
+        artifactRestoreWarnings.some((warning) =>
           isArtifactRestoreFailureWarning(warning),
         );
+      if (deferArtifactWorkspace) {
         entry.pendingArtifactRestore = {
           ...(restoredArtifactSnapshot !== undefined
             ? { snapshot: restoredArtifactSnapshot }
@@ -9258,21 +9356,7 @@ export function createSessionControlPlane(
               : [],
           warnings: artifactRestoreWarnings,
         };
-      } else {
-        artifactRestoreWarnings.push(
-          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
-        );
       }
-      for (const warning of artifactRestoreWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
-            warning,
-          )}`,
-        );
-      }
-      const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
-        isArtifactRestoreFailureWarning(warning),
-      );
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates, {
           ingestArtifacts:
@@ -9554,6 +9638,10 @@ export function createSessionControlPlane(
         {
           throwOnFailure: true,
           requireFlush: closeOpts?.requireAgentClose === true,
+          cancelReason:
+            closeOpts?.cause === 'workspace_runtime_stop'
+              ? undefined
+              : closeOpts?.cancelReason,
           ...(closeOpts?.agentCloseTimeoutMs !== undefined
             ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
             : {}),
@@ -10870,6 +10958,7 @@ export function createSessionControlPlane(
             }
           : undefined,
         startupConfig,
+        req.mcpServers,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -11041,7 +11130,7 @@ export function createSessionControlPlane(
             (req.prompt.some(
               (block) => isRecord(block) && block['type'] === 'image',
             )
-              ? '[image]'
+              ? IMAGE_ONLY_PROMPT_TEXT
               : '');
       const pendingEntry: PendingPromptEntry = {
         eventDetailMode,
@@ -11328,11 +11417,6 @@ export function createSessionControlPlane(
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
-                  // Stripped from every caller for the same reason as the
-                  // delivery above: an agent's thread tools act on whatever
-                  // this names, so a caller that could set it could make one
-                  // agent post under another's name.
-                  delete meta[DAEMON_AGENT_RUN_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[SUBMITTED_PROMPT_META_KEY];
                   delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
@@ -11374,9 +11458,6 @@ export function createSessionControlPlane(
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
-                  }
-                  if (context?.agentRun) {
-                    meta[DAEMON_AGENT_RUN_META_KEY] = context.agentRun;
                   }
                   if (promptDisplayText !== undefined) {
                     meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] =
@@ -11604,6 +11685,13 @@ export function createSessionControlPlane(
                   if (byId.get(sessionId) === entry) {
                     void forwardRunningPromptCancel(entry, pendingEntry, {
                       sessionId,
+                      _meta: {
+                        [PROMPT_CANCEL_REASON_META_KEY]:
+                          abortSignal.reason === USER_CANCEL_ABORT_REASON ||
+                          pendingEntry.userCancelRequested
+                            ? 'user'
+                            : 'interrupted',
+                      },
                     }).catch((err) => {
                       writeStderrLine(
                         `[pending-prompt] cancel forward failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
@@ -11820,11 +11908,20 @@ export function createSessionControlPlane(
               entry.activePromptId === runningPrompt.promptId
                 ? forwardRunningPromptCancel(entry, runningPrompt, notif)
                 : Promise.resolve();
+            // The abort reason, not `notif`, is what `onAbort` translates back
+            // into forwarded cancel metadata, so a cancel that lands before
+            // dispatch (gate false, no direct forward) must still carry the
+            // caller-declared provenance instead of being re-labelled 'user'.
+            // A user cancel after an earlier interruption cannot rewrite that
+            // immutable reason, so it is latched on the entry for `onAbort`.
+            if (
+              getPromptCancelAbortReason(notif._meta) ===
+              USER_CANCEL_ABORT_REASON
+            ) {
+              runningPrompt.userCancelRequested = true;
+            }
             runningPrompt.abortController.abort(
-              new DOMException(
-                'Prompt cancelled before dispatch',
-                'AbortError',
-              ),
+              getPromptCancelAbortReason(notif._meta),
             );
             await forwarding;
             return;
@@ -14712,9 +14809,22 @@ export function createSessionControlPlane(
       // Abort the prompt: for 'queued' prompts the FIFO will skip
       // dispatch on the `signal.aborted` check; for 'running' prompts
       // this triggers the cancel path.
-      target.abortController.abort(
-        new DOMException('Prompt removed by user', 'AbortError'),
-      );
+      target.userCancelRequested = true;
+      if (
+        target.abortController.signal.aborted &&
+        target.dispatched === true &&
+        entry.activePromptId === target.promptId
+      ) {
+        void forwardRunningPromptCancel(entry, target, {
+          sessionId,
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'user' },
+        }).catch((err) => {
+          writeStderrLine(
+            `[pending-prompt] cancel upgrade failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
+          );
+        });
+      }
+      target.abortController.abort(USER_CANCEL_ABORT_REASON);
       if (target.state === 'queued') {
         // A queued prompt never dispatches once aborted — safe to drop
         // from the list immediately.
@@ -14828,7 +14938,7 @@ export function createSessionControlPlane(
           const sameMedia =
             JSON.stringify(promotedMedia) === JSON.stringify(mediaBlocks);
           const promotedText =
-            promoted.text === '[image]' && trimmed.length === 0
+            promoted.text === IMAGE_ONLY_PROMPT_TEXT && trimmed.length === 0
               ? ''
               : promoted.text;
           if (
@@ -14932,9 +15042,6 @@ export function createSessionControlPlane(
         eventDetailMode,
         messageId,
         text: trimmed,
-        ...(options?.queueOnly && !originatorClientId && context?.agentRun
-          ? { agentRun: context.agentRun }
-          : {}),
         ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),
         originatorClientId,
         ...(options?.queueOnly
@@ -14966,6 +15073,27 @@ export function createSessionControlPlane(
         }
       }
       return { accepted: true, messageId };
+    },
+
+    sendMidTurnMessagesNow(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      // Only the user's own messages ask for this; queue-only steering keeps
+      // its tool-boundary delivery unless user input travels with it.
+      if (!entry.midTurnMessageQueue.some((message) => !message.queueOnly)) {
+        return { requested: false };
+      }
+      // Best-effort: an agent without the method still drains the queue at its
+      // next tool boundary.
+      void entry.connection
+        .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
+        .catch((error: unknown) => {
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
+          );
+        });
+      return { requested: true };
     },
 
     removeMidTurnMessage(sessionId, messageId, context) {
@@ -15045,6 +15173,55 @@ export function createSessionControlPlane(
           entry.pendingAgentNotificationCount - 1,
         );
         void maybeCloseIdleSession(entry, 'agent_notification_settled');
+        drainQuarantinedChannelFor(entry);
+      }
+    },
+
+    async appendExternalRecord(sessionId, request) {
+      // Same lookup, timeout, transport-closed race and pending-work hold as
+      // `enqueueBackgroundNotification`: the hold keeps a session whose last
+      // client detached (user closed the tab while an agent ran) from being
+      // idle-closed under the write.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.harness.isDying)
+        throw new SessionNotFoundError(sessionId);
+      entry.pendingAgentNotificationCount++;
+      try {
+        const response = await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+              { sessionId, ...request },
+            ),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+          ),
+          getTransportClosedReject(entry),
+        ]);
+        const recordId = response['recordId'];
+        if (response['deferred'] === true) {
+          // The child holds the record until its running turn settles.
+          return {
+            sessionId,
+            recordId: typeof recordId === 'string' ? recordId : '',
+            created: response['created'] === true,
+            deferred: true,
+          };
+        }
+        if (typeof recordId !== 'string' || recordId.length === 0) {
+          throw new Error(
+            `${SERVE_CONTROL_EXT_METHODS.sessionExternalRecord} returned no recordId`,
+          );
+        }
+        return { sessionId, recordId, created: response['created'] === true };
+      } finally {
+        entry.pendingAgentNotificationCount = Math.max(
+          0,
+          entry.pendingAgentNotificationCount - 1,
+        );
+        void maybeCloseIdleSession(entry, 'agent_external_record_settled');
         drainQuarantinedChannelFor(entry);
       }
     },
@@ -15508,9 +15685,9 @@ export function createSessionControlPlane(
                   preserveLiveEphemeral: true,
                 })
               : [];
-        const artifactRestoreFailed = artifactRestoreWarnings.some(
-          isArtifactRestoreFailureWarning,
-        );
+        const artifactRestoreFailed =
+          entry.artifacts.consumeLegacyOnlyRestore() ||
+          artifactRestoreWarnings.some(isArtifactRestoreFailureWarning);
         const shouldRecordArtifactSnapshot =
           shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
         const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
