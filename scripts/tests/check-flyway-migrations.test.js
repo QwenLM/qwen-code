@@ -168,7 +168,12 @@ describe('check-flyway-migrations', () => {
     module('server', { sql: ['README.md'] });
     snapshot();
     module('server', { java: ['V1__first.java'] });
-    expect(check('server').status).toBe(0);
+    const result = check('server');
+    expect(result.status).toBe(0);
+    expect(result.output).toContain(
+      `ordering not checked: baseline ${baseRef} has no migrations under server`,
+    );
+    expect(result.output).toContain('1 migrations, all versions unique');
   });
 
   it('ordering rejects a baseline with no files under the requested modules', () => {

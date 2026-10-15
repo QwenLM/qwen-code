@@ -230,6 +230,12 @@ if (baseRef) {
     .map((file) => migrationVersion(path.posix.basename(file)))
     .sort(compareMigrationVersions)
     .at(-1);
+  if (newestVersion === undefined) {
+    console.log(
+      `ordering not checked: baseline ${boundWorkflowPath(baseRef)} has no migrations under ` +
+        relativeModules.map(boundWorkflowPath).join(', '),
+    );
+  }
   for (const [version, group] of claimants) {
     if (
       newestVersion === undefined ||
