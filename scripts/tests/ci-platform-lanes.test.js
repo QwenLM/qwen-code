@@ -376,7 +376,11 @@ describe('post-merge push lane', () => {
     // dispatch and push; widening this — say by copying `test`'s block when
     // adding a reporter — hands write tokens to that code. `test`'s own
     // wider block is legitimate: dorny/test-reporter needs `checks: write`.
-    expect(ci.jobs.lint_and_static.permissions).toEqual({ contents: 'read' });
+    // The contract guard reads the PR file list; it needs no write access.
+    expect(ci.jobs.lint_and_static.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'read',
+    });
   });
 
   it('keeps every shared prelude step identical between test and lint_and_static', () => {
