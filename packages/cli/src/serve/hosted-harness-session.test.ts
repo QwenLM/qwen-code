@@ -14484,12 +14484,16 @@ describe('Hosted Harness no-tool session', () => {
       .set('X-Qwen-Client-Id', created.body.clientId as string)
       .send({ prompt, promptId: PROMPT_ID, payloadDigest });
     expect(admitted.status).toBe(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      // Settlement includes fsync-backed writes and can exceed 1s on busy CI.
+      { timeout: 10_000 },
+    );
     expect(state.model).toHaveBeenCalledTimes(1);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
     const loaded = await headers(
@@ -14547,12 +14551,16 @@ describe('Hosted Harness no-tool session', () => {
       .set('X-Qwen-Client-Id', created.body.clientId as string)
       .send({ prompt, promptId: PROMPT_ID, payloadDigest })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      // Settlement includes fsync-backed writes and can exceed 1s on busy CI.
+      { timeout: 10_000 },
+    );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
