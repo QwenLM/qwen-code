@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.R
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
-
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.Base64;

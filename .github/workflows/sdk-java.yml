@@ -234,6 +234,17 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
 
+      # managed-agent-server is the only module on qwen-code-checks.xml, and
+      # until now that ruleset was enforced solely by the `clean verify` lanes,
+      # which need MySQL and a host lock and have starved before. checkstyle:check
+      # does not resolve project dependencies, so it needs no sibling install.
+      - name: 'Run Managed Agent Server Checkstyle'
+        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
+        working-directory: 'packages/sdk-java/managed-agent-server'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
+
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'

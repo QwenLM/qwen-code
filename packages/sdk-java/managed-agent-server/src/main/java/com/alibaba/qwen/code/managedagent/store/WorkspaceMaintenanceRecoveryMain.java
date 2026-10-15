@@ -5,9 +5,10 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeB
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.List;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import java.util.List;
 
 /** Private offline entry point; the native host observation is the stop authority. */
 public final class WorkspaceMaintenanceRecoveryMain {

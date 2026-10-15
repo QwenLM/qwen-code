@@ -1,9 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.*;
-import static org.awaitility.Awaitility.await;
-import static org.mockito.Mockito.mock;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -14,18 +10,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.attribute.PosixFilePermissions;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -35,6 +21,20 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.*;
+import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.mock;
 
 class WorkspaceMigrationStoreTest {
     @TempDir Path temp;
@@ -231,11 +231,17 @@ class WorkspaceMigrationStoreTest {
         var manifest = WorkspaceRecoveryStore.JSON.createObjectNode().put("version", 1)
                 .put("provider", "local-workspace-bundle/1").put("tenantId", "tenant").put("storageId", "storage")
                 .put("captureOperationId", request.path("captureOperationId").asText()).put("activation", false);
-        for (String name : List.of("fenceOperationId", "mountRevision")) manifest.set(name, request.path(name));
-        for (String name : List.of("registration", "sourceDigest", "sessionCount")) manifest.set(name, context.path(name));
-        for (String name : List.of("sessions", "assets")) manifest.putObject(name)
-                .put("path", ".w1-recovery/" + name + ".ndjson").put("count", 0).put("byteLength", 0)
-                .put("digest", WorkspaceRecoveryStore.hash(new byte[0]));
+        for (String name : List.of("fenceOperationId", "mountRevision")) {
+            manifest.set(name, request.path(name));
+        }
+        for (String name : List.of("registration", "sourceDigest", "sessionCount")) {
+            manifest.set(name, context.path(name));
+        }
+        for (String name : List.of("sessions", "assets")) {
+            manifest.putObject(name)
+                    .put("path", ".w1-recovery/" + name + ".ndjson").put("count", 0).put("byteLength", 0)
+                    .put("digest", WorkspaceRecoveryStore.hash(new byte[0]));
+        }
         Path metadata = Files.createDirectories(temp.resolve("bundle/.w1-recovery"));
         byte[] bytes = manifest.toString().getBytes(StandardCharsets.UTF_8);
         Files.write(metadata.resolve("manifest.json"), bytes);
@@ -280,7 +286,9 @@ class WorkspaceMigrationStoreTest {
                         .isEqualTo(promote ? 2 : 1);
                 operation.verify(promote);
                 assertThat(operation.inspect()).isEqualTo(receipt);
-                if (!promote) operation.abort();
+                if (!promote) {
+                    operation.abort();
+                }
                 var terminal = operation.inspect();
                 operation.failed("source_drift");
                 assertThat(operation.inspect()).isEqualTo(terminal);
@@ -418,7 +426,6 @@ class WorkspaceMigrationStoreTest {
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_conflict");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isEqualTo(1);
     }
-
 
     @Test
     void preservesTheServiceRefusalCodeWhenMountIdentityBecomesUnreadable() throws Exception {

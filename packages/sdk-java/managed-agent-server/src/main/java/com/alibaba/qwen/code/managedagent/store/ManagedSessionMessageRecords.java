@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.List;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
