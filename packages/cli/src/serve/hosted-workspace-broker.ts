@@ -73,6 +73,35 @@ export function isHostedFileHistoryRefusal(
   );
 }
 
+/** The execution states the Broker can report: the four live states it
+ * answers for a record it tracks, `unknown` for a still-reconcilable
+ * outcome gap, and `abandoned` for a record it fenced terminally (see
+ * isTerminalUnknownRejection). The hosted recovery wire vocabulary is the
+ * closed subset without `unknown` (see HostedRuntimeRecoveryExecutionState):
+ * a new state here must be folded deliberately, or the client-side
+ * validator rejects the whole report. */
+export type HostedBrokerExecutionState =
+  | 'prepared'
+  | 'executing'
+  | 'cancel_requested'
+  | 'settled'
+  | 'abandoned'
+  | 'unknown';
+
+/** The Broker fences a record ABANDONED on loss evidence alone and marks the
+ * terminal answer with details.terminal; the record proves no stop, it only
+ * proves the outcome can never be observed again. */
+export function isTerminalUnknownRejection(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    cause.code === 'runtime_broker_execution_unknown' &&
+    cause.details?.['terminal'] === true
+  );
+}
+
 export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
   private leaseAcquired = false;
@@ -446,7 +475,7 @@ export class HostedWorkspaceBroker {
             (cause instanceof HostedWorkspaceBrokerRejection &&
               cause.status === 409 &&
               cause.code === 'runtime_broker_execution_unknown' &&
-              cause.details?.['terminal'] !== true) ||
+              !isTerminalUnknownRejection(cause)) ||
             transportFailed
           )
         )
@@ -581,9 +610,13 @@ export class HostedWorkspaceBroker {
 
   /**
    * Read-only execution state. Only a definitive not-found resolves to
-   * undefined; an unknown outcome is not proof that execution stopped.
+   * undefined; an unknown outcome is not proof that execution stopped, and a
+   * terminally abandoned record reaches the caller as the distinct
+   * `abandoned` state rather than folding into that sentinel.
    */
-  async status(id: string): Promise<{ state: string } | undefined> {
+  async status(
+    id: string,
+  ): Promise<{ state: HostedBrokerExecutionState } | undefined> {
     let response: Record<string, unknown>;
     try {
       response = await this.request(`/executions/${encodeURIComponent(id)}`);
@@ -598,7 +631,11 @@ export class HostedWorkspaceBroker {
           cause.status === 409 &&
           cause.code === 'runtime_broker_execution_unknown'
         )
-          return { state: 'unknown' };
+          // The terminal marker distinguishes a fenced ABANDONED record from
+          // a still-reconcilable UNKNOWN; only the latter may yet be running.
+          return {
+            state: isTerminalUnknownRejection(cause) ? 'abandoned' : 'unknown',
+          };
       }
       throw cause;
     }
@@ -611,7 +648,7 @@ export class HostedWorkspaceBroker {
       !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
     )
       throw new Error('Runtime execution outcome is unknown.');
-    return { state };
+    return { state: state as HostedBrokerExecutionState };
   }
 
   /**
