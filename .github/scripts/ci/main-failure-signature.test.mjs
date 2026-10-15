@@ -1026,7 +1026,7 @@ const WINDOWS_JOB = {
   steps: ['Run tests and generate reports'],
 };
 
-for (const { name, logs, jobs, coverage } of [
+for (const { name, logs, jobs, coverage, spawn } of [
   {
     name: 'unavailable logs',
     logs: [],
@@ -1041,13 +1041,21 @@ for (const { name, logs, jobs, coverage } of [
     coverage: '- Job logs analyzed: 1 of 1 failed-job logs.',
   },
   {
-    name: 'unavailable job list and logs',
+    name: 'empty failed-job entries and no logs',
     logs: [],
     jobs: [],
-    coverage: '- Job logs analyzed: 0; failed-job count unavailable.',
+    coverage:
+      '- Job logs analyzed: 0; failed-job entries empty or unavailable.',
+  },
+  {
+    name: 'empty downloaded log',
+    logs: [''],
+    jobs: [WINDOWS_JOB],
+    coverage: '- Job logs analyzed: 1 of 1 failed-job logs.',
   },
   {
     name: 'partial logs with identified failures',
+    spawn: true,
     logs: [VITEST_LOG],
     jobs: [WINDOWS_JOB, { name: 'Test (ubuntu-latest)', steps: ['Run tests'] }],
     coverage:
@@ -1097,7 +1105,7 @@ for (const { name, logs, jobs, coverage } of [
       OCCURRENCE.at,
     ];
     let plannedOutput;
-    if (name === 'partial logs with identified failures') {
+    if (spawn) {
       const helper = fileURLToPath(
         new URL('./main-failure-signature.mjs', import.meta.url),
       );
@@ -1427,6 +1435,12 @@ test('runCli analyze still plans when the jobs file is missing', () => {
     ]),
   );
   assert.deepEqual(analysis.failedJobs, []);
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(
+    body.includes(
+      '- Job logs analyzed: 0; failed-job entries empty or unavailable.',
+    ),
+  );
 });
 
 test('runCli plan renders the named job into the filed body', () => {

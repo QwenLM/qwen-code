@@ -354,7 +354,7 @@ function failedJobLines(failedJobs) {
 function jobLogCoverageLine(analysis) {
   const { logCount, failedJobs } = analysis;
   if (!failedJobs.length) {
-    return `- Job logs analyzed: ${logCount}; failed-job count unavailable. <!-- qwen-main-ci-failure-coverage -->`;
+    return `- Job logs analyzed: ${logCount}; failed-job entries empty or unavailable. <!-- qwen-main-ci-failure-coverage -->`;
   }
   const incomplete =
     logCount === failedJobs.length ? '' : ' (incomplete coverage)';
