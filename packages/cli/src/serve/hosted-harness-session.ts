@@ -1501,6 +1501,30 @@ async function recoverCancelledPreToolHook(
   return true;
 }
 
+/**
+ * The committed-call fold the recovered Turn's continue and cancel routes
+ * run before each terminal record they write. One argument list for every
+ * exit: hand-copied lists dropped `commands` on three of them (#13188
+ * R13-1), so a member's committed board call was left unpaired instead of
+ * answering from its command journal.
+ */
+function answerRecoveredTurnCommittedCalls(
+  session: HostedSession,
+  sessionId: string,
+  promptId: string,
+): Promise<number> {
+  return answerCommittedTurnCalls({
+    session: session.managed,
+    sessionId,
+    cwd: session.cwd,
+    promptId,
+    children: session.childAgents,
+    teams: session.teams,
+    messages: session.messages,
+    commands: session.commands,
+  });
+}
+
 // The cancellation-side settle of a provably ownerless parked Turn: the
 // LoadHarnessSession.cancellationTakeover signal names the user's CANCEL
 // intent, and the load's own writer fence proves the producing generation
@@ -8238,15 +8262,11 @@ export function registerHostedHarnessSessionRoutes(
         // calls, so the Turn stays re-drivable instead.
         if (state !== 'completed') {
           try {
-            await answerCommittedTurnCalls({
-              session: session.managed,
+            await answerRecoveredTurnCommittedCalls(
+              session,
               sessionId,
-              cwd: session.cwd,
               promptId,
-              children: session.childAgents,
-              teams: session.teams,
-              messages: session.messages,
-            });
+            );
           } catch (foldCause) {
             session.blocked = true;
             writeStderrLineSafe(
@@ -8312,15 +8332,7 @@ export function registerHostedHarnessSessionRoutes(
         // not an ambiguous terminal-write failure — the Turn stays
         // re-drivable rather than settling over unanswered calls.
         try {
-          await answerCommittedTurnCalls({
-            session: session.managed,
-            sessionId,
-            cwd: session.cwd,
-            promptId,
-            children: session.childAgents,
-            teams: session.teams,
-            messages: session.messages,
-          });
+          await answerRecoveredTurnCommittedCalls(session, sessionId, promptId);
         } catch (foldCause) {
           session.blocked = true;
           writeStderrLineSafe(
@@ -8642,16 +8654,7 @@ export function registerHostedHarnessSessionRoutes(
         // A Runtime park's non-Runtime siblings (a team call, a background
         // launch) that committed before the Harness died are answered by
         // what committed; the settlements above answer only what they own.
-        await answerCommittedTurnCalls({
-          session: session.managed,
-          sessionId,
-          cwd: session.cwd,
-          promptId,
-          children: session.childAgents,
-          teams: session.teams,
-          messages: session.messages,
-          commands: session.commands,
-        });
+        await answerRecoveredTurnCommittedCalls(session, sessionId, promptId);
         // Whatever shape the wait was in, its round is fully answered now:
         // the folds above landed (or the journaled proof they were never
         // owed), so only the terminal record below settles the Turn.
@@ -8768,15 +8771,11 @@ export function registerHostedHarnessSessionRoutes(
               // it too — the kept admission replays a retried cancel
               // without re-driving, so a call left unpaired here would
               // stay unpaired forever.
-              await answerCommittedTurnCalls({
-                session: session.managed,
+              await answerRecoveredTurnCommittedCalls(
+                session,
                 sessionId,
-                cwd: session.cwd,
                 promptId,
-                children: session.childAgents,
-                teams: session.teams,
-                messages: session.messages,
-              });
+              );
               await session.managed.sink.write(
                 record(session, sessionId, 'system', null, {
                   subtype: 'turn_result',

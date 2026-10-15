@@ -20915,6 +20915,104 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  // R13-1: a continue that settles the member's Turn without resuming it
+  // must still answer the committed board call from its command journal.
+  // The fold skips committed-nothing calls (`uncommitted: 'none'`), so a
+  // fold without the Session's command funnel leaves call-1 unpaired under
+  // the terminal record.
+  it.each([
+    {
+      exit: 'the compensating settle after a lost resume',
+      fault: () =>
+        vi
+          .spyOn(ManagedSessionRecordSink.prototype, 'project')
+          .mockRejectedValueOnce(new Error('projection lost')),
+    },
+    {
+      exit: 'the direct settle after a raw drive failure',
+      fault: () =>
+        vi
+          .spyOn(HostedWorkspaceToolTurn.prototype, 'resumeCommandWaitRuns')
+          .mockRejectedValueOnce(new Error('relay lost')),
+    },
+  ])(
+    'answers the committed board command from its journal on $exit',
+    async ({ fault }) => {
+      await parkCommandWaitTurn();
+      const { server, loaded } = await loadReplacement(
+        false,
+        'hosted-workspace-shell/1',
+      );
+      expect(loaded.status).toBe(200);
+      const clientId = loaded.body.clientId as string;
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { checkpointId: string; activationId: string };
+      const injected = fault();
+      const continued = await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(continued.status).toBe(200);
+      await vi.waitFor(
+        async () => {
+          const status = await replacementHeaders(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      // The fault fired: the resume never answered call-1 itself.
+      expect(injected).toHaveBeenCalled();
+      const transcript = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      const events = transcript.body.events as Array<{
+        type: string;
+        promptId?: string;
+        data?: {
+          record?: {
+            type?: string;
+            message?: {
+              parts?: Array<{
+                functionResponse?: { id?: string; response?: unknown };
+              }>;
+            };
+          };
+        };
+      }>;
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'turn_error', promptId: PROMPT_ID }),
+        ]),
+      );
+      const answers = events
+        .filter(
+          (event) =>
+            event.type === 'managed_journal_event' &&
+            event.data?.record?.type === 'tool_result',
+        )
+        .flatMap((event) => event.data?.record?.message?.parts ?? [])
+        .filter((part) => part.functionResponse?.id === 'call-1');
+      expect(answers).toHaveLength(1);
+      expect(JSON.stringify(answers[0]!.functionResponse!.response)).toContain(
+        'The command was cancelled before it ran; it never left.',
+      );
+      await replacementHeaders(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+    },
+  );
+
   it.each(
     (['continue', 'cancel'] as const).flatMap((route) =>
       (['closing', 'authorizing', 'detached'] as const).map((phase) => ({
