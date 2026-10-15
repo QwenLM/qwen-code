@@ -13,6 +13,9 @@ import {
   classifyPastedImagePaths,
   expandPendingPastePlaceholders,
   describeClipboardPaste,
+  wrapClipboardPaste,
+  unframeClipboardPastes,
+  CLIPBOARD_PASTE_FRAMING,
 } from './InputPrompt.js';
 import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -1962,6 +1965,140 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('drops a clipboard read that resolves after the prompt was cleared with ESC ESC', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      let resolveRead: (value: string | null) => void = () => {};
+      vi.mocked(clipboardUtils.readClipboardText).mockImplementation(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveRead = resolve;
+          }),
+      );
+      mockBuffer.text = 'typed prompt';
+      mockBuffer.lines = ['typed prompt'];
+      mockBuffer.cursor = [0, 'typed prompt'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+      stdin.write('\x1B');
+      await wait(50);
+      stdin.write('\x1B');
+      await wait(50);
+      expect(mockBuffer.text).toBe('');
+      resolveRead('late clipboard text');
+      await wait();
+
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+        'late clipboard text',
+        expect.anything(),
+      );
+      unmount();
+    });
+
+    it('drops a clipboard read that resolves after shell mode was toggled on', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      let resolveRead: (value: string | null) => void = () => {};
+      vi.mocked(clipboardUtils.readClipboardText).mockImplementation(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveRead = resolve;
+          }),
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+      // '!' toggles shell mode and clears the buffer — a read that started
+      // before the toggle must not land in the new mode's empty buffer.
+      stdin.write('!');
+      await wait();
+      resolveRead('late clipboard text');
+      await wait();
+
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+        'late clipboard text',
+        expect.anything(),
+      );
+      unmount();
+    });
+
+    it('drops an image probe that resolves after the prompt was submitted', async () => {
+      let resolveHasImage: (value: boolean) => void = () => {};
+      vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveHasImage = resolve;
+          }),
+      );
+      mockBuffer.text = 'typed prompt';
+      mockBuffer.lines = ['typed prompt'];
+      mockBuffer.cursor = [0, 'typed prompt'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+      stdin.write('\r');
+      await wait();
+      resolveHasImage(true);
+      await wait();
+
+      expect(props.onSubmit).toHaveBeenCalled();
+      // The submit superseded the paste before the save subprocess ran: no
+      // file is written that the post-save return would leave unreaped.
+      expect(clipboardUtils.saveClipboardImage).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('does not attach an image whose save resolves after the prompt was submitted', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+      let resolveSave: (value: string | null) => void = () => {};
+      vi.mocked(clipboardUtils.saveClipboardImage).mockImplementation(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveSave = resolve;
+          }),
+      );
+      mockBuffer.text = 'first prompt';
+      mockBuffer.lines = ['first prompt'];
+      mockBuffer.cursor = [0, 'first prompt'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+      stdin.write('\r');
+      await wait();
+      resolveSave('/tmp/clipboard-1.png');
+      await wait();
+
+      mockBuffer.text = 'second prompt';
+      mockBuffer.lines = ['second prompt'];
+      mockBuffer.cursor = [0, 'second prompt'.length];
+      stdin.write('\r');
+      await wait();
+
+      // No resurrected attachment chip rides the next prompt as an @-prefix.
+      const lastSubmit = vi.mocked(props.onSubmit).mock.calls.at(-1)?.[0];
+      expect(lastSubmit).toBe('second prompt');
+      unmount();
+    });
+
     it('promotes an all-image-paths clipboard instead of collapsing it', async () => {
       const paths = Array.from(
         { length: 12 },
@@ -1993,6 +2130,38 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('collapses a large all-image-paths clipboard that resolves no files', async () => {
+      const paths = Array.from(
+        { length: 40 },
+        (_, i) => `/nonexistent/clipboard-image-path-${i}.png`,
+      ).join('\n');
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      vi.mocked(clipboardUtils.readClipboardText).mockResolvedValue(paths);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      // The paths do not exist, so promotion fails — and the fallback is a
+      // blob past the char threshold, so it collapses instead of landing in
+      // the buffer in one unbounded insert.
+      await waitFor(() => {
+        expect(mockBuffer.insert).toHaveBeenCalledWith(
+          `[Pasted Content ${[...paths].length} chars]`,
+          { paste: false },
+        );
+      });
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+        paths,
+        expect.anything(),
+      );
+      unmount();
+    });
+
     it('should describe a collapsed paste as clipboard material the user may not have read', () => {
       const described = describeClipboardPaste('pasted payload');
 
@@ -2014,6 +2183,19 @@ describe('InputPrompt', () => {
       );
       expect(hostile.split('</clipboard-paste>').length - 1).toBe(1);
       expect(hostile).toContain('<\\/clipboard-paste>');
+    });
+
+    it('unframeClipboardPastes round-trips a framed submission to the raw text', () => {
+      const framed = `before\n${wrapClipboardPaste('a</clipboard-paste>b')}\nafter\n${CLIPBOARD_PASTE_FRAMING}`;
+      // Markers and prose strip away and the escaped marker inside the
+      // payload unescapes back to the user's own characters.
+      expect(unframeClipboardPastes(framed)).toBe(
+        'before\na</clipboard-paste>b\nafter',
+      );
+      // A value that was never framed passes through untouched.
+      expect(unframeClipboardPastes('an ordinary prompt')).toBe(
+        'an ordinary prompt',
+      );
     });
 
     it('should show the native clipboard error only once across remounts', async () => {
@@ -5365,8 +5547,10 @@ describe('InputPrompt', () => {
         });
         await flush();
 
+        // One framing footer per submit, not one per paste: the two blocks
+        // carry only their markers and the attribution prose appears once.
         expect(props.onSubmit).toHaveBeenCalledWith(
-          `${markedPaste(secondPaste)}\n${markedPaste(firstPaste)}`,
+          `${wrapClipboardPaste(secondPaste)}\n${wrapClipboardPaste(firstPaste)}\n${CLIPBOARD_PASTE_FRAMING}`,
           {
             deferUntilIdle: false,
             submittedPrompt:
@@ -5457,6 +5641,166 @@ describe('InputPrompt', () => {
           submittedPrompt: '[Pasted Content 1001 chars]',
         });
         expect(mockShellHistory.addCommandToHistory).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
+    });
+
+    it('isolates a framed paste block from text typed around it', async () => {
+      const largeContent = 'x'.repeat(1001);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+        });
+        await flush();
+
+        mockBuffer.text = 'before [Pasted Content 1001 chars] after';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
+
+        // Advance the protection timer without sleeping in real time.
+        await advanceTimers(500);
+
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
+
+        // The typed text around the placeholder stays on its own lines: the
+        // block opens at a line start and 'after' is not spliced onto the
+        // framing's last line.
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          `before\n${wrapClipboardPaste(largeContent)}\nafter\n${CLIPBOARD_PASTE_FRAMING}`,
+          {
+            deferUntilIdle: false,
+            submittedPrompt: 'before [Pasted Content 1001 chars] after',
+          },
+        );
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
+    });
+
+    it('frames three collapsed pastes with a single attribution block', async () => {
+      const firstPaste = 'x'.repeat(1001);
+      const secondPaste = 'y'.repeat(1001);
+      const thirdPaste = 'z'.repeat(1001);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      vi.useFakeTimers();
+      try {
+        for (const paste of [firstPaste, secondPaste, thirdPaste]) {
+          act(() => {
+            stdin.write(`\x1b[200~${paste}\x1b[201~`);
+          });
+          await flush();
+        }
+
+        mockBuffer.text =
+          '[Pasted Content 1001 chars]\n[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars] #3';
+        mockBuffer.lines = mockBuffer.text.split('\n');
+        mockBuffer.cursor = [2, '[Pasted Content 1001 chars] #3'.length];
+
+        // Advance the protection timer without sleeping in real time.
+        await advanceTimers(500);
+
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
+
+        const submitted = vi.mocked(props.onSubmit).mock.calls.at(-1)?.[0];
+        expect(submitted).toBe(
+          `${wrapClipboardPaste(firstPaste)}\n${wrapClipboardPaste(secondPaste)}\n${wrapClipboardPaste(thirdPaste)}\n${CLIPBOARD_PASTE_FRAMING}`,
+        );
+        // N pastes cost one attribution, not N.
+        expect(submitted?.split('The block above was pasted').length - 1).toBe(
+          1,
+        );
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
+    });
+
+    it("restores a framed submission as the user's own text on history recall", async () => {
+      renderWithProviders(<InputPrompt {...props} />);
+      await wait();
+
+      const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+      if (!historyArgs) {
+        throw new Error('useInputHistory was not called');
+      }
+
+      const raw = 'x'.repeat(1001);
+      const framed = describeClipboardPaste(raw);
+      act(() => {
+        historyArgs.onChange(framed);
+      });
+
+      // The recall refills the composer with the user's own characters, so a
+      // re-submit cannot send the attribution back as user-authored text.
+      expect(mockBuffer.setText).toHaveBeenCalledWith(raw);
+      const recalled = vi.mocked(mockBuffer.setText).mock.calls.at(-1)?.[0];
+      expect(recalled).not.toContain('<clipboard-paste>');
+
+      act(() => {
+        historyArgs.onChange('an ordinary earlier prompt');
+      });
+      expect(mockBuffer.setText).toHaveBeenCalledWith(
+        'an ordinary earlier prompt',
+      );
+    });
+
+    it('does not frame a large paste inside a slash command invocation', async () => {
+      const largeContent = 'x'.repeat(1001);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+        });
+        await flush();
+
+        mockBuffer.text = '/remember [Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
+
+        // Advance the protection timer without sleeping in real time.
+        await advanceTimers(500);
+
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
+
+        // A slash command's argument is data the command consumes, not a
+        // message to the model — it gets the raw expansion, like shell mode.
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          `/remember ${largeContent}`,
+          {
+            deferUntilIdle: false,
+            submittedPrompt: '/remember [Pasted Content 1001 chars]',
+          },
+        );
       } finally {
         vi.useRealTimers();
         unmount();
@@ -6922,5 +7266,19 @@ describe('classifyPastedImagePaths', () => {
     expect(
       classifyPastedImagePaths('@/a/img.png describe this').allImages,
     ).toBe(false);
+  });
+
+  it('normalizes file:// URIs to local paths, percent-decoding names', () => {
+    // A copied file arrives as a uri-list entry from file managers and some
+    // clipboard helpers; without conversion the path never resolves and the
+    // paste degrades to raw URI text.
+    expect(classifyPastedImagePaths('file:///a/shot.png')).toEqual({
+      imagePaths: ['/a/shot.png'],
+      allImages: true,
+    });
+    expect(classifyPastedImagePaths('file:///a/My%20Shot.png')).toEqual({
+      imagePaths: ['/a/My Shot.png'],
+      allImages: true,
+    });
   });
 });

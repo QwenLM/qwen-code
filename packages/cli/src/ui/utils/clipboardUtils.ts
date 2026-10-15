@@ -9,6 +9,7 @@ import { constants as fsConstants } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { wrapForMultiplexer } from '../../utils/osc.js';
 
@@ -530,17 +531,26 @@ function clipboardReadArgs(tool: 'wl-paste' | 'xclip', type: string): string[] {
 }
 
 /**
+ * Resolved when a read is discarded for exceeding MAX_CLIPBOARD_TEXT_BYTES —
+ * kept distinct from the empty-string failures so a caller looping over a
+ * selection's offered types can stop instead of re-reading the same oversized
+ * content once per type.
+ */
+const READ_DISCARDED_FOR_SIZE: unique symbol = Symbol('readDiscardedForSize');
+
+/**
  * Capture stdout from a clipboard tool. Anything that is not a successful read
- * — empty clipboard, unreachable tool, spawn failure, timeout, a payload over
- * the size cap — resolves to an empty string, so callers do not have to
- * distinguish them. Whether a successful read is actually worth pasting is
- * left to the caller to judge.
+ * — empty clipboard, unreachable tool, spawn failure, timeout — resolves to an
+ * empty string, so callers do not have to distinguish them. A payload over the
+ * size cap resolves to READ_DISCARDED_FOR_SIZE instead: the cap says something
+ * about the content, not about this one type, so retrying another offered type
+ * would just read the same oversized payload again. Whether a successful read
+ * is actually worth pasting is left to the caller to judge.
  */
 async function readStdout(
   command: string,
   args: string[],
-  maxBytes: number = MAX_CLIPBOARD_TEXT_BYTES,
-): Promise<string> {
+): Promise<string | typeof READ_DISCARDED_FOR_SIZE> {
   return new Promise((resolve) => {
     let child;
     try {
@@ -574,7 +584,7 @@ async function readStdout(
       resolve('');
     }, PROCESS_TIMEOUT_MS);
 
-    const done = (value: string) => {
+    const done = (value: string | typeof READ_DISCARDED_FOR_SIZE) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -582,17 +592,21 @@ async function readStdout(
     };
 
     child.stdout.on('data', (data: Buffer) => {
+      // The child may outlive an abandoned read (SIGTERM is best-effort), so
+      // once settled a late chunk must neither accumulate nor re-enter the
+      // over-cap kill/log branch.
+      if (settled) return;
       received += data.length;
-      if (received > maxBytes) {
+      if (received > MAX_CLIPBOARD_TEXT_BYTES) {
         try {
           child.kill();
         } catch {
           /* ignore */
         }
         debugLogger.debug(
-          `${command} ${args.join(' ')} exceeded ${maxBytes} bytes; discarding the read`,
+          `${command} ${args.join(' ')} exceeded ${MAX_CLIPBOARD_TEXT_BYTES} bytes; discarding the read`,
         );
-        done('');
+        done(READ_DISCARDED_FOR_SIZE);
         return;
       }
       chunks.push(data);
@@ -744,15 +758,15 @@ async function listClipboardTypes(
   const names =
     tool === 'wl-paste'
       ? await listWlPasteTypes()
-      : (
-          await readStdout(tool, [
-            '-selection',
-            'clipboard',
-            '-t',
-            'TARGETS',
-            '-o',
-          ])
-        ).split(/\s+/);
+      : await readStdout(tool, [
+          '-selection',
+          'clipboard',
+          '-t',
+          'TARGETS',
+          '-o',
+        ]).then((targets) =>
+          typeof targets === 'string' ? targets.split(/\s+/) : [],
+        );
 
   const types: ClipboardType[] = [];
   for (const name of names) {
@@ -792,16 +806,49 @@ export async function readClipboardText(): Promise<string | null> {
   const offers = await listClipboardTypes(tool);
   for (const tier of ['plain', 'other'] as const) {
     for (const type of offers.filter((offer) => offer.tier === tier)) {
-      const text = await readStdout(tool, clipboardReadArgs(tool, type.raw));
-      if (text.trim()) {
-        return text
+      const result = await readStdout(tool, clipboardReadArgs(tool, type.raw));
+      if (result === READ_DISCARDED_FOR_SIZE) {
+        // Every remaining offer is another conversion of the same oversized
+        // content, so it would breach the same cap — stop rather than read
+        // 16 MiB per type only to report nothing.
+        return null;
+      }
+      if (result.trim()) {
+        const text = result
           .replace(/\r\n/g, '\n')
           .replace(/\r/g, '\n')
           .replace(/\n+$/, '');
+        return type.raw.trim().toLowerCase().split(';')[0].trim() ===
+          'text/uri-list'
+          ? uriListToPaths(text)
+          : text;
       }
     }
   }
   return null;
+}
+
+/**
+ * `text/uri-list` carries one URI per line (RFC 2483, with `#` comment
+ * lines); file managers use it for copied files. Convert the `file://` URIs
+ * to local paths so a copied image file classifies as an image path on the
+ * way into the editor; anything else passes through unchanged.
+ */
+function uriListToPaths(text: string): string {
+  return text
+    .split('\n')
+    .filter((line) => !line.startsWith('#'))
+    .map((line) => {
+      if (!line.startsWith('file://')) {
+        return line;
+      }
+      try {
+        return fileURLToPath(line);
+      } catch {
+        return line;
+      }
+    })
+    .join('\n');
 }
 
 /**

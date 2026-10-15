@@ -508,6 +508,26 @@ describe('clipboardUtils', () => {
         reads: ['text/uri-list'],
       },
       {
+        name: 'converts file:// URIs in a uri-list to local paths',
+        tool: 'wl-paste',
+        types: ['text/uri-list'],
+        payloads: {
+          'text/uri-list': 'file:///a/shot.png\r\nfile:///a/My%20Shot.png\r\n',
+        },
+        expected: '/a/shot.png\n/a/My Shot.png',
+        reads: ['text/uri-list'],
+      },
+      {
+        name: 'drops uri-list comment lines',
+        tool: 'wl-paste',
+        types: ['text/uri-list'],
+        payloads: {
+          'text/uri-list': '# a comment\r\nfile:///a/shot.png\r\n',
+        },
+        expected: '/a/shot.png',
+        reads: ['text/uri-list'],
+      },
+      {
         name: 'maps X11 atoms onto text without reading TARGETS as content',
         tool: 'xclip',
         types: ['TARGETS', 'TIMESTAMP', 'UTF8_STRING', 'STRING'],
@@ -619,6 +639,48 @@ describe('clipboardUtils', () => {
       await expect(readClipboardText()).resolves.toBeNull();
       expect(bigChild?.kill).toHaveBeenCalled();
     });
+
+    it('stops reading offered types after the first over-cap read', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      // Both offers are conversions of the same oversized selection: after
+      // the first read breaches the cap, reading the second would stream
+      // another 16 MiB into the same discard.
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild('text/plain\nUTF8_STRING\n', 0);
+        }
+        return createChunkedMockChild([
+          Buffer.from('x'.repeat(16 * 1024 * 1024 + 1)),
+        ]);
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(requestedTypes()).toEqual(['text/plain']);
+    });
+
+    it('ignores chunks that arrive after a read was abandoned on timeout', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      // The child ignores SIGTERM, which a wedged clipboard owner may do: the
+      // timeout settles the read, and a chunk arriving afterwards must
+      // neither accumulate nor re-enter the over-cap kill branch.
+      const hanging = createHangingChild();
+      hanging.kill = vi.fn(); // no close follows — the child outlives the read
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild('text/plain\n', 0);
+        }
+        return hanging;
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(hanging.kill).toHaveBeenCalledTimes(1);
+
+      hanging.stdout.emit(
+        'data',
+        Buffer.from('x'.repeat(16 * 1024 * 1024 + 1)),
+      );
+      expect(hanging.kill).toHaveBeenCalledTimes(1);
+    }, 10000);
 
     it('stays quiet when no clipboard tool is reachable', async () => {
       mockExecSync.mockImplementation(() => {
