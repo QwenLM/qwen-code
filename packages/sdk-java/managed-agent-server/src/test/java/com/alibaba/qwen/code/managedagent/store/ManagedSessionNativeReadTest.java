@@ -1,12 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -14,6 +7,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
@@ -43,6 +38,9 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedSessionNativeReadTest {
     private static final String TOKEN = "csi-original-writer-token-for-test";
@@ -96,7 +94,7 @@ class ManagedSessionNativeReadTest {
 
     @AfterEach
     void closeOwnedDatabase() {
-        source.onFetch = () -> { };
+        source.onFetch = () -> {};
         source.closeFailure = "";
         jdbc.execute("SHUTDOWN");
     }
@@ -199,7 +197,7 @@ class ManagedSessionNativeReadTest {
     @Test
     void completionIdentityFailurePreservesOpenAndOriginalFetchError() {
         source.onFetch = () -> {
-                    tamperReadWriter();
+            tamperReadWriter();
             throw new IllegalArgumentException("owned fetch failure");
         };
         assertThatThrownBy(this::read).isInstanceOf(IllegalArgumentException.class)
@@ -339,7 +337,7 @@ class ManagedSessionNativeReadTest {
     }
 
     private static final class FaultSource extends DelegatingDataSource {
-        private Runnable onFetch = () -> { };
+        private Runnable onFetch = () -> {};
         private String closeFailure = "";
 
         private FaultSource(DriverManagerDataSource source) {

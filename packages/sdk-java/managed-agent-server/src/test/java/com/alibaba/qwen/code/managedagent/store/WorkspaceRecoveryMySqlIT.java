@@ -1,16 +1,18 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
-import java.util.UUID;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.UUID;
 
 class WorkspaceRecoveryMySqlIT {
     @TempDir Path temporary;
@@ -97,6 +99,8 @@ class WorkspaceRecoveryMySqlIT {
 
     @AfterEach
     void cleanup() {
-        if (admin != null && schema != null) admin.execute("DROP DATABASE IF EXISTS " + schema);
+        if (admin != null && schema != null) {
+            admin.execute("DROP DATABASE IF EXISTS " + schema);
+        }
     }
 }

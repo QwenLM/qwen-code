@@ -1,11 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import java.util.List;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+
+import java.util.List;
 
 /**
  * H4d-b: the JDBC side of the session message relay — its V64 ledger plus

@@ -1,15 +1,14 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 final class WorkspaceEvidenceResources {
     private WorkspaceEvidenceResources() {

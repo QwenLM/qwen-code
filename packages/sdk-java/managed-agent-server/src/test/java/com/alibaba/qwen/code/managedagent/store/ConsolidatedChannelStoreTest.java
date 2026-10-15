@@ -1,18 +1,18 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.ChannelDelivery;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import java.nio.charset.StandardCharsets;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.nio.charset.StandardCharsets;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ConsolidatedChannelStoreTest {
     private ConsolidatedStoreFixture fixture;
@@ -32,7 +32,9 @@ class ConsolidatedChannelStoreTest {
 
     @AfterEach
     void closeFixture() {
-        if (fixture != null) fixture.close();
+        if (fixture != null) {
+            fixture.close();
+        }
     }
 
     @Test

@@ -1,11 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -13,6 +9,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedSchemaLoadMySqlIT extends ManagedSchemaSessionMySqlIT {
     @Test

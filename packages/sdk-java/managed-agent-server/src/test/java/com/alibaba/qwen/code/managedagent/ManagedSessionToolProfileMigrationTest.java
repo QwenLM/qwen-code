@@ -1,14 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedSessionToolProfileMigrationTest {
     @Test

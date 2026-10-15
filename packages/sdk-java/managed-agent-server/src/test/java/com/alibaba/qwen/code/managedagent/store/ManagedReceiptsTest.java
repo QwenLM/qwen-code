@@ -1,10 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedReceiptsTest {
     @Test

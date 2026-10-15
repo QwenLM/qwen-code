@@ -1,18 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ACTIVATION_ID;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ref;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.resource;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.awaitility.Awaitility.await;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -32,6 +19,15 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.flywaydb.core.Flyway;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
@@ -55,13 +51,18 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import javax.sql.DataSource;
-import org.flywaydb.core.Flyway;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ACTIVATION_ID;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.resource;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Pinned query budgets for GitHub issue #13181: four managed-agent hot paths
@@ -921,7 +922,9 @@ class Issue13181QueryBudgetTest {
                 "UPDATE ma_workspace SET storage_id = 'storage'; UPDATE ma_workspace_access SET role = 'READER'"
         }) {
             // This fixture has only one tenant; each mutation proves a separate admission conjunct.
-            for (String statement : mutation.split(";")) fixture.jdbc.update(statement);
+            for (String statement : mutation.split(";")) {
+                fixture.jdbc.update(statement);
+            }
             assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
         }
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'");

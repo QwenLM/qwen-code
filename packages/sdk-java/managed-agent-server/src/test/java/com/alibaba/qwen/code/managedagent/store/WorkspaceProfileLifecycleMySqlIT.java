@@ -1,10 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import java.util.UUID;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import java.util.UUID;
 
 class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
     private JdbcTemplate admin;
@@ -47,7 +48,9 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
             })).toList();
             start.countDown();
             var claims = new java.util.ArrayList<StoreModels.OperationRecord>();
-            for (var future : futures) future.get(10, java.util.concurrent.TimeUnit.SECONDS).ifPresent(claims::add);
+            for (var future : futures) {
+                future.get(10, java.util.concurrent.TimeUnit.SECONDS).ifPresent(claims::add);
+            }
             org.assertj.core.api.Assertions.assertThat(claims).hasSize(1);
             var winner = claims.getFirst();
             org.assertj.core.api.Assertions.assertThat(winner.claimGeneration()).isGreaterThan(first.claimGeneration());
@@ -90,7 +93,9 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
             var winners = new java.util.ArrayList<ManagedSessionStoreModels.WriterGrant>();
             for (var future : futures) {
                 var grant = future.get(10, java.util.concurrent.TimeUnit.SECONDS);
-                if (grant != null) winners.add(grant);
+                if (grant != null) {
+                    winners.add(grant);
+                }
             }
             org.assertj.core.api.Assertions.assertThat(winners).hasSize(1);
             org.assertj.core.api.Assertions.assertThat(f.jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))

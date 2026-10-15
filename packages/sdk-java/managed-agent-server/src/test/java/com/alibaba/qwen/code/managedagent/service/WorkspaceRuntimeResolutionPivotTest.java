@@ -1,30 +1,31 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.List;
-import java.util.UUID;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.List;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The W2 execution pivot: after a cwd change commits, the exact resolution
@@ -60,8 +61,7 @@ class WorkspaceRuntimeResolutionPivotTest {
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                         TENANT, STORAGE, root.toString())));
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
-                new ObjectMapper(), Clock.systemUTC(), ignored -> {
-                }, new ManagedWorkspaceRegistry(jdbc), properties);
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         WorkspaceRuntimeResolver resolver = new WorkspaceRuntimeResolver(
                 store, new WorkspaceExecutionStore(jdbc,
                         new DataSourceTransactionManager(dataSource)),
