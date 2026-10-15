@@ -17,6 +17,7 @@ import type {
   ShowData,
 } from '../app-contract.js';
 import { ReportApp } from './App.js';
+import type { SendAnalysis } from './analysis-request.js';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -138,21 +139,30 @@ function detail(overrides: Partial<DetailData> = {}): DetailData {
   };
 }
 
-function render(query?: Query, data = report()) {
+function render(query?: Query, data = report(), sendAnalysis?: SendAnalysis) {
   const container = globalThis.document.createElement('div');
   globalThis.document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(<ReportApp report={data} query={query} />));
+  act(() =>
+    root.render(
+      <ReportApp report={data} query={query} sendAnalysis={sendAnalysis} />,
+    ),
+  );
   mounted.push({ root, container });
   return {
     container,
-    rerender: (nextQuery?: Query, connectionNotice?: string) =>
+    rerender: (
+      nextQuery?: Query,
+      connectionNotice?: string,
+      nextSendAnalysis: SendAnalysis | null | undefined = sendAnalysis,
+    ) =>
       act(() =>
         root.render(
           <ReportApp
             report={data}
             query={nextQuery}
             connectionNotice={connectionNotice}
+            sendAnalysis={nextSendAnalysis ?? undefined}
           />,
         ),
       ),
@@ -195,10 +205,10 @@ function inputText(container: HTMLElement, value: string) {
   });
 }
 
-function deferred() {
-  let resolve!: (data: QueryData) => void;
+function deferred<T = QueryData>() {
+  let resolve!: (data: T) => void;
   let reject!: (error: Error) => void;
-  const promise = new Promise<QueryData>((resolvePromise, rejectPromise) => {
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
@@ -636,5 +646,145 @@ describe('ReportApp', () => {
       two.reject(new Error('late list failure'));
     });
     expect(container.textContent).toBe('');
+  });
+
+  it('keeps manual copying available without message capability', async () => {
+    const { container } = render();
+    await act(async () =>
+      container
+        .querySelector<HTMLInputElement>('input[type="checkbox"]')!
+        .click(),
+    );
+    expect(container.textContent).not.toContain('Review selected failures');
+    const request = container.querySelector('textarea')!.value;
+    expect(request).toContain('Read-only analysis');
+    expect(request).toContain('do not modify files or rerun tests');
+    expect(request).toContain(reportId);
+    expect(request).toContain('f0:a0');
+    expect(request).not.toContain('example.test.ts');
+    await click(container, 'Select request text');
+    expect(globalThis.document.activeElement).toBe(
+      container.querySelector('textarea'),
+    );
+  });
+
+  it('requests review only on click, synchronously prevents duplicates, and reports acceptance without claiming completion', async () => {
+    const pending = deferred<{ isError?: boolean }>();
+    const sendAnalysis = vi.fn<SendAnalysis>().mockReturnValue(pending.promise);
+    const query = vi.fn<Query>().mockResolvedValue(list());
+    const { container, rerender } = render(query, report(), sendAnalysis);
+    await act(async () =>
+      container
+        .querySelector<HTMLInputElement>('input[type="checkbox"]')!
+        .click(),
+    );
+    expect(sendAnalysis).not.toHaveBeenCalled();
+    const review = button(container, 'Review selected failures');
+    await act(async () => {
+      review.click();
+      review.click();
+    });
+    expect(sendAnalysis).toHaveBeenCalledTimes(1);
+    expect(sendAnalysis.mock.calls[0][0]).toEqual(['f0:a0']);
+    expect(sendAnalysis.mock.calls[0][1].aborted).toBe(false);
+    expect(review.disabled).toBe(true);
+    expect(button(container, 'Search').disabled).toBe(false);
+    expect(button(container, 'Clear selection').disabled).toBe(true);
+    expect(container.textContent).toContain('Review this request in the host');
+    await act(async () => pending.resolve({}));
+    expect(container.textContent).toContain('daemon accepted the last request');
+    expect(container.textContent).toContain('does not confirm completion');
+    expect(container.textContent).not.toContain('Cancel request');
+    rerender(undefined, 'Connection closed.', null);
+    expect(container.textContent).toContain('daemon accepted the last request');
+    expect(sendAnalysis).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['host rejection', 'RPC timeout'] as const)(
+    'keeps %s unconfirmed and does not retry on its own',
+    async (outcome) => {
+      const sendAnalysis = vi.fn<SendAnalysis>();
+      if (outcome === 'host rejection')
+        sendAnalysis.mockResolvedValue({ isError: true });
+      else sendAnalysis.mockRejectedValue(new Error('Request timed out'));
+      const query = vi.fn<Query>().mockResolvedValue(list());
+      const { container, rerender } = render(query, report(), sendAnalysis);
+      await act(async () =>
+        container
+          .querySelector<HTMLInputElement>('input[type="checkbox"]')!
+          .click(),
+      );
+      await click(container, 'Review selected failures');
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        outcome === 'host rejection'
+          ? 'The host did not confirm acceptance. Check the host review and original conversation before sending again.'
+          : 'Acceptance is unknown. The request may have timed out or lost its connection; check the host review and original conversation before sending again.',
+      );
+      expect(container.textContent).not.toContain('daemon accepted');
+      expect(container.querySelector('textarea')!.value).toContain(reportId);
+      await click(container, 'Search');
+      rerender(query);
+      expect(sendAnalysis).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('cancels the pending RPC and ignores a later success without automatically resending', async () => {
+    const pending = deferred<{ isError?: boolean }>();
+    const sendAnalysis = vi.fn<SendAnalysis>().mockReturnValue(pending.promise);
+    const { container } = render(undefined, report(), sendAnalysis);
+    await act(async () =>
+      container
+        .querySelector<HTMLInputElement>('input[type="checkbox"]')!
+        .click(),
+    );
+    await click(container, 'Review selected failures');
+    await click(container, 'Cancel request');
+    expect(sendAnalysis.mock.calls[0][1].aborted).toBe(true);
+    expect(container.textContent).toContain(
+      'Cancellation requested. Acceptance is unknown',
+    );
+    await act(async () => pending.resolve({}));
+    expect(container.textContent).not.toContain('daemon accepted');
+    expect(container.textContent).toContain('Acceptance is unknown');
+    expect(sendAnalysis).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts review when the connection disappears and does not replay it on reconnection', async () => {
+    const pending = deferred<{ isError?: boolean }>();
+    const sendAnalysis = vi.fn<SendAnalysis>().mockReturnValue(pending.promise);
+    const { container, rerender } = render(undefined, report(), sendAnalysis);
+    await act(async () =>
+      container
+        .querySelector<HTMLInputElement>('input[type="checkbox"]')!
+        .click(),
+    );
+    await click(container, 'Review selected failures');
+    rerender(undefined, 'Connection closed.', null);
+    expect(sendAnalysis.mock.calls[0][1].aborted).toBe(true);
+    expect(container.textContent).toContain(
+      'Connection lost. Acceptance is unknown',
+    );
+    expect(container.querySelector('textarea')!.value).toContain('f0:a0');
+    await act(async () => pending.reject(new Error('Connection closed')));
+    rerender(undefined, '', sendAnalysis);
+    expect(sendAnalysis).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain('daemon accepted');
+  });
+
+  it('aborts pending analysis on teardown and ignores its later rejection', async () => {
+    const pending = deferred<{ isError?: boolean }>();
+    const sendAnalysis = vi.fn<SendAnalysis>().mockReturnValue(pending.promise);
+    const { container, unmount } = render(undefined, report(), sendAnalysis);
+    await act(async () =>
+      container
+        .querySelector<HTMLInputElement>('input[type="checkbox"]')!
+        .click(),
+    );
+    await click(container, 'Review selected failures');
+    unmount();
+    expect(sendAnalysis.mock.calls[0][1].aborted).toBe(true);
+    await act(async () => pending.reject(new Error('View removed')));
+    expect(container.textContent).toBe('');
+    expect(sendAnalysis).toHaveBeenCalledTimes(1);
   });
 });

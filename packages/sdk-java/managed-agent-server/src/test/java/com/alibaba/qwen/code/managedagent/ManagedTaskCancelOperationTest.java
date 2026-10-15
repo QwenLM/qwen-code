@@ -1,15 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.TaskCancelOutcome;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
@@ -18,7 +16,17 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -30,16 +38,9 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * H4f: the task_cancel operation on real SQL — admission in the contract's
@@ -53,6 +54,7 @@ class ManagedTaskCancelOperationTest {
     private static final String RUNNING_CHILD = "task_" + "a".repeat(64);
     private static final String SETTLED_CHILD = "task_" + "b".repeat(64);
     private static final String MONITOR = "task_" + "c".repeat(64);
+    private static final String WORKFLOW = "task_" + "e".repeat(64);
     private final AtomicLong now = new AtomicLong(1_000_000);
     private ManagedAgentStore store;
     private JdbcTemplate jdbc;
@@ -84,8 +86,7 @@ class ManagedTaskCancelOperationTest {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         store = new ManagedAgentStore(jdbc, new ObjectMapper(), clock,
-                ignored -> {
-                }, new ManagedWorkspaceRegistry(jdbc), properties);
+                ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
                 null, null, List.of(), null).sessionId();
         task(RUNNING_CHILD, "child_run", "child_agent", "running");
@@ -159,6 +160,42 @@ class ManagedTaskCancelOperationTest {
                 "a".repeat(64));
         refused(() -> begin("key-4", "digest-4", RUNNING_CHILD),
                 HttpStatus.CONFLICT, "task_action_unavailable");
+    }
+
+    // H4f-b: a workflow child_run takes the same admission rule as a child
+    // agent's — the cancellable states admit, terminal and
+    // recovery_blocked states refuse, and the retained key replays.
+    @Test
+    void aWorkflowTaskAdmitsCancelUnderTheSameRule() {
+        task(WORKFLOW, "child_run", "workflow", "running");
+        OperationAdmission first = begin("wf-key-1", "wf-digest-1",
+                WORKFLOW);
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.operation().kind()).isEqualTo(
+                OperationKind.TASK_CANCEL);
+        assertThat(first.operation().taskId()).isEqualTo(WORKFLOW);
+        assertThat(begin("wf-key-1", "wf-digest-1", WORKFLOW).replayed())
+                .isTrue();
+        refused(() -> begin("wf-key-1", "wf-digest-2", WORKFLOW),
+                HttpStatus.CONFLICT, "idempotency_conflict");
+        settle(first.operation(), TaskCancelOutcome.completed());
+        for (String state : new String[] {"pending", "waiting",
+                "degraded"}) {
+            jdbc.update("UPDATE ma_session_record SET"
+                    + " task_state = ? WHERE record_key = ?", state,
+                    "e".repeat(64));
+            settle(begin("wf-key-" + state, "wf-digest-" + state, WORKFLOW)
+                    .operation(), TaskCancelOutcome.completed());
+        }
+        for (String state : new String[] {"completed", "failed",
+                "cancelled", "recovery_blocked"}) {
+            jdbc.update("UPDATE ma_session_record SET"
+                    + " task_state = ? WHERE record_key = ?", state,
+                    "e".repeat(64));
+            refused(() -> begin("wf-key-" + state, "wf-digest-" + state,
+                    WORKFLOW), HttpStatus.CONFLICT,
+                    "task_action_unavailable");
+        }
     }
 
     // A bound Session under storage migration admits no new cancel, as

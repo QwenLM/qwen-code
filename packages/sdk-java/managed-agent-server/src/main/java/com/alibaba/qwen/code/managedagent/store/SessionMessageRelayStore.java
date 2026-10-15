@@ -1,9 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import java.util.List;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+
+import java.util.List;
 
 /**
  * H4d-b: the JDBC side of the session message relay — its V64 ledger plus
@@ -17,6 +19,17 @@ import org.springframework.stereotype.Repository;
 public class SessionMessageRelayStore {
     /** The failed steps after which the relay gives an entry up. */
     public static final int MAX_ATTEMPTS = 64;
+
+    /** Over a ledger row `l` joined to its entry: the row still owes work —
+     * none opened yet, or one neither classified nor past the attempt
+     * bound. A sender that takes no further revision never lets the
+     * give-up's own step land, so the bound is the only proof the entry
+     * stops; the relay then owes it nothing but that give-up. The child
+     * relay's hold on a child's own outbox and the send-order hold on a
+     * younger message both end here. */
+    public static final String LEDGER_OWES_WORK = "(l.delivery_id IS NULL"
+            + " OR (l.transport_state NOT IN ('done', 'orphaned', 'unknown')"
+            + " AND l.attempt_count < " + MAX_ATTEMPTS + "))";
 
     /** One outbox entry the delivery-pending index surfaced. H4e-b3 adds
      * the domain: command entries share every field and never collide
@@ -72,8 +85,8 @@ public class SessionMessageRelayStore {
                     + " AND (l.available_at IS NULL OR l.available_at <= ?)"
                     + " AND (l.claim_until IS NULL OR l.claim_until <= ?"
                     + " OR l.claim_owner = ?)"
-                    + " ORDER BY r.created_at, r.session_id, r.record_id"
-                    + " LIMIT ?";
+                    + " ORDER BY r.created_at, r.session_id, r.first_sequence,"
+                    + " r.record_id LIMIT ?";
 
     // The entries handed over and waiting for their target to read them,
     // driven from the ledger's own (state, next_retry_at) index, so the
@@ -206,6 +219,33 @@ public class SessionMessageRelayStore {
                 senderSessionId).isEmpty();
     }
 
+    /** The record resource ids of a sender's messages older than this one,
+     * by its own commit order, that still owe their handover or receipt:
+     * planned, accepting or unknown, on a ledger row still owing work
+     * ({@link #LEDGER_OWES_WORK}). The relay keeps the ones to the same run
+     * ahead of it. */
+    public List<String> olderOwedMessages(String tenantId,
+            String senderSessionId, String messageId) {
+        return jdbc.query("SELECT r.record_resource_id FROM"
+                        + " ma_session_record r"
+                        + " JOIN ma_session_record c"
+                        + " ON c.session_scope_key = r.session_scope_key AND c.tenant_id = r.tenant_id"
+                        + " AND c.session_id = r.session_id"
+                        + " AND c.domain = r.domain"
+                        + " AND c.record_id = ?"
+                        + " LEFT JOIN ma_delivery l"
+                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = r.session_scope_key AND l.tenant_id = r.tenant_id"
+                        + " AND l.source_session_id = r.session_id"
+                        + " AND l.delivery_id = r.record_id"
+                        + " WHERE r.session_scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
+                        + " AND r.domain = 'session_message'"
+                        + " AND r.first_sequence < c.first_sequence"
+                        + " AND r.delivery_state IN ('planned', 'accepting', 'unknown')"
+                        + " AND " + LEDGER_OWES_WORK,
+                (result, row) -> result.getString("record_resource_id"), messageId,
+                ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId, senderSessionId);
+    }
+
     /** Insert-or-claim: returns the row this worker now owns, or null when
      * another live claim holds it. */
     public MessageRow claim(String tenantId, String senderSessionId,
@@ -264,7 +304,7 @@ public class SessionMessageRelayStore {
         jdbc.update("UPDATE ma_delivery SET attempt_count = ?, available_at = ?, last_error = ?,"
                         + " claim_until = ?, updated_at = ? WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE'"
                         + " AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
-                row.attempts() + 1, nextRetryAt, truncate(lastError), leaseUntil, now,
+                row.attempts() + 1, nextRetryAt, StringUtils.truncate(lastError, 1024), leaseUntil, now,
                 deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()), owner, row.claimGeneration(), now);
     }
 
@@ -276,12 +316,7 @@ public class SessionMessageRelayStore {
                         + " consumption_state = CASE WHEN ? = 'done' THEN 'consumed' ELSE consumption_state END,"
                         + " last_error = ?, updated_at = ? WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE'"
                         + " AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
-                state, state, truncate(lastError), now, deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()),
+                state, state, StringUtils.truncate(lastError, 1024), now, deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()),
                 owner, row.claimGeneration(), now);
-    }
-
-    private static String truncate(String text) {
-        return text == null ? null
-                : text.substring(0, Math.min(text.length(), 1024));
     }
 }
