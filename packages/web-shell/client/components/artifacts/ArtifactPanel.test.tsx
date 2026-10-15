@@ -2361,6 +2361,120 @@ describe('ArtifactPanel add menu', () => {
     expect(onCreateSideTask).toHaveBeenCalledOnce();
   });
 
+  it('offers reversible archive actions for completed side tasks', () => {
+    const onArchiveSideTasks = vi.fn();
+    const onUnarchiveSideTasks = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            sideTasks={[
+              {
+                sessionId: 'side-complete',
+                title: 'Completed research',
+                archivable: true,
+              },
+              {
+                sessionId: 'side-running',
+                title: 'Running research',
+                archivable: false,
+              },
+            ]}
+            archivedSideTasks={[
+              {
+                sessionId: 'side-archived',
+                title: 'Archived research',
+              },
+            ]}
+            onCreateSideTask={vi.fn()}
+            onOpenSideTask={vi.fn()}
+            onArchiveSideTasks={onArchiveSideTasks}
+            onUnarchiveSideTasks={onUnarchiveSideTasks}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const openMenu = () => {
+      const sideTask = Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      ).find((button) => button.textContent?.includes('Side task'));
+      act(() => {
+        sideTask?.dispatchEvent(
+          new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+        );
+      });
+    };
+    const openTaskActions = (title: string) => {
+      const trigger = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent?.includes(title));
+      act(() => trigger?.click());
+    };
+
+    openMenu();
+    openTaskActions('Completed research');
+    const archive = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Archive');
+    act(() => archive?.click());
+    expect(onArchiveSideTasks).toHaveBeenNthCalledWith(1, [
+      expect.objectContaining({ sessionId: 'side-complete' }),
+    ]);
+
+    openMenu();
+    const archiveCompleted = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Archive completed');
+    act(() => archiveCompleted?.click());
+    expect(onArchiveSideTasks).toHaveBeenNthCalledWith(
+      2,
+      expect.arrayContaining([
+        expect.objectContaining({ sessionId: 'side-complete' }),
+        expect.objectContaining({ sessionId: 'side-running' }),
+      ]),
+    );
+
+    openMenu();
+    openTaskActions('Archived (1)');
+    const restore = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.includes('Archived research'));
+    act(() => restore?.click());
+    expect(onUnarchiveSideTasks).toHaveBeenCalledWith([
+      expect.objectContaining({ sessionId: 'side-archived' }),
+    ]);
+
+    openMenu();
+    openTaskActions('Running research');
+    const disabledArchive = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find(
+      (item) =>
+        item.textContent === 'Archive' && item.hasAttribute('data-disabled'),
+    );
+    expect(disabledArchive?.getAttribute('title')).toBe(
+      'Only completed side tasks can be archived.',
+    );
+  });
+
   it('forwards model management policy and the refusal callback to the side task panel', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

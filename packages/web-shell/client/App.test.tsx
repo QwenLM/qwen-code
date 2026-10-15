@@ -398,6 +398,20 @@ const {
       isArchived: false,
     }),
     listWorkspaceSessions: vi.fn(() => Promise.resolve([])),
+    archiveSessionsData: vi.fn().mockResolvedValue({
+      archived: [],
+      alreadyArchived: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [],
+    }),
+    unarchiveSessionsData: vi.fn().mockResolvedValue({
+      unarchived: [],
+      alreadyActive: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [],
+    }),
     createSideTaskSession: vi.fn().mockResolvedValue({
       sessionId: 'side-session-1',
       clientId: 'side-client-1',
@@ -2661,6 +2675,7 @@ const {
   getTaskActivityKey,
   getEnvironmentAgentTasks,
   mergeAgentTrace,
+  canArchiveSideTaskSummary,
   mergeMonitorTaskSnapshot,
   mergeSideTaskCatalog,
 } = await import('./App');
@@ -2674,6 +2689,23 @@ const { I18nProvider } = await import('./i18n');
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+describe('canArchiveSideTaskSummary', () => {
+  it.each([
+    [{}, true],
+    [{ activeWorkState: 'idle' as const }, true],
+    [{ hasActivePrompt: true }, false],
+    [{ hasRunningBackgroundTasks: true }, false],
+    [{ activeWorkState: 'active' as const }, false],
+    [{ activeWorkState: 'unknown' as const }, false],
+    [{ activeWorkState: 'unsupported' as const }, false],
+  ])(
+    'classifies completed work without guessing about live work',
+    (input, expected) => {
+      expect(canArchiveSideTaskSummary(input)).toBe(expected);
+    },
+  );
+});
 
 describe('mergeSideTaskCatalog', () => {
   const listed = (sessionId: string) => ({ sessionId, title: sessionId });
@@ -11895,6 +11927,22 @@ beforeEach(() => {
   });
   mockWorkspace.client.listWorkspaceSessions.mockReset();
   mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([]);
+  mockWorkspace.client.archiveSessionsData.mockReset();
+  mockWorkspace.client.archiveSessionsData.mockResolvedValue({
+    archived: [],
+    alreadyArchived: [],
+    resolvedConflicts: [],
+    notFound: [],
+    errors: [],
+  });
+  mockWorkspace.client.unarchiveSessionsData.mockReset();
+  mockWorkspace.client.unarchiveSessionsData.mockResolvedValue({
+    unarchived: [],
+    alreadyActive: [],
+    resolvedConflicts: [],
+    notFound: [],
+    errors: [],
+  });
   mockWorkspace.client.createSideTaskSession.mockReset();
   mockWorkspace.client.createSideTaskSession.mockImplementation(
     () => new Promise(() => undefined),
@@ -31822,6 +31870,283 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.forkSession).not.toHaveBeenCalled();
     expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
     expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
+  });
+
+  it.each([
+    {
+      features: ['session_side_task', 'session_archive'],
+      archiveAvailable: false,
+      restoreAvailable: true,
+    },
+    {
+      features: [
+        'session_side_task',
+        'session_archive',
+        'session_archive_idle_guard',
+      ],
+      archiveAvailable: true,
+      restoreAvailable: true,
+    },
+  ])(
+    'requires the atomic idle guard before exposing side-task archive: $archiveAvailable',
+    async ({ features, archiveAvailable, restoreAvailable }) => {
+      mockConnection.capabilities.features = features;
+      const { container } = renderApp();
+      await flush();
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click();
+      });
+      await flush();
+      expect(
+        Boolean(testState.latestArtifactPanelProps?.onArchiveSideTasks),
+      ).toBe(archiveAvailable);
+      expect(
+        Boolean(testState.latestArtifactPanelProps?.onUnarchiveSideTasks),
+      ).toBe(restoreAvailable);
+    },
+  );
+
+  it('archives settled side tasks without reviving stale catalog or saved tabs', async () => {
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'session_archive',
+      'session_archive_idle_guard',
+    ];
+    const completed = {
+      sessionId: 'side-complete',
+      title: 'Completed research',
+      workspaceCwd: '/tmp/project',
+      archivable: true,
+    };
+    const revived = {
+      sessionId: 'side-revived',
+      title: 'Revived research',
+      workspaceCwd: '/tmp/project',
+      archivable: true,
+    };
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        v: 1,
+        ['/tmp/project\0session-2']: {
+          open: true,
+          activeTabId: 'side-task:side-complete',
+          tabs: [
+            {
+              id: 'side-task:side-complete',
+              kind: 'side_task',
+              title: completed.title,
+              sessionId: completed.sessionId,
+              parentSessionId: 'session-2',
+              workspaceCwd: '/tmp/project',
+            },
+          ],
+        },
+      }),
+    );
+    const createCatalogRequest = () => deferred<DaemonSessionSummary[]>();
+    const staleCatalogs: Array<ReturnType<typeof createCatalogRequest>> = [];
+    const refreshedCatalog = createCatalogRequest();
+    let archiveStarted = false;
+    mockWorkspace.client.listWorkspaceSessions.mockImplementation(
+      (_workspaceCwd, options) => {
+        if (options?.archiveState === 'archived') return Promise.resolve([]);
+        if (archiveStarted) {
+          return refreshedCatalog.promise;
+        }
+        const request = createCatalogRequest();
+        staleCatalogs.push(request);
+        return request.promise;
+      },
+    );
+    mockWorkspace.client.archiveSessionsData.mockResolvedValueOnce({
+      archived: [completed.sessionId],
+      alreadyArchived: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [
+        {
+          sessionId: revived.sessionId,
+          error: 'Session has active or unconfirmed work',
+        },
+      ],
+    });
+    const onToast = vi.fn();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const { container } = renderApp({ onToast });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    act(() => {
+      testState.latestArtifactPanelProps?.onOpenSideTask?.(completed);
+      testState.latestArtifactPanelProps?.onOpenSideTask?.(revived);
+    });
+    await flush();
+
+    await vi.waitFor(() => expect(staleCatalogs.length).toBeGreaterThan(0));
+    const preArchiveRequestCount =
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length;
+    await act(async () => {
+      archiveStarted = true;
+      await testState.latestArtifactPanelProps?.onArchiveSideTasks?.([
+        completed,
+        revived,
+      ]);
+    });
+    await vi.waitFor(() => {
+      expect(mockWorkspace.client.archiveSessionsData).toHaveBeenCalledWith(
+        [completed.sessionId, revived.sessionId],
+        { requireIdle: true },
+      );
+      expect(
+        mockWorkspace.client.listWorkspaceSessions.mock.calls.length,
+      ).toBeGreaterThan(preArchiveRequestCount);
+    });
+    await act(async () => {
+      refreshedCatalog.resolve([
+        {
+          sessionId: revived.sessionId,
+          workspaceCwd: '/tmp/project',
+          displayName: revived.title,
+          activeWorkState: 'active',
+          hasActivePrompt: true,
+        },
+      ]);
+      await refreshedCatalog.promise;
+    });
+    await act(async () => {
+      for (const request of staleCatalogs) {
+        request.resolve([
+          {
+            sessionId: completed.sessionId,
+            workspaceCwd: '/tmp/project',
+            displayName: completed.title,
+            activeWorkState: 'idle',
+          },
+          {
+            sessionId: revived.sessionId,
+            workspaceCwd: '/tmp/project',
+            displayName: revived.title,
+            activeWorkState: 'idle',
+          },
+        ]);
+      }
+      await Promise.all(staleCatalogs.map((request) => request.promise));
+    });
+    await vi.waitFor(() => {
+      expect(testState.latestArtifactPanelProps?.sideTasks).toEqual([
+        expect.objectContaining({
+          sessionId: revived.sessionId,
+          archivable: false,
+        }),
+      ]);
+    });
+    expect(
+      container.querySelector('button[title="Completed research"]'),
+    ).toBeNull();
+    const persisted = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    );
+    for (const key of ['/tmp/project\0session-1', '/tmp/project\0session-2']) {
+      expect(persisted[key]?.tabs).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ sessionId: completed.sessionId }),
+        ]),
+      );
+    }
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('active or unconfirmed work'),
+    );
+    consoleError.mockRestore();
+  });
+
+  it('restores archived side tasks into the active parent catalog', async () => {
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'session_archive',
+      'session_archive_idle_guard',
+    ];
+    const archived = {
+      sessionId: 'side-archived',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Archived research',
+      sourceType: 'side_task',
+      sourceId: 'session-1',
+    };
+    let restored = false;
+    mockWorkspace.client.listWorkspaceSessions.mockImplementation(
+      (_workspaceCwd, options) =>
+        Promise.resolve(
+          options?.archiveState === 'archived'
+            ? restored
+              ? []
+              : [archived]
+            : restored
+              ? [archived]
+              : [],
+        ),
+    );
+    mockWorkspace.client.unarchiveSessionsData.mockImplementationOnce(
+      async () => {
+        restored = true;
+        return {
+          unarchived: [archived.sessionId],
+          alreadyActive: [],
+          resolvedConflicts: [],
+          notFound: [],
+          errors: [],
+        };
+      },
+    );
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.archivedSideTasks).toEqual([
+      expect.objectContaining({ sessionId: archived.sessionId }),
+    ]);
+
+    await act(async () => {
+      await testState.latestArtifactPanelProps?.onUnarchiveSideTasks?.([
+        {
+          sessionId: archived.sessionId,
+          title: archived.displayName,
+          workspaceCwd: archived.workspaceCwd,
+        },
+      ]);
+    });
+
+    expect(mockWorkspace.client.unarchiveSessionsData).toHaveBeenCalledWith([
+      archived.sessionId,
+    ]);
+    await flush();
+    expect(testState.latestArtifactPanelProps?.archivedSideTasks).toEqual([]);
+    expect(testState.latestArtifactPanelProps?.sideTasks).toEqual([
+      expect.objectContaining({
+        sessionId: archived.sessionId,
+        archivable: true,
+      }),
+    ]);
   });
 
   it.each([false, true])(

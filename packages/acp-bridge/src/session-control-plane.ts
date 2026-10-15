@@ -9583,6 +9583,15 @@ export function createSessionControlPlane(
         'session_closing',
       );
     }
+    if (
+      closeOpts?.requireIdle === true &&
+      entryActiveWorkState(entry) !== 'idle'
+    ) {
+      throw new SessionBusyError(
+        sessionId,
+        `Session ${sessionId} has active or unconfirmed work`,
+      );
+    }
     let originatorClientId: string | undefined;
     if (context?.clientId !== undefined) {
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
