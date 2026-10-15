@@ -54,10 +54,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       // NONE, '') fail contains() and stay hosted.
       'contains(fromJSON(\'\'["OWNER","MEMBER","COLLABORATOR"]\'\'), github.event.pull_request.author_association)',
       'fromJSON(\'\'["self-hosted", "linux", "x64", "ecs-qwen"]\'\')',
-      "format('refs/pull/{0}/head', github.event.pull_request.number)",
-      "EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'",
-      'git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD',
-      'exit 1',
+      "ref: '${{ github.sha }}'",
     ]) {
       expect(block).toContain(fragment);
     }
@@ -172,47 +169,6 @@ describe('SDK Java Flyway migration version guard', () => {
     );
   });
 
-  it('fetches the pull request baseline before enforcing migration ordering', () => {
-    const steps = parse(workflow).jobs['flyway-migrations'].steps;
-    const fetchIndex = steps.findIndex(
-      (step) => step.name === 'Fetch base branch for version checks',
-    );
-    const checkIndex = steps.findIndex(
-      (step) => step.name === 'Check Flyway migration versions are unique',
-    );
-    expect(fetchIndex).toBeGreaterThan(
-      steps.findIndex((step) => step.name === 'Checkout'),
-    );
-    expect(fetchIndex).toBeLessThan(checkIndex);
-    expect(steps[fetchIndex].if).toBe(
-      "${{ github.event_name == 'pull_request' }}",
-    );
-    expect(steps[fetchIndex].env.BASE_REF).toBe(
-      '${{ github.event.pull_request.base.ref }}',
-    );
-    expect(steps[fetchIndex].id).toBe('version_base');
-    expect(steps[fetchIndex].run).toContain(
-      'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"',
-    );
-    expect(steps[fetchIndex].run).toContain(
-      'BASE_SHA="$(git rev-parse FETCH_HEAD)"',
-    );
-    expect(steps[fetchIndex].run).toContain(
-      'echo "sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"',
-    );
-    expect(steps[checkIndex].env.FLYWAY_BASE_REF).toBe(
-      '${{ steps.version_base.outputs.sha }}',
-    );
-  });
-
-  it('fetches the shared version baseline only once', () => {
-    const steps = parse(workflow).jobs['flyway-migrations'].steps;
-    const fetches = steps.flatMap(
-      (step) => step.run?.match(/\bgit fetch\b/g) ?? [],
-    );
-    expect(fetches).toHaveLength(1);
-  });
-
   it('scans every sdk-java module that owns a registered migration directory', () => {
     // The guard's premise is the shared classpath:db/migration namespace —
     // managed-agent-server depends on runtime-broker, so one invocation must
@@ -239,23 +195,64 @@ describe('SDK Java Flyway migration version guard', () => {
     }
   });
 
-  it('triggers the workflow when the guard script itself changes', () => {
+  it('runs the full suite daily or on demand', () => {
     const yml = parse(workflow);
-    for (const event of ['pull_request', 'push']) {
-      expect(yml.on[event].paths).toContain(
-        'scripts/check-flyway-migrations.js',
-      );
-      expect(yml.on[event].paths).toContain(
-        'scripts/flyway-migration-utils.js',
-      );
-      // The contract version guard of #13804 rides the same lane.
-      expect(yml.on[event].paths).toContain(
-        'scripts/check-contract-version.js',
-      );
-      expect(yml.on[event].paths).toContain(
-        'scripts/contract-version-utils.js',
-      );
-    }
+    expect(Object.keys(yml.on).sort()).toEqual([
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(yml.on.schedule).toEqual([{ cron: '47 19 * * *' }]);
+  });
+
+  it('keeps the cheap migration guard in PR and post-merge CI', () => {
+    const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+    expect(ci.on.pull_request.branches).toContain('main');
+    expect(ci.on.push.branches).toContain('main');
+    expect(ci.on.pull_request.paths).toBeUndefined();
+    expect(ci.on.push.paths).toBeUndefined();
+    const guard = ci.jobs.lint_and_static.steps.find(
+      (s) => s.name === 'Check Flyway migration versions are unique',
+    );
+    expect(guard.run).toBe(
+      parse(workflow).jobs['flyway-migrations'].steps.find(
+        (s) => s.name === 'Check Flyway migration versions are unique',
+      ).run,
+    );
+    expect(guard.if).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
+    );
+  });
+
+  it('fetches the pull request baseline before enforcing migration ordering', () => {
+    const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+    const steps = ci.jobs.lint_and_static.steps;
+    const fetchIndex = steps.findIndex(
+      (step) => step.name === 'Fetch base branch for version checks',
+    );
+    const checkIndex = steps.findIndex(
+      (step) => step.name === 'Check Flyway migration versions are unique',
+    );
+    expect(fetchIndex).toBeGreaterThan(
+      steps.findIndex((step) => step.name === 'Checkout'),
+    );
+    expect(fetchIndex).toBeLessThan(checkIndex);
+    expect(steps[fetchIndex].if).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
+    );
+    expect(steps[fetchIndex].env.BASE_REF).toBe(
+      '${{ github.event.pull_request.base.ref }}',
+    );
+    expect(steps[fetchIndex].id).toBe('version_base');
+    expect(steps[fetchIndex].run).toContain(
+      'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"',
+    );
+    expect(steps[fetchIndex].run).toContain('git rev-parse FETCH_HEAD');
+    expect(steps[fetchIndex].run).toContain(
+      'echo "sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(steps[checkIndex].env.FLYWAY_BASE_REF).toBe(
+      '${{ steps.version_base.outputs.sha }}',
+    );
   });
 });
 
@@ -263,29 +260,44 @@ describe('SDK Java Flyway migration version guard', () => {
 // the base ref's whenever the document changed. Consumers key capability
 // detection on it, and a regressed or stalled number breaks nothing at
 // runtime to be caught by — both modes were seen in flight on 2026-10-09.
-// The check rides the same lane as the Flyway guard: a second job would
-// spend another pool checkout on a five-second scan.
+// The lightweight checks share the existing PR lint job.
 describe('SDK Java contract version guard', () => {
-  it('runs the advance check on every pull request in the Flyway lane', () => {
-    const parsed = parse(workflow).jobs['flyway-migrations'];
+  it('runs the advance check in PR CI before dependency installation', () => {
+    const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+    expect(ci.on.pull_request.branches).toContain('main');
+    expect(ci.on.pull_request.paths).toBeUndefined();
+    const parsed = ci.jobs.lint_and_static;
     const names = parsed.steps.map((s) => s.name);
     const index = names.indexOf('Check the API contract version advances');
     expect(index).toBeGreaterThan(names.indexOf('Checkout'));
-    expect(index).toBeGreaterThan(
-      names.indexOf('Fetch base branch for version checks'),
-    );
     const step = parsed.steps[index];
     // A push has no base ref to compare against; the races that remain
     // after a pull request's check are the re-check workflow's below.
-    expect(step.if).toBe("${{ github.event_name == 'pull_request' }}");
+    expect(step.if).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
+    );
+    expect(index).toBeLessThan(
+      parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
+    );
     expect(step.env).toEqual({
       BASE_SHA: '${{ steps.version_base.outputs.sha }}',
+      GH_TOKEN: '${{ github.token }}',
+      REPO: '${{ github.repository }}',
+      PR_NUMBER: '${{ github.event.pull_request.number }}',
     });
     // The default checkout is one commit deep, so the comparison copy comes
     // from a depth-one fetch of the base branch's head — not of a stale
     // merge base.
+    expect(index).toBeGreaterThan(
+      names.indexOf('Fetch base branch for version checks'),
+    );
     expect(step.run).toContain('git show "${BASE_SHA}:${DOCUMENT}"');
     expect(step.run).toContain(CONTRACT_DOCUMENT);
+    expect(parsed.permissions['pull-requests']).toBe('read');
+    expect(step.run).toContain('--paginate');
+    expect(step.run).toContain(
+      'grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"',
+    );
     expect(step.run).toContain('node scripts/check-contract-version.js');
   });
 });

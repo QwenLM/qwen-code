@@ -1047,7 +1047,7 @@ Read it with `gh pr view <pr> --repo "$REPO" --json baseRefName --jq .baseRefNam
 `git fetch origin "refs/heads/${BASE_REF}"` and capture
 `BASE_SHA=$(git rev-parse FETCH_HEAD)`. Then run from the root of that trial-merge tree:
 `FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js <modules>`,
-using the module list `sdk-java.yml` passes it.
+using the module list `ci.yml` passes it.
 Those module paths are repo-root-relative. Keep the fetch full and unfiltered:
 shallow history and partial-clone configuration affect all linked worktrees.
 Omitting `FLYWAY_BASE_REF`

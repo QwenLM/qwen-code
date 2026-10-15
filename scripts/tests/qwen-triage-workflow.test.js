@@ -4888,7 +4888,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // The pointer must resolve, and the script refuses a bare invocation,
     // so the module list it names must exist where the skill says.
     expect(existsSync('scripts/check-flyway-migrations.js')).toBe(true);
-    expect(flat).toContain('the module list `sdk-java.yml` passes it');
+    expect(flat).toContain('the module list `ci.yml` passes it');
     expect(flat).toContain(
       'FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js',
     );
@@ -4901,7 +4901,7 @@ describe('qwen-triage verify hardening round 2', () => {
     const fetchCommand = verifySkill.match(/`git fetch [^`]+`/)?.[0];
     expect(fetchCommand).toContain('origin "refs/heads/${BASE_REF}"');
     expect(fetchCommand).not.toMatch(/--depth(?:=|\s)|--filter(?:=|\s)/);
-    expect(readFileSync('.github/workflows/sdk-java.yml', 'utf8')).toContain(
+    expect(readFileSync('.github/workflows/ci.yml', 'utf8')).toContain(
       'node scripts/check-flyway-migrations.js packages/sdk-java/',
     );
 

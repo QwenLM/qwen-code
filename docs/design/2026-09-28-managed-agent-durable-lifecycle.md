@@ -297,7 +297,8 @@ instead would make Flyway refuse to start a database that already applied the
 later version. Upgrade tests apply the ordered sequence before service
 startup. Uniqueness across both migration locations and all scanned Maven
 modules is enforced without a database by `scripts/check-flyway-migrations.js`,
-which runs in the SDK Java workflow on every pull request and push (#12940).
+which runs in Qwen Code CI on every pull request and push (#12940); the daily
+and manual SDK Java runs retain the uniqueness check.
 On `pull_request`, it also requires newly added versions to be strictly above
 the fetched base snapshot's newest version, passed via `FLYWAY_BASE_REF`;
 push runs check uniqueness only. That check sees a pull request against the
