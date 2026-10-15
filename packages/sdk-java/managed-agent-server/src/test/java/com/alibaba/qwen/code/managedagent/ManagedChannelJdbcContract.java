@@ -196,7 +196,7 @@ public final class ManagedChannelJdbcContract {
                     1, eventId, 1);
             tieKeys.add(key);
             routes.findOrCreate(route(tenant, tieChannel, 1L, eventId, 1L, null, List.of()));
-            jdbc.update("UPDATE ma_request_receipt SET created_at=?,updated_at=? WHERE namespace='CHANNEL_INGRESS' AND tenant_id=? AND idempotency_key=?",
+            jdbc.update("UPDATE ma_request_receipt SET gmt_create=?,gmt_modified=? WHERE namespace='CHANNEL_INGRESS' AND tenant_id=? AND idempotency_key=?",
                     tieTime, tieTime, tenant, key);
         }
         tieKeys.sort(Comparator.reverseOrder());
@@ -356,7 +356,7 @@ public final class ManagedChannelJdbcContract {
         for (int i = 0; i < 5; i++) {
             tieIds.add("tie-" + i);
             deliveries.findOrCreate(delivery(tenant, tieChannel, "tie-" + i, "segment-" + i, 0));
-            jdbc.update("UPDATE ma_delivery SET created_at=?,updated_at=? WHERE delivery_kind='CHANNEL' AND tenant_id=? AND channel_id=? AND delivery_id=?",
+            jdbc.update("UPDATE ma_delivery SET gmt_create=?,gmt_modified=? WHERE delivery_kind='CHANNEL' AND tenant_id=? AND channel_id=? AND delivery_id=?",
                     tieTime, tieTime, tenant, tieChannel, "tie-" + i);
         }
         tieIds.sort(Comparator.reverseOrder());

@@ -470,7 +470,7 @@ public interface AgentStateStore {
 
     /**
      * Rotates a stale materialization target behind the fresher ones by
-     * touching only {@code updated_at} on its progress row — never
+     * touching only {@code gmt_modified} on its progress row — never
      * {@code covered_sequence}, which the gap guard must freeze on failure.
      */
     void deferMaterializationTarget(String tenantId, String sessionId);

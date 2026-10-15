@@ -61,6 +61,16 @@ class ChildWorktreeGitVersionTest {
         }
     }
 
+    @Test
+    void ignoresEmptyLfLinesWithoutSplittingCarriageReturns() throws Exception {
+        ChildWorktreeGit stub = stub("printf '\\n\\ngit version 2.45.0\\rcustom build\\n\\ngit version 1.0.0\\n'");
+        try {
+            assertThat(stub.requireSupportedVersion()).isEqualTo("git version 2.45.0\rcustom build");
+        } finally {
+            stub.close();
+        }
+    }
+
     private ChildWorktreeGit stub(String body) throws IOException {
         Path script = Files.createTempFile(temp, "git", null);
         Files.writeString(script, "#!/bin/sh\n" + body + "\n");
