@@ -4,15 +4,15 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -269,8 +269,11 @@ class HostedWorkspaceToolTurnIT {
                 System.out.println((providerMedia ? "M4_DATABASE " : shellOutput || providerControl ? "FG6F_DATABASE " : sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
                 try (var connection = jdbc.getDataSource().getConnection()) {
                     String product = connection.getMetaData().getDatabaseProductName();
-                    if (providerMedia) assertThat(product).isEqualToIgnoringCase("MySQL");
-                    else assertThat(product).containsAnyOf("MySQL", "MariaDB");
+                    if (providerMedia) {
+                        assertThat(product).isEqualToIgnoringCase("MySQL");
+                    } else {
+                        assertThat(product).containsAnyOf("MySQL", "MariaDB");
+                    }
                 }
             }
             ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);

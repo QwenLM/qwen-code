@@ -1,35 +1,35 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.net.ProxySelector;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.time.Duration;
-import java.util.HexFormat;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 final class HostedProviderMediaProbe implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -116,7 +116,9 @@ final class HostedProviderMediaProbe implements AutoCloseable {
                 .filter(frame -> frame.getClassName().equals(HostedProviderMediaProbe.class.getName()))
                 .findFirst().map(frame -> frame.getMethodName() + ":" + frame.getLineNumber()).orElse("unknown");
         String message = "M4_MEDIA_PROBE " + stage + " " + cause.getClass().getSimpleName() + " at " + site;
-        if (failure.compareAndSet(null, new IllegalStateException(message))) System.err.println(message);
+        if (failure.compareAndSet(null, new IllegalStateException(message))) {
+            System.err.println(message);
+        }
     }
 
     private void forward(HttpExchange exchange) throws Exception {
@@ -128,7 +130,9 @@ final class HostedProviderMediaProbe implements AutoCloseable {
         JsonNode body = JSON.readTree(bytes);
         String kind = body.path("operation").path("kind").asText();
         boolean provider = path.equals("/internal/managed-runtime/provider/v1/control");
-        if (provider) assertThat(body.path("providerProtocol").asText()).isEqualTo("managed-runtime-provider/1");
+        if (provider) {
+            assertThat(body.path("providerProtocol").asText()).isEqualTo("managed-runtime-provider/1");
+        }
         if (kind.equals("execute")) {
             assertThat(provider).isTrue();
             JsonNode reference = body.path("operation").path("reference");
@@ -143,7 +147,9 @@ final class HostedProviderMediaProbe implements AutoCloseable {
         for (String header : List.of("Authorization", "Cache-Control", "Content-Type",
                 "X-Qwen-Managed-Lease-Id", "X-Qwen-Managed-Lease-Epoch")) {
             String value = exchange.getRequestHeaders().getFirst(header);
-            if (value != null) request.header(header, value);
+            if (value != null) {
+                request.header(header, value);
+            }
         }
         var response = upstream.send(request.build(), HttpResponse.BodyHandlers.ofByteArray());
         if (kind.equals("execute")) {
@@ -178,17 +184,23 @@ final class HostedProviderMediaProbe implements AutoCloseable {
 
     private Map<String, Object> check(Map<String, Object> session, String phase, JsonNode fields) throws Exception {
         String harness = session.get("sessionId").toString();
-        if (phase.equals("worker-done")) return Map.of("done", finished.contains(harness));
+        if (phase.equals("worker-done")) {
+            return Map.of("done", finished.contains(harness));
+        }
         if (phase.equals("dropped")) {
             assertThat(session.get("fault")).isEqualTo("lost-execute");
             return Map.of("done", dropped == 1);
         }
         if (phase.equals("restart")) {
             assertThat(restarted).isNull();
-            for (var value : sessions) check(value, "released", JSON.createObjectNode());
+            for (var value : sessions) {
+                check(value, "released", JSON.createObjectNode());
+            }
             original.close();
             for (var process : processes) {
-                if (process.isAlive()) process.onExit().get(10, TimeUnit.SECONDS);
+                if (process.isAlive()) {
+                    process.onExit().get(10, TimeUnit.SECONDS);
+                }
                 assertThat(process.isAlive()).as("original media worker stopped").isFalse();
             }
             restarted = restart.get();
@@ -220,8 +232,12 @@ final class HostedProviderMediaProbe implements AutoCloseable {
             }
             assertThat(hash).isEqualTo(hashes.get(harness));
             assertThat(encoded.length).isEqualTo(lengths.get(harness));
-            if (fields.has("resultHash")) assertThat(hash).isEqualTo(fields.path("resultHash").asText());
-            if (fields.has("resultBytes")) assertThat(encoded.length).isEqualTo(fields.path("resultBytes").asInt());
+            if (fields.has("resultHash")) {
+                assertThat(hash).isEqualTo(fields.path("resultHash").asText());
+            }
+            if (fields.has("resultBytes")) {
+                assertThat(encoded.length).isEqualTo(fields.path("resultBytes").asInt());
+            }
         }
         String storageId = "storage-" + sessions.indexOf(session);
         var owner = jdbc.queryForMap("SELECT o.holder_key FROM ma_storage_owner o"
@@ -230,8 +246,11 @@ final class HostedProviderMediaProbe implements AutoCloseable {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
                 tenant, storageId);
         boolean released = phase.equals("released") || phase.equals("restarted");
-        if (released) assertThat(owner.get("holder_key")).isNull();
-        else assertThat(owner.get("holder_key")).isNotNull();
+        if (released) {
+            assertThat(owner.get("holder_key")).isNull();
+        } else {
+            assertThat(owner.get("holder_key")).isNotNull();
+        }
         assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
                 + " AND runtime_session_id = ?", String.class, harness, runtimeId)).isEqualTo(released ? "RELEASED" : "READY");
         if (phase.equals("restarted")) {
@@ -239,8 +258,10 @@ final class HostedProviderMediaProbe implements AutoCloseable {
             assertThat(Files.readString(Path.of(session.get("directory").toString())
                     .resolve(".provider-media-reads.json"))).isEqualTo(readCounts.get(harness));
         }
-        if (phase.equals("released")) readCounts.put(harness, Files.readString(Path.of(session.get("directory").toString())
-                .resolve(".provider-media-reads.json")));
+        if (phase.equals("released")) {
+            readCounts.put(harness, Files.readString(Path.of(session.get("directory").toString())
+                    .resolve(".provider-media-reads.json")));
+        }
         return Map.of("checked", phase);
     }
 
@@ -271,11 +292,17 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     @Override
     public void close() throws Exception {
         executor.shutdownNow();
-        if (restarted != null) restarted.close();
+        if (restarted != null) {
+            restarted.close();
+        }
         forwarded.shutdownNow();
         upstream.shutdownNow();
         captureProcesses();
         processes.forEach(ProcessHandle::destroyForcibly);
-        for (var process : processes) if (process.isAlive()) process.onExit().get(10, TimeUnit.SECONDS);
+        for (var process : processes) {
+            if (process.isAlive()) {
+                process.onExit().get(10, TimeUnit.SECONDS);
+            }
+        }
     }
 }
