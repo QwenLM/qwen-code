@@ -104,7 +104,9 @@ export function measureWorkflow(source) {
     triggers: prStage,
     jobCount: jobs.length,
     timeoutMinutes: jobs.reduce((sum, j) => sum + (j.timeoutMinutes ?? 0), 0),
-    jobsWithoutTimeout: jobs.filter((j) => j.timeoutMinutes === null).map((j) => j.name),
+    jobsWithoutTimeout: jobs
+      .filter((j) => j.timeoutMinutes === null)
+      .map((j) => j.name),
   };
 }
 
@@ -120,12 +122,20 @@ export function parseBaseline(source) {
     if (trimmed === '' || trimmed.startsWith('#')) return;
     const parts = trimmed.split(/\s+/);
     if (parts.length !== 5) {
-      errors.push(`${BASELINE_FILE}:${index + 1} expected '<jobs> <timeout-min> <no-timeout-jobs> <triggers> <file>', got '${trimmed}'`);
+      errors.push(
+        `${BASELINE_FILE}:${index + 1} expected '<jobs> <timeout-min> <no-timeout-jobs> <triggers> <file>', got '${trimmed}'`,
+      );
       return;
     }
     const [jobCount, timeoutMinutes, noTimeout, triggers, file] = parts;
-    if (![jobCount, timeoutMinutes, noTimeout].every((v) => /^(0|[1-9][0-9]*)$/.test(v))) {
-      errors.push(`${BASELINE_FILE}:${index + 1} numeric fields must be decimal integers without leading zeros, got '${trimmed}'`);
+    if (
+      ![jobCount, timeoutMinutes, noTimeout].every((v) =>
+        /^(0|[1-9][0-9]*)$/.test(v),
+      )
+    ) {
+      errors.push(
+        `${BASELINE_FILE}:${index + 1} numeric fields must be decimal integers without leading zeros, got '${trimmed}'`,
+      );
       return;
     }
     entries.set(file, {
@@ -147,20 +157,30 @@ export function parseBaseline(source) {
 function unchangedFromBase(file, baseSha) {
   if (!baseSha) return false;
   try {
-    execFileSync('git', ['rev-parse', '--verify', '--quiet', `${baseSha}^{commit}`], {
-      stdio: 'ignore',
-    });
+    execFileSync(
+      'git',
+      ['rev-parse', '--verify', '--quiet', `${baseSha}^{commit}`],
+      {
+        stdio: 'ignore',
+      },
+    );
   } catch {
     try {
-      execFileSync('git', ['fetch', '--depth=1', '--quiet', 'origin', baseSha], {
-        stdio: 'ignore',
-      });
+      execFileSync(
+        'git',
+        ['fetch', '--depth=1', '--quiet', 'origin', baseSha],
+        {
+          stdio: 'ignore',
+        },
+      );
     } catch {
       return null; // unresolvable base — callers fail strict
     }
   }
   try {
-    const base = execFileSync('git', ['show', `${baseSha}:${file}`], { encoding: 'utf8' });
+    const base = execFileSync('git', ['show', `${baseSha}:${file}`], {
+      encoding: 'utf8',
+    });
     return base === readFileSync(file, 'utf8');
   } catch {
     return null;
@@ -173,14 +193,26 @@ const DIMENSIONS = [
   { key: 'jobsWithoutTimeout', label: 'jobs with no timeout-minutes' },
 ];
 
-export function checkBudget({ workflowDir = WORKFLOW_DIR, baselineFile = BASELINE_FILE, baseSha = '' } = {}) {
+export function checkBudget({
+  workflowDir = WORKFLOW_DIR,
+  baselineFile = BASELINE_FILE,
+  baseSha = '',
+} = {}) {
   const errors = [];
   const warnings = [];
 
   if (!existsSync(baselineFile)) {
-    return { errors: [`${baselineFile} is missing or unreadable — the CI budget ratchet cannot run`], warnings, ledger: [] };
+    return {
+      errors: [
+        `${baselineFile} is missing or unreadable — the CI budget ratchet cannot run`,
+      ],
+      warnings,
+      ledger: [],
+    };
   }
-  const { entries, errors: baselineErrors } = parseBaseline(readFileSync(baselineFile, 'utf8'));
+  const { entries, errors: baselineErrors } = parseBaseline(
+    readFileSync(baselineFile, 'utf8'),
+  );
   errors.push(...baselineErrors);
 
   const ledger = [];
@@ -192,16 +224,27 @@ export function checkBudget({ workflowDir = WORKFLOW_DIR, baselineFile = BASELIN
 
     const recorded = entries.get(name);
     const noTimeoutCount = measured.jobsWithoutTimeout.length;
-    ledger.push({ file: name, ...measured, jobsWithoutTimeoutCount: noTimeoutCount });
+    ledger.push({
+      file: name,
+      ...measured,
+      jobsWithoutTimeoutCount: noTimeoutCount,
+    });
 
     if (!recorded) {
       const match = unchangedFromBase(file, baseSha);
       const entry = `${measured.jobCount} ${measured.timeoutMinutes} ${noTimeoutCount} ${measured.triggers.join('+')} ${name}`;
       if (match === true) {
-        warnings.push(`${file} has no entry in ${baselineFile}, but is unchanged from this PR's base — add '${entry}' on main so its budget is tracked; unrelated PRs are not blocked.`);
+        warnings.push(
+          `${file} has no entry in ${baselineFile}, but is unchanged from this PR's base — add '${entry}' on main so its budget is tracked; unrelated PRs are not blocked.`,
+        );
       } else {
-        errors.push(`${file} has no entry in ${baselineFile}. Add '${entry}' so its PR-stage budget is tracked.`);
-        if (match === null) warnings.push(`base ${baseSha} could not be resolved (git fetch failed?) — failing strict; if this PR did not touch ${file}, re-run the job.`);
+        errors.push(
+          `${file} has no entry in ${baselineFile}. Add '${entry}' so its PR-stage budget is tracked.`,
+        );
+        if (match === null)
+          warnings.push(
+            `base ${baseSha} could not be resolved (git fetch failed?) — failing strict; if this PR did not touch ${file}, re-run the job.`,
+          );
       }
       continue;
     }
@@ -211,17 +254,26 @@ export function checkBudget({ workflowDir = WORKFLOW_DIR, baselineFile = BASELIN
       timeoutMinutes: measured.timeoutMinutes,
       jobsWithoutTimeout: noTimeoutCount,
     };
-    const grown = DIMENSIONS.filter(({ key }) => actual[key] > recorded[key] + GROWTH_ALLOWANCE);
+    const grown = DIMENSIONS.filter(
+      ({ key }) => actual[key] > recorded[key] + GROWTH_ALLOWANCE,
+    );
     if (grown.length > 0) {
       const detail = grown
         .map(({ key, label }) => `${label} ${recorded[key]} → ${actual[key]}`)
         .join(', ');
       const match = unchangedFromBase(file, baseSha);
       if (match === true) {
-        warnings.push(`${file} exceeds its recorded budget (${detail}), but is unchanged from this PR's base — the baseline went stale on main, not in this PR. Bump ${baselineFile} on main; unrelated PRs are not blocked.`);
+        warnings.push(
+          `${file} exceeds its recorded budget (${detail}), but is unchanged from this PR's base — the baseline went stale on main, not in this PR. Bump ${baselineFile} on main; unrelated PRs are not blocked.`,
+        );
       } else {
-        errors.push(`${file} grew its PR-stage CI budget: ${detail} (recorded in ${baselineFile}). Split the lane, gate it on paths, or move it to merge_group/post-merge — or, if the growth is real, update ${baselineFile} in this PR and say why.`);
-        if (match === null) warnings.push(`base ${baseSha} could not be resolved (git fetch failed?) — failing strict; if this PR did not touch ${file}, re-run the job.`);
+        errors.push(
+          `${file} grew its PR-stage CI budget: ${detail} (recorded in ${baselineFile}). Split the lane, gate it on paths, or move it to merge_group/post-merge — or, if the growth is real, update ${baselineFile} in this PR and say why.`,
+        );
+        if (match === null)
+          warnings.push(
+            `base ${baseSha} could not be resolved (git fetch failed?) — failing strict; if this PR did not touch ${file}, re-run the job.`,
+          );
       }
       continue;
     }
@@ -229,7 +281,9 @@ export function checkBudget({ workflowDir = WORKFLOW_DIR, baselineFile = BASELIN
     const shrunk = DIMENSIONS.filter(({ key }) => actual[key] < recorded[key]);
     if (shrunk.length > 0) {
       const entry = `${actual.jobCount} ${actual.timeoutMinutes} ${noTimeoutCount} ${measured.triggers.join('+')} ${name}`;
-      warnings.push(`${file} is under its recorded budget (${shrunk.map(({ label, key }) => `${label} ${recorded[key]} → ${actual[key]}`).join(', ')}) — lower its ${baselineFile} entry to '${entry}' so the slack is not banked.`);
+      warnings.push(
+        `${file} is under its recorded budget (${shrunk.map(({ label, key }) => `${label} ${recorded[key]} → ${actual[key]}`).join(', ')}) — lower its ${baselineFile} entry to '${entry}' so the slack is not banked.`,
+      );
     }
   }
 
@@ -239,9 +293,13 @@ export function checkBudget({ workflowDir = WORKFLOW_DIR, baselineFile = BASELIN
   for (const [name] of entries) {
     if (!ledger.some((l) => l.file === name)) {
       if (!existsSync(join(workflowDir, name))) {
-        warnings.push(`${baselineFile} still records ${name}, which no longer exists — drop the entry.`);
+        warnings.push(
+          `${baselineFile} still records ${name}, which no longer exists — drop the entry.`,
+        );
       } else {
-        warnings.push(`${baselineFile} records ${name} as PR-stage, but it no longer triggers on ${PR_STAGE_TRIGGERS.join(' / ')} — drop the entry.`);
+        warnings.push(
+          `${baselineFile} records ${name} as PR-stage, but it no longer triggers on ${PR_STAGE_TRIGGERS.join(' / ')} — drop the entry.`,
+        );
       }
     }
   }
@@ -258,9 +316,12 @@ function main() {
   if (errors.length === 0) {
     const jobs = ledger.reduce((s, l) => s + l.jobCount, 0);
     const minutes = ledger.reduce((s, l) => s + l.timeoutMinutes, 0);
-    console.log(`✅ PR-stage CI budget holds: ${ledger.length} workflows, ${jobs} jobs, ${minutes} declared timeout-minutes${warnings.length ? ' (stale-baseline warnings above)' : ''}`);
+    console.log(
+      `✅ PR-stage CI budget holds: ${ledger.length} workflows, ${jobs} jobs, ${minutes} declared timeout-minutes${warnings.length ? ' (stale-baseline warnings above)' : ''}`,
+    );
   }
   process.exit(errors.length === 0 ? 0 : 1);
 }
 
-if (process.argv[1] && basename(process.argv[1]) === 'check-ci-budget.mjs') main();
+if (process.argv[1] && basename(process.argv[1]) === 'check-ci-budget.mjs')
+  main();

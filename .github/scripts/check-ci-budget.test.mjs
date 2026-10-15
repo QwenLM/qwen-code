@@ -33,7 +33,9 @@ describe('parseTriggers', () => {
   });
 
   it('stops at the next top-level key so job names are not read as triggers', () => {
-    assert.deepEqual(parseTriggers(`${BARE_ON}\njobs:\n  pull_request:\n`), ['pull_request']);
+    assert.deepEqual(parseTriggers(`${BARE_ON}\njobs:\n  pull_request:\n`), [
+      'pull_request',
+    ]);
   });
 
   it('returns [] when there is no trigger block', () => {
@@ -43,7 +45,9 @@ describe('parseTriggers', () => {
 
 describe('parseJobs', () => {
   it('captures the job-level timeout-minutes', () => {
-    assert.deepEqual(parseJobs(BARE_ON), [{ name: 'build', timeoutMinutes: 10 }]);
+    assert.deepEqual(parseJobs(BARE_ON), [
+      { name: 'build', timeoutMinutes: 10 },
+    ]);
   });
 
   it('ignores a step-level timeout-minutes, which is not the job budget', () => {
@@ -64,17 +68,26 @@ describe('parseJobs', () => {
 
 describe('measureWorkflow', () => {
   it('returns null for a workflow with no PR-stage trigger', () => {
-    assert.equal(measureWorkflow("on:\n  schedule:\n    - cron: '* * * * *'\njobs:\n  a:\n"), null);
+    assert.equal(
+      measureWorkflow(
+        "on:\n  schedule:\n    - cron: '* * * * *'\njobs:\n  a:\n",
+      ),
+      null,
+    );
   });
 
   it('counts merge_group as PR-stage', () => {
-    const m = measureWorkflow("on:\n  merge_group:\njobs:\n  a:\n    timeout-minutes: 5\n");
+    const m = measureWorkflow(
+      'on:\n  merge_group:\njobs:\n  a:\n    timeout-minutes: 5\n',
+    );
     assert.deepEqual(m.triggers, ['merge_group']);
     assert.equal(m.timeoutMinutes, 5);
   });
 
   it('names the jobs that declare no timeout', () => {
-    const m = measureWorkflow("on:\n  pull_request:\njobs:\n  a:\n  b:\n    timeout-minutes: 4\n");
+    const m = measureWorkflow(
+      'on:\n  pull_request:\njobs:\n  a:\n  b:\n    timeout-minutes: 4\n',
+    );
     assert.equal(m.jobCount, 2);
     assert.equal(m.timeoutMinutes, 4);
     assert.deepEqual(m.jobsWithoutTimeout, ['a']);
@@ -83,7 +96,9 @@ describe('measureWorkflow', () => {
 
 describe('parseBaseline', () => {
   it('skips comments and blank lines', () => {
-    const { entries, errors } = parseBaseline('# note\n\n2 20 0 pull_request a.yml\n');
+    const { entries, errors } = parseBaseline(
+      '# note\n\n2 20 0 pull_request a.yml\n',
+    );
     assert.deepEqual(errors, []);
     assert.deepEqual(entries.get('a.yml'), {
       jobCount: 2,
@@ -120,7 +135,8 @@ describe('checkBudget', () => {
 
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  const run = (baseSha = '') => checkBudget({ workflowDir: wfDir, baselineFile, baseSha });
+  const run = (baseSha = '') =>
+    checkBudget({ workflowDir: wfDir, baselineFile, baseSha });
 
   it('passes when the workflow matches its recorded budget', () => {
     writeFileSync(join(wfDir, 'a.yml'), BARE_ON);
@@ -131,7 +147,10 @@ describe('checkBudget', () => {
   });
 
   it('fails when a PR adds a job without bumping the ledger', () => {
-    writeFileSync(join(wfDir, 'a.yml'), `${BARE_ON}  test:\n    timeout-minutes: 7\n`);
+    writeFileSync(
+      join(wfDir, 'a.yml'),
+      `${BARE_ON}  test:\n    timeout-minutes: 7\n`,
+    );
     writeFileSync(baselineFile, '1 10 0 pull_request a.yml\n');
     const { errors } = run();
     assert.equal(errors.length, 1);
@@ -140,7 +159,10 @@ describe('checkBudget', () => {
   });
 
   it('fails when a new job drops its timeout-minutes, worth 360 min of runner', () => {
-    writeFileSync(join(wfDir, 'a.yml'), `${BARE_ON}  test:\n    runs-on: ubuntu-latest\n`);
+    writeFileSync(
+      join(wfDir, 'a.yml'),
+      `${BARE_ON}  test:\n    runs-on: ubuntu-latest\n`,
+    );
     writeFileSync(baselineFile, '1 10 0 pull_request a.yml\n');
     const { errors } = run();
     assert.equal(errors.length, 1);
@@ -159,24 +181,39 @@ describe('checkBudget', () => {
 
   it('ignores a workflow that is not PR-stage', () => {
     writeFileSync(join(wfDir, 'a.yml'), BARE_ON);
-    writeFileSync(join(wfDir, 'nightly.yml'), "on:\n  schedule:\n    - cron: '* * * * *'\njobs:\n  x:\n");
+    writeFileSync(
+      join(wfDir, 'nightly.yml'),
+      "on:\n  schedule:\n    - cron: '* * * * *'\njobs:\n  x:\n",
+    );
     writeFileSync(baselineFile, '1 10 0 pull_request a.yml\n');
     const { errors, ledger } = run();
     assert.deepEqual(errors, []);
-    assert.deepEqual(ledger.map((l) => l.file), ['a.yml']);
+    assert.deepEqual(
+      ledger.map((l) => l.file),
+      ['a.yml'],
+    );
   });
 
   it('warns to reclaim slack when a workflow shrinks, so the saving is not banked', () => {
-    writeFileSync(join(wfDir, 'a.yml'), "on:\n  pull_request:\njobs:\n  build:\n    timeout-minutes: 4\n");
+    writeFileSync(
+      join(wfDir, 'a.yml'),
+      'on:\n  pull_request:\njobs:\n  build:\n    timeout-minutes: 4\n',
+    );
     writeFileSync(baselineFile, '1 10 0 pull_request a.yml\n');
     const { errors, warnings } = run();
     assert.deepEqual(errors, []);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /lower its .* entry to '1 4 0 pull_request a\.yml'/);
+    assert.match(
+      warnings[0],
+      /lower its .* entry to '1 4 0 pull_request a\.yml'/,
+    );
   });
 
   it('warns when the ledger records a workflow that stopped being PR-stage', () => {
-    writeFileSync(join(wfDir, 'a.yml'), "on:\n  schedule:\n    - cron: '* * * * *'\njobs:\n  x:\n");
+    writeFileSync(
+      join(wfDir, 'a.yml'),
+      "on:\n  schedule:\n    - cron: '* * * * *'\njobs:\n  x:\n",
+    );
     writeFileSync(baselineFile, '1 10 0 pull_request a.yml\n');
     const { errors, warnings } = run();
     assert.deepEqual(errors, []);
@@ -191,7 +228,10 @@ describe('checkBudget', () => {
   });
 
   it('fails closed when an unresolvable base SHA leaves staleness undecidable', () => {
-    writeFileSync(join(wfDir, 'a.yml'), `${BARE_ON}  test:\n    timeout-minutes: 7\n`);
+    writeFileSync(
+      join(wfDir, 'a.yml'),
+      `${BARE_ON}  test:\n    timeout-minutes: 7\n`,
+    );
     writeFileSync(baselineFile, '1 10 0 pull_request a.yml\n');
     // Not a git repo, so the base can never resolve: the ratchet must not
     // downgrade the error to a stale-baseline warning.
