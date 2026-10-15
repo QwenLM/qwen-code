@@ -2099,6 +2099,7 @@ describe('MemoryManager', () => {
     });
     afterEach(() => {
       vi.unstubAllEnvs();
+      vi.restoreAllMocks();
     });
 
     it('runs every turn while the experiment is off', async () => {
@@ -2157,6 +2158,64 @@ describe('MemoryManager', () => {
       ).rejects.toThrow('boom');
       await turn(mgr, 6);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
+    it.each([false, true])(
+      'preserves skipped history after a long turn (failed: %s)',
+      async (failed) => {
+        vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+        const mgr = new MemoryManager();
+        await turn(mgr, 2);
+        expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+        if (failed) {
+          vi.mocked(runAutoMemoryExtract).mockRejectedValueOnce(
+            new Error('retry'),
+          );
+          await expect(turn(mgr, 60)).rejects.toThrow('retry');
+          await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+            true,
+          );
+        } else {
+          await turn(mgr, 60);
+        }
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(failed ? 3 : 2);
+        for (const [params] of vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.slice(1)) {
+          expect(params.skippedHistory).toEqual(turns(4).slice(2));
+        }
+      },
+    );
+
+    it('does not re-arm from an extraction predating a main-agent memory write', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const pending = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () => pending.promise,
+      );
+      const first = turn(mgr, 2);
+      const wrote = await mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, 'sess', [
+          ...turns(4),
+          content(
+            'model',
+            fnCall('write_file', {
+              file_path: path.join(
+                tmp.projectRoot,
+                '.qwen/memory/user/test.md',
+              ),
+            }),
+          ),
+        ]),
+        belowCompactionWarn: true,
+      });
+      expect(wrote.skippedReason).toBe('memory_tool');
+      pending.resolve(engagedNoop());
+      await first;
+      await mgr.drain();
+      expect((await turn(mgr, 6)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
     });
 
     it('keeps cadence state per session', async () => {
@@ -2503,10 +2562,9 @@ describe('MemoryManager', () => {
             release = () => resolve(engagedNoop('other'));
           }),
       );
-      // Another session holds the project slot, so the flush parks behind it
-      // and its caller times out while the run is still waiting.
+      // Another session holds the slot while a newer extraction covers pending.
       const other = turn(mgr, 2, 'other');
-      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      const flushing = mgr.flushPendingExtract('sess', 30_000);
 
       // A newer run for this session queues behind the same blocker, so it
       // commits before the parked flush gets the slot.
@@ -2516,6 +2574,7 @@ describe('MemoryManager', () => {
       await newer;
       await new Promise<void>((resolve) => setImmediate(resolve));
       await mgr.drain();
+      await expect(flushing).resolves.toBe(false);
       await new Promise<void>((resolve) => setImmediate(resolve));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -2541,29 +2600,29 @@ describe('MemoryManager', () => {
             release = () => resolve(engagedNoop('other'));
           }),
       );
-      // Another session holds the project slot, so the flush parks behind it
-      // and its caller times out before the slot frees.
+      // Another session holds the slot while a newer skip replaces pending.
       const other = turn(mgr, 2, 'other');
-      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      const olderFlush = mgr.flushPendingExtract('sess', 30_000);
 
-      // The refused close let the session take another turn, which the cadence
-      // skipped: `pending` is now a longer snapshot than the parked run's.
+      // A later turn skips while the older flush is parked, replacing pending.
       expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
 
       // Retried while the older run is still parked, so it must not take that
       // run's answer for turns it never extracted.
-      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      const newerFlush = mgr.flushPendingExtract('sess', 30_000);
 
       release();
       await other;
+      await expect(olderFlush).resolves.toBe(false);
+      await expect(newerFlush).resolves.toBe(true);
       await new Promise<void>((resolve) => setImmediate(resolve));
-      // Both parked runs outlived their budget, so they are abandoned instead
-      // of forking after it: the replaced snapshot stays pending.
+      // Only the replacement snapshot is extracted, exactly once.
       expect(
         vi
           .mocked(runAutoMemoryExtract)
-          .mock.calls.map((call) => call[0].history.length),
-      ).not.toContain(6);
+          .mock.calls.map((call) => call[0].history.length)
+          .filter((length) => length === 6),
+      ).toHaveLength(1);
       await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(
         vi
@@ -2572,7 +2631,7 @@ describe('MemoryManager', () => {
       ).toContain(6);
     });
 
-    it('keeps a newer snapshot a parked run settled without extracting', async () => {
+    it('keeps a newer snapshot when a parked flush refuses its older one', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
       const mgr = new MemoryManager();
       await turn(mgr, 2);
@@ -2586,15 +2645,14 @@ describe('MemoryManager', () => {
           }),
       );
       const other = turn(mgr, 2, 'other');
-      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      const flushing = mgr.flushPendingExtract('sess', 30_000);
       expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
 
-      // The parked run extracts its own, older snapshot and settles before the
-      // boundary retries; its success path must leave the newer one pending
-      // rather than report an extraction that never covered it.
+      // Refusing the older snapshot must leave the newer one pending.
       release();
       await other;
       await mgr.drain();
+      await expect(flushing).resolves.toBe(false);
       await new Promise<void>((resolve) => setImmediate(resolve));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -2719,7 +2777,7 @@ describe('MemoryManager', () => {
       );
       // Another session holds the project slot, so the flush parks behind it.
       const other = turn(mgr, 2, 'other');
-      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      const flushing = mgr.flushPendingExtract('sess', 30_000);
 
       // Compaction shrinks this session while that flush is still parked: the
       // run queues behind the same blocker, drops the snapshot and rewrites the
@@ -2729,6 +2787,7 @@ describe('MemoryManager', () => {
       await other;
       await shrunk;
       await mgr.drain();
+      await expect(flushing).resolves.toBe(false);
       await new Promise<void>((resolve) => setImmediate(resolve));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -2936,12 +2995,15 @@ describe('MemoryManager', () => {
             release = () => resolve(engagedNoop('other'));
           }),
       );
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000);
       const other = turn(mgr, 2, 'other');
       await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
 
+      clock.mockReturnValue(1_002);
       release();
       await other;
       await mgr.drain();
+      clock.mockRestore();
 
       // The flush budget expired while the run was parked, so it must not
       // fork the snapshot it was started for.

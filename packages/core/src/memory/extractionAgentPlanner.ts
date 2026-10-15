@@ -81,6 +81,7 @@ export interface AutoMemoryExtractionExecutionResult {
   touchedUserScope: boolean;
   systemMessage?: string;
   hasToolActivity: boolean;
+  extractorEngaged?: boolean;
 }
 
 /**
@@ -300,6 +301,7 @@ function touchedTopicsFromFilePaths(
 export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
+  skippedHistory: Content[] = [],
 ): Promise<AutoMemoryExtractionExecutionResult> {
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
@@ -308,7 +310,10 @@ export async function runAutoMemoryExtractionByAgent(
         'extraction must run after a completed main turn.',
     );
   }
-  const extraHistory = buildAgentHistory(cacheSafe.history);
+  const extraHistory = buildAgentHistory([
+    ...skippedHistory,
+    ...cacheSafe.history,
+  ]);
 
   const { topicSummaries, keywordVocabularySnapshot } =
     await buildExistingMemoryContext(projectRoot);
@@ -357,12 +362,17 @@ export async function runAutoMemoryExtractionByAgent(
 
   const { topics, touchedProjectScope, touchedUserScope } =
     touchedTopicsFromFilePaths(result.filesWritten ?? [], projectRoot);
+  const accessed = touchedTopicsFromFilePaths(
+    [...(result.filesRead ?? []), ...(result.filesWritten ?? [])],
+    projectRoot,
+  );
 
   return {
     touchedTopics: topics,
     touchedProjectScope,
     touchedUserScope,
     hasToolActivity: result.filesTouched.length > 0,
+    extractorEngaged: accessed.touchedProjectScope || accessed.touchedUserScope,
     systemMessage:
       topics.length > 0
         ? `Managed auto-memory updated: ${topics.map((t) => `${t}.md`).join(', ')}`

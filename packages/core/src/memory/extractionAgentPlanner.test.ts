@@ -62,7 +62,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: files,
-      ...(written ? { filesWritten: files } : {}),
+      ...(written ? { filesWritten: files } : { filesRead: files }),
     });
     return runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
   }
@@ -116,6 +116,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedProjectScope: true,
       touchedUserScope: false,
       hasToolActivity: true,
+      extractorEngaged: true,
       systemMessage: 'Managed auto-memory updated: user.md',
     });
     expect(getCacheSafeParams).toHaveBeenCalledWith('session-1');
@@ -470,7 +471,43 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedProjectScope: false,
       touchedUserScope: false,
       hasToolActivity: false,
+      extractorEngaged: false,
       systemMessage: undefined,
+    });
+  });
+
+  it.each([
+    { filesRead: [], engaged: false },
+    { filesRead: ['/tmp/outside.md'], engaged: false },
+    { filesRead: ['/tmp/auto-memory/user/prefs.md'], engaged: true },
+  ])(
+    'counts only successful memory-scoped reads as engagement: %j',
+    async ({ filesRead, engaged }) => {
+      vi.mocked(runForkedAgent).mockResolvedValue({
+        status: 'completed',
+        filesTouched: ['/tmp/auto-memory/user/missing.md'],
+        filesRead,
+        filesWritten: [],
+      });
+      const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+      expect(result.hasToolActivity).toBe(true);
+      expect(result.extractorEngaged).toBe(engaged);
+      expect(result.touchedTopics).toEqual([]);
+    },
+  );
+
+  it('preserves skipped history when the live captured tail no longer contains it', async () => {
+    const skipped = {
+      role: 'user',
+      parts: [{ text: 'Remember that I prefer reviews in Chinese.' }],
+    };
+    await extract([]);
+    vi.mocked(runForkedAgent).mockClear();
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [skipped]);
+    expect(forkedCall()?.extraHistory?.[0]).toEqual(skipped);
+    expect(forkedCall()?.extraHistory).toContainEqual({
+      role: 'user',
+      parts: [{ text: 'I prefer terse responses.' }],
     });
   });
 

@@ -132,6 +132,32 @@ describe('auto-memory extraction', () => {
     expect(cursor.processedOffset).toBe(2);
   });
 
+  it('forwards skipped context while keeping the cursor in raw-history offsets', async () => {
+    const skippedHistory = [
+      { role: 'user', parts: [{ text: 'Prefer Chinese reviews.' }] },
+    ];
+    const history = Array.from({ length: 60 }, () => ({
+      role: 'user',
+      parts: [{ text: 'next' }],
+    }));
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+      skippedHistory,
+    });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+      mockConfig,
+      projectRoot,
+      skippedHistory,
+    );
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { processedOffset: number };
+    expect(cursor.processedOffset).toBe(60);
+  });
+
   it('skips a session mismatch without advancing the cursor', async () => {
     vi.mocked(getCacheSafeParamsSessionId)
       .mockReturnValueOnce('session-1')

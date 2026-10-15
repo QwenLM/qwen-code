@@ -25,7 +25,8 @@ export const MAX_EXTRACT_NOOP_SKIP_TURNS = 3;
  * which are never fewer than curated ones, so it errs toward running. It is
  * checked at skip time only: a following turn that adds more entries than the
  * remaining room can still push a skipped turn out of the next run's tail.
- * That is a known limit of this experiment, not a guarantee.
+ * The next extraction supplements its tail with that skipped slice when a
+ * following turn exceeds the window, so skipped entries remain visible.
  */
 export const EXTRACT_CADENCE_MAX_PENDING_ENTRIES = 20;
 

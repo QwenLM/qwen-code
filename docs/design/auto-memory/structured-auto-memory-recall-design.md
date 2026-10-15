@@ -214,7 +214,7 @@ was removed from #13158: its shutdown tail and suspended oldest windows require
 durable replay before skipped facts can be preserved. Historical code remains
 at `a4568de26e49`. #13571 adds a default-off experiment instead:
 `QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS` (0–3) skips up to N turns after a
-run that used a tool and saved nothing, only while every unprocessed entry fits
+run that successfully accessed memory and saved nothing, only while every unprocessed entry fits
 half of the extractor's 40-entry tail and the prompt is below the compaction
 warning tier. An ACP session close flushes skipped turns within the remaining
 close budget, but that flush is best-effort: the cache-safe slot it reads is
@@ -225,9 +225,10 @@ that tier —, `/clear`, `/resume`, `/branch`, process exit, a close flush that
 lost the shared cache-safe slot to another session, and a close flush whose own
 budget expired while it waited for that slot (the run is abandoned rather than
 left to fork after the close tore its Config down) do not flush: up to N skipped
-turns are lost there, and a switch drops both sessions' skip state. The window
-bound is checked at skip time only, so a long following turn can still push a
-skipped turn out of the tail. These losses are what the paired runs must
+turns are lost there, and a switch drops both sessions' skip state. If a later
+turn grows beyond the tail window, the next extraction prepends the bounded
+skipped slice to its captured tail. This preserves skipped turns without
+changing the persisted cursor's raw-history index space. These losses are what the paired runs must
 measure before the default can change; #13004 stays open. Selector-only
 validation must not be cited as extraction, quality, or token-savings
 acceptance.

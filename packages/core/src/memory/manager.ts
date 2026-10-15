@@ -172,6 +172,7 @@ export interface ScheduleExtractParams {
   history: Content[];
   now?: Date;
   config?: Config;
+  skippedHistory?: Content[];
   /**
    * Whether the turn's prompt stayed below the compaction warning threshold.
    * Cadence skips (#13004) need `true`; near compaction every turn extracts.
@@ -1159,6 +1160,7 @@ export class MemoryManager {
       // strength of an older no-op. Drop the snapshot with it: a close-time
       // flush would otherwise fork over the live tail (this turn's own memory
       // write included) while its gate inspected the skipped turn.
+      this.cadenceDiscardEpoch += 1;
       const cadence = this.extractCadence.get(params.sessionId);
       if (cadence) {
         cadence.armed = false;
@@ -1231,6 +1233,18 @@ export class MemoryManager {
       params.history.length < cadenceNow.pending.history.length
     ) {
       delete cadenceNow.pending;
+    }
+
+    if (
+      cadenceNow?.pending &&
+      cadenceNow.projectRoot === params.projectRoot &&
+      params.history.length - cadenceNow.lastExtractedLength > 40
+    ) {
+      // A long following turn can evict skipped turns from the captured tail.
+      params = {
+        ...params,
+        skippedHistory: cadenceNow.pending.skippedHistory,
+      };
     }
 
     if (this.extractRunning.has(params.projectRoot)) {
@@ -1312,7 +1326,7 @@ export class MemoryManager {
    * #13004: skip this turn's extraction only when the previous run for the
    * session engaged with memory and saved nothing, the skip budget is not
    * spent, every unprocessed entry still fits the next run's history tail as
-   * measured at skip time (not a guarantee for later turns), and the prompt is
+   * measured at skip time, and the prompt is
    * below the compaction warning. A skip records the turn as pending for
    * {@link flushPendingExtract} and leaves the cursor untouched.
    * Arming requires a completed run, so a skip can overlap this session's own
@@ -1338,7 +1352,10 @@ export class MemoryManager {
       return false;
     }
     state.skips += 1;
-    state.pending = params;
+    state.pending = {
+      ...params,
+      skippedHistory: params.history.slice(state.lastExtractedLength),
+    };
     return true;
   }
 
