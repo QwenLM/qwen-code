@@ -15,15 +15,16 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -130,6 +131,8 @@ public interface AgentStateStore {
     SessionRecord completeSessionRename(String tenantId, String idempotencyKey,
             String sessionId, String title, String harnessBootId, long revision);
 
+    SessionRecord completeSessionRename(StoreModels.RenameDelivery delivery, String owner, String bootId);
+
     void abandonSessionRename(String tenantId, String idempotencyKey,
             String sessionId, long revision, String owner);
 
@@ -137,6 +140,8 @@ public interface AgentStateStore {
 
     Optional<StoreModels.RenameDelivery> claimRename(StoreModels.RenameDelivery delivery,
             String owner, Duration lease);
+
+    void markRenameSubmitted(StoreModels.RenameDelivery delivery, String owner);
 
     void retryRename(StoreModels.RenameDelivery delivery, String owner, long availableAt);
 
@@ -179,6 +184,12 @@ public interface AgentStateStore {
     OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key,
             String digest, boolean closeSupported);
+
+    default OperationAdmission beginChildClose(String tenantId, String parentSessionId,
+            String childSessionId, String childRunId, String actorDigest, String key,
+            String digest, boolean supported) {
+        throw new UnsupportedOperationException("Internal child close is unavailable");
+    }
 
     default OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
@@ -389,6 +400,8 @@ public interface AgentStateStore {
 
     EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
+
+    StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
 
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);

@@ -2528,7 +2528,7 @@ describe('DaemonSessionClient', () => {
     }
   });
 
-  it('coalesces a prompt abort with an explicit session cancel', async () => {
+  it('keeps a mechanical prompt abort separate from a later explicit cancel', async () => {
     let eventsController:
       | ReadableStreamDefaultController<Uint8Array>
       | undefined;
@@ -2589,16 +2589,68 @@ describe('DaemonSessionClient', () => {
     const explicitCancel = session.cancel();
     await vi.waitFor(() => {
       expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
-        1,
+        2,
       );
     });
 
+    expect(
+      calls
+        .filter((call) => call.url.endsWith('/cancel'))
+        .map((call) => JSON.parse(call.body!)),
+    ).toEqual([{ _meta: { 'qwen.cancelReason': 'interrupted' } }, {}]);
     resolveCancel(new Response(null, { status: 204 }));
     await explicitCancel;
     await prompt;
     eventsController?.close();
     eventsAbort.abort();
     await eventPump;
+  });
+
+  it('sends lifecycle interruption independently of a later user cancellation', async () => {
+    let release!: () => void;
+    const { fetch, calls } = recordingFetch((request) => {
+      const body = JSON.parse(request.body ?? '{}');
+      if (body._meta?.['qwen.cancelReason'] === 'interrupted') {
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response(null, { status: 204 }));
+        });
+      }
+      return new Response(null, { status: 204 });
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: { sessionId: 's-1', workspaceCwd: '/work/a', attached: true },
+    });
+    const interruption = session.interrupt();
+    await session.cancel();
+    expect(calls.map((request) => JSON.parse(request.body ?? '{}'))).toEqual([
+      { _meta: { 'qwen.cancelReason': 'interrupted' } },
+      {},
+    ]);
+    release();
+    await interruption;
+  });
+
+  it('coalesces duplicate public cancellations with the existing request shape', async () => {
+    const { fetch } = recordingFetch(() => new Response(null, { status: 204 }));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    let release!: () => void;
+    const cancel = vi.spyOn(client, 'cancel').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const session = new DaemonSessionClient({
+      client,
+      session: { sessionId: 's-1', workspaceCwd: '/work/a', attached: true },
+    });
+    const first = session.cancel();
+    const duplicate = session.cancel();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledWith('s-1', undefined);
+    release();
+    await Promise.all([first, duplicate]);
   });
 
   it('releases a subscription prompt slot after a non-202 result', async () => {
@@ -3620,6 +3672,92 @@ describe('DaemonSessionClient clientId self-heal', () => {
       },
     });
   }
+
+  it('checks the caller before the first admission request', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(202, { promptId: 'p-1', lastEventId: 0 }),
+    );
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const beforeDispatch = vi.fn(() => {
+      throw new DOMException('Caller expired', 'AbortError');
+    });
+
+    await expect(
+      session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        undefined,
+        beforeDispatch,
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(beforeDispatch).toHaveBeenCalledWith('client-1');
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each(['cancel', 'owner', 'client', 'unchanged', 'no-guard'] as const)(
+    'revalidates admission after client recovery: %s',
+    async (change) => {
+      let releaseResume!: (response: Response) => void;
+      const resume = new Promise<Response>((resolve) => {
+        releaseResume = resolve;
+      });
+      let promptCalls = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/resume')) return resume;
+        if (req.url.endsWith('/prompt')) {
+          promptCalls++;
+          return promptCalls === 1
+            ? invalidClientIdResponse()
+            : jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      const caller = new AbortController();
+      let ownerCurrent = true;
+      const beforeDispatch = vi.fn((clientId: string | undefined) => {
+        caller.signal.throwIfAborted();
+        if (!ownerCurrent || (change === 'client' && clientId !== 'client-1')) {
+          throw new DOMException('Caller expired', 'AbortError');
+        }
+      });
+      const pending = session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        undefined,
+        change === 'no-guard' ? undefined : beforeDispatch,
+      );
+      const result = pending.catch((error: unknown) => error);
+      await vi.waitFor(() =>
+        expect(calls.some((call) => call.url.endsWith('/resume'))).toBe(true),
+      );
+      if (change === 'cancel') caller.abort();
+      if (change === 'owner') ownerCurrent = false;
+      releaseResume(
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        }),
+      );
+
+      if (change === 'unchanged' || change === 'no-guard') {
+        expect(await result).toEqual({ promptId: 'p-1', lastEventId: 0 });
+        expect(promptCalls).toBe(2);
+        expect(calls.at(-1)?.headers['x-qwen-client-id']).toBe('client-2');
+      } else {
+        expect(await result).toMatchObject({ name: 'AbortError' });
+        expect(promptCalls).toBe(1);
+      }
+      if (change !== 'no-guard') {
+        expect(beforeDispatch.mock.calls).toEqual([['client-1'], ['client-2']]);
+      }
+    },
+  );
 
   it('retries a worktree prompt only after matching durable reattachment', async () => {
     let promptCalls = 0;

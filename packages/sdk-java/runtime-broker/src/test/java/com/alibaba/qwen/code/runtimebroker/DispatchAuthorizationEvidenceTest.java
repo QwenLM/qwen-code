@@ -152,20 +152,24 @@ class DispatchAuthorizationEvidenceTest {
     }
 
     @Test
-    void additivePrivateSchemaUpgradeDoesNotBackfillLegacyRows() throws Exception {
+    void alteredSchemaIsRefusedWithoutBackfillingAuthorizationEvidence() throws Exception {
         var f = fixture(true, "test-supervisor");
         var prepared = f.prepare("legacy");
         try (var connection = f.source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE qwen_tool_execution DROP COLUMN authorized_dispatch_generation");
-            statement.execute("ALTER TABLE qwen_tool_execution DROP COLUMN authorized_binding_version");
+            statement.execute("ALTER TABLE ma_tool_execution DROP COLUMN authorized_dispatch_generation");
+            statement.execute("ALTER TABLE ma_tool_execution DROP COLUMN authorized_binding_version");
         }
-        JdbcRuntimeBrokerSchema.initialize(f.source);
-        JdbcRuntimeBrokerSchema.initialize(f.source);
-        var reloaded = f.executions.findByExecutionCallId(prepared.getExecutionCallId());
-        assertTrue(prepared.sameRequest(reloaded));
-        assertNull(reloaded.getAuthorizedDispatchGeneration());
-        assertNull(reloaded.getAuthorizedBindingVersion());
-        assertEvidence(f.authorize(f.claim(reloaded)), 1, f.binding.getVersion());
+        assertThrows(IllegalStateException.class,
+                () -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(f.source));
+        try (var connection = f.source.getConnection(); var statement = connection.prepareStatement(
+                "SELECT execution_call_id, execution_state FROM ma_tool_execution WHERE execution_call_id_hash = ?")) {
+            statement.setString(1, JdbcRepositorySupport.valueKey(prepared.getExecutionCallId()));
+            try (var row = statement.executeQuery()) {
+                assertTrue(row.next());
+                assertEquals(prepared.getExecutionCallId(), row.getString(1));
+                assertEquals("PREPARED", row.getString(2));
+            }
+        }
     }
 
     @Test
@@ -175,7 +179,7 @@ class DispatchAuthorizationEvidenceTest {
             var f = fixture(true, "test-supervisor");
             var marked = f.authorize(f.claim(f.prepare("corrupt")));
             try (var connection = f.source.getConnection(); var statement = connection.createStatement()) {
-                assertEquals(1, statement.executeUpdate("UPDATE qwen_tool_execution SET " + mutation));
+                assertEquals(1, statement.executeUpdate("UPDATE ma_tool_execution SET " + mutation));
             }
             assertThrows(IllegalArgumentException.class, () -> f.executions.findByExecutionCallId(marked.getExecutionCallId()));
         }
@@ -216,7 +220,7 @@ class DispatchAuthorizationEvidenceTest {
         if (jdbc) {
             source = new JdbcDataSource();
             source.setURL("jdbc:h2:mem:authorization-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-            JdbcRuntimeBrokerSchema.initialize(source);
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
             sessions = new JdbcRuntimeSessionRepository(source);
             executions = new JdbcToolExecutionRepository(source);

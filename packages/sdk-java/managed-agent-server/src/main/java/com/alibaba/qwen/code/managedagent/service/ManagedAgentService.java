@@ -1,21 +1,19 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellContentPart;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
@@ -24,32 +22,42 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemPartRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -63,12 +71,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DuplicateKeyException;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
 
 @Service
 public class ManagedAgentService {
@@ -116,6 +118,9 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            return false;
+        }
         return session.workspace() == null || runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
                 && harness.supportsLifecycle(session.toolProfile());
     }
@@ -314,7 +319,8 @@ public class ManagedAgentService {
             List<Map<String, Object>> input, boolean isolated) {
         List<Map<String, Object>> normalizedInput = normalizeInput(input);
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
+                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -534,9 +540,9 @@ public class ManagedAgentService {
                 SessionRecord session = store.requireSession(tenantId, sessionId);
                 HarnessConnector.Attachment attachment = harness.createOrLoad(tenantId, sessionId,
                         session.harnessBootId() != null, true);
+                store.markRenameSubmitted(delivery, owner);
                 harness.rename(tenantId, sessionId, effectiveTitle, command.renameRevision());
-                session = store.completeSessionRename(tenantId, idempotencyKey, sessionId,
-                        effectiveTitle, attachment.bootId(), command.renameRevision());
+                session = store.completeSessionRename(delivery, owner, attachment.bootId());
                 return new SessionMutationResult<>(publicSession(session),
                         command.replayed());
             } catch (RuntimeException error) {
@@ -712,29 +718,18 @@ public class ManagedAgentService {
 
     public PublicItemList listPublicItems(String tenantId, String actorId,
             String sessionId, long afterSequence, int requestedLimit) {
+        return listPublicItems(tenantId, actorId, sessionId, null, afterSequence, requestedLimit);
+    }
+
+    public PublicItemList listPublicItems(String tenantId, String actorId, String sessionId,
+            String cursor, long afterSequence, int requestedLimit) {
         if (afterSequence < 0) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
-                    "invalid_event_cursor",
-                    "Item sequence must be non-negative.");
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_event_cursor", "Item sequence must be non-negative.");
         }
-        int limit = limit(requestedLimit);
         requireReadableSession(tenantId, actorId, sessionId);
-        SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
-                .orElse(null);
-        if (snapshot == null) {
-            return new PublicItemList("list", List.of(), false, null, 0);
-        }
-        List<ItemRecord> matching = snapshot.items().stream()
-                .filter(item -> item.firstSequence() > afterSequence)
-                .toList();
-        boolean hasMore = matching.size() > limit;
-        List<PublicItem> items = matching.stream().limit(limit)
-                .map(this::publicItem).toList();
-        String nextCursor = hasMore && !items.isEmpty()
-                ? Long.toString(items.get(items.size() - 1).firstSequence())
-                : null;
-        return new PublicItemList("list", items, hasMore, nextCursor,
-                snapshot.coveredSequence());
+        var page = store.findSnapshotPage(tenantId, sessionId, cursor, afterSequence, limit(requestedLimit));
+        return new PublicItemList("list", page.items().stream().map(this::publicItem).toList(), page.hasMore(),
+                page.nextCursor(), page.coveredSequence());
     }
 
     public WebShellTranscript transcript(String tenantId, String actorId,
@@ -784,8 +779,7 @@ public class ManagedAgentService {
                 session.sessionId(), afterSequence, limit);
         ReplayWindow window = store.findReplayWindow(session.tenantId(),
                 session.sessionId());
-        if (afterSequence < window.floorSequence()
-                && window.floorSequence() <= window.snapshotThroughSequence()) {
+        if (afterSequence < window.floorSequence()) {
             throw new ReplayCursorExpired(window);
         }
         return events;
@@ -971,6 +965,9 @@ public class ManagedAgentService {
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            return false;
+        }
         return retention || session.workspace() != null && runtimeWarmer != null
                 && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(session.toolProfile());
     }

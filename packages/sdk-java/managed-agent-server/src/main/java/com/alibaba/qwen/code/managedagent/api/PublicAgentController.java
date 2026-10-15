@@ -217,10 +217,23 @@ public class PublicAgentController {
     @GetMapping("/{sessionId}/items")
     public PublicItemList items(TenantContext tenant,
             @PathVariable String sessionId,
-            @RequestParam(defaultValue = "0") long after,
+            @RequestParam(defaultValue = "0") String after,
+            @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit) {
-        return service.listPublicItems(tenant.tenantId(), tenant.actorId(),
-                sessionId, after, limit);
+        long sequence = 0;
+        if (cursor == null && after.matches("-?[0-9]+")) {
+            try {
+                sequence = Long.parseLong(after);
+            } catch (NumberFormatException error) {
+                throw new ApiException(
+                        org.springframework.http.HttpStatus.BAD_REQUEST,
+                        "invalid_event_cursor",
+                        "Item sequence is invalid.");
+            }
+        } else if (cursor == null) {
+            cursor = after;
+        }
+        return service.listPublicItems(tenant.tenantId(), tenant.actorId(), sessionId, cursor, sequence, limit);
     }
 
     @GetMapping("/{sessionId}/turns")
