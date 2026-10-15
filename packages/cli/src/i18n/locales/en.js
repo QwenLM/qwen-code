@@ -8,6 +8,30 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  'Cannot branch: {{reason}}': 'Cannot branch: {{reason}}',
+  'Cannot fork: {{reason}}': 'Cannot fork: {{reason}}',
+  'Cannot change directory: {{reason}}': 'Cannot change directory: {{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    'tool "{{tool}}" is awaiting approval. Resolve the pending approval.',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    'a subagent is awaiting approval. Resolve the pending approval.',
+  'tool "{{tool}}" is {{status}}. Wait for it to finish.':
+    'tool "{{tool}}" is {{status}}. Wait for it to finish.',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    'the model is streaming a response. Wait for it to finish or press Esc to cancel.',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.',
+  'context compaction is in progress. Wait for it to finish.':
+    'context compaction is in progress. Wait for it to finish.',
+  'a slash command is still running. Wait for it to finish.':
+    'a slash command is still running. Wait for it to finish.',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
+  executing: 'executing',
+  scheduled: 'scheduled',
+  validating: 'validating',
   'Cannot disable an extension-provided MCP server here.':
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':

@@ -9,6 +9,30 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  'Cannot branch: {{reason}}': '無法建立分支：{{reason}}',
+  'Cannot fork: {{reason}}': '無法啟動分叉代理：{{reason}}',
+  'Cannot change directory: {{reason}}': '無法切換目錄：{{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    '工具「{{tool}}」正在等待批准。請處理待審批請求。',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    '子代理正在等待批准。請處理待審批請求。',
+  'tool "{{tool}}" is {{status}}. Wait for it to finish.':
+    '工具「{{tool}}」的狀態為{{status}}。請等待其完成。',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    '工具「{{tool}}」的結果尚未提交給模型。請等待提交，或按 Esc 取消本輪。',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    '模型正在串流輸出。請等待完成，或按 Esc 取消。',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    '模型請求仍在進行，但目前沒有回應內容到達。請等待完成，或按 Esc 取消。',
+  'context compaction is in progress. Wait for it to finish.':
+    '正在壓縮上下文。請等待壓縮完成。',
+  'a slash command is still running. Wait for it to finish.':
+    '斜線命令仍在執行。請等待其完成。',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '回應或工具呼叫仍在進行。請等待完成，或處理待確認的工具呼叫。',
+  executing: '執行中',
+  scheduled: '已排程',
+  validating: '驗證中',
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',

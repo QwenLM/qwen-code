@@ -7,6 +7,30 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  'Cannot branch: {{reason}}': '无法创建分支：{{reason}}',
+  'Cannot fork: {{reason}}': '无法启动分叉代理：{{reason}}',
+  'Cannot change directory: {{reason}}': '无法切换目录：{{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    '工具“{{tool}}”正在等待批准。请处理待审批请求。',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    '子代理正在等待批准。请处理待审批请求。',
+  'tool "{{tool}}" is {{status}}. Wait for it to finish.':
+    '工具“{{tool}}”的状态为{{status}}。请等待其完成。',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    '工具“{{tool}}”的结果尚未提交给模型。请等待提交，或按 Esc 取消本轮。',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    '模型正在流式输出。请等待完成，或按 Esc 取消。',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    '模型请求仍在进行，但当前没有响应内容到达。请等待完成，或按 Esc 取消。',
+  'context compaction is in progress. Wait for it to finish.':
+    '正在压缩上下文。请等待压缩完成。',
+  'a slash command is still running. Wait for it to finish.':
+    '斜杠命令仍在运行。请等待其完成。',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '响应或工具调用仍在进行。请等待完成，或处理待确认的工具调用。',
+  executing: '执行中',
+  scheduled: '已调度',
+  validating: '验证中',
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',

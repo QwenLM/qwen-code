@@ -17,6 +17,7 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { getSessionBusyMessage } from '../utils/session-busy.js';
 
 const debugLogger = createDebugLogger('FORK_COMMAND');
 
@@ -59,7 +60,6 @@ export const forkCommand: SlashCommand = {
     }
 
     const { config } = context.services;
-    const { ui } = context;
 
     if (!config) {
       return {
@@ -71,13 +71,12 @@ export const forkCommand: SlashCommand = {
 
     // Guard: streaming or awaiting tool confirmation — forking mid-flight
     // would snapshot an inconsistent conversation state.
-    if (ui.isIdleRef?.current === false) {
+    const busyMessage = getSessionBusyMessage(context, 'fork');
+    if (busyMessage) {
       return {
         type: 'message',
         messageType: 'error',
-        content: t(
-          'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
-        ),
+        content: busyMessage,
       };
     }
 
