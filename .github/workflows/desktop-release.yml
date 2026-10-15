@@ -297,6 +297,7 @@ jobs:
     # entry, so serializing the shell lane would only add up to 45 minutes
     # before the build. publish joins on both, so nothing is released
     # unchecked.
+    runs-on: '${{ matrix.os }}'
     timeout-minutes: 120
     strategy:
       fail-fast: false
