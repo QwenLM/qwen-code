@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -16,8 +16,9 @@ import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class HostedLifecycleRelayTest {
     @Test
@@ -50,13 +51,17 @@ class HostedLifecycleRelayTest {
             var bytes = new java.io.ByteArrayOutputStream();
             for (int value; (value = socket.getInputStream().read()) != -1;) {
                 bytes.write(value);
-                if (bytes.toString(StandardCharsets.UTF_8).endsWith("\r\n0\r\n\r\n")) break;
+                if (bytes.toString(StandardCharsets.UTF_8).endsWith("\r\n0\r\n\r\n")) {
+                    break;
+                }
             }
             String response = bytes.toString(StandardCharsets.UTF_8).toLowerCase(java.util.Locale.ROOT);
             assertThat(response).contains("200 ok", "x-qwen-harness-boot-id: original", "done").doesNotContain("x-response-hop");
             assertThat(calls.get()).isEqualTo(1);
             assertThat(relay.failure()).isNull();
-        } finally { backend.stop(0); }
+        } finally {
+            backend.stop(0);
+        }
     }
 
     @Test
@@ -110,8 +115,12 @@ class HostedLifecycleRelayTest {
             exchange.sendResponseHeaders(200, 0);
             exchange.getResponseBody().write("first".getBytes(StandardCharsets.UTF_8));
             exchange.getResponseBody().flush();
-            try { finish.await(10, TimeUnit.SECONDS); }
-            catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            try {
+                finish.await(10, TimeUnit.SECONDS);
+            }
+            catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
             exchange.getResponseBody().write("last".getBytes(StandardCharsets.UTF_8));
             exchange.close();
         });
