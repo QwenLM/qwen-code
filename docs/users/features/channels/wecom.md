@@ -2,6 +2,9 @@
 
 This guide covers setting up Qwen Code with a WeCom intelligent robot (企业微信智能机器人).
 
+For a self-built application using Corp ID, Agent ID, Token and EncodingAESKey,
+use the separate [WeCom Callback channel](./wecom-callback).
+
 ## Prerequisites
 
 - A WeCom organization account

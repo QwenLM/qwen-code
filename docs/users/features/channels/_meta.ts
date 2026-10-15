@@ -5,6 +5,7 @@ export default {
   dingtalk: 'DingTalk',
   dws: 'DingTalk Workspace',
   wecom: 'WeCom',
+  'wecom-callback': 'WeCom Callback',
   feishu: 'Feishu',
   qqbot: 'QQ Bot',
   email: 'Email',
