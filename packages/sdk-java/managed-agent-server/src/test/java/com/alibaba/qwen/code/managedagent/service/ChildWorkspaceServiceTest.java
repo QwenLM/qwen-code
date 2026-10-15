@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.Row;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -590,7 +591,7 @@ class ChildWorkspaceServiceTest {
         var parentProfiles = jdbc.queryForMap("SELECT tool_profile, approval_mode FROM ma_session"
                 + " WHERE session_id = ?", parent.sessionId());
         // The exact profile the hosted side declares read-only (read_file and glob).
-        assertThat(ManagedAgentStore.SNAPSHOT_TOOL_PROFILE).isEqualTo("hosted-workspace-read/1");
+        assertThat(WorkspaceToolProfiles.READ).isEqualTo("hosted-workspace-read/1");
         assertThat(parentProfiles.get("tool_profile")).isNotEqualTo("hosted-workspace-read/1");
         assertThat(profiles.get("tool_profile")).isEqualTo("hosted-workspace-read/1");
         assertThat(profiles.get("approval_mode")).isEqualTo(parentProfiles.get("approval_mode"));

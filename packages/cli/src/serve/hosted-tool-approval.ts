@@ -57,9 +57,10 @@ const PREAPPROVED_TOOLS: Readonly<
 };
 
 // `glob` ships with the `/2` search profiles and the read profile (#13753 I3),
-// so those pre-approve it and no other profile does. A name-keyed allowance would also pre-approve an
-// MCP-declared tool that happens to be called `glob` — the MCP server picks
-// its own names — and dispatch it without ever asking the operator.
+// so those pre-approve it and no other profile does. A name-keyed allowance
+// would also pre-approve an MCP-declared tool that happens to be called
+// `glob` — the MCP server picks its own names — and dispatch it without ever
+// asking the operator.
 const SEARCH_PREAPPROVED_TOOLS: readonly string[] = ['glob'];
 
 /**

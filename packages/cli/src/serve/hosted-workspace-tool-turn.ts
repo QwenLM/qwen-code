@@ -33,6 +33,7 @@ import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceGlobProfile,
   isHostedWorkspaceReadProfile,
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
@@ -202,6 +203,7 @@ export {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceGlobProfile,
   isHostedWorkspaceReadProfile,
   type HostedWorkspaceToolProfile,
 };
@@ -573,7 +575,7 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
 // call it does not declare.
 export const HOSTED_WORKSPACE_READ_TOOLS: FunctionDeclaration[] = [
   {
-    ...HOSTED_WORKSPACE_FILE_TOOLS[0],
+    ...HOSTED_WORKSPACE_FILE_TOOLS.find((tool) => tool.name === 'read_file')!,
     description:
       "Read a file in this read-only snapshot of the parent's Workspace, taken when this child started. Files cannot be changed and commands cannot run here.",
   },
@@ -1642,9 +1644,9 @@ export class HostedWorkspaceToolTurn {
     void this.warmed.catch(() => undefined);
   }
 
-  /** Whether this Session runs one of the `/2` search profiles. */
-  private get searchProfile(): boolean {
-    return isHostedWorkspaceSearchProfile(this.profile);
+  /** Whether this Session's profile declares `glob`, which then asks no approval. */
+  private get globProfile(): boolean {
+    return isHostedWorkspaceGlobProfile(this.profile);
   }
 
   /**
@@ -2043,12 +2045,15 @@ export class HostedWorkspaceToolTurn {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
+    // #13753 I3: a snapshot child's read profile declares only `read_file`
+    // and `glob`, the batch this path resumes without file history.
     if (
       !saved?.pendingTurn &&
       !saved?.pendingUndo &&
       !this.hooks &&
       !this.mcp &&
-      this.profile === HOSTED_WORKSPACE_FILE_PROFILE
+      (this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+        isHostedWorkspaceReadProfile(this.profile))
     ) {
       this.uncertain = true;
       try {
@@ -2782,7 +2787,7 @@ export class HostedWorkspaceToolTurn {
           const asks = hostedApprovalAsks(
             this.approval!.settings,
             call.name,
-            this.searchProfile,
+            this.globProfile,
           );
           if (!asks) return call;
           const output = await this.hooks!.fire(
@@ -3102,8 +3107,8 @@ export class HostedWorkspaceToolTurn {
           } else if (named && args['isolation'] === 'snapshot') {
             // #13753 I3: a member trades messages with its leader, which a
             // snapshot, with no message lane, can neither send nor take.
-            validationError =
-              'Hosted team member cannot run as a snapshot: a member exchanges messages with the team leader, which a read-only snapshot cannot. Launch the member with isolation "worktree" or without isolation, or launch the snapshot without name.';
+            // The remedies name only the isolation this host serves.
+            validationError = `Hosted team member cannot run as a snapshot: a member exchanges messages with the team leader, which a read-only snapshot cannot. Launch the member ${this.childWorkspaces ? 'with isolation "worktree" or ' : ''}without isolation${this.childSnapshots ? ', or launch the snapshot without name' : ''}.`;
           } else if (
             args['plan_mode_required'] !== undefined &&
             typeof args['plan_mode_required'] !== 'boolean'
@@ -3694,7 +3699,7 @@ export class HostedWorkspaceToolTurn {
               hostedApprovalAsks(
                 this.approval.settings,
                 request.call.name,
-                this.searchProfile,
+                this.globProfile,
               )
             )
               askAgain.add(index);
@@ -6822,14 +6827,14 @@ export class HostedWorkspaceToolTurn {
     if (this.nativeBatch) this.nativeBatch.refusals = refusals;
     const approval = this.approval;
     if (!approval) return refusals;
-    const searchProfile = this.searchProfile;
+    const globProfile = this.globProfile;
     let asked = false;
     for (const [index, request] of requests.entries()) {
       if (index < nextOrdinal) continue;
       if (
         refusals[index] ||
         this.hookPermission.get(request.call.callId) === 'allow' ||
-        !hostedApprovalAsks(approval.settings, request.call.name, searchProfile)
+        !hostedApprovalAsks(approval.settings, request.call.name, globProfile)
       )
         continue;
       asked = true;

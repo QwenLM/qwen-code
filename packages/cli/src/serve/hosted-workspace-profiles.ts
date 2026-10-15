@@ -56,11 +56,20 @@ export function hostedShellLaneAttachesChildAgents(
   return shellLane && !suppressChildAgents;
 }
 
-/** The profiles that declare `glob`: the `/2` search profiles and the read profile. */
 export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
+  );
+}
+
+/**
+ * The profiles that declare `glob`, so approval pre-approves it: the `/2`
+ * search profiles and the read profile (#13753 I3).
+ */
+export function isHostedWorkspaceGlobProfile(profile: unknown): boolean {
+  return (
+    isHostedWorkspaceSearchProfile(profile) ||
     profile === HOSTED_WORKSPACE_READ_PROFILE
   );
 }

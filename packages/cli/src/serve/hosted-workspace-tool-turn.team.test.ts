@@ -518,8 +518,24 @@ it('refuses a snapshot member and admits a plain snapshot child', async () => {
     member('bob', 'call-bob', { isolation: 'snapshot' }),
   ]);
   expect(refused).toContain('Hosted team member cannot run as a snapshot');
+  expect(refused).toContain(
+    'with isolation \\"worktree\\" or without isolation, or launch the snapshot without name.',
+  );
   expect(children.record('prompt:call-bob')).toBeUndefined();
   expect(roster()).toEqual([]);
+  // The remedies name only the isolation the host serves.
+  const worktreeOnly = await execute(createTurn({ childWorkspaces: true }), [
+    member('bob', 'call-bob-worktree', { isolation: 'snapshot' }),
+  ]);
+  expect(worktreeOnly).toContain(
+    'Launch the member with isolation \\"worktree\\" or without isolation.',
+  );
+  expect(worktreeOnly).not.toContain('snapshot without name');
+  expect(
+    await execute(createTurn(), [
+      member('bob', 'call-bob-shared', { isolation: 'snapshot' }),
+    ]),
+  ).toContain('Launch the member without isolation.');
 
   await execute(capable, [
     call(

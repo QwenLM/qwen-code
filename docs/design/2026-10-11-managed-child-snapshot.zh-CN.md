@@ -92,13 +92,14 @@ Issue #13753 对 I3 提出两点：
    - **发送时拒绝。** 父的 `send_message` 拒绝运行中的 snapshot child，工具错误会说明原因，并建议等待其结果。无论按 `task_id`、按成员名还是在广播中寻址都如此，广播中该接收者的那一行会说明。拒绝位于 `sendToChild`，即所有形式都走的那条路由，所以不会提交 child 永远无法接收的消息。
    - **为什么在发送方拒绝。** 到达没有 lane 的 Session 的消息会让消息 relay 一直重试，并扣住 child 的结算（H4d-b 决策 8），直到 relay 放弃。
    - **已完成的 snapshot child** 照常续跑。续跑是一个新的 snapshot run，会按父目录树当时的样子准备一份新的副本。
-   - **团队成员不能作为快照。** 成员的指令告诉它用 `send_message` 向 leader 提问，leader 也通过消息给它派活（H4e-b2）。快照两者都不具备，而未声明的调用会让成员的 Turn 失败。所以 Agent 工具把带 `name` 的 `isolation: "snapshot"` 当作参数错误拒绝，在任何东西提交之前；从团队 Session 启动的普通 child 仍可以是快照。
+   - **团队成员不能作为快照。** 成员的指令告诉它用 `send_message` 向 leader 提问，leader 也通过消息给它派活（H4e-b2）。快照两者都不具备，而未声明的调用会让成员的 Turn 失败。所以 Agent 工具把带 `name` 的 `isolation: "snapshot"` 当作参数错误拒绝，在任何东西提交之前；从团队 Session 启动的普通 child 仍可以是快照。拒绝提示只建议主机支持的隔离方式。
 
 7. **Glob 的推广。** 只读 profile 使用 `glob`，而 #13166 把 glob 的推广定为由运维执行：排空旧 worker 并升级每个 provisioner。child 快照只在 durable local-process Broker 上运行，它从已安装的 CLI 启动 worker。运维只在完成该推广之后才开启快照（决策 2）。较旧的 worker 对 `glob` 答以工具错误，绝不会写入。
 
 8. **恢复能读取新的 profile。** `hosted-workspace-read/1` 加入已保存 profile 的词汇，所以创建、加载与 Workspace 恢复都接受它。
    - 恢复不认识的 profile 会中止整个共享 storage 的恢复。W1b 把 hosted 文件与 Shell profile 放在那个捕获闭包之内。
    - 存储迁移仍只接受 `files/1` Session，所以带有存活 snapshot child 的父会被拒绝，与带有任何 Shell child 的父一样。
+   - 已提交的读取结果在 Runtime 被替换后仍可恢复。G3 第 3 步的路径（#14059）不重新 acquire 已退役的 owner，直接恢复 `results_ready` checkpoint；它在 `hosted-workspace-files/1` 之外也接受只读 profile。只读 profile 的批次永远只有 `read_file` 与 `glob`，正是该路径本就允许没有文件历史而恢复的批次。
 
 9. **串行共享不需要单独的取值（最终）。** 这确认了 I1 决策 15。
    - **保证。** storage lease 一次只接纳一个 holder，storage 的每个写入方在写入前都获取它：父、`shared` 与 `worktree` child，以及 child Workspace 维护。snapshot child 的读取也获取它。所以同一父的任何两个 child 都不能同时持有 storage。
@@ -150,6 +151,7 @@ Issue #13753 对 I3 提出两点：
   - 两个读工具在 `default` 与 `auto-edit` 下都预先批准。
 - **消息**（`hosted-session-message-session.test.ts`）：snapshot child 运行期间（attach 前后）都会被拒绝，且不提交任何东西，而运行中的 worktree child 仍能收到消息；快照完成后，只有在提供快照的主机上才续跑，续跑为 `snapshot` run。
 - **主机标志与恢复**（`hosted-harness-session.test.ts`，新增 2 个用例；`workspace-recovery-session.test.ts`）：只有创建或加载重申了两个标志时才宣告 `snapshot`（只有 snapshot 标志或文本 `"true"` 都不算）；只读 profile 的 Session 可以创建，并声明它的两个工具；恢复接受只读 profile，带捕获容量时仍会拒绝。
+- **Runtime 被替换**（`hosted-recovery.test.ts`，新增 2 个用例）：只读 profile 的 child 在 `read_file` 结果提交后 Runtime 被替换，恢复时直接采用已提交的结果，不重跑工具、不重新 acquire 已退役的 owner，释放原 owner，并拒绝该 Turn 中的新工具调用。
 - **Relay**（`ChildResultRelayTest`，新增 5 个用例）：
   - snapshot run 以自己的模式准备副本，并以隔离方式创建 child；
   - 完成的快照立即提交，回执不带 `workspace` 成员，只请求丢弃；

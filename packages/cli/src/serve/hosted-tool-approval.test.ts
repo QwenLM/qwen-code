@@ -20,6 +20,7 @@ import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceReadProfile,
   isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceGlobProfile,
   isHostedWorkspaceShellProfile,
 } from './hosted-workspace-profiles.js';
 
@@ -97,9 +98,10 @@ describe('Hosted tool approval settings', () => {
           hostedApprovalAsks(
             { mode, timeoutMs: 1_000 },
             tool,
-            isHostedWorkspaceSearchProfile(profile),
+            isHostedWorkspaceGlobProfile(profile),
           ),
         ).toBe(false);
+    expect(isHostedWorkspaceSearchProfile(profile)).toBe(false);
   });
 
   it('asks before every team write and never before reading the board', () => {

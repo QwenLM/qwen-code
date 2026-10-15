@@ -80,11 +80,6 @@ public class ManagedAgentStore implements AgentStateStore {
             new TypeReference<>() {
             };
     private static final TypeReference<List<ItemPartRecord>> PARTS_TYPE = new TypeReference<>() {};
-    /**
-     * The hosted profile of a child bound to a snapshot child Workspace
-     * (#13753 I3): `read_file` and `glob` only, so the child cannot write.
-     */
-    public static final String SNAPSHOT_TOOL_PROFILE = "hosted-workspace-read/1";
     // Between full rewrites the snapshot may lag the projection by this many
     // events or this long; the batch that ends a Turn rewrites it anyway.
     public static final int SNAPSHOT_REFRESH_EVENTS = 1000;
@@ -578,7 +573,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 && ChildWorkspaceStore.SNAPSHOT.equals(requireReadyChildWorkspace(
                         tenantId, parentSessionId, lineage.parentChildRunId(),
                         parent.workspace(), childCwdRelative))) {
-            toolProfile = SNAPSHOT_TOOL_PROFILE;
+            toolProfile = WorkspaceToolProfiles.READ;
         }
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();

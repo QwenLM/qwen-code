@@ -92,13 +92,14 @@ The facts below are from `main` at `415925cbda`, after the schema consolidation 
    - **Refused when sent.** The parent's `send_message` refuses a running snapshot child with a tool error that says so and suggests waiting for its result. This holds whether it is addressed by `task_id`, by member name or in a broadcast, where the line for that recipient says so. The refusal is in `sendToChild`, the one route every form takes, so no message is committed that the child could never receive.
    - **Why at the sender.** A message that reached a Session without a lane would keep the message relay retrying, and would hold the child's settlement (H4d-b decision 8) until the relay gave up.
    - **A completed snapshot child** is continued as usual. The continuation is a new snapshot run that prepares a new copy of the parent's tree as it then is.
-   - **A team member cannot be a snapshot.** A member's instructions tell it to ask its leader with `send_message`, and its leader gives it work by message (H4e-b2). A snapshot has neither, and an undeclared call fails the member's Turn. So the Agent tool refuses `isolation: "snapshot"` with a `name` as an argument error before anything commits; a plain child launched from a team Session may still be a snapshot.
+   - **A team member cannot be a snapshot.** A member's instructions tell it to ask its leader with `send_message`, and its leader gives it work by message (H4e-b2). A snapshot has neither, and an undeclared call fails the member's Turn. So the Agent tool refuses `isolation: "snapshot"` with a `name` as an argument error before anything commits; a plain child launched from a team Session may still be a snapshot. The refusal suggests only the isolation the host serves.
 
 7. **Glob rollout.** The read profile uses `glob`, which #13166 made an operator-enforced rollout: drain old workers and upgrade every provisioner. Child snapshots run only on the durable local-process Broker, which launches workers from the installed CLI. The operator turns snapshots on (decision 2) only after that rollout. An older worker answers `glob` with a tool error, never a write.
 
 8. **Recovery reads the new profile.** `hosted-workspace-read/1` joins the saved-profile vocabulary, so creation, load and Workspace recovery all accept it.
    - A profile that recovery did not know would abort recovery of the whole shared storage. W1b puts the hosted files and Shell profiles inside that capture closure.
    - Storage migration still accepts only `files/1` Sessions, so a parent with a live snapshot child is refused, as one with any Shell child already is.
+   - Committed read results survive a replaced Runtime. The G3 step-3 path (#14059) resumes a `results_ready` checkpoint without reacquiring the retired owner; it accepts the read profile beside `hosted-workspace-files/1`. A read profile's batch is always `read_file` and `glob`, the batch that path already resumes without file history.
 
 9. **Serialized sharing needs no value of its own (final).** This confirms I1 decision 15.
    - **The guarantee.** The storage lease admits one holder at a time, and every writer of a storage takes it before writing: the parent, `shared` and `worktree` children, and child Workspace maintenance. A snapshot child's reads take it too. So no two children of one parent can hold the storage at once.
@@ -150,6 +151,7 @@ The facts below are from `main` at `415925cbda`, after the schema consolidation 
   - both read tools are pre-approved under `default` and `auto-edit`.
 - **Messages** (`hosted-session-message-session.test.ts`): a snapshot child is refused while it runs, before and after it attaches, with nothing committed, while a running worktree child still takes a message; once completed, a snapshot is continued only where snapshots are served, as a `snapshot` run.
 - **Host flag and recovery** (`hosted-harness-session.test.ts`, 2 new cases; `workspace-recovery-session.test.ts`): `snapshot` advertised only while a create or load restates both flags (not for the snapshot flag alone or for `"true"` as text); a read-profile Session is created and declares its two tools; recovery accepts the read profile and still refuses it with a capture size.
+- **Replaced Runtime** (`hosted-recovery.test.ts`, 2 new cases): after a read-profile child's `read_file` result commits and its Runtime is replaced, recovery takes the committed result without rerunning the tool or reacquiring the retired owner, releases the original owner, and refuses a new tool call in that Turn.
 - **Relay** (`ChildResultRelayTest`, 5 new cases):
   - a snapshot run prepares its copy with its own mode and creates its child isolated;
   - a completed snapshot commits at once with no `workspace` member and asks only its discard;
