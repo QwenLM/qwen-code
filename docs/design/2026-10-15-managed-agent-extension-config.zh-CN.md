@@ -2,7 +2,7 @@
 
 [English](2026-10-15-managed-agent-extension-config.md) | [简体中文](2026-10-15-managed-agent-extension-config.zh-CN.md)
 
-状态：已实现并完成本地验证。基线：`e612bbf23c`。
+状态：已实现并完成本地验证。初始实现基线：`e612bbf23c`；审查后的恢复修复已 rebase 到 `55fbf99003`。
 
 ## 问题与基线行为
 
@@ -16,7 +16,7 @@ Managed MCP 和 Hook 已有可持久恢复的私有 Hosted 实现。公开 Agent
 
 MCP 定义只包含 `server_id`、`server_revision` 和 `definition_digest` pin，用于选择管理员预置的 Runtime manifest。它要求既有 MCP 工具 profile 和部署白名单。Hook catalog 同样只包含 `catalog_id`、`catalog_revision` 和 `definition_digest`，要求绑定 Workspace 的工具 profile。这两个受支持的 pin 形状都不接受 endpoint、凭据、命令、模块路径或执行 recipe。
 
-Skill 要求绑定 Workspace 的工具 profile，不初始化本地 SkillManager 发现。扩展字段为空或省略时保留原行为。非法、重复、超限、不兼容或尚不支持的定义，在准入时返回明确指出字段的错误。非空 MCP pin 没有搭配 MCP profile，以及 MCP profile 没有提供 pin，均拒绝。
+Skill 要求绑定 Workspace 的工具 profile，不初始化本地 SkillManager 发现。对于非 MCP profile，扩展字段为空或省略时保留原行为。非法、重复、超限、不兼容或尚不支持的定义，在准入时返回明确指出字段的错误。非空 MCP pin 没有搭配 MCP profile，以及 MCP profile 没有提供 pin，均拒绝。
 
 每项 Skill 只接受 `name`、`description`、`body` 和可选的 `base_directory`（默认 `.`）。名称沿用原生 Skill 字符集合，上限为 128 UTF-8 字节。一个 catalog 最多包含 16 个不同名称，JSON 总量不超过 48 KiB；描述上限 4 KiB，正文上限 32 KiB。目录上限 4 KiB，使用规范相对 POSIX 分段，不允许目录穿越、反斜杠、冒号或控制字符。拒绝非法 Unicode 和必填字段的空白值，同时不改写已发布正文的字节。
 
@@ -70,7 +70,7 @@ Skill 在独立工具批次中先加载，再执行 Workspace 工具。混合批
 
 MCP 和 Hook 副作用保留原稳定 operation ID 与 Runtime owner。结果未知时只观察原操作，不作为新工作重发。既有 MCP/Hook 的关闭和排空检查仍为必要条件。启用 MCP profile 仍要求部署显式配置 profile 白名单，并声明兼容 Hosted 生命周期能力；本次不全局启用，也不绕过升级门禁。
 
-先部署兼容的 Harness 和 Runtime，再准入带新配置的 Session。没有扩展字段的已有 Session 保持可读。旧 Harness 可能拒绝新发布的配置，因此准入失败必须可见，不能被报告为安装成功。
+先部署兼容的 Harness 和 Runtime，再准入带新配置的 Session。对于非 MCP profile，没有扩展字段的已有 Session 保持可读。MCP profile 现在在 create 和 attach/load 校验时都要求非空 server pin。之前的存储准入可能保留了没有 pin 的 MCP profile，虽然 Hosted attachment 当时已经会拒绝它。不能假定这类行不存在：发布前应审计已保存的定义和 Session，单独保留历史访问能力，并在替换旧部署前通过旧部署结束或关闭受影响 Session。发布修正后的定义版本可用于新 Session，不会改写已有 Session pin。旧 Harness 可能拒绝新发布的配置，因此准入失败必须可见，不能被报告为安装成功。
 
 ## 边界
 
@@ -82,9 +82,11 @@ MCP 和 Hook 副作用保留原稳定 operation ID 与 Runtime owner。结果未
 
 实现前先在全局 CLI 确认基线，并区分公开准入缺口与普通 CLI 已有的 Skill 能力。测试合法及非法定义、资源发布、首次调用 Skill、未知 Skill 拒绝、资源损坏、冲突 load、Harness detach/load、MCP/Hook pin 转发以及 MCP 关闭能力门禁。使用确定性模型与 MCP fixture，证明模型看见并调用选定能力且不发现宿主 settings。运行定向 TypeScript 与 Java 测试、build/typecheck/bundle、适用的 Java 验证 profile，以及两轮完整 diff 自审。如实记录无法运行的物理环境，不能把 fixture 结果当作生产验收。
 
-本地 build、typecheck、bundle、lint 和格式检查通过；另通过 515 项 Hosted Session 测试、337 项 Skill/Hook/工具/恢复测试、50 项模型/定义测试、77 项 Java SDK 测试，以及 Java server 验证套件（2897 项，跳过七项）。选定的 Hosted Harness/MySQL 8.4 profile 两项测试均使用最终 bundle 通过。MySQL 全量 profile 首次通过 548/549，既有异步校验时序用例在隔离重跑中通过；这不能把原全量结果记为全绿。
+初始实现的本地 build、typecheck、bundle、lint 和格式检查通过；另通过 515 项 Hosted Session 测试、337 项 Skill/Hook/工具/恢复测试、50 项模型/定义测试、77 项 Java SDK 测试，以及 Java server 验证套件（2897 项，跳过七项）。选定的 Hosted Harness/MySQL 8.4 profile 两项测试均使用最终 bundle 通过。MySQL 全量 profile 首次通过 548/549，既有异步校验时序用例在隔离重跑中通过；这不能把原全量结果记为全绿。
 
 最终打包进程 fixture 完成 18 次确定性模型请求，逐项核对实际调用名称、参数与持久历史。它覆盖按需加载、非法调用、不可变冷加载、资源损坏或缺失、普通混批拒绝，以及纯 Skill 的 SIGKILL 后 HTTP 恢复。混批 SIGKILL 的 load 仍明确阻塞并返回 HTTP 409；另外在同一真实日志上调用已构建的恢复 helper，验证同一拒绝与幂等性，不能声称 HTTP 已续行。该 fixture 没有执行 Runtime 工具。这些结果不代表物理 Linux 执行、真实 MCP/Hook 副作用或生产验收。
+
+审查后的恢复修复 rebase 到 `55fbf99003` 后，build/typecheck/bundle 和改动文件 lint/格式检查均通过，同时通过 392 项 TypeScript 定向测试、31 项 Java 恢复定向测试、十项 Workspace 恢复/MySQL 测试、两项 Hosted Harness/MySQL 测试及 SpotBugs。完整 Java 测试阶段通过 2923 项、跳过七项，但 `mvn verify` 因该基线未改动的 CSI SQL worker 测试中十一处既有 Checkstyle 违规而失败；报错文件、规则与插件配置都与基线完全一致。独立 reader 探针验证了两处修复，重建后的 18 次请求进程 fixture 也保持上述恢复边界。
 
 ## 验收标准
 

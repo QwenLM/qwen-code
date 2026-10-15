@@ -11,6 +11,7 @@ import {
   type ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import { HOSTED_SKILL_CATALOG_MAX_BYTES } from './hosted-skill-catalog.js';
 
 export interface HostedAgentDefinition {
   agentId: string;
@@ -81,7 +82,7 @@ export function parseHostedAgentDefinition(
     if (
       ref.kind !== 'managed-agent-skills' ||
       ref.schemaVersion !== 1 ||
-      ref.byteLength > 48 * 1024
+      ref.byteLength > HOSTED_SKILL_CATALOG_MAX_BYTES
     )
       throw new Error('Invalid agent skills reference.');
     result.skillsRef = ref;

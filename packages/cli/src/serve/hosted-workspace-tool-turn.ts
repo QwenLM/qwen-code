@@ -1671,6 +1671,7 @@ export class HostedWorkspaceToolTurn {
     // b3c: a member's widened send_message rides the same gate as its
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
+    const skill = this.skills?.declaration();
     this.advertised = [
       ...(this.publication || this.shell
         ? search
@@ -1692,7 +1693,7 @@ export class HostedWorkspaceToolTurn {
           : tool,
       ),
       ...(this.mcp?.tools() ?? []),
-      ...(this.skills?.declaration() ? [this.skills.declaration()!] : []),
+      ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
       // Shell-laned Session whose own child orchestrator exists (never in
       // a child's), behind the kind gate — files profiles and the public

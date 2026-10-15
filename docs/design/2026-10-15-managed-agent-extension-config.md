@@ -2,7 +2,7 @@
 
 [English](2026-10-15-managed-agent-extension-config.md) | [简体中文](2026-10-15-managed-agent-extension-config.zh-CN.md)
 
-Status: implemented and locally verified. Baseline: `e612bbf23c`.
+Status: implemented and locally verified. Initial implementation baseline: `e612bbf23c`; review recovery fix rebased onto `55fbf99003`.
 
 ## Problem and baseline behavior
 
@@ -16,7 +16,7 @@ The first supported Skill is a static, model-invocable instruction resource. An 
 
 MCP definitions contain only `server_id`, `server_revision`, and `definition_digest` pins selecting an administrator-provisioned Runtime manifest. They require the existing MCP tool profile and deployment allowlist. A Hook catalog similarly contains `catalog_id`, `catalog_revision`, and `definition_digest`. It requires a Workspace-bound tool profile. Neither supported pin shape accepts endpoints, credentials, commands, module paths, or execution recipes.
 
-Skills require a Workspace-bound tool profile. They do not initialize local SkillManager discovery. Empty or omitted extension fields preserve existing behavior. Invalid, duplicate, oversized, incompatible, or unsupported definitions fail admission with a field-specific error. Nonempty MCP pins without the MCP profile, and an MCP profile without pins, are rejected.
+Skills require a Workspace-bound tool profile. They do not initialize local SkillManager discovery. Empty or omitted extension fields preserve existing behavior for non-MCP profiles. Invalid, duplicate, oversized, incompatible, or unsupported definitions fail admission with a field-specific error. Nonempty MCP pins without the MCP profile, and an MCP profile without pins, are rejected.
 
 Each Skill accepts exactly `name`, `description`, `body`, and optional `base_directory` (default `.`). Names follow the native Skill character vocabulary and are limited to 128 UTF-8 bytes. A catalog holds at most 16 unique names and 48 KiB of JSON; descriptions are limited to 4 KiB and bodies to 32 KiB. Directories are limited to 4 KiB and use canonical relative POSIX segments, without traversal, backslashes, colons, or control characters. Invalid Unicode and blank required values are rejected without changing the published body bytes.
 
@@ -70,7 +70,7 @@ The existing AgentDefinition revision and digest remain the public source of ide
 
 MCP and Hook side effects retain their original stable operation IDs and Runtime owners. Unknown outcomes are observed, never resent as new work. Existing MCP/Hook close and drain checks remain mandatory. Enabling the MCP profile still requires the deployment's explicit profile allowlist and compatible Hosted lifecycle capability; this change does not enable it globally or bypass an upgrade gate.
 
-Deploy compatible Harness and Runtime components before admitting new configured Sessions. Existing Sessions without extension fields remain readable. Old Harness processes may reject the newly published configuration, so admission failures remain visible and must not be reported as successful installation.
+Deploy compatible Harness and Runtime components before admitting new configured Sessions. Existing Sessions without extension fields remain readable for non-MCP profiles. The MCP profile now requires nonempty server pins during create and attach/load validation. Earlier storage admission could retain an MCP profile with empty pins, although Hosted attachment already rejected it. Do not assume such rows are absent: audit stored definitions and Sessions before rollout, retain historical access separately, and settle or close affected Sessions with the previous deployment before replacing it. Publishing a corrected definition revision enables new Sessions; it does not rewrite existing Session pins. Old Harness processes may reject the newly published configuration, so admission failures remain visible and must not be reported as successful installation.
 
 ## Boundaries
 
@@ -82,9 +82,11 @@ Changes cover AgentDefinition validation and its OpenAPI schema, the Java Hosted
 
 Run a global-CLI baseline before implementation and record the public admission gap separately from the ordinary CLI's existing Skill support. Test valid and invalid definitions, resource publication, first Skill invocation, unknown Skill refusal, resource corruption, conflicting load, Harness detach/load, MCP/Hook pin forwarding, and MCP close capability gates. Use deterministic model/MCP fixtures to prove the model sees and invokes the configured capability without host-settings discovery. Run focused TypeScript and Java tests, build/typecheck/bundle, the applicable Java verification profiles, and two clean full-diff audits. Record unavailable physical environments and never equate fixture results with production acceptance.
 
-Local build, typecheck, bundle, lint and formatting passed, alongside 515 Hosted Session tests, 337 Skill/Hook/tool/recovery tests, 50 model/definition tests, 77 Java SDK tests and the Java server verification suite (2897 tests, seven skipped). Both tests in the selected Hosted Harness/MySQL 8.4 profile passed against the final bundle. The full MySQL profile first passed 548 of 549 tests; its existing asynchronous verification timing case passed an isolated rerun. This does not make the original full run green.
+Initial implementation build, typecheck, bundle, lint and formatting passed, alongside 515 Hosted Session tests, 337 Skill/Hook/tool/recovery tests, 50 model/definition tests, 77 Java SDK tests and the Java server verification suite (2897 tests, seven skipped). Both tests in the selected Hosted Harness/MySQL 8.4 profile passed against the final bundle. The full MySQL profile first passed 548 of 549 tests; its existing asynchronous verification timing case passed an isolated rerun. This does not make the original full run green.
 
 The final packaged-process fixture made 18 deterministic model requests, verifying actual call names and arguments against durable history. It covered on-demand loading, invalid invocations, immutable cold loads, corrupt/missing resources, normal mixed-batch refusals and a pure-Skill SIGKILL followed by HTTP recovery. Mixed-batch SIGKILL loads remained explicitly blocked with HTTP 409; a separate built recovery-helper check on the same real journal verified the immutable refusal and idempotency, without claiming HTTP continuation. No Runtime execution occurred in this fixture. Physical Linux execution, real MCP/Hook effects and production acceptance are not established by these results.
+
+After rebasing the review recovery fix onto `55fbf99003`, build/typecheck/bundle and changed-file lint/formatting passed, together with 392 targeted TypeScript tests, 31 focused Java recovery tests, ten Workspace recovery/MySQL tests, two Hosted Harness/MySQL tests and SpotBugs. The full Java test phase passed 2923 tests with seven skipped, but `mvn verify` failed on eleven pre-existing Checkstyle violations in the unchanged CSI SQL worker test from that base; the failing file, ruleset and plugin configuration exactly match the base. Independent reader probes verified both fixes, and the rebuilt 18-request process fixture retained the same recovery boundaries described above.
 
 ## Acceptance criteria
 
