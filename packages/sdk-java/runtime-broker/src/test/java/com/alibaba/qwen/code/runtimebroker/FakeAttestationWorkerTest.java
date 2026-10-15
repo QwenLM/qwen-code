@@ -152,6 +152,69 @@ class FakeAttestationWorkerTest {
         }
     }
 
+    /**
+     * The {@code --ignore-term} wedge the provisioner's escalation tests
+     * rely on: SIGTERM lands but the worker keeps running, so only a
+     * forcible destroy reclaims it.
+     */
+    @Test
+    @org.junit.jupiter.api.condition.DisabledOnOs(
+            org.junit.jupiter.api.condition.OS.WINDOWS)
+    void ignoreTermSurvivesSigterm() throws Exception {
+        LocalProcessRuntimeProvisionerTest.requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        Process worker = new ProcessBuilder("node", script.toString(),
+                "--ignore-term").start();
+        try {
+            try (OutputStream stdin = worker.getOutputStream()) {
+                stdin.write(JSON.writeValueAsBytes(fixtures().get("boot")));
+            }
+            BufferedReader stdout = new BufferedReader(new InputStreamReader(
+                    worker.getInputStream(), StandardCharsets.UTF_8));
+            assertTrue(stdout.readLine() != null,
+                    "worker never became ready");
+            // POSIX-only semantics: on Windows destroy() terminates
+            // outright; there is no SIGTERM to swallow.
+            worker.toHandle().destroy();
+            Thread.sleep(500);
+            assertTrue(worker.isAlive(),
+                    "--ignore-term must swallow SIGTERM");
+        } finally {
+            worker.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * The mirror arm: without {@code --ignore-term} the fake worker's
+     * default SIGTERM handler must let destroy() stop it — otherwise the
+     * escalation tests prove nothing. The ready line must be read first:
+     * it is written from the listen callback, so it reaches this process
+     * only after the top-level handler installation has run, and
+     * destroying earlier would kill the worker through SIGTERM's default
+     * disposition and prove nothing about the handler. POSIX-only, like the
+     * arm it mirrors: on Windows destroy() terminates outright.
+     */
+    @Test
+    @org.junit.jupiter.api.condition.DisabledOnOs(
+            org.junit.jupiter.api.condition.OS.WINDOWS)
+    void defaultWorkerExitsOnSigterm() throws Exception {
+        LocalProcessRuntimeProvisionerTest.requireNode();
+        Process worker = start(JSON.writeValueAsBytes(fixtures().get("boot")));
+        try {
+            BufferedReader stdout = new BufferedReader(new InputStreamReader(
+                    worker.getInputStream(), StandardCharsets.UTF_8));
+            assertTrue(stdout.readLine() != null,
+                    "worker never became ready");
+            worker.toHandle().destroy();
+            assertTrue(worker.waitFor(2, TimeUnit.SECONDS),
+                    "a default worker must exit on SIGTERM");
+        } finally {
+            worker.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+        }
+    }
+
     private static Process start(byte[] boot) throws IOException {
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
                 .toAbsolutePath();

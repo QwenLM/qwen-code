@@ -83,7 +83,7 @@ public final class WorkspaceCatalog {
         }
         WorkspaceView defaultView = usableDefault(actor)
                 .map(workspace -> new WorkspaceView(workspace,
-                        WorkspaceAccess.CREATE))
+                        WorkspaceAccess.OPERATOR))
                 .orElse(null);
         return new WorkspacePage(views, hasMore, defaultView);
     }

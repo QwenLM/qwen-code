@@ -100,6 +100,7 @@ test('shell card separates output, reveals and copies commands, and retains fail
   });
   await expect(collapsedSteps).toHaveCount(2);
   await collapsedSteps.first().click();
+  await expect(collapsedSteps).toHaveCount(1);
   await collapsedSteps.first().click();
   await page
     .getByRole('button', { name: 'Wait for daemon health', exact: true })

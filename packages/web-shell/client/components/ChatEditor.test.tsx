@@ -1082,7 +1082,27 @@ describe('ChatEditor context usage ring', () => {
     expect(getContextUsage).not.toHaveBeenCalled();
   });
 
-  it('opens the context breakdown when clicked', () => {
+  it('opens the details panel when clicked', () => {
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage,
+      onShowContextUsage,
+    });
+
+    act(() => {
+      ring(container)!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(onOpenContextUsage).toHaveBeenCalledTimes(1);
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a transcript snapshot when the host has no details panel', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
       tokenCount: 100,
@@ -1097,6 +1117,24 @@ describe('ChatEditor context usage ring', () => {
     });
 
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the conversation hint once the click opens the details panel', async () => {
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage: vi.fn(),
+    });
+
+    await act(async () => {
+      ring(container)!.focus();
+    });
+
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(tooltip.textContent).toContain('Context Usage');
+    expect(tooltip.textContent).not.toContain(
+      'Click to view the breakdown in the conversation.',
+    );
   });
 
   it('shows the used/total detail in the hover card on focus', async () => {
@@ -1681,6 +1719,16 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
     ).toBe(true);
+    renderChatEditor({
+      composerScopeKey: 'managed:tenant:actor:session',
+      workspaceFeaturesEnabled: false,
+      disableLegacyHistoryFallback: true,
+      shellModeEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(true);
+    expect(latestComposerCoreOptions.current?.shellModeEnabled).toBe(false);
   });
 
   it('shows the workspace indicator when the workspace action is visible', () => {
@@ -1699,6 +1747,23 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(chip?.getAttribute('title')).toBeNull();
     expect(
       container.querySelector('[data-web-shell-workspace]'),
+    ).not.toBeNull();
+  });
+
+  it('retains the native Workspace selector for a sole explicit Managed choice', () => {
+    const container = renderChatEditor({
+      workspaces: [
+        { id: 'ws-a', cwd: 'ws-a', label: 'A', primary: false, trusted: true },
+      ],
+      onSelectWorkspace: vi.fn(),
+      workspaceSelectorAlwaysVisible: true,
+      contextChipPlacement: 'below',
+      visibleToolbarActions: ['workspace'],
+    });
+    expect(
+      container.querySelector(
+        '[data-web-shell-composer-context-row] button[aria-label="Workspace"]',
+      ),
     ).not.toBeNull();
   });
 
@@ -3574,6 +3639,24 @@ describe('ChatEditor mobile composer actions', () => {
     ).toBe(false);
     await clickButton('Input history');
     expect(composerCoreState.openHistorySearch).toHaveBeenCalledOnce();
+  });
+
+  it('hides the mobile Shell entry for Managed while retaining the ordinary default', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      shellModeEnabled: false,
+    });
+    expect(
+      container.querySelector('[data-web-shell-mobile-editing-actions]'),
+    ).not.toBeNull();
+    const shellButton = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Shell mode',
+      );
+    expect(shellButton()).toBeUndefined();
+    rerenderChatEditor(container, { visibleToolbarActions: [] });
+    expect(shellButton()).toBeDefined();
   });
 
   it('returns focus to the composer after entering Shell from the drawer', async () => {

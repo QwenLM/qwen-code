@@ -5,11 +5,9 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, open, readFile, unlink, writeFile } from 'node:fs/promises';
-import type { FileHandle } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { lstat, readFile, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
@@ -46,7 +44,6 @@ let modelCalls = 0;
 let cancels = 0;
 let injected = false;
 let statusHeld = false;
-let writer: FileHandle | undefined;
 let resumeStatus = () => {};
 let operations: string[] = [];
 let proxyFailure: unknown;
@@ -80,16 +77,9 @@ async function evidence(phase: string) {
 }
 
 async function enteredTool() {
-  await waitUntil(async () => {
-    try {
-      writer = await open(proof, constants.O_WRONLY | constants.O_NONBLOCK);
-      return true;
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== 'ENXIO') throw cause;
-      return false;
-    }
-  });
-  assert((await lstat(proof)).isFIFO());
+  await waitUntil(() => existsSync(`${proof}.read-entered`));
+  assert((await lstat(proof)).isFile());
+  assert.equal(await readFile(proof, 'utf8'), 'x');
   await evidence('entered');
 }
 
@@ -109,12 +99,14 @@ const proxy = createServer(async (req, res) => {
     const id = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
     if (id) assert.equal(id, executionCallId);
     operations.push(operation);
-    if (operation === 'start')
+    if (operation === 'start') {
       assert.notEqual(
         fault,
         'prepared',
         'Cancelled reservation must not start',
       );
+      await writeFile(`${proof}.read-gate`, '');
+    }
     if (operation === 'release') {
       assert.equal(
         blocked(),
@@ -273,10 +265,6 @@ try {
     injected = false;
     statusHeld = false;
     operations = [];
-    if (fault !== 'prepared') {
-      await unlink(proof);
-      execFileSync('mkfifo', [proof]);
-    }
     await start();
     const connection = () => ({
       managedSessionStore: {
@@ -321,10 +309,9 @@ try {
     if (fault !== 'prepared') {
       await evidence('pending');
       await transcript(false);
-      assert((await lstat(proof)).isFIFO());
-      await writer!.write('x');
-      await writer!.close();
-      writer = undefined;
+      assert((await lstat(proof)).isFile());
+      assert.equal(await readFile(proof, 'utf8'), 'x');
+      await unlink(`${proof}.read-gate`);
       resumeStatus();
       await waitUntil(
         async () => (await evidence('state')).state === 'SETTLED',
@@ -410,7 +397,6 @@ try {
 } finally {
   resumeStatus();
   await cli.close();
-  await writer?.close();
   await model.close();
   proxy.closeAllConnections();
   await new Promise<void>((resolve) => proxy.close(() => resolve()));

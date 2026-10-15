@@ -5,12 +5,15 @@
  */
 
 import type { Content, Part } from '@google/genai';
+import { isTurnResultRecordPayload } from './chatRecordingService.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
+  TurnResultRecordPayload,
 } from './chatRecordingService.js';
+import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 
 const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
 
@@ -44,6 +47,94 @@ export function findApiHistoryPromptIndex(
     match = index;
   }
   return match;
+}
+
+export function getLastApiHistoryPromptId(
+  history: readonly Content[],
+  trailingSystemNotifications?: number,
+): string | undefined {
+  const prompt = history
+    .slice(0, history.length - (trailingSystemNotifications ?? 0))
+    .findLast((content) => getApiHistoryPromptId(content) !== undefined);
+  return prompt && getApiHistoryPromptId(prompt);
+}
+
+export function getTurnResultCancellation(
+  result: Pick<
+    TurnResultRecordPayload,
+    'promptId' | 'state' | 'cancelledAt' | 'cancelReason'
+  >,
+  owned = true,
+): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+  return result.state === 'cancelled' &&
+    typeof result.cancelledAt === 'number' &&
+    Number.isFinite(result.cancelledAt)
+    ? {
+        reason: owned && result.cancelReason === 'user' ? 'user' : 'unknown',
+        promptId: result.promptId,
+      }
+    : undefined;
+}
+
+export function getLastApiPromptCancellation(
+  history: readonly Content[],
+  records: readonly ChatRecord[],
+  trailingSystemNotifications?: number,
+): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+  const promptId = getLastApiHistoryPromptId(
+    history,
+    trailingSystemNotifications,
+  );
+  const isOwner = (record: ChatRecord) =>
+    (record.type === 'user' && record.subtype === undefined) ||
+    (record.type === 'system' && record.subtype === 'turn_attempt');
+  const isResult = (record: ChatRecord) =>
+    record.type === 'system' && record.subtype === 'turn_result';
+  const cancellation = (record: ChatRecord | undefined, owned: boolean) => {
+    if (!record || !isResult(record)) return undefined;
+    const result = record.systemPayload as TurnResultRecordPayload;
+    return getTurnResultCancellation(
+      {
+        ...result,
+        promptId:
+          typeof result?.promptId === 'string' && result.promptId.length > 0
+            ? result.promptId
+            : record.uuid,
+      },
+      owned && isTurnResultRecordPayload(result),
+    );
+  };
+  const latest = records.findLast(
+    (record) => isOwner(record) || isResult(record),
+  );
+  const owner =
+    promptId &&
+    records.findLast(
+      (record) => isOwner(record) && record.promptId === promptId,
+    );
+  if (!owner) return cancellation(latest, false);
+  const results = records
+    .slice(records.indexOf(owner) + 1)
+    .filter(
+      (record) =>
+        isResult(record) &&
+        (record.promptId === promptId ||
+          (record.promptId === undefined &&
+            owner.daemonPromptId !== undefined &&
+            (record.systemPayload as TurnResultRecordPayload)?.promptId ===
+              owner.daemonPromptId)),
+    );
+  const result = results.findLast((record) => cancellation(record, false));
+  if (!result)
+    return results.length > 0 ? undefined : cancellation(latest, false);
+  const owned =
+    results.length === 1 &&
+    (result.promptId === promptId ||
+      records.filter(
+        (record) =>
+          isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
+      ).length === 1);
+  return cancellation(result, owned);
 }
 
 export interface BuildApiHistoryOptions {
@@ -102,6 +193,11 @@ function appendApiHistoryRecord(
   if (record.type === 'user' && !record.subtype) {
     markApiHistoryPrompt(message, record.promptId);
   }
+  // Session multi-agent records (`agent_mention` / `agent_message`) need no
+  // branch: their `message` is the enveloped model text, pushed below as its
+  // own user entry. This is the resume half of the contract; the live half is
+  // `Session.pendingExternalAgentContext`, which only exists in memory, so
+  // the two never double up.
   if (record.subtype === 'mid_turn_user_message') {
     const previous = history.at(-1);
     if (
@@ -135,7 +231,8 @@ function hasUniqueToolResult(history: Content[], toolCallId: unknown): boolean {
 
 /**
  * Whether `record` is one the recorder stamped as a system-injected background
- * notification rather than user input.
+ * notification rather than user input — AND that is a cold copy persisted
+ * before any turn ran, rather than a turn's own user entry.
  *
  * `createNotificationRecord` (chatRecordingService.ts) is the only producer of
  * `subtype: 'notification'` and it always pairs it with `provenance: 'system'`.
@@ -146,16 +243,35 @@ function hasUniqueToolResult(history: Content[], toolCallId: unknown): boolean {
  * out. `'cron'` is deliberately excluded: `recordCronPrompt` reuses the same
  * `provenance` but carries a user-authored prompt, and the shape predicate
  * this signal refines never trimmed those.
+ *
+ * `deliveredTurn` is excluded for the opposite reason: `client.ts` stamps it
+ * on the user entry of a notification turn its send path admitted, so a
+ * stamped-but-unanswered entry (the turn failed mid-stream before any
+ * `functionCall`, leaving the bare-envelope entry as the tail) must stay
+ * classifiable as the `interrupted_prompt` it is, not be trimmed like a cold
+ * record the daemon persisted before the turn ran. The stamp is the only
+ * reliable separator between the two — the shapes are identical and
+ * `backgroundTurn` vanishes on the `channelTask` admission branch. Pre-stamp
+ * transcripts simply keep the old behaviour: their delivered records are
+ * unmarked, so they read as cold. The stamp marks admission rather than model
+ * acceptance, so a turn one of that path's pre-send refusal gates returned on
+ * is stamped too and is excluded here all the same — an accepted false
+ * positive, quantified on `ChatRecord.deliveredTurn`.
  */
 function isSystemNotificationRecord(record: ChatRecord): boolean {
-  return record.provenance === 'system' && record.subtype === 'notification';
+  return (
+    record.provenance === 'system' &&
+    record.subtype === 'notification' &&
+    record.deliveredTurn !== true
+  );
 }
 
 export class SessionApiHistoryAccumulator {
   private history: Content[] = [];
   /**
    * Per-entry companion to {@link history}: `true` when the entry was appended
-   * from a record the recorder stamped as a system-injected notification.
+   * from a record the recorder stamped as a cold system-injected notification
+   * (see {@link isSystemNotificationRecord}).
    *
    * Kept as a parallel array because the authoritative stamp lives on the
    * `ChatRecord` and cannot ride along on `Content` (that type comes from
@@ -168,6 +284,10 @@ export class SessionApiHistoryAccumulator {
   private lastMaterialRecord?: ChatRecord;
 
   add(record: ChatRecord): void {
+    // Internal calls have no model-emitted function-call partner.
+    if (isInternalCodeModeToolResult(record)) {
+      return;
+    }
     if (record.type === 'system') {
       if (record.subtype === 'slash_command') {
         const payload = record.systemPayload as
@@ -284,16 +404,20 @@ export class SessionApiHistoryAccumulator {
 
   /**
    * The same projection as {@link finish}, plus how many TRAILING entries of
-   * the returned history came from records the recorder stamped as
-   * system-injected background notifications.
+   * the returned history came from records the recorder stamped as cold
+   * system-injected background notifications, persisted before any turn ran.
    *
    * This is the authoritative provenance signal that `Content` cannot carry
    * (its type comes from `@google/genai`). Session recovery uses it to tell a
    * real user prompt that happens to look like a `<task-notification>`
    * envelope from a cold notification record — the two are identical by shape,
-   * and only the record's own stamp separates them. A trailing COUNT rather
-   * than a full index set is all a consumer needs, because the only question
-   * ever asked is how far back from the end the notification run reaches.
+   * and only the record's own stamp separates them. A notification entry the
+   * send path stamped as a turn's own user entry (`deliveredTurn` on the
+   * source record) is not counted: left unanswered it is treated as an
+   * interrupted prompt, not a cold record, so it must stay classifiable. A
+   * trailing COUNT rather than a full index set is all a consumer needs,
+   * because the only question ever asked is how far back from the end the
+   * cold-notification run reaches.
    *
    * The count is derived here, alongside the entries, so it survives
    * `stripThoughtsFromHistory` dropping entries: the flags are filtered in

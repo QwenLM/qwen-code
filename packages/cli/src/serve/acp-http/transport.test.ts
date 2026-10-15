@@ -854,6 +854,16 @@ const fakeWorkspace = {
       requiresOperatorAction: true,
     };
   },
+  async grantWorkspaceTrust() {
+    return {
+      v: 1,
+      workspaceCwd: TEST_WORKSPACE,
+      folderTrustEnabled: true,
+      effective: { state: 'trusted', source: 'file' },
+      explicitTrustLevel: 'TRUST_FOLDER',
+      requiresDaemonRestartForChanges: false,
+    };
+  },
   async getWorkspacePermissionsStatus() {
     return {
       v: 1,
@@ -1015,11 +1025,14 @@ async function* readSseRaw(
   }
 }
 
+// The frame budget starts at 15 s: a contended CI runner (many vitest
+// workers per CPU) stalls the event loop for seconds, and a 2 s budget
+// aborts healthy streams. Call sites that assert silence pass their own.
 /** Read the next N RAW data frames (with `id:` lines) from an SSE response. */
 async function takeRawFrames(
   res: Response,
   n: number,
-  timeoutMs = 2000,
+  timeoutMs = 15_000,
 ): Promise<string[]> {
   const out: string[] = [];
   const ac = new AbortController();
@@ -1040,7 +1053,7 @@ async function takeRawFrames(
 async function takeFrames(
   res: Response,
   n: number,
-  timeoutMs = 2000,
+  timeoutMs = 15_000,
 ): Promise<unknown[]> {
   const out: unknown[] = [];
   const ac = new AbortController();
@@ -1061,7 +1074,7 @@ function frameReader(res: Response) {
   const ac = new AbortController();
   const iterator = readSse(res, ac.signal)[Symbol.asyncIterator]();
   return {
-    async next(timeoutMs = 2000): Promise<unknown> {
+    async next(timeoutMs = 15_000): Promise<unknown> {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -1085,7 +1098,7 @@ function frameReader(res: Response) {
 
 async function waitUntil(
   predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 2000,
+  timeoutMs = 15_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -7846,6 +7859,96 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     requestSpy.mockRestore();
   });
 
+  it('dispatches _qwen/workspace/trust/grant', async () => {
+    // The pre-write status must differ from the post-write grant result on
+    // the asserted fields, so the reply below can only be satisfied by the
+    // grant result — not by the dispatcher echoing the pre-write status.
+    const trustSpy = vi
+      .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: true,
+        effective: { state: 'untrusted', source: 'file' },
+        explicitTrustLevel: null,
+        requiresDaemonRestartForChanges: true,
+      });
+    // A real grant notifies the trust monitor, whose reconcile closes this
+    // generation before the reply is built, so the spy closes it too.
+    const generationGuard = createWorkspaceGenerationGuard();
+    const grant = fakeWorkspace.grantWorkspaceTrust.bind(fakeWorkspace);
+    const grantSpy = vi
+      .spyOn(fakeWorkspace, 'grantWorkspaceTrust')
+      .mockImplementation(async (ctx) => {
+        generationGuard.close();
+        return grant(ctx);
+      });
+    await restartServer({ generationGuard });
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 216,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+    const frames = (await got) as Array<{ id: number; result?: unknown }>;
+    expect(frames[0]).toMatchObject({
+      id: 216,
+      result: {
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: true,
+        effective: { state: 'trusted', source: 'file' },
+      },
+    });
+    expect(grantSpy).toHaveBeenCalledTimes(1);
+    trustSpy.mockRestore();
+    grantSpy.mockRestore();
+  });
+
+  it('rejects _qwen/workspace/trust/grant when folder trust is disabled', async () => {
+    const trustSpy = vi
+      .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: false,
+        effective: { state: 'trusted', source: 'disabled' },
+        explicitTrustLevel: null,
+        requiresDaemonRestartForChanges: true,
+      });
+    const grantSpy = vi.spyOn(fakeWorkspace, 'grantWorkspaceTrust');
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 217,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; message: string };
+    }>;
+    expect(frames[0]).toMatchObject({
+      id: 217,
+      error: {
+        code: -32600,
+        message: 'Folder trust is disabled for this workspace',
+      },
+    });
+    expect(grantSpy).not.toHaveBeenCalled();
+    trustSpy.mockRestore();
+    grantSpy.mockRestore();
+  });
+
   it('dispatches _qwen/workspace/permissions', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
@@ -8462,7 +8565,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId);
     const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 2); // session/new reply + load reject
+    const reader = frameReader(connStream);
     await new Promise((r) => setTimeout(r, 50));
     // close is now in flight (awaiting closeGate) → sess-1 is "closing".
     void post(connId, {
@@ -8478,11 +8581,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/load',
       params: { sessionId: 'sess-1' },
     });
-    const frames = (await got) as Array<{
-      id: number;
-      error?: { code: number; message: string };
-    }>;
-    const loadReply = frames.find((f) => f.id === 301);
+    // The load reject is the only frame this stream is owed — the
+    // session/new reply rode the delivery stream newSession opened, and a
+    // replayed duplicate of it may or may not precede the reject. Read
+    // until the reject lands instead of counting frames.
+    let loadReply:
+      | { id: number; error?: { code: number; message: string } }
+      | undefined;
+    for (;;) {
+      const frame = (await reader.next()) as {
+        id: number;
+        error?: { code: number; message: string };
+      };
+      if (frame.id === 301) {
+        loadReply = frame;
+        break;
+      }
+    }
     // Transient server-side race → INTERNAL_ERROR (-32603), not INVALID_PARAMS.
     expect(loadReply?.error?.code).toBe(-32603); // "being closed; retry"
     expect(loadReply?.error?.message).toContain('being closed');
@@ -9324,7 +9439,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/tasks',
         params: { sessionId: 'sess-1', includeWorkflows: true },
       });
-      const frames = await takeFrames(await streamRes, 7);
+      // Exactly the five replies this stream carries: session/new plus the
+      // four extension calls above — the session_update push rides the
+      // session stream, not this one.
+      const frames = await takeFrames(await streamRes, 5);
       const byId = new Map(
         frames
           .filter(
@@ -13068,6 +13186,36 @@ describe('ACP WebSocket transport security', () => {
     expect(res).toMatchObject({
       id: 2,
       result: { accepted: true, desiredState: 'untrusted' },
+    });
+    expect(tiers).toEqual(['mutation']);
+    ws.close();
+  });
+
+  it('classifies _qwen/workspace/trust/grant as a WS mutation method', async () => {
+    const tiers: string[] = [];
+    await startServer({
+      checkRate: (_key, tier) => {
+        tiers.push(tier);
+        return true;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    const res = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+
+    expect(res).toMatchObject({
+      id: 2,
+      result: { effective: { state: 'trusted' } },
     });
     expect(tiers).toEqual(['mutation']);
     ws.close();

@@ -1,7 +1,8 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
+import org.springframework.stereotype.Component;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -9,16 +10,16 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
-import org.springframework.stereotype.Component;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Component
-public class SessionEventHub implements CommittedEventPublisher {
+public class SessionEventHub {
     // Events kept per Session; a subscriber further behind reads the store.
     static final int CAPACITY = 512;
     private final Map<SessionKey, SessionBuffer> buffers =
             new ConcurrentHashMap<>();
 
-    @Override
     public void publish(List<EventRecord> events) {
         if (events.isEmpty()) {
             return;
@@ -75,37 +76,67 @@ public class SessionEventHub implements CommittedEventPublisher {
     }
 
     private static final class SessionBuffer {
+        // Object.wait pins a virtual-thread carrier on JDK 21 (compensated
+        // only up to the scheduler maxPoolSize); a Condition parks instead.
+        private final ReentrantLock lock = new ReentrantLock();
+        private final Condition changed = lock.newCondition();
         private final NavigableMap<Long, EventRecord> events =
                 new TreeMap<>();
         private int references;
         private long droppedThrough;
 
-        synchronized void retain() {
-            references++;
+        void retain() {
+            lock.lock();
+            try {
+                references++;
+            } finally {
+                lock.unlock();
+            }
         }
 
-        synchronized boolean release() {
-            references--;
-            return references == 0;
+        boolean release() {
+            lock.lock();
+            try {
+                references--;
+                return references == 0;
+            } finally {
+                lock.unlock();
+            }
         }
 
-        synchronized void publish(List<EventRecord> committed) {
+        void publish(List<EventRecord> committed) {
+            lock.lock();
+            try {
+                publishLocked(committed);
+                changed.signalAll();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private void publishLocked(List<EventRecord> committed) {
             for (EventRecord event : committed) {
                 events.put(event.sequence(), event);
                 if (events.size() > CAPACITY) {
                     droppedThrough = events.pollFirstEntry().getKey();
                 }
             }
-            notifyAll();
         }
 
-        synchronized Delivery await(long afterSequence, Duration timeout)
+        Delivery await(long afterSequence, Duration timeout)
                 throws InterruptedException {
-            if (!hasAfter(afterSequence)) {
-                long millis = timeout.toMillis();
-                int nanos = (int) (timeout.minusMillis(millis).toNanos());
-                wait(millis, nanos);
+            lock.lock();
+            try {
+                if (!hasAfter(afterSequence)) {
+                    changed.awaitNanos(Math.max(1, timeout.toNanos()));
+                }
+                return deliver(afterSequence);
+            } finally {
+                lock.unlock();
             }
+        }
+
+        private Delivery deliver(long afterSequence) {
             boolean overflowed = afterSequence < droppedThrough;
             List<EventRecord> available = new ArrayList<>();
             if (!overflowed) {

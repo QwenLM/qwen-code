@@ -27,6 +27,10 @@ interface MockSpan extends Span {
   attributes: Record<string, unknown>;
 }
 
+function self<T>(this: T): T {
+  return this;
+}
+
 function span(recording = true): MockSpan {
   const attributes: Record<string, unknown> = {};
   return {
@@ -47,39 +51,54 @@ function span(recording = true): MockSpan {
         traceFlags: 0,
       };
     },
-    setStatus() {
-      return this;
-    },
+    setStatus: self,
     end() {},
-    updateName() {
-      return this;
-    },
-    recordException() {
-      return this;
-    },
-    addEvent() {
-      return this;
-    },
-    addLink() {
-      return this;
-    },
-    addLinks() {
-      return this;
-    },
+    updateName: self,
+    recordException: self,
+    addEvent: self,
+    addLink: self,
+    addLinks: self,
   };
 }
 
-function exchange(target: Span, captureContent = true) {
-  return createGenAiExchange(ROOT_CONTEXT, target, {
+function exchange(
+  target: Span,
+  captureContent = true,
+  parent: Context = ROOT_CONTEXT,
+) {
+  return createGenAiExchange(parent, target, {
     captureContent,
     sensitiveAttributeMaxLength: 10_000,
   });
 }
 
+// A recording span plus an exchange observing it.
+function observe(captureContent = true) {
+  const target = span();
+  return { target, observed: exchange(target, captureContent) };
+}
+
+// A request whose only message is one user turn.
+function userTurn(content: string) {
+  return { messages: [{ role: 'user', content }] };
+}
+
+const inputOf = (s: MockSpan) => s.attributes['gen_ai.input.messages'];
+const outputOf = (s: MockSpan) => s.attributes['gen_ai.output.messages'];
+
+// An OpenAI stream chunk with one choice-0 delta; `finish_reason` only if given.
+function chunk(content: string, finish_reason?: string) {
+  const choice = { index: 0, delta: { content } };
+  return {
+    choices: [
+      finish_reason === undefined ? choice : { ...choice, finish_reason },
+    ],
+  };
+}
+
 describe('GenAI exchange observer', () => {
   it('records provider-final request content and response content', () => {
-    const target = span();
-    const observed = exchange(target);
+    const { target, observed } = observe();
     const attempt = reportOpenAiRequest(
       {
         temperature: 0.2,
@@ -100,18 +119,14 @@ describe('GenAI exchange observer', () => {
 
     expect(observed.controller.finalize(true)).toEqual(['stop']);
     expect(target.attributes['gen_ai.request.temperature']).toBe(0.2);
-    expect(
-      JSON.parse(target.attributes['gen_ai.input.messages'] as string),
-    ).toEqual([
+    expect(JSON.parse(inputOf(target) as string)).toEqual([
       {
         role: 'user',
         parts: [{ type: 'text', content: 'hello' }],
       },
     ]);
     expect(target.attributes['gen_ai.tool.definitions']).toBe('[]');
-    expect(
-      JSON.parse(target.attributes['gen_ai.output.messages'] as string),
-    ).toEqual([
+    expect(JSON.parse(outputOf(target) as string)).toEqual([
       {
         role: 'assistant',
         parts: [{ type: 'text', content: 'answer' }],
@@ -121,47 +136,29 @@ describe('GenAI exchange observer', () => {
   });
 
   it('keeps the first request snapshot and latest response attempt', () => {
-    const target = span();
-    const observed = exchange(target);
-    const first = reportOpenAiRequest(
-      { messages: [{ role: 'user', content: 'first' }] },
-      observed.context,
-    );
-    reportOpenAiChunk(first, {
-      choices: [{ index: 0, delta: { content: 'old' } }],
-    });
-    const second = reportOpenAiRequest(
-      { messages: [{ role: 'user', content: 'second' }] },
-      observed.context,
-    );
-    reportOpenAiChunk(first, {
-      choices: [
-        { index: 0, delta: { content: 'late' }, finish_reason: 'stop' },
-      ],
-    });
-    reportOpenAiChunk(second, {
-      choices: [
-        { index: 0, delta: { content: 'new' }, finish_reason: 'length' },
-      ],
-    });
+    const { target, observed } = observe();
+    const first = reportOpenAiRequest(userTurn('first'), observed.context);
+    reportOpenAiChunk(first, chunk('old'));
+    const second = reportOpenAiRequest(userTurn('second'), observed.context);
+    reportOpenAiChunk(first, chunk('late', 'stop'));
+    reportOpenAiChunk(second, chunk('new', 'length'));
     observed.controller.finalize(true);
 
-    expect(target.attributes['gen_ai.input.messages']).toContain('first');
-    expect(target.attributes['gen_ai.input.messages']).not.toContain('second');
-    expect(target.attributes['gen_ai.output.messages']).toContain('new');
-    expect(target.attributes['gen_ai.output.messages']).not.toContain('old');
-    expect(target.attributes['gen_ai.output.messages']).not.toContain('late');
+    expect(inputOf(target)).toContain('first');
+    expect(inputOf(target)).not.toContain('second');
+    expect(outputOf(target)).toContain('new');
+    expect(outputOf(target)).not.toContain('old');
+    expect(outputOf(target)).not.toContain('late');
   });
 
   it('starts a fallback attempt from its handle after context exit', () => {
-    const target = span();
-    const observed = exchange(target);
+    const { target, observed } = observe();
     const streamingAttempt = reportAnthropicRequest(
-      { messages: [{ role: 'user', content: 'initial' }], stream: true },
+      { ...userTurn('initial'), stream: true },
       observed.context,
     );
     const fallbackAttempt = reportAnthropicFollowingRequest(
-      { messages: [{ role: 'user', content: 'fallback' }] },
+      userTurn('fallback'),
       streamingAttempt,
     );
     reportAnthropicResponse(fallbackAttempt, {
@@ -170,28 +167,18 @@ describe('GenAI exchange observer', () => {
     });
 
     expect(observed.controller.finalize(true)).toEqual(['end_turn']);
-    expect(target.attributes['gen_ai.input.messages']).toContain('initial');
-    expect(target.attributes['gen_ai.input.messages']).not.toContain(
-      'fallback',
-    );
-    expect(target.attributes['gen_ai.output.messages']).toContain(
-      'fallback answer',
-    );
+    expect(inputOf(target)).toContain('initial');
+    expect(inputOf(target)).not.toContain('fallback');
+    expect(outputOf(target)).toContain('fallback answer');
   });
 
   it('does not recover a missing fallback handle from the active context', () => {
     const target = span();
-    const outer = createGenAiExchange(ROOT_CONTEXT, target, {
-      captureContent: true,
-      sensitiveAttributeMaxLength: 10_000,
-    });
+    const outer = exchange(target);
 
     context.with(outer.context, () => {
       expect(
-        reportAnthropicFollowingRequest(
-          { messages: [{ role: 'user', content: 'fallback' }] },
-          undefined,
-        ),
+        reportAnthropicFollowingRequest(userTurn('fallback'), undefined),
       ).toBeUndefined();
     });
 
@@ -199,8 +186,7 @@ describe('GenAI exchange observer', () => {
   });
 
   it('consumes an empty first snapshot', () => {
-    const target = span();
-    const observed = exchange(target);
+    const { target, observed } = observe();
     reportOpenAiRequest({}, observed.context);
     reportOpenAiRequest(
       {
@@ -215,10 +201,7 @@ describe('GenAI exchange observer', () => {
   it('shadows an outer observer for a non-recording nested span', () => {
     const outerSpan = span();
     const outer = exchange(outerSpan);
-    const inner = createGenAiExchange(outer.context, span(false), {
-      captureContent: true,
-      sensitiveAttributeMaxLength: 10_000,
-    });
+    const inner = exchange(span(false), true, outer.context);
 
     const innerAttempt = reportOpenAiRequest(
       { temperature: 0.9 },
@@ -243,10 +226,7 @@ describe('GenAI exchange observer', () => {
         throw new Error('context write failed');
       },
     };
-    const inner = createGenAiExchange(brokenParent, span(), {
-      captureContent: true,
-      sensitiveAttributeMaxLength: 10_000,
-    });
+    const inner = exchange(span(), true, brokenParent);
 
     expect(
       reportOpenAiRequest({ temperature: 0.9 }, inner.context),
@@ -260,73 +240,41 @@ describe('GenAI exchange observer', () => {
     const left = exchange(leftSpan);
     const right = exchange(rightSpan);
     const leftAttempt = reportOpenAiRequest(
-      { messages: [{ role: 'user', content: 'left-input' }] },
+      userTurn('left-input'),
       left.context,
     );
     const rightAttempt = reportOpenAiRequest(
-      { messages: [{ role: 'user', content: 'right-input' }] },
+      userTurn('right-input'),
       right.context,
     );
-    reportOpenAiChunk(rightAttempt, {
-      choices: [
-        { index: 0, delta: { content: 'right-output' }, finish_reason: 'stop' },
-      ],
-    });
-    reportOpenAiChunk(leftAttempt, {
-      choices: [
-        { index: 0, delta: { content: 'left-output' }, finish_reason: 'stop' },
-      ],
-    });
+    reportOpenAiChunk(rightAttempt, chunk('right-output', 'stop'));
+    reportOpenAiChunk(leftAttempt, chunk('left-output', 'stop'));
     left.controller.finalize(true);
     right.controller.finalize(true);
 
-    expect(leftSpan.attributes['gen_ai.input.messages']).toContain(
-      'left-input',
-    );
-    expect(leftSpan.attributes['gen_ai.output.messages']).toContain(
-      'left-output',
-    );
-    expect(leftSpan.attributes['gen_ai.output.messages']).not.toContain(
-      'right-output',
-    );
-    expect(rightSpan.attributes['gen_ai.input.messages']).toContain(
-      'right-input',
-    );
-    expect(rightSpan.attributes['gen_ai.output.messages']).toContain(
-      'right-output',
-    );
+    expect(inputOf(leftSpan)).toContain('left-input');
+    expect(outputOf(leftSpan)).toContain('left-output');
+    expect(outputOf(leftSpan)).not.toContain('right-output');
+    expect(inputOf(rightSpan)).toContain('right-input');
+    expect(outputOf(rightSpan)).toContain('right-output');
   });
 
   it('uses an explicit handle after the creating context has exited', () => {
-    const target = span();
-    const observed = exchange(target);
+    const { target, observed } = observe();
     const attempt = reportOpenAiRequest({ messages: [] }, observed.context);
-    reportOpenAiChunk(attempt, {
-      choices: [
-        { index: 0, delta: { content: 'outside' }, finish_reason: 'stop' },
-      ],
-    });
+    reportOpenAiChunk(attempt, chunk('outside', 'stop'));
     observed.controller.finalize(true);
-    expect(target.attributes['gen_ai.output.messages']).toContain('outside');
+    expect(outputOf(target)).toContain('outside');
   });
 
   it('invalidates handles and makes finalize idempotent', () => {
-    const target = span();
-    const observed = exchange(target);
+    const { target, observed } = observe();
     const attempt = reportOpenAiRequest({ messages: [] }, observed.context);
-    reportOpenAiChunk(attempt, {
-      choices: [
-        { index: 0, delta: { content: 'before' }, finish_reason: 'stop' },
-      ],
-    });
+    reportOpenAiChunk(attempt, chunk('before', 'stop'));
     expect(observed.controller.finalize(true)).toEqual(['stop']);
-    reportOpenAiChunk(attempt, {
-      choices: [
-        { index: 0, delta: { content: 'after' }, finish_reason: 'length' },
-      ],
-    });
+    reportOpenAiChunk(attempt, chunk('after', 'length'));
     expect(observed.controller.finalize(false)).toBeUndefined();
-    expect(target.attributes['gen_ai.output.messages']).not.toContain('after');
+    expect(outputOf(target)).not.toContain('after');
   });
 
   it('does not let span API failures affect reporting', () => {
@@ -351,8 +299,7 @@ describe('GenAI exchange observer', () => {
   });
 
   it('omits response content when conversion throws after a partial update', () => {
-    const target = span();
-    const observed = exchange(target);
+    const { target, observed } = observe();
     const attempt = reportOpenAiRequest({ messages: [] }, observed.context);
     const brokenMessage = new Proxy(
       {},
@@ -378,12 +325,11 @@ describe('GenAI exchange observer', () => {
     });
 
     expect(observed.controller.finalize(true)).toBeUndefined();
-    expect(target.attributes['gen_ai.output.messages']).toBeUndefined();
+    expect(outputOf(target)).toBeUndefined();
   });
 
   it('captures non-sensitive request fields while content capture is off', () => {
-    const target = span();
-    const observed = exchange(target, false);
+    const { target, observed } = observe(false);
     const attempt = reportOpenAiRequest(
       {
         temperature: 0.3,
@@ -391,12 +337,10 @@ describe('GenAI exchange observer', () => {
       },
       observed.context,
     );
-    reportOpenAiChunk(attempt, {
-      choices: [{ index: 0, delta: { content: 'partial' } }],
-    });
+    reportOpenAiChunk(attempt, chunk('partial'));
     expect(target.attributes['gen_ai.request.temperature']).toBe(0.3);
-    expect(target.attributes['gen_ai.input.messages']).toBeUndefined();
+    expect(inputOf(target)).toBeUndefined();
     expect(observed.controller.finalize(false)).toEqual(['error']);
-    expect(target.attributes['gen_ai.output.messages']).toBeUndefined();
+    expect(outputOf(target)).toBeUndefined();
   });
 });

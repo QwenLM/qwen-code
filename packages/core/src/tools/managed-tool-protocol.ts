@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { FunctionDeclaration } from '@google/genai';
+import type { FunctionDeclaration, Part } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import type {
@@ -208,6 +208,43 @@ export function managedToolDigest(
   return createHash('sha256')
     .update(canonicalJson(value, maxBytes))
     .digest('hex');
+}
+
+/**
+ * The model parts a worker's response parts map to: the worker marks text
+ * parts with a `type` that model parts do not have. Only a null or undefined
+ * part throws here — the live result path reports that as an ordinary tool
+ * error — so a restore that must tolerate one filters first.
+ */
+export function managedToolResponseParts(parts: readonly unknown[]): Part[] {
+  return parts.map((part): Part => {
+    const { type, ...rest } = part as { type?: unknown } & Record<
+      string,
+      unknown
+    >;
+    return (type === 'text' ? rest : part) as Part;
+  });
+}
+
+/**
+ * The message the host reports for a settled call that did not succeed: what
+ * the model reads for a call that failed, never ran, or was cancelled. The
+ * live result path and the restore's re-recorded record both synthesize it
+ * from the durable payload, so they say the same thing.
+ */
+export function managedToolFailureMessage(payload: {
+  readonly executionStatus: string;
+  readonly error?: { readonly message?: string };
+}): string {
+  if (payload.executionStatus === 'not_started') {
+    return `The tool call did not run: ${payload.error?.message ?? 'the Runtime worker did not run it.'}`;
+  }
+  return (
+    payload.error?.message ??
+    (payload.executionStatus === 'cancelled'
+      ? 'The tool call was cancelled.'
+      : 'The tool call failed.')
+  );
 }
 
 function record(value: unknown): Record<string, unknown> {

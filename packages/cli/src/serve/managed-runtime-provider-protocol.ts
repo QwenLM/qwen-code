@@ -22,6 +22,11 @@ import {
   parseManagedToolFileHistoryState,
   type ManagedToolFileHistoryBinding,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js';
+import {
+  historyPath,
+  parseHostedFileHistoryState,
+  type RawFileHistoryOperation,
+} from './hosted-file-history-protocol.js';
 import { isShellResultDisplay } from '@qwen-code/qwen-code-core/utils/shell-result.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { ToolConfirmationPayload } from '@qwen-code/qwen-code-core/tools/tools.js';
@@ -38,6 +43,26 @@ export const MANAGED_RUNTIME_PROVIDER_ROUTE = Object.freeze({
   cacheControl: 'no-store',
 } as const);
 
+/**
+ * The project instruction files a Hosted turn reads from the Session's
+ * working directory, in prompt order.
+ */
+export const MANAGED_WORKSPACE_CONTEXT_FILES = [
+  'QWEN.md',
+  'AGENTS.md',
+] as const;
+
+/**
+ * Each file's text is capped in characters so the whole result stays under
+ * the 1 MiB control limit even when every character JSON-escapes to six bytes.
+ */
+export const MANAGED_WORKSPACE_CONTEXT_FILE_CHARS = 64 * 1024;
+
+export interface ManagedWorkspaceContextFile {
+  name: (typeof MANAGED_WORKSPACE_CONTEXT_FILES)[number];
+  text: string;
+}
+
 export interface ManagedRuntimeProviderSession {
   readonly harnessSessionId: string;
   readonly runtimeSessionId: string;
@@ -45,7 +70,8 @@ export interface ManagedRuntimeProviderSession {
 }
 
 export type ManagedRuntimeProviderControl =
-  | { kind: 'manifest' | 'history' }
+  | RawFileHistoryOperation
+  | { kind: 'manifest' | 'history' | 'workspace-context' }
   | { kind: 'begin-turn'; identity: ManagedToolCallIdentity }
   | {
       kind: 'prepare';
@@ -194,10 +220,30 @@ export function parseManagedRuntimeProviderOperation(
   if (!boundedByCaller)
     managedToolDigest(value, managedRuntimeProviderLimit(kind));
   switch (kind) {
+    case 'raw-file-history': {
+      const action = op['action'];
+      if (action === 'bind') {
+        keys(op, ['kind', 'action', 'state']);
+        if (op['state'] !== null)
+          parseHostedFileHistoryState(op['state'], session.harnessSessionId);
+      } else if (action === 'prepare') {
+        keys(op, ['kind', 'action', 'promptId', 'paths']);
+        parseManagedToolFileHistoryPromptId(op['promptId']);
+        if (!Array.isArray(op['paths']) || !op['paths'].length)
+          throw new ManagedRuntimeProviderProtocolError();
+        op['paths'].forEach(historyPath);
+      } else if (action === 'rewind') {
+        keys(op, ['kind', 'action', 'promptId']);
+        parseManagedToolFileHistoryPromptId(op['promptId']);
+      } else if (action === 'snapshot') keys(op, ['kind', 'action']);
+      else throw new ManagedRuntimeProviderProtocolError();
+      break;
+    }
     case 'acquire':
     case 'release':
     case 'manifest':
     case 'history':
+    case 'workspace-context':
       keys(op, ['kind']);
       break;
     case 'begin-turn':
@@ -342,6 +388,61 @@ export function parseManagedRuntimeProviderResult(
   }
   const result = object(value);
   switch (operation.kind) {
+    case 'raw-file-history': {
+      if (operation.action !== 'rewind')
+        return parseHostedFileHistoryState(value, session.harnessSessionId);
+      keys(result, ['state', 'filesChanged', 'filesFailed', 'conflict']);
+      const state = parseHostedFileHistoryState(
+        result['state'],
+        session.harnessSessionId,
+      );
+      if (
+        !Array.isArray(result['filesChanged']) ||
+        !Array.isArray(result['filesFailed']) ||
+        typeof result['conflict'] !== 'boolean'
+      )
+        throw new ManagedRuntimeProviderProtocolError();
+      result['filesChanged'].forEach(historyPath);
+      result['filesFailed'].forEach(historyPath);
+      if (
+        new Set(result['filesChanged']).size !==
+          result['filesChanged'].length ||
+        result['filesChanged'].some(
+          (file) => !Object.hasOwn(state.files, file),
+        ) ||
+        !state.snapshots.some(
+          (snapshot) => snapshot.promptId === operation.promptId,
+        ) ||
+        (result['conflict'] && result['filesChanged'].length !== 0)
+      )
+        throw new ManagedRuntimeProviderProtocolError(
+          'Invalid Hosted file history rewind outcome.',
+        );
+      break;
+    }
+    case 'workspace-context': {
+      keys(result, ['files']);
+      if (!Array.isArray(result['files']))
+        throw new ManagedRuntimeProviderProtocolError();
+      let next = 0;
+      for (const entry of result['files']) {
+        const file = object(entry);
+        keys(file, ['name', 'text']);
+        const index = MANAGED_WORKSPACE_CONTEXT_FILES.indexOf(
+          file['name'] as ManagedWorkspaceContextFile['name'],
+        );
+        if (
+          index < next ||
+          typeof file['text'] !== 'string' ||
+          file['text'].length > MANAGED_WORKSPACE_CONTEXT_FILE_CHARS
+        )
+          throw new ManagedRuntimeProviderProtocolError(
+            'Invalid Workspace context result.',
+          );
+        next = index + 1;
+      }
+      return result['files'] as ManagedWorkspaceContextFile[];
+    }
     case 'bind-history':
     case 'checkpoint':
     case 'history': {

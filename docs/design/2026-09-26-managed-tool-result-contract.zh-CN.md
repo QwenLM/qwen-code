@@ -75,7 +75,7 @@ manifest 是 kind 为 `managed-tool-result-manifest`、schema 版本为 1 的 Se
 | `sessionId`         | id:Managed Session,而不是 Runtime Session                                                    |
 | `turnId`            | id                                                                                           |
 | `executionCallId`   | id:Session 回执将要指明的 `tool.intent` 身份                                                 |
-| `callId`            | id:模型的调用 ID                                                                             |
+| `callId`            | id:原始 Runtime `reference.callId`；模型配对标识独立保存                                     |
 | `invocationDigest`  | id:原始引用的 `argsDigest`,与 Runtime 收到的完全一致                                         |
 | `bindingGeneration` | generation:执行该调用的 Runtime 绑定代数                                                     |
 | `captureId`         | token:每次执行捕获一个;分段以它为键                                                          |

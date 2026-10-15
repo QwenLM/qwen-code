@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -17,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
@@ -87,6 +89,39 @@ class ProviderRuntimeTransportTest {
                 + server.getAddress().getPort()), "secret", "lease", 3);
     }
 
+    @Test
+    void rawFileHistoryDoesNotAcquireAProviderSession() {
+        result = Map.of("ownerSessionId", HARNESS, "snapshots", List.of(), "files", Map.of());
+        Map<String, Object> bind = new LinkedHashMap<>();
+        bind.put("kind", "raw-file-history");
+        bind.put("action", "bind");
+        bind.put("state", null);
+        assertEquals(result, transport.control(lease, session, bind).toCompletableFuture().join());
+        assertEquals(1, requests.size());
+        assertEquals(bind, requests.getFirst().get("operation"));
+        Map<String, Object> prepare = Map.of("kind", "raw-file-history", "action", "prepare",
+                "promptId", "original-prompt", "paths", List.of("a"));
+        assertEquals(result, transport.control(lease, session, prepare).toCompletableFuture().join());
+        assertEquals(prepare, requests.getLast().get("operation"));
+        assertThrows(RuntimeBrokerException.class, () -> transport.control(lease, session,
+                Map.of("kind", "raw-file-history", "action", "prepare", "promptId", "", "paths", List.of("a"))));
+        assertThrows(RuntimeBrokerException.class, () -> transport.control(lease, session,
+                Map.of("kind", "raw-file-history", "action", "bind", "state", Map.of("ownerSessionId", "other"))));
+        assertEquals(2, requests.size());
+    }
+
+    @Test
+    void workspaceContextDoesNotAcquireAProviderSession() {
+        result = Map.of("files", List.of(Map.of("name", "QWEN.md", "text", "rules")));
+        Map<String, Object> read = Map.of("kind", "workspace-context");
+        assertEquals(result, transport.control(lease, session, read).toCompletableFuture().join());
+        assertEquals(1, requests.size());
+        assertEquals(read, requests.getFirst().get("operation"));
+        assertThrows(RuntimeBrokerException.class, () -> transport.control(lease, session,
+                Map.of("kind", "workspace-context", "path", "/etc/passwd")));
+        assertEquals(1, requests.size());
+    }
+
     @AfterEach
     void stop() {
         server.stop(0);
@@ -108,6 +143,7 @@ class ProviderRuntimeTransportTest {
                 "managed_context_conflict", 409,
                 "managed_runtime_provider_operation_failed", 409,
                 "managed_runtime_provider_incompatible", 409,
+                "managed_runtime_owner_hold_pending", 409,
                 "managed_runtime_provider_too_large", 413,
                 "managed_runtime_provider_unsupported", 501).entrySet()) {
             status = failure.getValue();
@@ -220,7 +256,9 @@ class ProviderRuntimeTransportTest {
             assertEquals(8 * 1024 * 1024, ProviderRuntimeProtocol.limit(kind), kind);
         }
         for (String kind : Set.of("acquire", "release", "manifest", "begin-turn", "prepare",
-                "confirmation", "confirm", "preflight", "execute", "status", "cancel")) {
+                "confirmation", "confirm", "preflight", "execute", "status", "cancel",
+                // The TS per-file cap is sized against this tier.
+                "workspace-context")) {
             assertEquals(1024 * 1024, ProviderRuntimeProtocol.limit(kind), kind);
         }
     }
@@ -391,17 +429,34 @@ class ProviderRuntimeTransportTest {
     }
 
     @Test
-    void refusesProviderStatusCursorsThatAreNotExactIntegers() {
-        // fastjson2 reads these forms as Short 4, Byte 4 and Double 1.0.
-        for (String cursor : List.of("65540S", "260B", "1.0000000000000001D")) {
+    void refusesProviderStatusCursorsThatAreNotSafeExactIntegers() {
+        // The first three coerce to Short 4, Byte 4 and Double 1.0;
+        // the fourth exceeds JavaScript's safe integer ceiling.
+        for (String cursor : List.of("65540S", "260B", "1.0000000000000001D", "9007199254740992")) {
             rawResult = "{\"state\":\"executing\",\"cancelRequested\":false,\"lastSeq\":" + cursor
                     + ",\"firstAvailableSeq\":0,\"progressGap\":false,\"progress\":[]}";
             assertAttestationInvalid(() -> transport.status(lease, session, reference(), 0), cursor);
         }
+        rawResult = "{\"state\":\"executing\",\"cancelRequested\":false,\"lastSeq\":9007199254740991"
+                + ",\"firstAvailableSeq\":9007199254740992,\"progressGap\":false,\"progress\":[]}";
+        assertAttestationInvalid(() -> transport.status(lease, session, reference(), 0), "firstAvailableSeq");
+        rawResult = "{\"state\":\"executing\",\"cancelRequested\":false,\"lastSeq\":9007199254740991"
+                + ",\"firstAvailableSeq\":9007199254740991,\"progressGap\":false,\"progress\":[]}";
+        assertEquals("executing", assertDoesNotThrow(() -> transport.status(lease, session, reference(), 0)
+                .toCompletableFuture().join()).get("state"));
         rawResult = "{\"state\":\"executing\",\"cancelRequested\":false,\"lastSeq\":4"
                 + ",\"firstAvailableSeq\":0,\"progressGap\":false,\"progress\":[]}";
         assertEquals("executing", transport.status(lease, session, reference(), 0)
                 .toCompletableFuture().join().get("state"));
+    }
+
+    @Test
+    void acceptsUppercaseSessionUuidInProviderControlIdentity() {
+        String uppercase = SESSION.toUpperCase(Locale.ROOT);
+        Map<String, Object> reference = new LinkedHashMap<>(reference());
+        reference.put("sessionId", uppercase);
+        assertDoesNotThrow(() -> ProviderRuntimeProtocol.control(
+                Map.of("kind", "preflight", "reference", reference), HARNESS, uppercase));
     }
 
     @Test

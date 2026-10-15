@@ -28,17 +28,18 @@ Store 提交失败，但它们的 Spring 夹具仍位于测试 JVM 内。正常�
 | `worker-kill`     | 真实 worker 正在执行工具           | worker 收到 SIGKILL；未知结果保持阻塞       |
 | `worker-stop`     | 真实 worker 正在执行工具           | worker 收到 SIGSTOP；未知结果保持阻塞       |
 
-必须通过操作系统级工具屏障证明执行已经开始，再注入信号。不能用猜测时间、模拟
+必须通过 worker 内的文件读取屏障证明已进入原生 Edit，再注入信号。不能用猜测时间、模拟
 worker、伪造结果或产品调试端点代替证据。测试控制器负责信号和清理；HTTP 代理除
 所选 Harness 崩溃边界外，转发真实 Store/Broker 数据。Spring 使用正常应用装配，
 在独立 JVM 中运行。测试启动代码只创建已保存 Session 并公布监听地址，不增加
 产品路由或恢复行为。
 
-执行中的场景在已保存的子目录中放置名为 `proof.txt` 的 POSIX FIFO。只有真实 Edit
-打开读端后，非阻塞写端才能打开。保持写端打开且不发送数据可阻止工具完成。
-`harness-start` 在杀死 Harness 后发送 `x`，使 Edit 能将 FIFO 原子替换为 `xx`。
-Spring/worker 场景在断言期间始终不发送数据，因此 FIFO 保留且没有产生效果。
-`harness-prepare` 和 `harness-result` 使用普通文件。不替换任何工具实现。
+所有场景均使用内容为 `x` 的普通文件 `proof.txt`。执行中的场景在备份准备后、
+转发 start 前创建 `proof.txt.read-gate`。worker 导入
+`hosted-file-read-gate.mjs`，在原生 Edit 读取时写入 `proof.txt.read-entered`，
+等待 gate 消失后再调用原 `fs.promises.readFile`。`harness-start` 在杀死
+Harness 后删除 gate，让 Edit 写入 `xx`。Spring/worker 场景在断言期间保持
+gate，因此普通文件仍为 `x`，没有产生效果。不替换工具结果或实现。
 
 Spring 丢失后持久化执行保持 `EXECUTING` 且没有结果；重启后的本地 provisioner
 不能接管孤儿。worker 丢失或暂停后，在真实传输失败或超时后变为 `UNKNOWN`。
@@ -63,12 +64,12 @@ Spring 场景在重启前让 Store 停机八秒，超过 Harness 的五秒 write
 
 崩溃和重载期间必须始终保留原存储 owner。夹具不得回收或接管 owner。SIGSTOP
 清理必须恢复或杀死并回收准确的 worker；失败和成功路径都要清理所属子进程和
-监听器。
+监听器。父夹具负责 worker 退出清理；不能只为完成清理而放行未知 Edit 的读取 gate。
 
 ## 范围、文件与风险
 
 修改限于测试夹具、Java 集成测试 profile 和 CI 时间预算，以及这份双语设计。
-保留现有响应丢失和 Store 失败门禁。POSIX 信号和工具屏障要求 Linux 或 macOS；
+保留现有响应丢失和 Store 失败门禁。POSIX 信号和进程清理要求 Linux 或 macOS；
 Hosted 数据库门禁在 Linux CI 中运行。本增量不覆盖 Windows 进程崩溃测试。取消
 语义、SSE 重连、Shell/provider 效果、自动续跑、孤儿接管和 W0e 回收不在此门禁
 覆盖范围内。

@@ -756,6 +756,19 @@ class HttpRuntimeTransportTest {
         assertThrows(ExecutionException.class, () -> transport.statusV3(
                 lease, session, reference, 0).toCompletableFuture()
                 .get(2, TimeUnit.SECONDS));
+
+        reply.set(json(501, JsonCodec.encode(Map.of("code", "unsupported"))));
+        for (CompletionStage<Map<String, Object>> call : List.of(
+                transport.executeV3(lease, session, reference,
+                        Map.of("toolName", "run_shell_command", "input", Map.of("command", "printf hello")),
+                        capture),
+                transport.statusV3(lease, session, reference, 0))) {
+            CompletionException thrown = assertThrows(CompletionException.class,
+                    () -> call.toCompletableFuture().join());
+            RuntimeBrokerException failure = assertInstanceOf(RuntimeBrokerException.class, thrown.getCause());
+            assertEquals(501, failure.getStatusCode());
+            assertEquals("runtime_tool_v3_unsupported", failure.getCode());
+        }
     }
 
     @Test
@@ -887,6 +900,211 @@ class HttpRuntimeTransportTest {
         assertEquals("unknown", answer.get("state"));
         assertEquals(Set.of("state"), answer.keySet());
         assertNull(answer.get("result"));
+    }
+
+    @Test
+    void oversizedMcpRequestHasDefinitiveClassification() {
+        RuntimeSession session = toolSession();
+        Map<String, Object> operation = new LinkedHashMap<>(mcpOperation(session, "mcp-invoke"));
+        operation.put("request", Map.of("kind", "prompt_get", "name", "large",
+                "arguments", Map.of("value", "x".repeat(HttpRuntimeTransport.TOOL_REQUEST_LIMIT_BYTES + 1))));
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> transport.control(toolLease(server.getAddress().getPort()), session, operation));
+        assertNull(captured.get(), "oversized request must never reach the Runtime");
+        RuntimeBrokerException classified = assertInstanceOf(RuntimeBrokerException.class, failure);
+        assertEquals(413, classified.getStatusCode());
+        assertEquals("runtime_control_operation_too_large", classified.getCode());
+        assertFalse(classified.isRetryable());
+    }
+
+    @Test
+    void oversizedMcpRequestKeepsClassificationThroughBrokerService() {
+        RuntimeSession session = toolSession();
+        RuntimeScope scope = session.getScope();
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        var clock = java.time.Clock.systemUTC();
+        var bindings = new InMemoryRuntimeBindingRepository(clock, () -> "size-probe-binding");
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        RuntimeProvisioner provisioner = request -> CompletableFuture.completedFuture(lease);
+        try (var service = new RuntimeBrokerService(harness -> CompletableFuture.completedFuture(scope),
+                provisioner, transport, bindings, sessions, executions, "size-probe",
+                Duration.ofMinutes(1), Duration.ofMinutes(1), clock, () -> "size-probe-execution")) {
+            service.acquire(session.getHarnessSessionId(), session.getRuntimeSessionId(), "bootstrap").toCompletableFuture().join();
+            Map<String, Object> operation = new LinkedHashMap<>(mcpOperation(session, "mcp-invoke"));
+            operation.put("request", Map.of("kind", "prompt_get", "name", "large",
+                    "arguments", Map.of("value", "x".repeat(HttpRuntimeTransport.TOOL_REQUEST_LIMIT_BYTES + 1))));
+            CompletionException failure = assertThrows(CompletionException.class, () -> service.control(
+                    session.getHarnessSessionId(), session.getRuntimeSessionId(), operation).toCompletableFuture().join());
+            RuntimeBrokerException classified = assertInstanceOf(RuntimeBrokerException.class, failure.getCause());
+            assertNull(captured.get(), "oversized request must never reach the Runtime");
+            assertEquals(413, classified.getStatusCode());
+            assertEquals("runtime_control_operation_too_large", classified.getCode());
+            assertFalse(classified.isRetryable());
+        }
+    }
+
+    @Test
+    void forwardsMcpDataWithoutInventingAToolResult() throws Exception {
+        RuntimeSession session = toolSession();
+        Map<String, Object> operation = mcpOperation(session, "mcp-invoke");
+        Map<String, Object> data = Map.of("contents", List.of(Map.of("uri", "test:blob",
+                "blob", "AAE=", "mimeType", "application/octet-stream")));
+        Map<String, Object> view = Map.of("operationId", "mcp-operation", "state", "settled", "response", data);
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", view))));
+        assertEquals(view, transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        assertEquals(ManagedMcpProtocol.PATH, capturedPath.get());
+        assertEquals(JSON.valueToTree(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", operation)), JSON.readTree(captured.get()));
+        assertEquals("Bearer " + toolSuite.required("identity").required("token").textValue(), capturedAuthorization.get());
+        assertEquals("no-store", capturedCacheControl.get());
+    }
+
+    @Test
+    void mcpRecoveryKeepsTheOriginalOperationIdentityAndRejectsMalformedReceipts() throws Exception {
+        RuntimeSession session = toolSession();
+        Map<String, Object> operation = mcpOperation(session, "mcp-status");
+        Map<String, Object> view = Map.of("operationId", "original-operation", "state", "outcome_unknown");
+        Map<String, Object> envelope = Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", view);
+        reply.set(json(200, JsonCodec.encode(envelope)));
+        assertEquals(view, transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        for (Map<String, Object> invalid : List.<Map<String, Object>>of(
+                Map.of("operationId", "mcp-operation", "state", "settled"),
+                Map.of("operationId", "original-operation", "state", "unknown"),
+                Map.of("operationId", "original-operation", "state", "outcome_unknown", "response", Map.of()),
+                Map.of("operationId", "original-operation", "state", "settled", "toolResult", Map.of()),
+                Map.of("operationId", "original-operation", "state", "settled", "error", Map.of("code", "failed", "message", "secret")))) {
+            reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", invalid))));
+            assertThrows(ExecutionException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        }
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                "runtimeSessionId", "different-session", "operation", view))));
+        assertThrows(ExecutionException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        reply.set(json(200, new byte[HttpRuntimeTransport.TOOL_RESULT_LIMIT_BYTES + 1]));
+        assertThrows(ExecutionException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void forwardsHookReceiptsThroughTheBoundedPrivateRoute() throws Exception {
+        RuntimeSession session = toolSession();
+        Map<String, Object> operation = hookOperation(session, "hook-execute");
+        Map<String, Object> data = Map.of("contents", List.of(Map.of("uri", "test:blob",
+                "blob", "AAE=", "mimeType", "application/octet-stream")));
+        Map<String, Object> view = Map.of("operationId", "hook-operation", "state", "settled", "result", data);
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", view))));
+        assertEquals(view, transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        assertEquals(ManagedHookProtocol.PATH, capturedPath.get());
+        assertEquals(JSON.valueToTree(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", operation)), JSON.readTree(captured.get()));
+        assertEquals("Bearer " + toolSuite.required("identity").required("token").textValue(), capturedAuthorization.get());
+        assertEquals("no-store", capturedCacheControl.get());
+    }
+
+    @Test
+    void forwardsCompleteHookContextBeyondTheToolRequestLimit() throws Exception {
+        RuntimeSession session = toolSession();
+        Map<String, Object> operation = new LinkedHashMap<>(hookOperation(session, "hook-execute"));
+        operation.put("input", Map.of("messages", List.of(Map.of("text", "x".repeat(300 * 1024)))));
+        Map<String, Object> view = Map.of("operationId", "hook-operation", "state", "running");
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", view))));
+        assertEquals(view, transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        assertEquals(JSON.valueToTree(operation), JSON.readTree(captured.get()).get("operation"));
+        operation.put("input", Map.of("messages", List.of(Map.of("text", "x".repeat(8 * 1024 * 1024)))));
+        assertThrows(RuntimeBrokerException.class,
+                () -> transport.control(toolLease(server.getAddress().getPort()), session, operation));
+    }
+
+    @Test
+    void hookRecoveryKeepsTheOriginalOperationIdentityAndRejectsMalformedReceipts() throws Exception {
+        RuntimeSession session = toolSession();
+        Map<String, Object> operation = hookOperation(session, "hook-status");
+        Map<String, Object> view = Map.of("operationId", "original-operation", "state", "outcome_unknown");
+        Map<String, Object> envelope = Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", view);
+        reply.set(json(200, JsonCodec.encode(envelope)));
+        assertEquals(view, transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        for (Map<String, Object> invalid : List.<Map<String, Object>>of(
+                Map.of("operationId", "hook-operation", "state", "settled"),
+                Map.of("operationId", "original-operation", "state", "unknown"),
+                Map.of("operationId", "original-operation", "state", "outcome_unknown", "result", Map.of()),
+                Map.of("operationId", "original-operation", "state", "settled", "toolResult", Map.of()),
+                Map.of("operationId", "original-operation", "state", "settled", "error", Map.of("code", "failed", "message", "secret")))) {
+            reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", invalid))));
+            assertThrows(ExecutionException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        }
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                "runtimeSessionId", "different-session", "operation", view))));
+        assertThrows(ExecutionException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        reply.set(json(200, new byte[HttpRuntimeTransport.TOOL_RESULT_LIMIT_BYTES + 1]));
+        assertThrows(ExecutionException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+    }
+
+    private static Map<String, Object> hookOperation(RuntimeSession session, String kind) {
+        return Map.of("kind", kind, "operationId", "hook-operation",
+                "targetOperationId", "original-operation",
+                "sessionKey", Map.of("tenantId", session.getScope().getTenantId(),
+                        "workspaceId", session.getScope().getWorkspaceId(), "sessionId", session.getHarnessSessionId()));
+    }
+
+    @Test
+    void rejectsForeignHookSessionsBeforeSending() {
+        RuntimeSession session = toolSession();
+        for (String field : List.of("tenantId", "workspaceId", "sessionId")) {
+            Map<String, Object> operation = new LinkedHashMap<>(hookOperation(session, "hook-status"));
+            Map<String, Object> key = new LinkedHashMap<>(Map.of("tenantId", session.getScope().getTenantId(),
+                    "workspaceId", session.getScope().getWorkspaceId(), "sessionId", session.getHarnessSessionId()));
+            key.put(field, "foreign");
+            operation.put("sessionKey", key);
+            assertThrows(RuntimeBrokerException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation));
+        }
+        assertNull(captured.get());
+    }
+
+    @Test
+    void rejectsForeignMcpSessionsAndToolCallsBeforeSending() {
+        RuntimeSession session = toolSession();
+        for (String field : List.of("tenantId", "workspaceId", "sessionId")) {
+            Map<String, Object> operation = new LinkedHashMap<>(mcpOperation(session, "mcp-status"));
+            Map<String, Object> key = new LinkedHashMap<>(Map.of("tenantId", session.getScope().getTenantId(),
+                    "workspaceId", session.getScope().getWorkspaceId(), "sessionId", session.getHarnessSessionId()));
+            key.put(field, "foreign");
+            operation.put("sessionKey", key);
+            assertThrows(RuntimeBrokerException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation));
+        }
+        Map<String, Object> tool = new LinkedHashMap<>(mcpOperation(session, "mcp-invoke"));
+        tool.put("request", Map.of("kind", "tool_call", "name", "effect", "arguments", Map.of()));
+        assertThrows(RuntimeBrokerException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, tool));
+        assertNull(captured.get());
+    }
+
+    private static Map<String, Object> mcpOperation(RuntimeSession session, String kind) {
+        Map<String, Object> operation = new LinkedHashMap<>(Map.of("kind", kind,
+                "sessionKey", Map.of("tenantId", session.getScope().getTenantId(),
+                        "workspaceId", session.getScope().getWorkspaceId(), "sessionId", session.getHarnessSessionId()),
+                "operationId", "mcp-operation"));
+        if ("mcp-invoke".equals(kind)) {
+            operation.put("request", Map.of("kind", "resource_read", "uri", "test:blob"));
+        } else {
+            operation.put("targetOperationId", "original-operation");
+        }
+        return operation;
     }
 
     @Test
@@ -1376,6 +1594,67 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void answersTheDetachedCaptureFamilyOfAV3Settle() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        // The background start settles its delivery blocked: the handle
+        // reaches the model through the session history, not the store.
+        Map<String, Object> capturedResult = new LinkedHashMap<>();
+        capturedResult.put("captureStatus", "detached");
+        capturedResult.put("captureReason", null);
+        capturedResult.put("manifest", null);
+        capturedResult.put("previewTruncated", false);
+        capturedResult.put("deliveryStatus", "blocked");
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("executionStatus", "success");
+        envelope.put("responseParts", List.of());
+        envelope.put("capture", capturedResult);
+        reply.set(json(200, JsonCodec.encode(Map.of(
+                "protocolVersion", 3,
+                "toolResult", "managed-tool-result/1",
+                "state", "settled",
+                "result", envelope))));
+        Map<String, Object> body = transport.statusV3(lease, session,
+                reference, 0).toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertEquals("settled", body.get("state"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result =
+                (Map<String, Object>) body.get("result");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> capture =
+                (Map<String, Object>) result.get("capture");
+        assertEquals("detached", capture.get("captureStatus"));
+        assertNull(capture.get("manifest"));
+        assertEquals("blocked", capture.get("deliveryStatus"));
+    }
+
+    @Test
+    void refusesADetachedCaptureStillNamingAManifestOrAReason() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        for (String broken : List.of(
+                "{\"captureStatus\":\"detached\",\"captureReason\":null,"
+                        + "\"previewTruncated\":false,\"deliveryStatus\":\"blocked\","
+                        + "\"manifest\":{\"resourceId\":\"res-1\","
+                        + "\"kind\":\"managed-tool-result-manifest\",\"schemaVersion\":1,"
+                        + "\"byteLength\":4,\"digest\":\"" + "a".repeat(64) + "\"}}",
+                "{\"captureStatus\":\"detached\",\"captureReason\":\"storage_failed\","
+                        + "\"previewTruncated\":false,\"deliveryStatus\":\"blocked\","
+                        + "\"manifest\":null}")) {
+            reply.set(json(200, ("{\"protocolVersion\":3,\"toolResult\":"
+                    + "\"managed-tool-result/1\",\"state\":\"settled\",\"result\":"
+                    + "{\"executionStatus\":\"success\",\"responseParts\":[],"
+                    + "\"capture\":" + broken + "}}")
+                    .getBytes(StandardCharsets.UTF_8)));
+            assertThrows(ExecutionException.class, () -> transport.statusV3(
+                    lease, session, reference, 0).toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS), broken);
+        }
+    }
+
+    @Test
     void rejectsExplicitNullAndEmptyOptionalResponseFields() throws Exception {
         ObjectNode settled = (ObjectNode) findIn(toolSuite("execute"), "success")
                 .required("expected").required("body").deepCopy();
@@ -1439,18 +1718,23 @@ class HttpRuntimeTransportTest {
         RuntimeSession session = toolSession();
         Map<String, Object> reference = toolReference();
 
+        // Six 1 MiB loopback exchanges; on a contended CI host a healthy
+        // exchange can outlast a short wait, so budget past the transport's
+        // own 30 s request deadline and let a wedge surface as the client's
+        // classified failure instead of a bare test timeout.
         transport.execute(lease, session, reference)
-                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                .toCompletableFuture().get(60, TimeUnit.SECONDS);
         transport.status(lease, session, reference, 0)
-                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                .toCompletableFuture().get(60, TimeUnit.SECONDS);
         transport.cancel(lease, session, reference)
-                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                .toCompletableFuture().get(60, TimeUnit.SECONDS);
 
         reply.set(json(200, Arrays.copyOf(padded, limit + 1)));
         for (String operation : List.of("execute", "status", "cancel")) {
             assertEquals(limit, toolRoute(operation)
                     .required("responseBodyLimitBytes").intValue());
-            RuntimeBrokerException failure = awaitToolFailure(operation);
+            RuntimeBrokerException failure = awaitToolFailure(operation, 60,
+                    TimeUnit.SECONDS);
             assertEquals(413, failure.getStatusCode());
             assertEquals("managed_runtime_attestation_too_large",
                     failure.getCode());
@@ -1527,6 +1811,11 @@ class HttpRuntimeTransportTest {
     }
 
     private RuntimeBrokerException awaitToolFailure(String operation) {
+        return awaitToolFailure(operation, 5, TimeUnit.SECONDS);
+    }
+
+    private RuntimeBrokerException awaitToolFailure(String operation,
+            long timeout, TimeUnit unit) {
         RuntimeLease lease = toolLease(server.getAddress().getPort());
         RuntimeSession session = toolSession();
         Map<String, Object> reference = toolReference();
@@ -1534,14 +1823,14 @@ class HttpRuntimeTransportTest {
                 () -> {
                     switch (operation) {
                         case "execute" -> transport.execute(lease, session,
-                                reference).toCompletableFuture().get(5,
-                                        TimeUnit.SECONDS);
+                                reference).toCompletableFuture().get(timeout,
+                                        unit);
                         case "status" -> transport.status(lease, session,
-                                reference, 0).toCompletableFuture().get(5,
-                                        TimeUnit.SECONDS);
+                                reference, 0).toCompletableFuture()
+                                .get(timeout, unit);
                         case "cancel" -> transport.cancel(lease, session,
-                                reference).toCompletableFuture().get(5,
-                                        TimeUnit.SECONDS);
+                                reference).toCompletableFuture().get(timeout,
+                                        unit);
                         default -> throw new AssertionError(
                                 "unknown operation");
                     }
