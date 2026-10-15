@@ -154,14 +154,11 @@ class SessionRowLockOrderTest {
     // save a lock-only candidate in a file with no turn access at all,
     // ToolPublicationRetentionStore.open/4 since the 32-table baseline —
     // and the pin is asserted exactly, so a new unresolvable reference or
-    // a stale entry fails the sibling boundary test. ManagedEventEnvelopes
-    // and the staged-placement delegation entered through the merge:
-    // MessageDigest.digest at line ~352 names the local digest/1 on the
-    // untypeable receiver, and the lockStagedPlacement/2 delegator names
-    // only itself; both candidates are JSON/delegation only. Main's private
-    // CSI work (#13996) adds the same shapes: data-source probes, the
-    // publication-placement lock delegator and the runtime-access record's
-    // accessors, none of which reaches either side.
+    // a stale entry fails the sibling boundary test. The staged-placement
+    // lockStagedPlacement/2 delegator names only itself and is delegation
+    // only. Main's private CSI work (#13996) adds the same shapes:
+    // data-source probes, the publication-placement lock delegator and the
+    // runtime-access record's accessors, none of which reaches either side.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
             Map.ofEntries(
                     Map.entry("ChildResultRelayStore.java",
@@ -179,8 +176,6 @@ class SessionRowLockOrderTest {
                             Set.of("ManagedArtifactReader.open/1",
                                     "ManagedArtifactReader.readRange/3",
                                     "ManagedArtifactReader.readRange/5")),
-                    Map.entry("ManagedEventEnvelopes.java",
-                            Set.of("ManagedEventEnvelopes.digest/1")),
                     Map.entry("ManagedExtensionRecordStore.java",
                             Set.of("ManagedExtensionRecordStore.sha256/1",
                                     "ManagedExtensionRecordStore.storedRow/2")),
@@ -213,8 +208,7 @@ class SessionRowLockOrderTest {
                                     "AcknowledgementBundle.outcomeRef/0",
                                     "ToolPublicationAdmissionStore.usesDataSource/1")),
                     Map.entry("ToolPublicationContract.java",
-                            Set.of("ToolPublicationContract.digest/1",
-                                    "ToolPublicationContract.id/1")),
+                            Set.of("ToolPublicationContract.id/1")),
                     Map.entry("ToolPublicationDataStore.java",
                             Set.of("ToolPublicationDataStore.hash/1",
                                     "ToolPublicationDataStore.lockOriginalSettledResult/3",
@@ -246,10 +240,6 @@ class SessionRowLockOrderTest {
                     Map.entry("WorkspaceCsiWorkerAckStore.java",
                             Set.of("WorkspaceCsiWorkerAckStore.decode/1",
                                     "WorkspaceCsiWorkerAckStore.hash/1")),
-                    Map.entry("WorkspaceEvidenceResources.java",
-                            Set.of("WorkspaceEvidenceResources.digest/1")),
-                    Map.entry("WorkspaceExecutionStore.java",
-                            Set.of("WorkspaceExecutionStore.digest/1")),
                     Map.entry("WorkspaceMigrationStore.java",
                             Set.of("WorkspaceMigrationStore.inspect/0",
                                     "WorkspaceMigrationStore.path/1")),
