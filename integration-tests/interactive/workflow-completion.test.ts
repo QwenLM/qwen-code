@@ -29,6 +29,17 @@ import {
 // InteractiveSession.start, upstream of these waits.
 const MODEL_REPLY_SCREEN_TIMEOUT = 120_000;
 
+// Per-case ceiling with slack over a loaded self-hosted run (~460s): 90s
+// ready prompt + ~110s /about window (its 90s deadline is checked only after
+// a trailing 20s waitForScreen) + 2 x ~123s reply waits (3s pre-poll sleep,
+// then a 120s deadline) + ~20s of idles, paging, and sends. The slack keeps
+// a breach attributable to the wait that overran instead of surfacing as a
+// bare vitest timeout. retry: 0 because six cases at this ceiling would
+// multiply past the 20-minute no-AK PR gate that runs this file, and a
+// genuine break fails at its first waitForScreen either way — retrying would
+// only re-burn the same budget.
+const WORKFLOW_CASE_OPTIONS = { timeout: 480_000, retry: 0 };
+
 // OpenTUI's schedule_tool handler is a separate, unwired entry point.
 describe.skipIf(pickE2eRenderer() === 'opentui')(
   'saved workflow slash-command completion',
@@ -102,8 +113,7 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
           'SET_TIMEOUT_12176',
         ],
       },
-      // 90s ready prompt + 90s /about deadline + 2 x 120s reply waits.
-    ])('delivers $marker once', { timeout: 420_000 }, async (testCase) => {
+    ])('delivers $marker once', WORKFLOW_CASE_OPTIONS, async (testCase) => {
       const isSlash = testCase.source === 'slash';
       rig = new TestRig();
       restoreNoProxy = applyContainerSandboxNoProxy();
