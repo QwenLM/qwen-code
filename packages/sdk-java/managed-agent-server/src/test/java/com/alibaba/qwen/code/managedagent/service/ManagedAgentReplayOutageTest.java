@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -18,16 +12,21 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 class ManagedAgentReplayOutageTest {
-
     // The replay contract during a Harness outage: a recorded submit must
     // answer its 202 to every client retry without re-dispatching. A
     // replay-driven dispatch would defer the Turn once per client retry,
@@ -42,7 +41,7 @@ class ManagedAgentReplayOutageTest {
         ManagedSchema.initialize(source);
         ManagedAgentStore store = new ManagedAgentStore(
                 new ManagedSchemaJdbcTemplate(source), new ObjectMapper(),
-                Clock.systemUTC(), events -> { },
+                Clock.systemUTC(), events -> {},
                 mock(ManagedWorkspaceRegistry.class),
                 new ManagedAgentProperties());
         HarnessCoordinator coordinator = mock(HarnessCoordinator.class);

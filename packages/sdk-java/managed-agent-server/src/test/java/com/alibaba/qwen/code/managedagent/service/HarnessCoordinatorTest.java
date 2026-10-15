@@ -9,13 +9,13 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.harness.HarnessDisabledException;
-import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceStream;
+import com.alibaba.qwen.code.managedagent.harness.HarnessDisabledException;
 import com.alibaba.qwen.code.managedagent.harness.HostedHarnessRecoveryDeclinedException;
+import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -365,7 +365,7 @@ class HarnessCoordinatorTest {
         try {
             dispatchWithCreateOrLoadFailure(
                     new HarnessDisabledException("disabled"), false, 5,
-                unboundSessionRecord());
+                    unboundSessionRecord());
         } finally {
             coordinatorLog.detachAppender(logged);
         }

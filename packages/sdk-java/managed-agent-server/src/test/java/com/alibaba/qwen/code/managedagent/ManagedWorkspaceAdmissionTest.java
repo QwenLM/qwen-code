@@ -786,8 +786,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
                     @Override
@@ -856,8 +855,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
                     @Override
@@ -948,8 +946,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
                     @Override
@@ -1093,8 +1090,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         String digest = new RequestDigests().digest(Map.of("sessionId",
                 sessionId, "title", "new title"));
         transaction.executeWithoutResult(status -> gated.beginSessionRename(
@@ -1155,8 +1151,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         String digest = new RequestDigests().digest(Map.of("sessionId",
                 sessionId, "title", "new title"));
         transaction.executeWithoutResult(status -> gated.beginSessionRename(
@@ -2205,8 +2200,7 @@ class ManagedWorkspaceAdmissionTest {
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant,
                         "storage-a", "/workspace")));
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, properties);
+                Clock.systemUTC(), ignored -> {}, registry, properties);
         return new ManagedAgentService(gated, new RequestDigests(), null,
                 new UnavailableHarnessConnector() {
                     @Override

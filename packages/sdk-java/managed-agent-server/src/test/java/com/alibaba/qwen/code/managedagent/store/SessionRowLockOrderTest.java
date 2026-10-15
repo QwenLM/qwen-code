@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.sun.source.tree.AssignmentTree;
 import com.sun.source.tree.BinaryTree;
 import com.sun.source.tree.BlockTree;
@@ -28,6 +25,15 @@ import com.sun.source.tree.VariableTree;
 import com.sun.source.tree.YieldTree;
 import com.sun.source.util.JavacTask;
 import com.sun.source.util.TreeScanner;
+import org.junit.jupiter.api.Test;
+import org.springframework.transaction.annotation.Transactional;
+
+import javax.lang.model.element.Modifier;
+import javax.tools.JavaCompiler;
+import javax.tools.JavaFileObject;
+import javax.tools.SimpleJavaFileObject;
+import javax.tools.ToolProvider;
+
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.URI;
@@ -36,9 +42,9 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.IdentityHashMap;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -48,14 +54,9 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import javax.lang.model.element.Modifier;
-import javax.tools.JavaCompiler;
-import javax.tools.JavaFileObject;
-import javax.tools.SimpleJavaFileObject;
-import javax.tools.ToolProvider;
 
-import org.junit.jupiter.api.Test;
-import org.springframework.transaction.annotation.Transactional;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 // recordAdmission's inline comment fixes the lock order that keeps InnoDB
 // from deadlocking concurrent Turn admissions: the session row FOR UPDATE
@@ -508,7 +509,6 @@ class SessionRowLockOrderTest {
     void theAuditReportsATurnRowAccessBeforeTheSessionLock() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void badWriter(String tenantId, String sessionId) {
                         deferTurnRetry(tenantId, sessionId);
@@ -540,7 +540,6 @@ class SessionRowLockOrderTest {
     void theAuditReadsALowercaseForUpdateAsTheSessionLock() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void newWriter(String tenantId, String sessionId) {
                         jdbc.update("UPDATE ma_turn SET status"
@@ -569,7 +568,6 @@ class SessionRowLockOrderTest {
     void theAuditPlacesATurnOnlyWriterInTheTurnRowPopulation() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void existingWriter(String tenantId,
                             String sessionId) {
@@ -606,7 +604,6 @@ class SessionRowLockOrderTest {
     void aCommentMentioningTheLockHelperIsNotALock() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void proseWriter(String tenantId,
                             String sessionId) {
@@ -634,7 +631,6 @@ class SessionRowLockOrderTest {
     void theAuditCountsALockTakenThroughAPrivateHelper() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void helperLockWriter(String tenantId,
                             String sessionId) {
@@ -666,7 +662,6 @@ class SessionRowLockOrderTest {
     void aCommentLineAboveADeclarationDoesNotHideIt() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     // ordering note
                     public void badWriter(String tenantId, String sessionId) {
@@ -700,7 +695,6 @@ class SessionRowLockOrderTest {
     void theAuditScoresTheLockAtTheForUpdateStatement() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void lateLockWriter(String tenantId,
                             String sessionId) {
@@ -725,7 +719,6 @@ class SessionRowLockOrderTest {
     void theAuditScoresOnlyTheSessionRowsForUpdate() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void mixedLockWriter(String tenantId,
                             String sessionId) {
@@ -756,7 +749,6 @@ class SessionRowLockOrderTest {
     void theAuditFollowsTheTurnRowThroughTransitiveCalls() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void deepWriter(String tenantId,
                             String sessionId) {
@@ -793,7 +785,6 @@ class SessionRowLockOrderTest {
     void theAuditFollowsTheLockThroughTransitiveCalls() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void deepLockWriter(String tenantId,
                             String sessionId) {
@@ -837,7 +828,6 @@ class SessionRowLockOrderTest {
     void theAuditFollowsTheLockIntoANestedType() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void inlineWriter(String tenantId,
                             String sessionId) {
@@ -861,7 +851,6 @@ class SessionRowLockOrderTest {
                     }
 
                     static class Nested {
-
                         static void lockSession(String tenantId,
                                 String sessionId) {
                             jdbc.queryForMap("SELECT session_id FROM"
@@ -885,7 +874,6 @@ class SessionRowLockOrderTest {
     void theAuditThrowsOnANestedLockBehindAnUntypedReceiver() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void fieldLockWriter(String tenantId,
                             String sessionId) {
@@ -895,7 +883,6 @@ class SessionRowLockOrderTest {
                     }
 
                     static class Nested {
-
                         void lockSession(String tenantId,
                                 String sessionId) {
                             jdbc.queryForMap("SELECT session_id FROM"
@@ -918,7 +905,6 @@ class SessionRowLockOrderTest {
     void theAuditThrowsOnAnAmbiguousCallReachingALock() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void writer(String tenantId, String sessionId) {
                         helper(tenantId);
@@ -955,7 +941,6 @@ class SessionRowLockOrderTest {
     void theAuditExemptsABenignAmbiguousCall() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void writer(String tenantId, String sessionId) {
                         requireSessionForUpdate(tenantId, sessionId);
@@ -992,7 +977,6 @@ class SessionRowLockOrderTest {
     void theAuditThrowsOnAMethodReferenceReachingTheTurnRow() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void writer(String tenantId, String sessionId) {
                         requireSessionForUpdate(tenantId, sessionId);
@@ -1026,7 +1010,6 @@ class SessionRowLockOrderTest {
     void theAuditCreditsAConditionalLockOnEitherBranch() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void conditionalLockWriter(String tenantId,
                             String sessionId, boolean locking) {
@@ -1052,7 +1035,6 @@ class SessionRowLockOrderTest {
     void theAuditCreditsATurnAccessOnEitherBranch() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void conditionalTurnWriter(String tenantId,
                             String sessionId, boolean counting) {
@@ -1082,7 +1064,6 @@ class SessionRowLockOrderTest {
     void theAuditFollowsACallEmbeddedInASqlConcatenation() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void embeddingWriter(String tenantId,
                             String sessionId) {
@@ -1117,7 +1098,6 @@ class SessionRowLockOrderTest {
     void theAuditReadsALiteralInsideAnUnresolvableCallOperand() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void concatReader(String tenantId,
                             String sessionId) {
@@ -1148,7 +1128,6 @@ class SessionRowLockOrderTest {
     void theAuditScoresAnEmbeddedCallBeforeTheStatementsSpelling() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void embeddingLockWriter(String tenantId,
                             String sessionId) {
@@ -1174,7 +1153,6 @@ class SessionRowLockOrderTest {
     void theAuditReadsSqlFromASwitchExpression() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void switchWriter(String tenantId,
                             String sessionId, int kind) {
@@ -1204,7 +1182,6 @@ class SessionRowLockOrderTest {
     void theAuditFailsClosedOnAnAssignedLambdaReachingASide() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void lambdaWriter(String tenantId,
                             String sessionId) {
@@ -1235,7 +1212,6 @@ class SessionRowLockOrderTest {
     void theAuditFailsClosedOnANestedHeldLambdaReachingASide() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void nestedLambdaWriter(String tenantId,
                             String sessionId) {
@@ -1270,7 +1246,6 @@ class SessionRowLockOrderTest {
     void theAuditFailsClosedOnAnAnonymousClassBodyReachingASide() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void anonLocker(String tenantId,
                             String sessionId) {
@@ -1306,7 +1281,6 @@ class SessionRowLockOrderTest {
     void theAuditFailsClosedOnAMutuallyRecursiveDelegate() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void writerA(String tenantId, String sessionId) {
                         writerB(tenantId, sessionId);
@@ -1342,7 +1316,6 @@ class SessionRowLockOrderTest {
     void theAuditTracksAStringLocalThroughReassignment() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void reassignedLocalWriter(String tenantId,
                             String sessionId) {
@@ -1375,7 +1348,6 @@ class SessionRowLockOrderTest {
     void theAuditFailsClosedOnALocalClassHoldingTheSessionLock() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void localClassWriter(String tenantId,
                             String sessionId) {
@@ -1408,7 +1380,6 @@ class SessionRowLockOrderTest {
     void theAuditDoesNotCertifyAMergedConditionalBranchCarryingBothSides() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void conditionalWriter(String tenantId,
                             String sessionId, boolean chooseLock) {
@@ -1440,7 +1411,6 @@ class SessionRowLockOrderTest {
     void theAuditFoldsADirectArgumentLambda() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void callbackWriter(String tenantId,
                             String sessionId) {
@@ -1472,7 +1442,6 @@ class SessionRowLockOrderTest {
     void theAuditScoresALocalStringAtItsUseSite() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void localSqlWriter(String tenantId,
                             String sessionId) {
@@ -1505,7 +1474,6 @@ class SessionRowLockOrderTest {
     void theAuditDescendsIntoASameSiteDelegate() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void lateLockWriter(String tenantId,
                             String sessionId) {
@@ -1540,7 +1508,6 @@ class SessionRowLockOrderTest {
     void theAuditAuditsAProtectedWriter() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     protected void protectedWriter(String tenantId,
                             String sessionId) {
@@ -1567,7 +1534,6 @@ class SessionRowLockOrderTest {
     void theAuditAuditsAPackagePrivateOverload() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void beginWorkspaceLifecycle(String tenantId,
                             String sessionId) {
@@ -1608,7 +1574,6 @@ class SessionRowLockOrderTest {
     void theAuditResolvesOverloadsByArity() {
         String synthetic = """
                 class SyntheticStore {
-
                     @Transactional
                     public void lateLockWriter(String tenantId,
                             String sessionId) {
@@ -1645,7 +1610,6 @@ class SessionRowLockOrderTest {
     void theAuditReadsTheTurnRowSqlFromAClassConstant() {
         String synthetic = """
                 class SyntheticStore {
-
                     private static final String FAIL_TURN = "UPDATE"
                             + " ma_turn SET status = 'FAILED'";
 
@@ -1674,7 +1638,6 @@ class SessionRowLockOrderTest {
     void aSiblingStoreWriterIsAudited() {
         String sibling = """
                 class SiblingStore {
-
                     @Transactional
                     public void badWriter(String tenantId, String sessionId) {
                         jdbc.update("UPDATE ma_turn SET status"
@@ -2386,7 +2349,6 @@ class SessionRowLockOrderTest {
         }.scan(node, null);
         return text.toString();
     }
-
 
     // The bytecode's own member enumeration, recursively over the named
     // nested types and projected to owner#name/arity, for the harvest
