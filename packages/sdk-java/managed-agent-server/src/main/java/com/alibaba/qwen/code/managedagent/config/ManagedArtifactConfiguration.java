@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -141,7 +142,7 @@ public class ManagedArtifactConfiguration {
 
             public boolean readOriginal(String tenantId, String actorId,
                     String workspaceId, String sessionId) {
-                return actorId != null && !actorId.isBlank()
+                return StringUtils.isNotBlank(actorId)
                         && publishOriginal(tenantId, workspaceId, sessionId);
             }
         };
