@@ -22,6 +22,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import jakarta.annotation.PreDestroy;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -33,6 +34,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -238,9 +240,8 @@ public class HarnessCoordinator {
                 // in managed_agent_turn.error_message VARCHAR(2048), so bound it
                 // instead of letting one oversized body throw the terminal
                 // write itself.
-                String declineReason = error.getReason().length() > 1024
-                        ? error.getReason().substring(0, 1024)
-                        : error.getReason();
+                String declineReason = StringUtils.truncate(
+                        Objects.requireNonNull(error.getReason()), 1024);
                 terminal = failTerminally(claimed,
                         "managed_runtime_recovery_blocked",
                         "The prior Harness generation parked a Turn this"
@@ -1064,9 +1065,8 @@ public class HarnessCoordinator {
                 // refusal above. Without that mark the same code arrives
                 // from the open-LOAD path, whose reviewed exhaustion
                 // answer is the generic unavailable.
-                return fail(turn, http.getErrorCode().length() > 128
-                        ? http.getErrorCode().substring(0, 128)
-                        : http.getErrorCode(),
+                return fail(turn, StringUtils.truncate(
+                        Objects.requireNonNull(http.getErrorCode()), 128),
                         "Hosted Harness refused the Turn before Turn"
                                 + " admission.");
             }

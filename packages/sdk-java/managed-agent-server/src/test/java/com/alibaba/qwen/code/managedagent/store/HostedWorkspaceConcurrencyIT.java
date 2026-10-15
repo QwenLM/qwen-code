@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -245,7 +246,7 @@ class HostedWorkspaceConcurrencyIT {
     }
 
     private static Map<String, Object> row(JdbcTemplate jdbc, String tenant) {
-        return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE tenant_id = ?", tenant);
+        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE tenant_id = ?", tenant);
     }
 
     private static ManagedAgentStore store(DriverManagerDataSource source, ManagedAgentProperties properties) {

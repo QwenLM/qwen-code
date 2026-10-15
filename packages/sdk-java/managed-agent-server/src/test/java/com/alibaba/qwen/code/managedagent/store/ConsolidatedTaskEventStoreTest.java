@@ -22,7 +22,7 @@ class ConsolidatedTaskEventStoreTest {
         ManagedSchema.initialize(source);
         jdbc = new JdbcTemplate(source);
         events = new ManagedTaskEventStore(jdbc);
-        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,session_kind,workspace_id,created_at,updated_at)"
+        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,session_kind,workspace_id,gmt_create,gmt_modified)"
                 + " VALUES ('tenant','session','CONTROL','workspace',0,0)");
     }
 
@@ -50,10 +50,10 @@ class ConsolidatedTaskEventStoreTest {
     void taskTailAndFloorStayAfterAllEventsExpireAndDoNotMixWithSessionStream() {
         events.appendStateChange("tenant", "session", "task", "running", "ready", 1);
         events.appendStateChange("tenant", "session", "task", "completed", "ready", 2);
-        jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,last_sequence,updated_at)"
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,last_sequence,gmt_modified)"
                 + " VALUES ('tenant','session','SESSION','',1,0)");
         jdbc.update("INSERT INTO ma_public_event (tenant_id,session_id,stream_kind,stream_id,sequence_id,event_id,"
-                + "event_type,data_json,terminal,created_at) VALUES ('tenant','session','SESSION','',1,'session-event',"
+                + "event_type,data_json,terminal,gmt_create) VALUES ('tenant','session','SESSION','',1,'session-event',"
                 + "'session.updated','{}',FALSE,1)");
         assertThat(events.expireThrough("tenant", "session", "task", 2)).isEqualTo(2);
         assertThat(events.read("tenant", "session", "task", 0, 100).events()).isEmpty();

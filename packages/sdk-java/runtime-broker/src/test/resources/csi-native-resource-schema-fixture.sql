@@ -16,8 +16,8 @@ CREATE TABLE ma_resource (
     encryption_key_id VARCHAR(512),
     publish_command_id VARCHAR(512) NOT NULL,
     state VARCHAR(32) NOT NULL,
-    created_at DATETIME(6) NOT NULL,
-    last_verified_at DATETIME(6),
-    retention_until DATETIME(6),
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    last_verified_at BIGINT UNSIGNED,
+    retention_until BIGINT UNSIGNED,
     PRIMARY KEY (session_scope_key, resource_id)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;

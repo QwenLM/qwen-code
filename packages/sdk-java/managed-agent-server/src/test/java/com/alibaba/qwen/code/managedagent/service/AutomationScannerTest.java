@@ -386,7 +386,7 @@ class AutomationScannerTest {
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, created_at)"
+                        + " task_kind, task_state, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, 'automation_run', ?, ?, 3,"
                         + " 'resource', 'automation_run', 'completed', ?)",
                 ManagedSessionStore.sessionScopeKey(tenant, sessionId),
@@ -1121,7 +1121,7 @@ class AutomationScannerTest {
                 null, true);
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, created_at, updated_at, completed_at)"
+                        + " status, gmt_create, gmt_modified, completed_at)"
                         + " VALUES (?, ?, 'turn-open', 'prompt-open', '[]',"
                         + " 'digest', 'RUNNING', 1000, 1000, NULL)",
                 tenant, sessionId);
@@ -1284,7 +1284,7 @@ class AutomationScannerTest {
                             + " session_id, resource_id, kind, schema_version,"
                             + " byte_length, sha256, storage_kind,"
                             + " inline_bytes, publish_command_id, state,"
-                            + " created_at)"
+                            + " gmt_create)"
                             + " VALUES (?, ?, ?, ?, ?, 'wedged-run-rev-3',"
                             + " 'managed-automation-run', 1, ?, ?,"
                             + " 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', ?)",
@@ -1298,7 +1298,7 @@ class AutomationScannerTest {
                             + " workspace_id, session_id, domain, record_id,"
                             + " operation_hash, revision, record_resource_id,"
                             + " task_kind, task_state, definition_revision,"
-                            + " created_at)"
+                            + " gmt_create)"
                             + " VALUES (?, ?, ?, ?, ?, 'automation_run', ?, ?, 3,"
                             + " 'wedged-run-rev-3', 'automation_run', 'failed',"
                             + " 1, ?)",
@@ -1397,7 +1397,7 @@ class AutomationScannerTest {
         // takeover: no reconcile goes out for it.
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, created_at, updated_at, completed_at)"
+                        + " status, gmt_create, gmt_modified, completed_at)"
                         + " VALUES (?, ?, 'turn-open-reconcile',"
                         + " 'prompt-open-reconcile', '[]', 'digest', 'RUNNING',"
                         + " 1000, 1000, NULL)",

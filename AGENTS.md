@@ -47,6 +47,13 @@ PRs are exempt):
 **When in doubt, escalate. Better to wrongly escalate than to wrongly
 approve.**
 
+## Module-specific Instructions
+
+Before changing `packages/sdk-java/managed-agent-server/**`, read its
+[AGENTS.md](packages/sdk-java/managed-agent-server/AGENTS.md). It supplements
+these repository-wide rules with Java verification and service constraints;
+the common design, self-audit, and PR workflows still apply.
+
 ## Common Commands
 
 ### Building
@@ -226,7 +233,10 @@ npm run preflight  # Full check: clean → install → format → lint → build
    workflow change into a red main CI run.
 4. **Build, typecheck, and test before declaring done**:
    `npm run build && npm run typecheck`, plus unit tests for the files you
-   changed.
+   changed. Changes confined to `packages/sdk-java/managed-agent-server/`
+   follow its local Maven verification instructions instead. Cross-language
+   changes require both the affected Java checks and the TypeScript checks
+   above. Documentation-only changes require formatting and reference checks.
 5. **Self-audit before declaring done** — read the full diff you are about
    to ship, including new untracked files, in open-ended passes, not hunting
    for anything specific. Then verify each change, and each green test you
@@ -254,6 +264,8 @@ Project-specific rules for `/review`. The skill loads this section verbatim (by
 its `## Code Review` heading) and hands it to every review agent, so keep it to
 things a reviewer of _this_ codebase must check — not general advice.
 
+- **Apply module-specific review rules.** Read any nested `AGENTS.md` that
+  applies to the reviewed files and include its `## Code Review` rules.
 - **Verify a finding against the exact reviewed commit before reporting it.**
   Read the lines you are about to cite. A Critical that quotes code not present at
   the commit under review is worse than no finding — it blocks the author over
