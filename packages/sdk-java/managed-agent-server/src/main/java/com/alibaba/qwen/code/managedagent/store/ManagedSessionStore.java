@@ -399,6 +399,9 @@ public class ManagedSessionStore {
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
+        // A root that predates this writer still needs its scope keys and the
+        // SESSION event stream the session read path joins on.
+        materializeSessionRoot(tenantId, sessionId);
         bindControlSessionStorage(tenantId, request.workspaceId(), sessionId);
         // Materialize the key before any locking read: missing-key RR locks can
         // deadlock independent tenants when both first writers insert a head.
@@ -2724,6 +2727,10 @@ public class ManagedSessionStore {
 
     private void ensureSessionRoot(String tenantId, String sessionId) {
         insertSessionRoot(tenantId, sessionId);
+        materializeSessionRoot(tenantId, sessionId);
+    }
+
+    private void materializeSessionRoot(String tenantId, String sessionId) {
         long now = databaseEpochMillis(databaseNow());
         String tenantKey = JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
