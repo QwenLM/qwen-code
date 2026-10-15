@@ -61,7 +61,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                             + " JOIN performance_schema.data_locks locks ON locks.ENGINE = waits.ENGINE"
                             + " AND locks.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID"
                             + " WHERE threads.PROCESSLIST_ID = ? AND locks.OBJECT_SCHEMA = ?"
-                            + " AND locks.OBJECT_NAME = 'qwen_tool_publication_tenant'", Long.class, connection.get(), schema) > 0;
+                            + " AND locks.OBJECT_NAME = 'ma_tenant_guard'", Long.class, connection.get(), schema) > 0;
                     if (!waiting) { Thread.sleep(20); }
                 }
                 assertThat(waiting).as("writer connection observed in an actual InnoDB lock wait").isTrue();
@@ -87,7 +87,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
     }
 
     @Test
-    void killedPutAndSuccessfulRetryKeepTheOriginalAttemptUnresolved() throws Exception {
+    void killedPutAfterPhysicalSuccessReconcilesTheOriginalAttempt() throws Exception {
         Process child = child("put");
         try {
             ready(child);
@@ -95,13 +95,36 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(child.waitFor(10, TimeUnit.SECONDS)).isTrue();
             var objects = new O4FileObjects(root);
             retention.put(key, scope, "pub-1", "exact/one", new byte[] {7}, objects);
-            assertThat(jdbc.queryForList("SELECT state FROM qwen_output_put_attempt WHERE scope_key = ?",
-                    String.class, scope)).containsExactlyInAnyOrder("IN_FLIGHT", "RETURNED");
+            assertThat(jdbc.queryForList("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?",
+                    String.class, scope)).containsExactly("RETURNED");
+            assertThat(jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?",
+                    Long.class, scope)).isEqualTo(1);
+            retire();
+            assertThat(blocker()).isNull();
+            assertThat(held()).isEqualTo(3000);
+            assertThat(Files.exists(root.resolve("exact/one"))).isTrue();
+        } finally { stop(child); }
+    }
+
+    @Test
+    void killedPutBeforePhysicalWriteCannotBeResentOrReleasedByExpiry() throws Exception {
+        Process child = child("put-before");
+        try {
+            ready(child);
+            child.destroyForcibly();
+            assertThat(child.waitFor(10, TimeUnit.SECONDS)).isTrue();
+            var objects = new O4FileObjects(root);
+            assertThat(Files.exists(root.resolve("exact/one"))).isFalse();
+            jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -60, CURRENT_TIMESTAMP(6))"
+                    + " WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?", scope);
+            assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "exact/one", new byte[] {7}, objects))
+                    .isInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class);
+            assertThat(Files.exists(root.resolve("exact/one"))).isFalse();
+            assertThat(jdbc.queryForList("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?",
+                    String.class, scope)).containsExactly("IN_FLIGHT");
             retire();
             assertThat(collector(objects).runOnce()).isFalse();
             assertThat(blocker()).isEqualTo("put_unresolved");
-            assertThat(held()).isEqualTo(3000);
-            assertThat(Files.exists(root.resolve("exact/one"))).isTrue();
         } finally { stop(child); }
     }
 
@@ -132,7 +155,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(Files.exists(root.resolve("exact/three"))).isFalse();
             assertThat(held()).isZero();
             assertThat(replacement.runOnce()).isFalse();
-            assertThat(jdbc.queryForObject("SELECT gc_generation FROM qwen_tool_publication WHERE scope_key = ?",
+            assertThat(jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
                     Long.class, scope)).isEqualTo(2);
         } finally { stop(child); }
     }
@@ -147,7 +170,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
         try {
             ready(child);
             signal(child, "-STOP");
-            long expires = jdbc.queryForObject("SELECT expires_at FROM qwen_output_read_lease WHERE tenant_key = ?",
+            long expires = jdbc.queryForObject("SELECT expires_at FROM ma_read_lease WHERE tenant_key = ?",
                     Long.class, ToolPublicationRetentionStore.hash(tenant));
             assertThat(expires - ToolPublicationRetentionStore.now(jdbc)).as("two-minute reader budget")
                     .isBetween(115_000L, 120_000L);
@@ -183,7 +206,8 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             try {
                 assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "exact/one", new byte[] {7}, objects))
                         .isInstanceOf(IllegalStateException.class);
-                retention.put(key, scope, "pub-1", "exact/one", new byte[] {7}, objects);
+                assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "exact/one", new byte[] {7}, objects))
+                        .isInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class);
                 retire();
                 assertThat(collector(objects).runOnce()).isFalse();
             } finally { late.countDown(); }
@@ -218,16 +242,15 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             try (var input = objects.open(objectKey)) {
                 assertThat(input.transferTo(java.io.OutputStream.nullOutputStream())).isEqualTo(segment.length);
             }
-            jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key, resource_id,"
-                            + " resource_kind, byte_length, sha256, object_key, state, operation_id, created_at)"
-                            + " VALUES (?, 'pub-1', ?, ?, 'managed-tool-result-content', ?, ?, ?, 'VERIFIED', 'op', CURRENT_TIMESTAMP(6))",
-                    scope, slot, slot, segment.length, digest, objectKey);
+            addCaptureObject(scope, "pub-1", session, slot, slot, objectKey, null, "VERIFIED");
+            jdbc.update("UPDATE ma_resource SET byte_length = ?, sha256 = ? WHERE scope_key = ? AND slot_key = ?",
+                    segment.length, digest, scope, slot);
             stored += segment.length;
         }
         for (String name : java.util.List.of("manifest", "pages", "outcome")) { addObject("z-" + name, null, new byte[] {1}); }
-        jdbc.update("UPDATE qwen_tool_publication SET capture_used_bytes = ?, capture_held_bytes = ?,"
+        jdbc.update("UPDATE ma_output_capture SET capture_used_bytes = ?, capture_held_bytes = ?,"
                         + " producer_used_bytes = 3, producer_held_bytes = 1000 WHERE scope_key = ?", total, total, scope);
-        assertThat(jdbc.queryForObject("SELECT SUM(byte_length) FROM qwen_tool_publication_object WHERE scope_key = ?",
+        assertThat(jdbc.queryForObject("SELECT SUM(byte_length) FROM ma_resource WHERE scope_key = ?",
                 Long.class, scope)).isEqualTo(total + 3);
         retire();
         var gc = collector(objects);
@@ -240,10 +263,10 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
         }
         assertThat(pages).isEqualTo((count + 3 + 99) / 100);
         assertThat(held()).isZero();
-        assertThat(jdbc.queryForObject("SELECT collected_bytes FROM qwen_tool_publication WHERE scope_key = ?",
+        assertThat(jdbc.queryForObject("SELECT collected_bytes FROM ma_output_capture WHERE scope_key = ?",
                 Long.class, scope)).isEqualTo(total + 3);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object WHERE scope_key = ?"
-                + " AND (state <> 'COLLECTED' OR inline_bytes IS NOT NULL)", Long.class, scope)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE scope_key = ?"
+                + " AND (capture_state <> 'COLLECTED' OR inline_bytes IS NOT NULL)", Long.class, scope)).isZero();
         try (var input = objects.open(prefix + "outside")) { assertThat(input.read()).isEqualTo(9); }
         System.out.println("O4 capacity: bytes=" + total + ", catalogObjects=" + (count + 3) + ", pages=" + pages);
     }

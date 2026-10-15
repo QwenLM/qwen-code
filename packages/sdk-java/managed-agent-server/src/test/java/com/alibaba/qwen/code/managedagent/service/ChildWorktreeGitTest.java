@@ -3,10 +3,17 @@ package com.alibaba.qwen.code.managedagent.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mockStatic;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitor;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
@@ -718,7 +725,7 @@ class ChildWorktreeGitTest {
     }
 
     @Test
-    void namesBeyondAsciiMergeAndANameThatIsNotUtf8IsAConflict() throws Exception {
+    void namesBeyondAsciiMerge() throws Exception {
         write(project, "中文.txt", "parent\n");
         plain(project, "add", "-A");
         plain(project, "commit", "-qm", "unicode");
@@ -735,6 +742,12 @@ class ChildWorktreeGitTest {
         assertThat(project.resolve("café.txt")).hasContent("child");
         assertThat(project.resolve("中文.txt")).hasContent("child");
 
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.EnabledOnOs(OS.LINUX)
+    void aNameThatIsNotUtf8IsAConflict() throws Exception {
+        var repository = git.open(root, "project");
         git.create(root, repository, "c2", git.snapshot(root, repository, project, null));
         Path second = root.resolve(ChildWorktreeGit.CONTAINER + "/c2");
         Process bytes = new ProcessBuilder("sh", "-c", "printf child > \"$(printf '\\377')\".txt")
@@ -921,6 +934,75 @@ class ChildWorktreeGitTest {
         assertCode(() -> git.discard(root, "project", "c1", false), ChildWorkspaceException.LAYOUT);
 
         assertThat(outside.resolve("important/data.txt")).hasContent("precious");
+    }
+
+    @Test
+    void linkedMetadataIsRefusedBeforeDiscoveryFromTheRepositoryOrNestedCwd() throws Exception {
+        Path outside = Files.createDirectory(temp.toRealPath().resolve("outside"));
+        Path marker = temp.resolve("git-was-started");
+        write(outside, "important/data.txt", "precious\n");
+        Path executable = script("must-not-run-git", "touch '" + marker + "'\nrm -rf '" + outside + "'\nexit 1");
+        var guarded = new ChildWorktreeGit(executable.toString(), Duration.ofSeconds(30));
+        Path admin = project.resolve(".git/worktrees");
+        Files.createDirectories(project.resolve("nested/deep"));
+        try {
+            for (boolean linkedEntry : List.of(false, true)) {
+                if (linkedEntry) {
+                    Files.createDirectory(admin);
+                    Files.createSymbolicLink(admin.resolve("planted"), outside);
+                } else {
+                    Files.createSymbolicLink(admin, outside);
+                }
+                assertCode(() -> guarded.open(root, "project"), ChildWorkspaceException.LAYOUT);
+                assertCode(() -> guarded.layout(root, "project/nested/deep"), ChildWorkspaceException.LAYOUT);
+                assertCode(() -> guarded.discard(root, "project", "c1", false), ChildWorkspaceException.LAYOUT);
+                assertThat(marker).doesNotExist();
+                assertThat(outside.resolve("important/data.txt")).hasContent("precious");
+                if (linkedEntry) Files.delete(admin.resolve("planted"));
+                Files.delete(admin);
+            }
+            Path bare = root.resolve("bare.git");
+            plain(root, "init", "--bare", "-q", bare.toString());
+            Files.createSymbolicLink(bare.resolve("worktrees"), outside);
+            assertCode(() -> guarded.open(root, "bare.git"), ChildWorkspaceException.LAYOUT);
+            assertCode(() -> guarded.layout(root, "bare.git"), ChildWorkspaceException.LAYOUT);
+            Files.delete(bare.resolve("HEAD"));
+            Files.createSymbolicLink(bare.resolve("HEAD"), Path.of("refs/heads/main"));
+            assertCode(() -> guarded.open(root, "bare.git"), ChildWorkspaceException.LAYOUT);
+            assertCode(() -> guarded.layout(root, "bare.git"), ChildWorkspaceException.LAYOUT);
+            assertThat(marker).doesNotExist();
+            assertThat(outside.resolve("important/data.txt")).hasContent("precious");
+        } finally {
+            guarded.close();
+        }
+    }
+
+    @Test
+    void discoveryPreservesRegularGitFilesAndRelativeCommonDirectoryPointers() throws Exception {
+        Path separate = Files.createDirectory(root.resolve("separate"));
+        Path gitDir = root.resolve("metadata with trailing space ");
+        plain(separate, "init", "-q", "--separate-git-dir", gitDir.toString());
+        assertThat(git.layout(root, "separate")).isEqualTo(new ChildWorktreeGit.Layout("separate", "."));
+        Path linked = root.resolve("linked");
+        plain(project, "worktree", "add", "-q", "--detach", linked.toString());
+        Files.createDirectories(linked.resolve("nested"));
+        assertThat(git.layout(root, "linked/nested")).isEqualTo(new ChildWorktreeGit.Layout("linked", "nested"));
+        assertThat(git.open(root, "linked").commonDir()).isEqualTo(project.resolve(".git"));
+    }
+
+    @Test
+    void aVanishedObjectEntryDoesNotRejectTheRepository() throws Exception {
+        Path objects = project.resolve(".git/objects");
+        Path removed = objects.resolve("removed-object");
+        try (var files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            files.when(() -> Files.walkFileTree(eq(objects), anySet(), eq(1), any()))
+                    .thenAnswer(invocation -> {
+                        FileVisitor<Path> visitor = invocation.getArgument(3);
+                        visitor.visitFileFailed(removed, new NoSuchFileException(removed.toString()));
+                        return invocation.callRealMethod();
+                    });
+            assertThat(git.open(root, "project").commonDir()).isEqualTo(project.resolve(".git"));
+        }
     }
 
     @Test

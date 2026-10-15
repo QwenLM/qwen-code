@@ -8,7 +8,27 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const planGate = vi.hoisted(() => ({ enabled: false }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_plan' && planGate.enabled) return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
 import {
   openManagedSession,
   type ManagedSession,
@@ -19,7 +39,9 @@ import {
   parseTeamState,
   parseTeamTask,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
+import { answerCommittedTurnCalls } from './hosted-runtime-recovery.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { decodeChildLaunchEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { HostedSessionMessageSession } from './hosted-session-message-session.js';
 import {
   HostedChildChains,
@@ -78,6 +100,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  planGate.enabled = false;
   await session?.close();
   await rm(root, { recursive: true, force: true });
 });
@@ -169,6 +192,544 @@ async function stopDeleteAtClosing(callKey: string): Promise<void> {
     'store unavailable',
   );
 }
+
+describe('team plans', () => {
+  async function member() {
+    planGate.enabled = true;
+    await createTeam();
+    const membership = teams.admitMember('alice');
+    await launch('run-alice');
+    await teams.join({
+      ...membership,
+      childRunId: 'run-alice',
+      planModeRequired: true,
+    });
+  }
+
+  it.each([true, false])(
+    'recovers approval withdrawal with plan gate %s',
+    async (enabled) => {
+      await member();
+      await teams.submitPlan('submit-1', 'run-alice', 'read');
+      await children.settleFailed('run-alice', {
+        stopReason: 'creation_failed',
+        reason: null,
+        started: false,
+      });
+      const args = { request_id: 'submit-1', action: 'approve' };
+      for (const id of ['approval', 'unrelated']) {
+        await session.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId: sessionKey.sessionId,
+          timestamp: new Date().toISOString(),
+          model: 'model',
+          type: 'assistant',
+          cwd: root,
+          version: 'test',
+          daemonPromptId: 'prompt',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id,
+                  name: 'team_plan_approval',
+                  args,
+                },
+              },
+            ],
+          },
+        });
+      }
+      expect(
+        await teams.run('team_plan_approval', args, 'prompt:approval'),
+      ).toContain('Plan submit-1 was withdrawn');
+      expect(teams.plan('submit-1')?.run.state).toBe('cancelled');
+      planGate.enabled = enabled;
+      const recovered = new HostedTeamSession(
+        { authority: session.authority, resources: session.resources },
+        sessionKey,
+        children,
+      );
+      expect(
+        await answerCommittedTurnCalls({
+          session,
+          sessionId: sessionKey.sessionId,
+          cwd: root,
+          promptId: 'prompt',
+          children,
+          teams: recovered,
+        }),
+      ).toBe(1);
+      const answers = (await session.sink.project())
+        .filter((entry) => entry.type === 'tool_result')
+        .flatMap((entry) => entry.message?.parts ?? []);
+      expect(JSON.stringify(answers)).toContain('Plan submit-1 was withdrawn');
+      expect(JSON.stringify(answers)).not.toContain('never ran');
+      expect(
+        answers.some((part) => part.functionResponse?.id === 'unrelated'),
+      ).toBe(false);
+      expect(
+        recovered.committedBy('team_plan_approval', 'prompt:approval'),
+      ).toBe(true);
+      expect(
+        recovered.committedBy('team_plan_approval', 'prompt:unrelated'),
+      ).toBe(false);
+      expect(
+        await recovered.planDecisionEvidence('prompt:unrelated'),
+      ).toBeUndefined();
+      expect(
+        await recovered.run('team_plan_approval', args, 'prompt:approval'),
+      ).toContain('Plan submit-1 was withdrawn');
+    },
+  );
+
+  it('recognizes deletion withdrawal after another call closed the team', async () => {
+    await member();
+    await teams.submitPlan('submit-1', 'run-alice', 'read');
+    await settle('run-alice');
+    planGate.enabled = false;
+    await stopDeleteAtClosing('first-delete');
+    planGate.enabled = true;
+    await stopDeleteAtClosing('second-delete');
+    expect(teams.plan('submit-1')?.run.state).toBe('cancelled');
+    expect(teams.committedBy('team_delete', 'second-delete')).toBe(true);
+    expect(teams.committedBy('team_delete', 'unrelated')).toBe(false);
+  });
+
+  it('submits, reads, rejects and approves with call-keyed continuation evidence', async () => {
+    await member();
+    expect(
+      await teams.submitPlan('submit-1', 'run-alice', 'Read <file>'),
+    ).toContain('revision 1');
+    expect(await teams.run('task_list', {}, 'list')).toContain(
+      'request submit-1',
+    );
+    expect(await teams.showPlan('submit-1')).toContain('Read <file>');
+    await expect(
+      teams.run(
+        'team_plan_approval',
+        { request_id: 'submit-1', action: 'reject' },
+        'reject',
+      ),
+    ).rejects.toThrow('run settles');
+    expect(teams.plan('submit-1')?.run.state).toBe('waiting');
+    await settle('run-alice');
+    expect(
+      await teams.run(
+        'team_plan_approval',
+        {
+          request_id: 'submit-1',
+          action: 'reject',
+          message: 'revise <safely>',
+        },
+        'reject',
+      ),
+    ).toContain('member was continued');
+    expect(teams.memberPlanMode(teams.membership('run-alice')!)).toBe(true);
+    const rejected = decodeChildLaunchEnvelope(
+      await session.resources.read(children.record('reject')!.inputRef),
+    );
+    expect(rejected.prompt).toContain('plan-mode="required"');
+    expect(rejected.prompt).toContain('Read &lt;file&gt;');
+    expect(rejected.prompt).toContain(
+      '<feedback>revise &lt;safely&gt;</feedback>',
+    );
+    await teams.submitPlan('submit-2', 'reject', 'Read safely');
+    await settle('reject');
+    await teams.run(
+      'team_plan_approval',
+      { request_id: 'submit-2', action: 'approve' },
+      'approve',
+    );
+    expect(teams.memberPlanMode(teams.membership('run-alice')!)).toBe(false);
+    const approved = decodeChildLaunchEnvelope(
+      await session.resources.read(children.record('approve')!.inputRef),
+    );
+    expect(approved.prompt).not.toContain('plan-mode="required"');
+    expect(approved.prompt).toContain('<plan>\nRead safely\n</plan>');
+    expect(await teams.planDecisionEvidence('unrelated')).toBeUndefined();
+    expect(await teams.planDecisionEvidence('reject')).toContain('submit-1');
+    expect(
+      await teams.submitPlan('submit-1', 'run-alice', 'Read <file>'),
+    ).toContain('revision 1');
+  });
+
+  it.each(['cut', 'settled', 'newer'] as const)(
+    'recovers partial supersede: %s',
+    async (scenario) => {
+      await member();
+      await teams.submitPlan('original', 'run-alice', 'first');
+      const interrupted = new HostedTeamSession(
+        {
+          resources: session.resources,
+          authority: Object.create(session.authority, {
+            commitExtensionRecord: {
+              value: async (
+                ...args: Parameters<
+                  HostedTeamStore['authority']['commitExtensionRecord']
+                >
+              ) => {
+                const result = await session.authority.commitExtensionRecord(
+                  ...args,
+                );
+                if (args[0].commandId === 'supersede:replacement:original') {
+                  if (scenario === 'settled') await settle('run-alice');
+                  else throw new Error('cut after cancel');
+                }
+                return result;
+              },
+            },
+          }),
+        },
+        sessionKey,
+        children,
+      );
+      if (scenario === 'settled') {
+        expect(
+          await interrupted.submitPlan('replacement', 'run-alice', 'second'),
+        ).toContain('revision 2');
+      } else {
+        await expect(
+          interrupted.submitPlan('replacement', 'run-alice', 'second'),
+        ).rejects.toThrow('cut after cancel');
+        await settle('run-alice');
+        if (scenario === 'newer') {
+          await children.sendToChild({
+            taskId: children.taskIdOf('run-alice'),
+            text: 'next',
+            messageId: 'next',
+            continuationRunId: 'next',
+            executionCallId: 'next',
+            closing: false,
+          });
+          await teams.submitPlan('newer', 'next', 'third');
+          const newer = teams.plan('newer');
+          await expect(
+            teams.submitPlan('fresh-stale', 'run-alice', 'stale'),
+          ).rejects.toThrow('Only the running');
+          const answer = await teams.submitPlan(
+            'replacement',
+            'run-alice',
+            'second',
+          );
+          expect(answer).toContain('superseded');
+          expect(answer).not.toContain('decision arrives');
+          expect(teams.plan('newer')).toEqual(newer);
+          expect(
+            teams
+              .plans()
+              .filter((plan) => plan.run.state === 'waiting')
+              .map((plan) => plan.requestId),
+          ).toEqual(['newer']);
+          return;
+        }
+        expect(
+          await teams.submitPlan('replacement', 'run-alice', 'second'),
+        ).toContain('revision 2');
+      }
+      expect(teams.plan('original')?.run.state).toBe('cancelled');
+      expect(teams.plan('replacement')?.run.state).toBe('waiting');
+    },
+  );
+
+  it('refuses a fresh submission whose head changes while publishing without cancelling the newer plan', async () => {
+    await member();
+    await teams.submitPlan('original', 'run-alice', 'first');
+    let raced = false;
+    const racing = new HostedTeamSession(
+      {
+        authority: session.authority,
+        resources: {
+          ...session.resources,
+          read: session.resources.read.bind(session.resources),
+          publish: async (
+            ...args: Parameters<typeof session.resources.publish>
+          ) => {
+            const result = await session.resources.publish(...args);
+            if (!raced) {
+              raced = true;
+              await settle('run-alice');
+              await children.sendToChild({
+                taskId: children.taskIdOf('run-alice'),
+                text: 'next',
+                messageId: 'next',
+                continuationRunId: 'next',
+                executionCallId: 'next',
+                closing: false,
+              });
+              await teams.submitPlan('newer', 'next', 'third');
+            }
+            return result;
+          },
+        },
+      },
+      sessionKey,
+      children,
+    );
+    await expect(
+      racing.submitPlan('stale', 'run-alice', 'second'),
+    ).rejects.toThrow('no longer the running');
+    expect(teams.plan('newer')).toMatchObject({
+      planRevision: 2,
+      run: { state: 'waiting' },
+    });
+    expect(teams.plan('stale')).toBeUndefined();
+  });
+
+  it('supersedes only from the current run and withdraws on finished-member shutdown', async () => {
+    await member();
+    await teams.submitPlan('submit-1', 'run-alice', 'first');
+    await teams.submitPlan('submit-2', 'run-alice', 'second');
+    expect(teams.plan('submit-1')?.run.state).toBe('cancelled');
+    await settle('run-alice');
+    await teams.run('request_shutdown', { to: 'alice' }, 'shutdown');
+    expect(teams.plan('submit-2')?.run.state).toBe('cancelled');
+    expect(await teams.submitPlan('submit-1', 'run-alice', 'first')).toContain(
+      'revision 1',
+    );
+    expect(teams.plans()).toHaveLength(2);
+  });
+
+  it('preflights closing before settlement and recovers an undelivered decision', async () => {
+    await member();
+    await teams.submitPlan('submit-1', 'run-alice', 'read');
+    await settle('run-alice');
+    await expect(
+      teams.run(
+        'team_plan_approval',
+        { request_id: 'submit-1', action: 'approve' },
+        'closing',
+        undefined,
+        { closing: true },
+      ),
+    ).rejects.toThrow();
+    expect(teams.plan('submit-1')?.run.state).toBe('waiting');
+    const failing = new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      {
+        requestStop: children.requestStop.bind(children),
+        sendToChild: async (params) =>
+          params.preflight
+            ? children.sendToChild(params)
+            : { kind: 'refused', reason: 'capacity changed' },
+      },
+    );
+    const answer = await failing.run(
+      'team_plan_approval',
+      { request_id: 'submit-1', action: 'approve' },
+      'split',
+    );
+    expect(answer).toContain('submit-1');
+    expect(answer).toContain('stopped before alice was continued');
+    expect(teams.plan('submit-1')?.decision).toBe('approved');
+    expect(children.record('split')).toBeUndefined();
+    expect(
+      await teams.run(
+        'team_plan_approval',
+        { request_id: 'submit-1', action: 'approve' },
+        'split',
+      ),
+    ).toBe(answer);
+    expect(children.record('split')).toBeUndefined();
+  });
+
+  it('recovers a real never-started plan continuation without launching it again', async () => {
+    await member();
+    await teams.submitPlan('never-started-plan', 'run-alice', 'read');
+    await settle('run-alice');
+    const args = { request_id: 'never-started-plan', action: 'approve' };
+    await teams.run('team_plan_approval', args, 'decision-run');
+    await children.settleFailed('decision-run', {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+    expect(children.record('decision-run')?.run.execution).toBe(
+      'not_started_proven',
+    );
+    const recovered = new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      children,
+    );
+    const before = session.authority.extensionRecordsInDomain('child_run');
+    const evidence = await recovered.planDecisionEvidence('decision-run');
+    expect(evidence).toContain('continuation never started');
+    expect(evidence).toContain('send_message');
+    expect(evidence).toContain('request_id "never-started-plan"');
+    expect(evidence).not.toContain('member was continued');
+    expect(
+      await recovered.run('team_plan_approval', args, 'decision-run'),
+    ).toBe(evidence);
+    expect(await recovered.planDecisionEvidence('unrelated')).toBeUndefined();
+    expect(session.authority.extensionRecordsInDomain('child_run')).toEqual(
+      before,
+    );
+    expect(await recovered.run('task_list', {}, 'list-recovered')).toContain(
+      'never-started-plan',
+    );
+  });
+
+  it('does not deliver a stale decision after the head changes following preflight', async () => {
+    await member();
+    await teams.submitPlan('race-plan', 'run-alice', 'read');
+    await settle('run-alice');
+    const racing = new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      {
+        requestStop: children.requestStop.bind(children),
+        sendToChild: async (params) => {
+          if (!params.preflight) {
+            await children.sendToChild({
+              taskId: children.taskIdOf('run-alice'),
+              text: 'another instruction',
+              messageId: 'race-message',
+              continuationRunId: 'race-head',
+              executionCallId: 'race-head',
+              closing: false,
+            });
+            await settle('race-head');
+          }
+          return children.sendToChild(params);
+        },
+      },
+    );
+    const answer = await racing.run(
+      'team_plan_approval',
+      { request_id: 'race-plan', action: 'approve' },
+      'stale',
+    );
+    expect(answer).toContain('stopped before alice was continued');
+    expect(children.record('race-head')).toBeDefined();
+    expect(children.record('stale')).toBeUndefined();
+    expect(
+      session.authority.extensionRecordsInDomain('session_message'),
+    ).toHaveLength(0);
+    expect(teams.plan('race-plan')?.decision).toBe('approved');
+  });
+
+  it.each(['request_shutdown', 'team_delete'] as const)(
+    'allows %s with historical waiting plans while the plan gate is off',
+    async (tool) => {
+      await member();
+      await teams.submitPlan('historical', 'run-alice', 'read');
+      if (tool === 'team_delete') await settle('run-alice');
+      planGate.enabled = false;
+      await expect(
+        teams.run(
+          tool,
+          tool === 'request_shutdown' ? { to: 'alice' } : {},
+          'cleanup',
+        ),
+      ).resolves.toContain(tool === 'request_shutdown' ? 'stopped' : 'deleted');
+      expect(teams.plan('historical')?.run.state).toBe('waiting');
+      await expect(
+        teams.submitPlan('fresh', 'run-alice', 'new'),
+      ).rejects.toThrow();
+      planGate.enabled = true;
+      const late = teams.run(
+        'team_plan_approval',
+        { request_id: 'historical', action: 'approve' },
+        'late',
+      );
+      if (tool === 'team_delete')
+        await expect(late).rejects.toThrow('not active');
+      else await expect(late).resolves.toContain('withdrawn');
+      expect(teams.plan('historical')?.decision).toBeNull();
+      expect(children.record('late')).toBeUndefined();
+    },
+  );
+
+  it('refuses gate-off shutdown of a completed member with a waiting plan without effects', async () => {
+    await member();
+    await teams.submitPlan('historical', 'run-alice', 'read');
+    await settle('run-alice');
+    const before = session.authority.extensionRecordsInDomain('child_run');
+    planGate.enabled = false;
+    expect(
+      await refusal(teams.run('request_shutdown', { to: 'alice' }, 'rollback')),
+    ).toContain('team_plan is disabled');
+    expect(teams.plan('historical')?.run.state).toBe('waiting');
+    expect(session.authority.extensionRecordsInDomain('child_run')).toEqual(
+      before,
+    );
+    expect(teams.committedBy('request_shutdown', 'rollback')).toBe(false);
+    planGate.enabled = true;
+    await expect(
+      teams.run(
+        'team_plan_approval',
+        { request_id: 'historical', action: 'approve' },
+        'after-refusal',
+      ),
+    ).resolves.toContain('member was continued');
+    expect(children.record('after-refusal')).toBeDefined();
+  });
+
+  it('refuses gate-off shutdown if normal completion outraces its stop', async () => {
+    await member();
+    await teams.submitPlan('race-shutdown-plan', 'run-alice', 'read');
+    const racing = new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      {
+        requestStop: async () => {
+          await settle('run-alice');
+          throw new ManagedSessionConflictError('settlement won');
+        },
+      },
+    );
+    planGate.enabled = false;
+    expect(
+      await refusal(
+        racing.run('request_shutdown', { to: 'alice' }, 'race-shutdown'),
+      ),
+    ).toContain('team_plan is disabled');
+    expect(teams.plan('race-shutdown-plan')?.run.state).toBe('waiting');
+    expect(children.record('run-alice')?.stopRequested).toBe(false);
+    expect(racing.committedBy('request_shutdown', 'race-shutdown')).toBe(false);
+  });
+
+  it('recognizes only the shutdown call that durably withdrew a completed member plan', async () => {
+    await member();
+    await teams.submitPlan('historical', 'run-alice', 'read');
+    await settle('run-alice');
+    await teams.run('request_shutdown', { to: 'alice' }, 'withdraw-only');
+    expect(
+      session.authority.committedExtensionOperation(
+        'commitChildRunRecord',
+        'shutdown:withdraw-only',
+      ),
+    ).toBeUndefined();
+    const recovered = new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      children,
+    );
+    expect(recovered.committedBy('request_shutdown', 'withdraw-only')).toBe(
+      true,
+    );
+    expect(recovered.committedBy('request_shutdown', 'unrelated')).toBe(false);
+  });
+
+  it('bounds escaped plans and feedback before writing', async () => {
+    await member();
+    await expect(
+      teams.submitPlan('too-big', 'run-alice', '<'.repeat(7000)),
+    ).rejects.toThrow('byte_limit');
+    expect(teams.plans()).toHaveLength(0);
+    expect(
+      hostedTeamArgumentError('team_plan_approval', {
+        request_id: 'x',
+        action: 'approve',
+        message: '界'.repeat(1366),
+      }),
+    ).toContain('4096');
+  });
+});
 
 describe('team lifecycle', () => {
   it('opens one team named in the Legacy form, keyed by its call', async () => {
@@ -938,6 +1499,118 @@ describe('the board', () => {
     expect(
       await refusal(teams.run('task_list', { owner: '***' }, 'prompt:l')),
     ).toContain('Cannot filter by owner');
+  });
+
+  // A well-formed number with no task is a refusal, never a crash:
+  // existence is proved before the ownership probe reads the task.
+  it('refuses a well-formed addBlocks target that does not exist instead of crashing', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'one', description: 'do one' },
+      'prompt:t1',
+    );
+    expect(
+      await refusal(
+        teams.memberTaskUpdate('alice', 'cmd_missing', {
+          taskId: '1',
+          addBlocks: ['999'],
+        }),
+      ),
+    ).toBe('Cannot update task #1: referenced task #999 not found.');
+  });
+
+  // A partially committed task_update replays its remaining places
+  // against the board as it stands now: the leader legally made task 2
+  // block task 1 after the subject place committed, so the replayed
+  // edge would close a cycle — it rides the receipt, never the fault.
+  it('replays the remaining addBlocks places against the board as it stands now', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'one', description: 'do one' },
+      'prompt:t1',
+    );
+    await teams.run(
+      'task_create',
+      { subject: 'two', description: 'do two' },
+      'prompt:t2',
+    );
+    // The original call committed only the subject place.
+    await teams.memberTaskUpdate('alice', 'cmd_board', {
+      taskId: '1',
+      subject: 'renamed',
+    });
+    await teams.run(
+      'task_update',
+      { taskId: '1', addBlockedBy: ['2'] },
+      'prompt:leader-edge',
+    );
+    const result = await teams.memberTaskUpdate('alice', 'cmd_board', {
+      taskId: '1',
+      subject: 'renamed',
+      addBlocks: ['2'],
+    });
+    expect(result).toContain('Not committed');
+    expect(result).toContain('dependency cycle');
+    const two = parseTeamTask(
+      session.authority.extensionRecord('team_task', 'prompt:call-team#2')!
+        .record,
+    );
+    expect(two.blockedBy).toHaveLength(0);
+  });
+
+  // The blocker-count limit follows the same replay rule: the remaining
+  // place is validated against the current board, so a crowded target
+  // gets its Not-committed entry instead of a fault escaping execute.
+  it('replays a remaining addBlocks place by its blocker cap against the current board', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'one', description: 'do one' },
+      'prompt:t1',
+    );
+    await teams.run(
+      'task_create',
+      { subject: 'two', description: 'do two' },
+      'prompt:t2',
+    );
+    // The original call committed only the subject place.
+    await teams.memberTaskUpdate('alice', 'cmd_cap', {
+      taskId: '1',
+      subject: 'renamed',
+    });
+    // The leader filled task 2 with the maximum since: 64 blockers.
+    const blockers: string[] = [];
+    for (let index = 0; index < 64; index += 1) {
+      const number = index + 3;
+      blockers.push(`${number}`);
+      await teams.run(
+        'task_create',
+        { subject: `filler-${number}`, description: 'f' },
+        `prompt:cap-${number}`,
+      );
+    }
+    await teams.run(
+      'task_update',
+      { taskId: '2', addBlockedBy: blockers },
+      'prompt:cap-fill',
+    );
+    const result = await teams.memberTaskUpdate('alice', 'cmd_cap', {
+      taskId: '1',
+      subject: 'renamed',
+      addBlocks: ['2'],
+    });
+    expect(result).toContain('Not committed');
+    expect(result).toContain('would exceed 64 blockers');
+    const two = parseTeamTask(
+      session.authority.extensionRecord('team_task', 'prompt:call-team#2')!
+        .record,
+    );
+    expect(two.blockedBy).toHaveLength(64);
   });
 
   it('opens new tasks only in an active team', async () => {

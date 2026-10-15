@@ -96,6 +96,7 @@ export interface RecoverySessionSource {
     readonly retiredAt: number;
     readonly recoveryProtected: boolean;
   } | null;
+  readonly retiredHead?: RecoverySessionSource['head'];
   readonly head: {
     readonly tenantId: string;
     readonly workspaceId: string;
@@ -324,6 +325,36 @@ export async function verifyRecoverySession(
             head.writerId === null &&
             head.writerLeaseUntil === null))),
     'invalid pinned retirement',
+  );
+  const retiredHead = source.retiredHead;
+  requireValue(
+    retiredHead == null ||
+      (head === null &&
+        retirement != null &&
+        retiredHead.tenantId === source.binding.tenantId &&
+        retiredHead.sessionId === source.sessionId &&
+        typeof retiredHead.workspaceId === 'string' &&
+        retiredHead.workspaceId.length > 0 &&
+        retiredHead.state === 'DELETED' &&
+        [1, 2].includes(retiredHead.storageVersion) &&
+        retiredHead.writerId === null &&
+        retiredHead.writerLeaseUntil === null &&
+        retiredHead.latestCheckpointResourceId === null &&
+        retiredHead.recoveryStatus === 'READY' &&
+        Number.isSafeInteger(retiredHead.writerGeneration) &&
+        retiredHead.writerGeneration >= 0 &&
+        Number.isSafeInteger(retiredHead.journalRevision) &&
+        retiredHead.journalRevision >= 0 &&
+        retiredHead.compactedThroughRevision === retiredHead.journalRevision &&
+        Number.isSafeInteger(retiredHead.committedSequence) &&
+        retiredHead.committedSequence >= 0 &&
+        Number.isSafeInteger(retiredHead.activationEpoch) &&
+        retiredHead.activationEpoch >= 0 &&
+        ((retiredHead.lastCommitDigest === null &&
+          retiredHead.committedSequence === 0) ||
+          (typeof retiredHead.lastCommitDigest === 'string' &&
+            /^[0-9a-f]{64}$/u.test(retiredHead.lastCommitDigest)))),
+    'invalid collected retirement head',
   );
   if (purpose === 'migration') {
     requireValue(Boolean(head || retirement), 'uninitialized migration member');

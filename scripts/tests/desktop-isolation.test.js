@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Three agreements nothing else in the suite reads, all of which fail green.
+// Two agreements nothing else in the suite reads, all of which fail green.
 //
 // 1. `scripts/check-desktop-isolation.js` keeps a `nativePrefixes` list, and
 //    the root workspace manifests keep a `!packages/*` negation per native
@@ -16,19 +16,8 @@
 //    guard to keep covering the package. Deleting the added line changes
 //    neither the guard's output nor its exit code, so only this file notices.
 //
-// 2. The `desktop_shell` job in `ci.yml` names the crate directory in five
-//    places -- the changed-files filter, the `Cargo.toml` existence guard and
-//    its `::notice::` text, the rust-cache `workspaces:`, and two
-//    `working-directory:` values. They have to name the same directory as each
-//    other and a directory that exists, or the job skips and reports success
-//    having compiled nothing.
-//
-// 3. That job's changed-files filter lists both updater-feed scripts.
-//    `packages/desktop/scripts/test-release.js` is the only test either of them
-//    has and it runs in this job, so a filter naming one script and not the
-//    other lets a PR that edits only the unlisted one skip its own test and
-//    still report green. The filter is only worth pinning together with the
-//    lane it gates, so the same test asserts that lane still runs the script.
+// 2. The daily Desktop job must agree on the crate directory across its
+//    presence guard, cache and working directories, and retain release tests.
 //
 // The npm/pnpm mirror of the negation list is already pinned by
 // `package-scripts.test.js` ("mirrors the npm workspace boundaries in
@@ -78,7 +67,10 @@ const npmNegations = JSON.parse(read('package.json'))
   .map((entry) => entry.slice(1));
 
 const ci = parseYaml(read('.github', 'workflows', 'ci.yml'));
-const desktopJob = ci.jobs.desktop_shell;
+const desktop = parseYaml(
+  read('.github', 'workflows', 'desktop-packaging-check.yml'),
+);
+const desktopJob = desktop.jobs.desktop_shell;
 const stepNamed = (name) =>
   desktopJob.steps.find((step) => step.name === name) ??
   desktopJob.steps.find((step) => String(step.uses ?? '').includes(name));
@@ -133,9 +125,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
   const filterRun = String(filterStep?.run ?? '');
 
   it('still carries the Cargo.toml existence guard, and it clears changed', () => {
-    // Not redundant with the filter: the filter also matches on ci.yml and
-    // desktop-release.yml changing, which a head with no crate at all can do.
-    // That is the #8132 failure the job's header comment describes.
+    // Manual dispatch may select a ref that predates the desktop crate.
     // The condition is only half the guard: without the assignment inside its
     // own body, every gated step still runs against a crate that is not there.
     const guardBody =
@@ -152,13 +142,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
     ).toMatch(/^\s*changed=false\s*$/mu);
   });
 
-  it('names one crate directory in all five places, and it exists', () => {
-    const filterAlternative = /\^\(([^|]+)\|/u.exec(filterRun)?.[1];
-    expect(
-      filterAlternative,
-      'changed-files filter lost its path alternative',
-    ).toBeDefined();
-
+  it('names one existing crate directory in every step', () => {
     const guardPath = /! -f (\S+)\/src-tauri\/Cargo\.toml/u.exec(
       filterRun,
     )?.[1];
@@ -177,9 +161,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       .filter((value) => value !== undefined)
       .map(String);
 
-    expect(filterAlternative).toBeDefined();
     const sites = {
-      'changed-files filter': filterAlternative.replace(/\/$/u, ''),
       'Cargo.toml guard': guardPath,
       'guard ::notice::': noticePath,
       'rust-cache workspaces': cacheRoot,
@@ -189,7 +171,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
     };
 
     // Every site must resolve; an undefined one means the parser fell behind a
-    // rewrite of ci.yml, which must not read as agreement.
+    // rewrite of the workflow, which must not read as agreement.
     for (const [site, value] of Object.entries(sites)) {
       expect(
         value,
@@ -201,62 +183,29 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       JSON.stringify(sites, null, 2),
     ).toBe(1);
 
-    const crateDir = sites['changed-files filter'];
+    const crateDir = sites['Cargo.toml guard'];
     expect(
       existsSync(join(root, crateDir, 'src-tauri', 'Cargo.toml')),
       `${crateDir}/src-tauri/Cargo.toml does not exist, so every gated step in desktop_shell skips and the job reports success having compiled nothing.`,
     ).toBe(true);
-    // The filter is `grep -Eq '^(<alternative>|...)'` over the PR's changed
-    // file names, so the alternative is a bare path prefix and has to end in
-    // `/`: without it, `packages/desktop` also matches a sibling such as
-    // `packages/desktop-extra/`, and the job runs on heads that never touch
-    // the crate. Building a path out of `crateDir` -- this same alternative
-    // with the slash stripped -- and comparing it back proves nothing.
-    expect(
-      filterAlternative.endsWith('/'),
-      `the filter alternative ${filterAlternative} has no trailing slash, so the changed-files filter also matches sibling paths that merely start with it`,
-    ).toBe(true);
   });
 
-  it('lists both updater-feed scripts, so either one triggers the lane that tests them', () => {
-    // Read the alternatives out of the `grep -Eq '^(...)'` call instead of
-    // searching the whole run script. A substring match cannot tell an
-    // alternative of the anchored ERE from the same text in one of that step's
-    // comment lines, and it does not pin the `-E` mode the pattern's `\.`, `|`
-    // and `^(…)` depend on: under `grep -Fq` they are literals, the group
-    // never matches, every PR gets changed=false, and the job reports success
-    // having compiled nothing.
-    const pattern = /grep -Eq '\^\((.*)\)'/u.exec(filterRun)?.[1];
-    expect(
-      pattern,
-      "the changed-files filter is no longer an anchored `grep -Eq '^(...)'` alternation, so its `\\.` escapes and `|` separators are literals and no changed file ever matches",
-    ).toBeDefined();
-    const alternatives = pattern.split('|');
-    for (const script of [
-      'create-desktop-update-manifest',
-      'create-electron-bridge-manifest',
-    ]) {
-      expect(
-        alternatives,
-        `the changed-files filter does not list ${script}.mjs as an alternative, so a PR touching only that script skips 'Run desktop release tests' and reports green having tested nothing`,
-      ).toContain(`\\.github/scripts/${script}\\.mjs`);
-    }
+  it('runs daily or manually without registering PR desktop jobs', () => {
+    expect(ci.jobs.desktop_shell).toBeUndefined();
+    expect(Object.keys(desktop.on).sort()).toEqual([
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(desktop.on.schedule).toEqual([{ cron: '0 16 * * *' }]);
+    expect(desktopJob.defaults.run.shell).toBe('bash');
+  });
 
-    // The filter is only the first link: the mechanism that closes #12806 is
-    // filter matches -> desktop_shell runs -> `Run desktop release tests`
-    // executes test-release.js -> the matrix/feed parity assert fires. Pin the
-    // last two links as well, or the filter can gate a lane that tests nothing.
-    // `toContain` on the changed-files conjunct, not equality on the whole
-    // `if:` -- that gate also carries `runner.os == 'Linux'`, which the
-    // windows-2022 leg of the job matrix legitimately does not satisfy.
+  it('runs release tests whenever the desktop crate is present', () => {
+    expect(filterRun).toMatch(/^changed=true$/mu);
     const lane = stepNamed('Run desktop release tests');
-    expect(
-      String(lane?.run ?? ''),
-      'desktop_shell no longer runs test-release.js, so the changed-files filter gates a lane that tests nothing',
-    ).toContain('node scripts/test-release.js');
-    expect(
-      String(lane?.if ?? ''),
-      'the test-release.js lane is no longer gated by the filter this test pins, so the two can drift apart silently',
-    ).toContain("steps.filter.outputs.changed == 'true'");
+    expect(lane.run).toBe('node scripts/test-release.js');
+    expect(lane.if).toBe(
+      "${{ steps.filter.outputs.changed == 'true' && runner.os == 'Linux' }}",
+    );
   });
 });
