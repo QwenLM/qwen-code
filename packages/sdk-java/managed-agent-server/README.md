@@ -778,6 +778,23 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+After a credential-key rotation, keep each prior key in deployment config
+until no persisted Runtime binding references its key ID:
+
+```yaml
+qwen:
+  managed-agent:
+    runtime-broker:
+      credential-key-id: local-dev-v2
+      credential-key: replace-with-base64-encoded-32-byte-v2-key
+      previous-credential-keys:
+        local-dev-v1: replace-with-base64-encoded-32-byte-v1-key
+```
+
+New credentials use only the active key. Reads select the active or previous
+key by the ID stored with the ciphertext; an unavailable ID fails closed. The
+server does not re-encrypt old rows during reads. See the [rotation design](../../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
+
 Two optional knobs change how the Broker listens and how long it waits for a
 dispatched v3 execution's result:
 
@@ -831,9 +848,11 @@ fails before traffic is accepted.
 The Hosted file profile connects through the private Broker endpoint, which
 defaults to `http://127.0.0.1:4182`. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
-it does not fall back to in-memory repositories. The credential key must decode
-to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
-credentials with AES-256-GCM. By default, local worker ownership is durable:
+it does not fall back to in-memory repositories. The active credential key and
+every configured previous key must decode to exactly 32 bytes and protect
+persisted Runtime seeds and static Runtime credentials with AES-256-GCM. New
+writes use only the active key; reads select the exact key ID stored with the
+ciphertext. By default, local worker ownership is durable:
 the Broker registers every launch and a restarted Broker adopts the same live
 worker. This requires Linux and fails startup elsewhere; on such hosts set
 `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with

@@ -24,7 +24,7 @@ sha256sum --check SHA256SUMS
 - Node.js 满足 `compatibility.node`，Qwen Code 匹配 `compatibility.qwenCodeVersion`。
 - MySQL 8，使用空数据库或由旧版兼容参考分发产物管理的数据库。
 - Runtime state 和授权 Workspace 使用私有、持久目录。
-- 数据库凭据、Runtime credential key 和 Harness token 稳定保存于压缩包之外。
+- 数据库凭据、Runtime credential key ring 和 Harness token 稳定保存于压缩包之外。
 
 Java 压缩包不包含 npm CLI。请单独安装或构建精确兼容的 Qwen Code revision，并找到供 Runtime worker 使用的 `dist/cli.js`。
 
@@ -90,13 +90,29 @@ export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 
 1. 下载并校验新压缩包，读取新旧两个 manifest。在改动运行中部署前，确认新的 Qwen Code/Harness、Java、协议与数据库要求。
 2. 停止新的入口准入，按照部署既有 drain 流程等待已准入工作完成结算。
-3. 备份 MySQL、`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`、Runtime credential key 和精确旧版分发产物。升级期间不要轮换 credential key。
+3. 备份 MySQL、`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`、完整 Runtime credential key ring 和精确旧版分发产物。分发产物升级期间不要轮换 credential key。
 4. 停止 Java 服务与 Hosted Harness，保留 Workspace 和 durable Runtime state。
 5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。
 6. 使用相同数据库和 durable 配置启动新版 `bin/qwen-managed-agent-server`，由 Flyway 向前迁移 schema。
 7. 要求 actuator 健康检查通过，读取一个既有 Session 与历史，再完成一个新的无工具 Turn，之后才能恢复入口流量。任何可选工具 capability 都必须在重新验收后才能开启。
 
 不支持数据库降级。如果在恢复流量前启动或验证失败，应修正配置并重试同一产物。如需退回到 manifest 声明较旧 schema 范围的版本，必须在接受任何新写入前同时恢复升级前的数据库与 Runtime-state 备份；不得假设旧 server 可以直接运行在已迁移数据库上。
+
+## 轮换 Runtime credential key
+
+请把 credential key 轮换与分发产物升级分开执行。先备份数据库和当前密钥，再配置新的 active key pair，并把旧 key pair 保留在 `previous-credential-keys` 下：
+
+```yaml
+qwen:
+  managed-agent:
+    runtime-broker:
+      credential-key-id: reference-v2
+      credential-key: <base64-encoded-32-byte-v2-key>
+      previous-credential-keys:
+        reference-v1: <base64-encoded-32-byte-v1-key>
+```
+
+重启单 Java control plane，验证既有 binding 可以加载，并确认新 binding 记录写入 `reference-v2`。新 secret 只使用 active key；旧记录继续由其已记录的 key ID 加密。在数据库证据证明没有持久化凭据再引用 `reference-v1` 之前，持续配置该密钥。服务器不会在读取时重加密旧记录，删除仍被引用的密钥会使这些记录不可读。
 
 ## 运维恢复
 
