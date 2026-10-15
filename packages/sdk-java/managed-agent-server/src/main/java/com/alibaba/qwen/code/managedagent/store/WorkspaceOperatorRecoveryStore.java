@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -251,7 +252,7 @@ public final class WorkspaceOperatorRecoveryStore {
         if (binding == null || binding.getGeneration() != generation
                 || !binding.getRequest().isManagedContext()
                 || binding.getResourceHandle() == null
-                || !"local-process".equals(binding.getResourceHandle().getKind())
+                || !LocalProcessRuntimeProvisioner.KIND.equals(binding.getResourceHandle().getKind())
                 || binding.getResourceHandle().getVersion() != 2
                 || binding.getProvisionSeed() == null || binding.getLease() == null) {
             throw blocked();
