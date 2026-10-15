@@ -22,7 +22,6 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import type { ChatCompletionToolWithCache } from './types.js';
 import {
   DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
@@ -1386,7 +1385,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       // Neither the last message nor the tools get cache control when not streaming.
       expect(result.messages[3].role).toBe('user');
       expect(result.messages[3].content).toBe('Hello!');
-      const tools = result.tools as ChatCompletionToolWithCache[];
+      const tools = result.tools as Array<{ cache_control?: unknown }>;
       expect(tools).toBeDefined();
       expect(tools).toHaveLength(1);
       expect(tools[0].cache_control).toBeUndefined();
@@ -1406,7 +1405,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result.messages[3].content).toEqual([cachedText('Hello!')]);
       // DashScope ignores cache_control on tool definitions; the system
       // marker already covers them because they render before the system.
-      const tools = result.tools as ChatCompletionToolWithCache[];
+      const tools = result.tools as Array<{ cache_control?: unknown }>;
       expect(tools).toBeDefined();
       expect(tools).toHaveLength(1);
       expect(tools[0].cache_control).toBeUndefined();
