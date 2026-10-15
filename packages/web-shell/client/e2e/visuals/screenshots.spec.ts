@@ -762,6 +762,25 @@ for (const theme of THEMES) {
           ),
         }))
         .toEqual({ wrapper: 'plaintext', code: 'plaintext' });
+      const lineInsets = await highlightedCode
+        .locator('code .line')
+        .evaluateAll((lines) => {
+          const container = lines[0]?.closest('pre');
+          if (!container) return [];
+          const containerRect = container.getBoundingClientRect();
+          return lines.slice(0, 2).map((line) => {
+            const range = document.createRange();
+            range.selectNodeContents(line);
+            const lineRect = range.getBoundingClientRect();
+            return {
+              left: lineRect.left - containerRect.left,
+              right: containerRect.right - lineRect.right,
+            };
+          });
+        });
+      expect(lineInsets).toHaveLength(2);
+      expect(lineInsets[0]!.right).toBeLessThanOrEqual(1);
+      expect(lineInsets[1]!.left).toBeLessThanOrEqual(1);
       await captureScreenshot(page, `markdown-bidirectional-settled-${theme}`);
     });
 

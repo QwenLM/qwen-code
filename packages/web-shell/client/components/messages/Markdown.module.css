@@ -278,6 +278,7 @@
 }
 
 .codeBlockContent :global(.shiki) code {
+  unicode-bidi: plaintext;
   display: block;
   white-space: pre-wrap;
   word-break: break-word;

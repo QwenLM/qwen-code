@@ -40,6 +40,9 @@ describe('Markdown bidirectional text contract', () => {
     expect(rule('.content')).toMatch(/unicode-bidi:\s*plaintext;/);
     expect(rule('.codeBlockContent')).toMatch(/unicode-bidi:\s*plaintext;/);
     expect(rule('.codeBlockContent pre')).toMatch(/unicode-bidi:\s*plaintext;/);
+    expect(rule('.codeBlockContent :global(.shiki) code')).toMatch(
+      /unicode-bidi:\s*plaintext;/,
+    );
     expect(rule('.inlineCode')).toMatch(/unicode-bidi:\s*isolate;/);
 
     expect(
