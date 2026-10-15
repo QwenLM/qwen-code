@@ -574,6 +574,13 @@ public class WorkspaceExecutionStore {
                 "Workspace execution authority is unavailable.", false);
     }
 
+    // Same structural refusal, with the discarded cause kept for the log:
+    // without it a failed mount verification reports nothing but the verdict.
+    public static RuntimeBrokerException unavailable(Throwable cause) {
+        return new RuntimeBrokerException(409, "workspace_unavailable",
+                "Workspace execution authority is unavailable.", false, cause);
+    }
+
     // A probe's momentary I/O failure is not the structural verdict the
     // terminal refusal promises: it retries through the delivery machine,
     // keeping the cause for the log. Structural refusals keep

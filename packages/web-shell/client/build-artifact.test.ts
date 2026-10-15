@@ -608,6 +608,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toMatch(/["'`]settings\./);
   });
 
+  it('keeps MCP App message review strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]mcpApp\.message\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('mcpApp.message.title');
+    expect(interactive).toContain('Review App message');
+    expect(interactive).toContain('审阅 App 消息');
+  });
+
   it('keeps trajectory filter strings in the interactive entry only', () => {
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
