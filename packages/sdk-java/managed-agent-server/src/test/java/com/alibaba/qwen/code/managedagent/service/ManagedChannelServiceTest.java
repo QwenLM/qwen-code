@@ -185,6 +185,73 @@ class ManagedChannelServiceTest {
                 Integer.class, TENANT, channel)).isEqualTo(1);
     }
 
+    // A TAB in an inbound subject survives the producer chain's
+    // [\r\n\0] sanitization, and the create route refuses control
+    // characters in a title — folding them to spaces at the derivation
+    // keeps the route's Session creatable instead of dropping the event as
+    // a deterministic refusal the adapter never re-drives.
+    @Test
+    void bindsARouteWhoseSubjectCarriesAControlCharacter() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                new InboundEventRequest(1, "1700:99", 1,
+                        new RouteScope("chat_thread", null,
+                                "alice@example.com", "thread-9"),
+                        "alice@example.com", "alice@example.com", "thread-9",
+                        "Build\tstatus", "check the build", List.of(), null));
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(instances.findBinding(TENANT, channel, admitted.routeId()))
+                .isPresent();
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, TENANT,
+                admitted.sessionId())).isEqualTo("email: Build status");
+    }
+
+    @Test
+    void bindsARouteWhoseSenderIdCarriesAControlCharacter() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                new InboundEventRequest(1, "1700:98", 1,
+                        new RouteScope("chat_thread", null,
+                                "alice@example.com", "thread-8"),
+                        "alice\t@example.com", "alice@example.com",
+                        "thread-8", null, "check the build", List.of(),
+                        null));
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(instances.findBinding(TENANT, channel, admitted.routeId()))
+                .isPresent();
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, TENANT,
+                admitted.sessionId())).isEqualTo("email: alice @example.com");
+    }
+
+    // The platform name composes the same title and is validated only as
+    // @NotBlank @Size(max = 64) at registration — no character class — so
+    // a TAB in it refuses the route's Session exactly like an unfolded
+    // subject, and with no binding row written every later event of the
+    // route re-drives the same refusal: the platform folds too.
+    @Test
+    void bindsARouteWhosePlatformCarriesAControlCharacter() {
+        String tabbed = "tab-" + UUID.randomUUID();
+        service.register(TENANT, tabbed, new RegisterChannelRequest(
+                "emai\til", "agent@example.com", 1, ACTOR, WORKSPACE, ".",
+                new ChannelPolicy("emai\til", "allowlist",
+                        List.of("alice@example.com"), "followup")));
+        InboundAdmission admitted = service.submitInbound(TENANT, tabbed,
+                new InboundEventRequest(1, "1700:97", 1,
+                        new RouteScope("chat_thread", null,
+                                "alice@example.com", "thread-7"),
+                        "alice@example.com", "alice@example.com", "thread-7",
+                        "Build status", "check the build", List.of(), null));
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(instances.findBinding(TENANT, tabbed, admitted.routeId()))
+                .isPresent();
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, TENANT,
+                admitted.sessionId())).isEqualTo("emai il: Build status");
+    }
+
     @Test
     void recoversAnAdmissionWhoseAnswerWasLost() {
         // The Harness committed, the control plane died before marking the

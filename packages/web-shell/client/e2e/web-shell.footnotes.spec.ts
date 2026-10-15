@@ -602,7 +602,7 @@ test('source locator demo delegates the card link to its host panel', async ({
   expect(footerMetrics).toMatchObject({
     citationFontSize: '11px',
     citationIconWidth: 14,
-    copyIconWidth: 14,
+    copyIconWidth: 16,
     timeFontSize: '11px',
   });
   expect(footerMetrics.iconCenterOffset).toBe(0);
