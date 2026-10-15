@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.AgentDefinitionRequest;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -34,7 +31,6 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -69,6 +65,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ManagedAgentMySqlIT {
@@ -1939,7 +1938,7 @@ class ManagedAgentMySqlIT {
         var store =
                 new ManagedAgentDefinitionStore(
                         new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
-                                source));
+                                source), new RequestDigests());
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -1990,7 +1989,7 @@ class ManagedAgentMySqlIT {
         var store =
                 new ManagedAgentDefinitionStore(
                         new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
-                                source));
+                                source), new RequestDigests());
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -2021,7 +2020,7 @@ class ManagedAgentMySqlIT {
                 .load()
                 .migrate();
         var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
-        var store = new ManagedAgentDefinitionStore(jdbc);
+        var store = new ManagedAgentDefinitionStore(jdbc, new RequestDigests());
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -2053,7 +2052,7 @@ class ManagedAgentMySqlIT {
         var winnerSource = dataSource();
         var winnerService =
                 new ManagedAgentDefinitionService(
-                        new ManagedAgentDefinitionStore(new JdbcTemplate(winnerSource)),
+                        new ManagedAgentDefinitionStore(new JdbcTemplate(winnerSource), new RequestDigests()),
                         new RequestDigests(),
                         new ObjectMapper());
         var winnerTransactions =
@@ -2078,7 +2077,7 @@ class ManagedAgentMySqlIT {
                 };
         var racingService =
                 new ManagedAgentDefinitionService(
-                        new ManagedAgentDefinitionStore(racingJdbc),
+                        new ManagedAgentDefinitionStore(racingJdbc, new RequestDigests()),
                         new RequestDigests(),
                         new ObjectMapper());
 

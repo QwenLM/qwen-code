@@ -11,6 +11,14 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
+import jakarta.annotation.PreDestroy;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -25,21 +33,15 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import jakarta.annotation.PreDestroy;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
 
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.APPLIED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.APPLYING;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.BLOCKED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.CONFLICTED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARD;
-import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARD_PINNED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARDED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARDING;
+import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARD_PINNED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.FAILED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.MERGE;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.MERGED;
@@ -467,7 +469,7 @@ public class ChildWorkspaceService {
         if (pinFailure.get() != null) {
             // The row itself records that a pin was owed and could not be
             // written: on a non-retryable failure nothing else names the loss.
-            discarded.put("last_error", truncate(pinFailure.get()));
+            discarded.put("last_error", StringUtils.truncate(pinFailure.get(), 1024));
         }
         advance(claimed, DISCARDED, discarded);
     }
@@ -560,7 +562,7 @@ public class ChildWorkspaceService {
             return;
         }
         long backoff = Math.min(MAX_BACKOFF_MS, 1_000L << Math.min(latest.attempts(), 6));
-        store.retry(latest, owner, true, clock.get() + backoff, truncate(message), clock.get());
+        store.retry(latest, owner, true, clock.get() + backoff, StringUtils.truncate(message, 1024), clock.get());
     }
 
     /**
@@ -576,7 +578,7 @@ public class ChildWorkspaceService {
         boolean landed = APPLIED.equals(latest.state()) || "merged".equals(latest.outcomeCode());
         String outcome = landed ? "merged" : latest.outcomeCode() != null ? latest.outcomeCode() : code;
         java.util.Map<String, Object> columns = columns("outcome_code", outcome,
-                "last_error", truncate(message));
+                "last_error", StringUtils.truncate(message, 1024));
         if (DISCARDING.equals(latest.state())) {
             columns.put("finish_request", null);
         }
@@ -588,9 +590,5 @@ public class ChildWorkspaceService {
         Row latest = store.find(claimed.tenantId(), claimed.parentSessionId(), claimed.childRunId());
         return latest != null && latest.claimGeneration() == claimed.claimGeneration()
                 && owner.equals(latest.claimedBy()) ? latest : null;
-    }
-
-    private static String truncate(String text) {
-        return text == null || text.length() <= 1024 ? text : text.substring(0, 1024);
     }
 }
