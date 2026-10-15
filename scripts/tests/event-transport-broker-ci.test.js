@@ -103,12 +103,17 @@ describe('EventTransport broker gates CI', () => {
     expect(String(java).split('\n')).toEqual(['17', '21']);
   });
 
-  it('triggers on the provisioning script on both events', () => {
-    for (const event of ['pull_request', 'push']) {
-      expect(workflow.on[event].paths).toContain(
-        'scripts/rocketmq-lite-broker.sh',
-      );
-    }
+  it('still runs the gate on its only live triggers', () => {
+    // #14205 moved the whole SDK Java workflow off pull_request/push, so the
+    // provisioning script no longer has a per-change trigger: the daily
+    // schedule is now the only run that boots the broker these steps
+    // drive, and dropping it would retire the gate with every pin above
+    // still green.
+    expect(Object.keys(workflow.on).sort()).toEqual([
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(workflow.on.schedule).toEqual([{ cron: '47 19 * * *' }]);
   });
 
   it('provisions every group the server and the gate subscribe in', () => {
