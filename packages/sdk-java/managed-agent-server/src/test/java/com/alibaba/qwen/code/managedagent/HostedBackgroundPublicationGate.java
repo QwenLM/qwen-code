@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
@@ -11,6 +9,14 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.managedprobes.ProbeAdvice;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,13 +27,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * End-to-end witness for #13533 finding A1: the background Shell and
@@ -84,7 +85,6 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
  * generic; the wedge witness observes it as-is).
  */
 class HostedBackgroundPublicationGate {
-
     @TempDir
     private Path temporary;
 
@@ -217,8 +217,9 @@ class HostedBackgroundPublicationGate {
                 entry.put("directory", workspaces.get(index).resolve("child").toString());
                 entry.put("toolProfile", "hosted-workspace-shell/1");
                 entry.put("role", specs.get(index).role());
-                if (specs.get(index).shellCommand() != null)
+                if (specs.get(index).shellCommand() != null) {
                     entry.put("shellCommand", specs.get(index).shellCommand());
+                }
                 sessions.add(entry);
             }
             var registration = new ManagedAgentProperties();
