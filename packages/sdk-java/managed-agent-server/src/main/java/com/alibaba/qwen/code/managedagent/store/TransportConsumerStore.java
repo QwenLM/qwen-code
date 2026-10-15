@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 
@@ -59,7 +60,7 @@ public class TransportConsumerStore {
                         result.getString("workspace_id"),
                         result.getString("state"),
                         result.getLong("committed_sequence"),
-                        result.getTimestamp("writer_lease_until")),
+                        ManagedSchemaTime.timestamp(result, "writer_lease_until")),
                 ManagedSchemaKeys.key(tenantId), ManagedSchemaKeys.key(sessionId), tenantId, sessionId);
         if (rows.isEmpty()) {
             return Optional.empty();
@@ -102,8 +103,7 @@ public class TransportConsumerStore {
                                     Collections.nCopies(chunk.size(), "?"))
                             + ")",
                     (RowCallbackHandler) result -> {
-                        Timestamp lease = result.getTimestamp(
-                                "writer_lease_until");
+                        Timestamp lease = ManagedSchemaTime.timestamp(result, "writer_lease_until");
                         if (lease != null && lease.after(now)) {
                             held.add(result.getString("session_id"));
                         }
@@ -165,7 +165,7 @@ public class TransportConsumerStore {
     }
 
     private Timestamp databaseNow() {
-        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)",
+        Timestamp now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "",
                 Timestamp.class);
         if (now == null) {
             throw new IllegalStateException("Database time is unavailable");

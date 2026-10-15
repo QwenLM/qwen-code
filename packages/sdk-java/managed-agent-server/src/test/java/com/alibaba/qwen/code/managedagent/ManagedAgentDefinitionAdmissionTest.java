@@ -439,7 +439,7 @@ class ManagedAgentDefinitionAdmissionTest {
                                 + "\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString());
         var session = store.requireSession(tenant, receipt.get("id").asText());
-        var definitions = new com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore(jdbc);
+        var definitions = new com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore(jdbc, new RequestDigests());
         assertThat(definitions.pinnedContent(session).get("instructions"))
                 .isEqualTo("Review in Chinese.");
         var resources = new com.alibaba.qwen.code.managedagent.store.ManagedSessionStore(jdbc);
