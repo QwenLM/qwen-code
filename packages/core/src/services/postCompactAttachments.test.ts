@@ -1024,9 +1024,9 @@ describe('composePostCompactHistory', () => {
     expect(result).toHaveLength(2);
     expect(result[0].role).toBe('user');
     expect(result[result.length - 1].role).toBe('model');
-    expect(
-      result[result.length - 1].parts?.some((p) => !!p.functionCall),
-    ).toBe(false);
+    expect(result[result.length - 1].parts?.some((p) => !!p.functionCall)).toBe(
+      false,
+    );
     const summaryText = (result[0].parts ?? [])
       .map((p) => (p as { text?: string }).text ?? '')
       .join('\n');
@@ -1624,5 +1624,130 @@ describe('composePostCompactHistory — subagent snapshot', () => {
     const lateIdx = flat.indexOf('late');
     expect(earlyIdx).toBeLessThan(midIdx);
     expect(midIdx).toBeLessThan(lateIdx);
+  });
+});
+
+import { detectTurnInterruption } from '../core/turn-interruption.js';
+import { buildSessionHistoryFromConversation } from './session-api-history.js';
+import type { ChatRecord } from './chatRecordingService.js';
+import { CompressionStatus } from '../core/turn.js';
+
+describe('post-/compress history is not classified as interrupted (#14325)', () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'pca-int-'));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // Mirrors the manual /compress input: the trailing model+functionCall was
+  // already stripped, and a file read earlier produces a restoration
+  // attachment, so postAckParts is non-empty.
+  async function composeManualCompressHistory(): Promise<Content[]> {
+    const realFile = join(tmpDir, 'restored.ts');
+    writeFileSync(realFile, 'export const restored = 1;');
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'read it' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'read_file',
+              args: { file_path: realFile },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'read_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'done reading' }] },
+    ];
+    const composed = await composePostCompactHistory(history, 'SUM', {
+      workspaceRoot: tmpDir,
+    });
+    // Guard: the attachment really was emitted, so this exercises the
+    // with-attachments shape that used to end on a user entry.
+    const allText = composed
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    expect(allText).toContain('export const restored = 1;');
+    return composed;
+  }
+
+  it('live session: composed history installed via setHistory classifies as none', async () => {
+    const composed = await composeManualCompressHistory();
+    // Live recovery (Session#getRecoveryPlan) classifies chat.getHistory(),
+    // which is the composed array; no completed tool-call ids survive.
+    expect(detectTurnInterruption(composed).kind).toBe('none');
+  });
+
+  it('restored session: chat_compression record rebuilt from transcript classifies as none', async () => {
+    const composed = await composeManualCompressHistory();
+    const base = {
+      sessionId: 'session',
+      timestamp: '2026-10-15T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+    };
+    const messages: ChatRecord[] = [
+      {
+        ...base,
+        uuid: 'prompt',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: '/compress' }] },
+      },
+      {
+        ...base,
+        uuid: 'compression',
+        parentUuid: 'prompt',
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 100,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: composed,
+          completedToolCallIds: ['call-1'],
+        },
+      },
+      {
+        ...base,
+        uuid: 'output',
+        parentUuid: 'compression',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/compress',
+          outputHistoryItems: [{ type: 'info', text: 'Context compressed' }],
+        },
+      },
+    ] as ChatRecord[];
+    const built = buildSessionHistoryFromConversation({ messages });
+    expect(built.apiHistory).toEqual(composed);
+    expect(
+      detectTurnInterruption(
+        built.apiHistory,
+        built.completedToolCallIds,
+        built.trailingSystemNotifications,
+      ).kind,
+    ).toBe('none');
   });
 });
