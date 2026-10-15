@@ -121,7 +121,9 @@ async function mount({
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
-  await act(async () => {
+  let currentSessionId = sessionId;
+  let currentWorkspaceCwd = atWorkspaceCwd;
+  const render = () => {
     root!.render(
       <WebShellPortalRootContext.Provider value={null}>
         <I18nProvider language="en">
@@ -129,15 +131,32 @@ async function mount({
             composerInput={composerInput}
             onSubmit={onSubmit}
             onInputTextChange={onInputTextChange}
-            sessionId={sessionId}
-            atWorkspaceCwd={atWorkspaceCwd}
+            sessionId={currentSessionId}
+            atWorkspaceCwd={currentWorkspaceCwd}
             expanded={expanded}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
     );
+  };
+  await act(async () => {
+    render();
   });
-  return { onSubmit };
+  return {
+    onSubmit,
+    switchSession(
+      nextSessionId: string | undefined,
+      nextWorkspaceCwd: string | undefined,
+    ) {
+      currentSessionId = nextSessionId;
+      currentWorkspaceCwd = nextWorkspaceCwd;
+      act(() => render());
+    },
+  };
+}
+
+function getSessionDraftKey(sessionId: string): string {
+  return `qwen-web-shell-session-draft:${encodeURIComponent(sessionId)}`;
 }
 
 function typeText(text: string) {
@@ -336,6 +355,18 @@ describe('useComposerCore mobile textarea backend', () => {
     act(() => latest!.searchState.openHistorySearch());
     expect(latest!.searchState.searchMode).toBe(true);
     expect(latest!.searchState.searchMatches).toContain('first message');
+  });
+
+  it('recalls submitted slash commands through history search', async () => {
+    // The touch textarea has no slash completion menu, so the history panel
+    // is the only touch path that can recall a submitted slash command.
+    mockTouchDevice();
+    await mount();
+    typeText('/theme dark');
+    act(() => latest!.submitText());
+    act(() => latest!.searchState.openHistorySearch());
+    expect(latest!.searchState.searchMode).toBe(true);
+    expect(latest!.searchState.searchMatches).toContain('/theme dark');
   });
 
   it('focuses history search when timers run before the input mounts', async () => {
@@ -610,6 +641,46 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.mobileComposer!.value).toBe(text);
   });
 
+  it('keeps the stored draft when a history recall is followed by a session switch', async () => {
+    mockTouchDevice();
+    const mounted = await mount({ sessionId: 'session-a' });
+    typeText('older saved input');
+    act(() => latest!.submitText());
+    typeText('my draft');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    act(() => latest!.searchState.closeSearch(false));
+    expect(latest!.mobileComposer!.value).toBe('older saved input');
+
+    mounted.switchSession('session-b', undefined);
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    mounted.switchSession('session-a', undefined);
+    expect(latest!.mobileComposer!.value).toBe('my draft');
+
+    // A genuine edit after the recall re-arms draft persistence.
+    typeText('my draft edited');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft edited',
+    );
+  });
+
   it('saves the draft immediately on blur before the debounce timer fires', async () => {
     mockTouchDevice();
     vi.useFakeTimers();
@@ -619,9 +690,7 @@ describe('useComposerCore mobile textarea backend', () => {
     });
     typeText('mobile draft text');
     expect(
-      localStorage.getItem(
-        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
-      ),
+      localStorage.getItem(getSessionDraftKey('mobile-session')),
     ).toBeNull();
 
     act(() => {
@@ -629,11 +698,9 @@ describe('useComposerCore mobile textarea backend', () => {
         .querySelector('textarea')!
         .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
     });
-    expect(
-      localStorage.getItem(
-        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
-      ),
-    ).toBe('mobile draft text');
+    expect(localStorage.getItem(getSessionDraftKey('mobile-session'))).toBe(
+      'mobile draft text',
+    );
     vi.useRealTimers();
   });
 });

@@ -326,6 +326,17 @@ for (const width of [390, 240]) {
     const buttons = page
       .locator('[data-web-shell-mobile-editing-actions]')
       .getByRole('button');
+    // Pin the controls this scenario must render before measuring them, so a
+    // dropped button fails the test instead of shrinking the iterated set.
+    // (Hide keyboard renders only while the textarea is focused; fill does
+    // focus it. The standalone dev host always opts into the Add entry, so
+    // the no-Add contextual buttons are covered by unit tests instead.)
+    await expect(
+      page.getByRole('button', { name: 'Expand editor', exact: true }),
+    ).toHaveCount(1);
+    await expect(
+      page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+    ).toHaveCount(1);
     expect(await buttons.count()).toBeGreaterThan(0);
     for (const button of await buttons.all()) {
       const bounds = await button.boundingBox();
