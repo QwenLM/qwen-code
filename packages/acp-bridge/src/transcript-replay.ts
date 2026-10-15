@@ -1759,20 +1759,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       const payload = isObjectRecord(record.systemPayload)
         ? record.systemPayload
         : undefined;
-      const cancelledAt = finiteNumber(
-        payload?.['cancelledAt'] === undefined
-          ? payload?.['endedAt']
-          : payload?.['cancelledAt'],
-      );
-      // Older cancellation timestamps did not distinguish user intent from
-      // interruption. Keep that ambiguity in the projected notice.
-      const reason =
-        payload?.['cancelReason'] === 'user'
-          ? 'user'
-          : payload?.['cancelReason'] === undefined &&
-              payload?.['cancelledAt'] !== undefined
-            ? 'unknown'
-            : 'interrupted';
+      const cancelledAt = finiteNumber(payload?.['cancelledAt']);
       const startedAt = finiteNumber(payload?.['startedAt']);
       const promptId = payload?.['promptId'];
       if (
@@ -1792,7 +1779,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           ...meta,
           extra: {
             qwenDiscreteMessage: true,
-            promptCancelled: { promptId, cancelledAt, elapsedMs, reason },
+            promptCancelled: { promptId, cancelledAt, elapsedMs },
           },
         }),
       );

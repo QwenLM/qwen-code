@@ -75,7 +75,7 @@ class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
-  private pendingContinueTurn: { confirmCancellation?: string } | undefined;
+  private pendingContinueTurn: boolean = false;
   private continueTurnInProgress: boolean = false;
   private readonly sessionAbortController: AbortController;
   private activeTurnAbortController: AbortController | null = null;
@@ -345,8 +345,7 @@ class Session {
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
       onInterrupt: () => this.handleInterrupt(),
-      onContinueLastTurn: (confirmation) =>
-        this.requestContinueLastTurn(confirmation),
+      onContinueLastTurn: () => this.requestContinueLastTurn(),
     });
     this.dispatcher = new ControlDispatcher(this.controlContext);
     this.controlService = new ControlService(
@@ -539,9 +538,7 @@ class Session {
    * continuation turn on the work queue. Returns the control reply
    * payload; the continuation itself runs serialized with user messages.
    */
-  private async requestContinueLastTurn(
-    confirmCancellation?: string,
-  ): Promise<Record<string, unknown>> {
+  private async requestContinueLastTurn(): Promise<Record<string, unknown>> {
     await this.waitForInitialization();
 
     if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
@@ -569,7 +566,7 @@ class Session {
     );
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
-      apiHistory: historyTail,
+      apiHistory: cancellation ? [] : historyTail,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
     });
     debugLogger.info('[Session] requestContinueLastTurn recovery', {
@@ -594,21 +591,7 @@ class Session {
       return { accepted: false, interruption };
     }
 
-    if (
-      (cancellation && !cancellation.confirmationId) ||
-      confirmCancellation !== cancellation?.confirmationId
-    ) {
-      return {
-        accepted: false,
-        interruption:
-          cancellation && !cancellation.confirmationId ? 'none' : interruption,
-        ...(cancellation?.confirmationId && {
-          cancellationConfirmationId: cancellation.confirmationId,
-        }),
-      };
-    }
-
-    this.pendingContinueTurn = { confirmCancellation };
+    this.pendingContinueTurn = true;
     this.ensureProcessingStarted();
     debugLogger.info('[Session] continue_last_turn accepted', {
       sessionId: this.sessionId,
@@ -623,9 +606,7 @@ class Session {
    * since the request was accepted); a turn that became clean by then is
    * a no-op result message.
    */
-  private async processContinueTurn(
-    confirmCancellation?: string,
-  ): Promise<void> {
+  private async processContinueTurn(): Promise<void> {
     this.continueTurnInProgress = true;
     let resultAlreadyEmitted = false;
     let turnAbortController: AbortController | null = null;
@@ -640,7 +621,6 @@ class Session {
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         continueInterrupted: true,
-        confirmCancellation,
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
         recoverableCancellation: true,
@@ -738,10 +718,9 @@ class Session {
       !this.sessionAbortController.signal.aborted
     ) {
       if (this.pendingContinueTurn) {
-        const { confirmCancellation } = this.pendingContinueTurn;
-        this.pendingContinueTurn = undefined;
+        this.pendingContinueTurn = false;
         try {
-          await this.processContinueTurn(confirmCancellation);
+          await this.processContinueTurn();
         } catch (error) {
           debugLogger.error('[Session] Error processing continue turn:', error);
           await this.emitErrorResult(error);
@@ -911,7 +890,7 @@ class Session {
     // consumer that received `{ accepted: true }` would wait forever. Emit a
     // terminal error result so it learns the continuation was abandoned.
     if (this.pendingContinueTurn) {
-      this.pendingContinueTurn = undefined;
+      this.pendingContinueTurn = false;
       await this.emitErrorResult(
         new Error('Continuation abandoned: session shut down before it ran'),
       );

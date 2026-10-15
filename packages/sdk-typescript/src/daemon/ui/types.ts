@@ -560,12 +560,11 @@ export interface DaemonUiPromptCancelledEvent extends DaemonUiEventBase {
   /** Execution time before explicit cancellation, excluding cleanup. */
   elapsedMs?: number;
   /**
-   * Terminal/replayed notices use `'user'` for an explicitly recorded user
-   * cancel, `'interrupted'` for a mechanical interruption, and `'unknown'`
-   * for an older cancellation timestamp with no recorded provenance.
-   * Early cancel-request notices may omit this field. `'forward_failed'`
-   * remains the bridge-synthesized notice that forwarding failed after the
-   * user echo was published; it does not represent an agent terminal result.
+   * Why the turn was cancelled. Absent for a user-initiated cancel;
+   * `'forward_failed'` when the daemon synthesized the cancel because the
+   * prompt forward rejected after the user echo was already published (the
+   * bridge's C3 compensating broadcast). Lets the UI distinguish "peer
+   * cancelled" from "the request failed to reach the agent".
    */
   reason?: 'forward_failed' | (string & {});
 }

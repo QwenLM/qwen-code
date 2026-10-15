@@ -1511,12 +1511,6 @@ function broadcastTurnComplete(
         ? {
             cancelledAt: rawPromptCancelled['cancelledAt'],
             elapsedMs: rawPromptCancelled['elapsedMs'],
-            reason:
-              rawPromptCancelled['reason'] === 'user'
-                ? 'user'
-                : rawPromptCancelled['reason'] === undefined
-                  ? 'unknown'
-                  : 'interrupted',
           }
         : undefined;
     const published = entry.events.publish({
@@ -13937,7 +13931,6 @@ export function createSessionControlPlane(
       const decision = await requestSessionStatus<{
         accepted: boolean;
         interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-        cancellationConfirmationId?: string;
       }>(
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionContinue,

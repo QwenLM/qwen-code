@@ -375,25 +375,6 @@ it('labels a permission title and shows an unresolved permission as pending', as
   expect(container.textContent).not.toContain('unrecorded');
 });
 
-it('localizes the cancellation reason in the record body', async () => {
-  const row: TrajectoryOtherRow = {
-    kind: 'other',
-    key: 'cancel:1',
-    turnIndex: 1,
-    depth: 0,
-    block: {
-      kind: 'prompt_cancelled',
-      id: 'cancel:1',
-      reason: 'unknown',
-    } as TrajectoryOtherRow['block'],
-  };
-  const container = await render(row);
-  await click(container, 'Body');
-  expect(container.querySelector('pre')?.textContent).toBe(
-    'This request was cancelled, but the reason was not recorded.',
-  );
-});
-
 it('displays and copies a request execution ID', async () => {
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, 'clipboard', {

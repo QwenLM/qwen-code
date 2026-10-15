@@ -6676,9 +6676,6 @@ describe('Session', () => {
           expect(await session.continueLastTurn()).toEqual({
             accepted: canContinue,
             interruption: 'interrupted_prompt',
-            ...(reason === 'unknown'
-              ? { cancellationConfirmationId: 'result' }
-              : {}),
           });
           if (!canContinue) {
             await expect(
@@ -12259,7 +12256,6 @@ describe('Session', () => {
           stopReason: 'cancelled',
           _meta: {
             'qwen.promptCancelled': {
-              reason: 'user',
               cancelledAt: 4_500,
               elapsedMs: 0,
             },
@@ -12389,11 +12385,7 @@ describe('Session', () => {
         ).resolves.toMatchObject({
           stopReason: 'cancelled',
           _meta: {
-            'qwen.promptCancelled': {
-              reason: 'user',
-              cancelledAt: 4_500,
-              elapsedMs: 3_500,
-            },
+            'qwen.promptCancelled': { cancelledAt: 4_500, elapsedMs: 3_500 },
           },
         });
 
@@ -12463,10 +12455,7 @@ describe('Session', () => {
           } else {
             expect(payload).not.toHaveProperty('cancelledAt');
             expect(payload).not.toHaveProperty('cancelReason');
-            expect(result._meta?.['qwen.promptCancelled']).toMatchObject({
-              reason: 'interrupted',
-              cancelledAt: expect.any(Number),
-            });
+            expect(result._meta?.['qwen.promptCancelled']).toBeUndefined();
           }
         },
       );
@@ -12489,10 +12478,7 @@ describe('Session', () => {
         ).resolves.toMatchObject({
           stopReason: 'cancelled',
           _meta: {
-            'qwen.promptCancelled': {
-              reason: 'user',
-              cancelledAt: expect.any(Number),
-            },
+            'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
           },
         });
 
@@ -12678,16 +12664,7 @@ describe('Session', () => {
         ]);
         expect(firstResult).toEqual({
           status: 'fulfilled',
-          value: {
-            stopReason: 'cancelled',
-            _meta: {
-              'qwen.promptCancelled': {
-                cancelledAt: expect.any(Number),
-                elapsedMs: expect.any(Number),
-                reason: 'interrupted',
-              },
-            },
-          },
+          value: { stopReason: 'cancelled' },
         });
         expect(secondResult.status).toBe('fulfilled');
 
@@ -12855,7 +12832,6 @@ describe('Session', () => {
           stopReason: 'cancelled',
           _meta: {
             'qwen.promptCancelled': {
-              reason: 'user',
               cancelledAt: expect.any(Number),
               elapsedMs: 0,
             },
@@ -52163,16 +52139,7 @@ describe('Session', () => {
       session.dispose();
       aborting.abort('Error');
 
-      await expect(prompt).resolves.toEqual({
-        stopReason: 'cancelled',
-        _meta: {
-          'qwen.promptCancelled': {
-            cancelledAt: expect.any(Number),
-            elapsedMs: expect.any(Number),
-            reason: 'interrupted',
-          },
-        },
-      });
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
       const internals = session as unknown as {
         todoStopGuard: {
           isHardSuspended: boolean;
@@ -55939,16 +55906,7 @@ describe('Session', () => {
       releaseSecondSend();
 
       const [firstResult] = await Promise.all([firstPrompt, secondPrompt]);
-      expect(firstResult).toEqual({
-        stopReason: 'cancelled',
-        _meta: {
-          'qwen.promptCancelled': {
-            cancelledAt: expect.any(Number),
-            elapsedMs: expect.any(Number),
-            reason: 'interrupted',
-          },
-        },
-      });
+      expect(firstResult).toEqual({ stopReason: 'cancelled' });
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(5);
     });
 

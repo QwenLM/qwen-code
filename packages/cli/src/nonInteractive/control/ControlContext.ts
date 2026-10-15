@@ -47,9 +47,7 @@ export interface IControlContext {
    * request). Resolves with `{ accepted, interruption }`; the resumed
    * turn's output flows through the regular stream afterwards.
    */
-  onContinueLastTurn?: (
-    confirmCancellation?: string,
-  ) => Promise<Record<string, unknown>>;
+  onContinueLastTurn?: () => Promise<Record<string, unknown>>;
 }
 
 /**
@@ -71,9 +69,7 @@ export class ControlContext implements IControlContext {
   inputClosed: boolean;
 
   onInterrupt?: () => void;
-  onContinueLastTurn?: (
-    confirmCancellation?: string,
-  ) => Promise<Record<string, unknown>>;
+  onContinueLastTurn?: () => Promise<Record<string, unknown>>;
 
   constructor(options: {
     config: Config;
@@ -84,9 +80,7 @@ export class ControlContext implements IControlContext {
     settings: LoadedSettings;
     permissionMode?: PermissionMode;
     onInterrupt?: () => void;
-    onContinueLastTurn?: (
-      confirmCancellation?: string,
-    ) => Promise<Record<string, unknown>>;
+    onContinueLastTurn?: () => Promise<Record<string, unknown>>;
   }) {
     this.config = options.config;
     this.streamJson = options.streamJson;

@@ -3091,7 +3091,10 @@ export class Session implements SessionContext {
       // cause that names the pause. Enumerating them separately means a fifth
       // cause can compile, pause correctly, and fall through to the failure
       // arm -- mislabelling the stop in the journal, the `_meta.goalState`
-      // update and the card, with no test able to see it.
+      // update and the card, with no test able to see it. The two cancels in
+      // that list pause alike but do not read alike: the interrupted abort
+      // reason means the client or host cancelled the prompt, so only a user
+      // cancel may name the user.
       const pauseReason = supersededByNewPrompt
         ? undefined
         : cancelledTurn
@@ -6031,7 +6034,6 @@ export class Session implements SessionContext {
   async continueLastTurn(confirmCancellation?: string): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-    cancellationConfirmationId?: string;
   }> {
     const recovery = await this.getRecoveryStatusForClient();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
@@ -6066,10 +6068,6 @@ export class Session implements SessionContext {
       accepted:
         recovery.canContinue &&
         confirmCancellation === recovery.cancellationConfirmationId,
-      ...(recovery.cancellationConfirmationId &&
-      confirmCancellation !== recovery.cancellationConfirmationId
-        ? { cancellationConfirmationId: recovery.cancellationConfirmationId }
-        : {}),
       interruption:
         recovery.kind === 'interrupted_prompt' ||
         recovery.kind === 'interrupted_turn'
@@ -9052,15 +9050,15 @@ export class Session implements SessionContext {
     if (recording === null) return;
     const cancelledAt =
       state === 'cancelled' ? recording.cancelledAt : undefined;
-    const noticeAt =
-      state === 'cancelled' ? (cancelledAt ?? Date.now()) : undefined;
-    if (noticeAt !== undefined && response) {
+    if (cancelledAt !== undefined && response) {
       response._meta = {
         ...response._meta,
         'qwen.promptCancelled': {
-          cancelledAt: noticeAt,
-          elapsedMs: Math.max(0, noticeAt - (recording.startedAt ?? noticeAt)),
-          reason: cancelledAt !== undefined ? 'user' : 'interrupted',
+          cancelledAt,
+          elapsedMs: Math.max(
+            0,
+            cancelledAt - (recording.startedAt ?? cancelledAt),
+          ),
         },
       };
     }

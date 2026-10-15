@@ -742,9 +742,7 @@ export class DaemonSessionClient {
       this.client.continueSession(this.sessionId, {
         clientId: this.clientId,
         signal,
-        ...(typeof options.confirmCancellation === 'string'
-          ? { confirmCancellation: options.confirmCancellation }
-          : {}),
+        confirmCancellation: options.confirmCancellation,
       }),
     );
   }

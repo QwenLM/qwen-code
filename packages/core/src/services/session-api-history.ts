@@ -129,13 +129,13 @@ export function getLastApiPromptCancellation(
   const result = results.findLast((record) => cancellation(record, false));
   if (!result)
     return results.length > 0 ? undefined : cancellation(latest, false);
+  const uniqueOwner =
+    records.filter(
+      (record) =>
+        isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
+    ).length === 1;
   const owned =
-    results.length === 1 &&
-    (result.promptId === promptId ||
-      records.filter(
-        (record) =>
-          isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
-      ).length === 1);
+    results.length === 1 && (result.promptId === promptId || uniqueOwner);
   const cancelled = cancellation(result, owned);
   const payload = result.systemPayload;
   if (
@@ -143,16 +143,11 @@ export function getLastApiPromptCancellation(
     owned &&
     isTurnResultRecordPayload(payload) &&
     payload.cancelReason === undefined &&
-    typeof owner.daemonPromptId === 'string' &&
-    owner.daemonPromptId.length > 0 &&
     payload.promptId === owner.daemonPromptId &&
     !records
       .slice(records.indexOf(result) + 1)
       .some((record) => cancellation(record, false)) &&
-    records.filter(
-      (record) =>
-        isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
-    ).length === 1 &&
+    uniqueOwner &&
     typeof result.uuid === 'string' &&
     result.uuid.length > 0 &&
     records.filter((record) => record.uuid === result.uuid).length === 1

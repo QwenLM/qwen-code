@@ -2599,7 +2599,6 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-    cancellationConfirmationId?: string;
     /**
      * Replay cursor + correlation id for an accepted continuation, mirroring
      * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —

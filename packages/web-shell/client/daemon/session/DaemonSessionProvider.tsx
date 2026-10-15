@@ -511,7 +511,6 @@ function mergeTranscriptHistoryBlocks(
       elapsedMs: persisted.elapsedMs,
       serverTimestamp: persisted.serverTimestamp,
       sourceRecordIds: persisted.sourceRecordIds,
-      ...(persisted.reason ? { reason: persisted.reason } : {}),
     };
   });
   return [

@@ -45,7 +45,7 @@ describe('SystemMessage — prompt_cancelled marker', () => {
         content=""
         variant="info"
         source="prompt_cancelled"
-        data={{ elapsedMs, reason: 'user' }}
+        data={{ elapsedMs }}
       />,
       language,
     );
@@ -66,33 +66,6 @@ describe('SystemMessage — prompt_cancelled marker', () => {
       );
       expect(container.querySelector('[role="status"]')?.textContent).toBe(
         '你已取消请求',
-      );
-    },
-  );
-
-  it.each([
-    ['en', 'interrupted', 'This request was interrupted'],
-    ['zh-CN', 'interrupted', '本次请求已中断'],
-    [
-      'en',
-      'unknown',
-      'This request was cancelled, but the reason was not recorded.',
-    ],
-    ['zh-CN', 'unknown', '本次请求已取消，但未记录原因。'],
-  ] as const)(
-    'renders %s provenance %s without claiming a user cancel',
-    (language, reason, text) => {
-      const container = render(
-        <SystemMessage
-          content=""
-          variant="info"
-          source="prompt_cancelled"
-          data={{ elapsedMs: 10999, reason }}
-        />,
-        language,
-      );
-      expect(container.querySelector('[role="status"]')?.textContent).toBe(
-        text,
       );
     },
   );

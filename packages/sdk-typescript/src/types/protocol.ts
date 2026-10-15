@@ -278,7 +278,6 @@ export interface CLIControlInterruptRequest {
  */
 export interface CLIControlContinueLastTurnRequest {
   subtype: 'continue_last_turn';
-  confirmCancellation?: string;
 }
 
 export interface CLIControlPermissionRequest {

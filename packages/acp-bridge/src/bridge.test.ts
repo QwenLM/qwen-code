@@ -19778,29 +19778,14 @@ describe('createAcpSessionBridge', () => {
 
   describe('turn_complete promptCancelled', () => {
     it.each([
-      ['cancelled', { cancelledAt: 4_500, elapsedMs: 3_500 }, 'unknown'],
-      [
-        'cancelled',
-        { cancelledAt: 4_500, elapsedMs: 3_500, reason: 'user' },
-        'user',
-      ],
-      [
-        'cancelled',
-        { cancelledAt: 4_500, elapsedMs: 3_500, reason: 'interrupted' },
-        'interrupted',
-      ],
-      [
-        'cancelled',
-        { cancelledAt: 4_500, elapsedMs: 3_500, reason: 'forward_failed' },
-        'interrupted',
-      ],
-      ['end_turn', { cancelledAt: 4_500, elapsedMs: 3_500 }, undefined],
-      ['cancelled', { cancelledAt: NaN, elapsedMs: 3_500 }, undefined],
-      ['cancelled', { cancelledAt: 4_500, elapsedMs: -1 }, undefined],
-      ['cancelled', { cancelledAt: 4_500, elapsedMs: Infinity }, undefined],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: 3_500 }, true],
+      ['end_turn', { cancelledAt: 4_500, elapsedMs: 3_500 }, false],
+      ['cancelled', { cancelledAt: NaN, elapsedMs: 3_500 }, false],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: -1 }, false],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: Infinity }, false],
     ])(
       'validates %s cancellation metadata %j',
-      async (stopReason, metadata, expectedReason) => {
+      async (stopReason, metadata, valid) => {
         const events: BridgeEvent[] = [];
         const handle = makeChannel({
           promptImpl: () =>
@@ -19829,11 +19814,8 @@ describe('createAcpSessionBridge', () => {
           ),
         );
         const terminal = events.find((event) => event.type === 'turn_complete');
-        if (expectedReason !== undefined) {
-          expect(terminal?.data).toHaveProperty('promptCancelled', {
-            ...metadata,
-            reason: expectedReason,
-          });
+        if (valid) {
+          expect(terminal?.data).toHaveProperty('promptCancelled', metadata);
         } else {
           expect(terminal?.data).not.toHaveProperty('promptCancelled');
         }

@@ -3039,21 +3039,10 @@ describe('runNonInteractive', () => {
           .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
       }));
 
-      const exitCode = await runNonInteractive(
-        mockConfig,
-        mockSettings,
-        '',
-        'prompt-c3',
-        {
-          continueInterrupted: true,
-        },
-      );
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c3', {
+        continueInterrupted: true,
+      });
 
-      expect(exitCode).toBe(0);
-      expect(processStdoutSpy).toHaveBeenCalledWith(
-        expect.stringContaining('No interrupted turn to continue.'),
-      );
-      expect(processStderrSpy).not.toHaveBeenCalled();
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
 
@@ -3121,94 +3110,11 @@ describe('runNonInteractive', () => {
         { continueInterrupted: true },
       );
 
-      expect(exitCode).toBe(1);
+      expect(exitCode).toBe(0);
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
-      expect(processStderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Recovery confirmation does not match the current turn.',
-        ),
+      expect(processStdoutSpy).toHaveBeenCalledWith(
+        expect.stringContaining('No interrupted turn to continue.'),
       );
-    });
-
-    it.each([undefined, 'stale-terminal', 'legacy-terminal'])(
-      'only replays a legacy cancelled prompt with its current confirmation (%s)',
-      async (confirmCancellation) => {
-        setupMetricsMock();
-        const content: Content = {
-          role: 'user',
-          parts: [{ text: 'do the thing' }],
-        };
-        markApiHistoryPrompt(content, 'client-legacy');
-        mockLlmClient.getChat = vi.fn(() => ({
-          getDebugResponses: mockGetDebugResponses,
-          getHistoryShallow: () => [content],
-          getHistory: () => [content],
-        }));
-        mockConfig
-          .getChatRecordingService()
-          .readActiveTranscriptChain.mockResolvedValue([
-            {
-              uuid: 'legacy-input',
-              type: 'user',
-              promptId: 'client-legacy',
-              daemonPromptId: 'daemon-legacy',
-              message: content,
-            },
-            {
-              uuid: 'legacy-terminal',
-              type: 'system',
-              subtype: 'turn_result',
-              systemPayload: {
-                promptId: 'daemon-legacy',
-                state: 'cancelled',
-                cancelledAt: 1,
-                endedAt: 2,
-              },
-            },
-          ]);
-        mockLlmClient.sendMessageStream.mockReturnValue(
-          createStreamFromEvents([
-            {
-              type: LlmEventType.Finished,
-              value: {
-                reason: undefined,
-                usageMetadata: { totalTokenCount: 5 },
-              },
-            },
-          ]),
-        );
-        const exitCode = await runNonInteractive(
-          mockConfig,
-          mockSettings,
-          '',
-          'replay',
-          { continueInterrupted: true, confirmCancellation },
-        );
-        expect(exitCode).toBe(
-          confirmCancellation === 'legacy-terminal' ? 0 : 1,
-        );
-        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
-          confirmCancellation === 'legacy-terminal' ? 1 : 0,
-        );
-      },
-    );
-
-    it('rejects an old confirmation when the current prompt has no cancellation', async () => {
-      setupMetricsMock();
-      mockLlmClient.getChat = vi.fn(() => ({
-        getDebugResponses: mockGetDebugResponses,
-        getHistoryShallow: () => [],
-        getHistory: () => [{ role: 'user', parts: [{ text: 'new task' }] }],
-      }));
-      const exitCode = await runNonInteractive(
-        mockConfig,
-        mockSettings,
-        '',
-        'replay',
-        { continueInterrupted: true, confirmCancellation: 'old-terminal' },
-      );
-      expect(exitCode).toBe(1);
-      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
 
     it('refuses direct continuation of an unknown legacy cancellation', async () => {
@@ -3244,7 +3150,7 @@ describe('runNonInteractive', () => {
         'prompt-c5',
         { continueInterrupted: true },
       );
-      expect(exitCode).toBe(1);
+      expect(exitCode).toBe(0);
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
   });

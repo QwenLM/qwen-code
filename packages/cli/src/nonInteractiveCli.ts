@@ -481,7 +481,6 @@ export interface RunNonInteractiveOptions {
    * cleanly the run emits a no-op result and exits 0.
    */
   continueInterrupted?: boolean;
-  confirmCancellation?: string;
 }
 
 /**
@@ -1216,7 +1215,7 @@ export async function runNonInteractive(
         );
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: history,
+          apiHistory: cancellation ? [] : history,
           completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
@@ -1224,21 +1223,6 @@ export async function runNonInteractive(
           repairs: recoveryPlan.repairs,
           hasContinuation: recoveryPlan.continuation !== undefined,
         });
-        if (
-          (cancellation && !cancellation.confirmationId) ||
-          options.confirmCancellation !== cancellation?.confirmationId
-        ) {
-          await emitNonInteractiveFinalMessage({
-            message:
-              'Recovery confirmation does not match the current turn. Refresh recovery status before continuing.',
-            isError: true,
-            adapter,
-            config,
-            startTimeMs: startTime,
-            beforeEmit: settleBeforeTerminalOutput,
-          });
-          return 1;
-        }
         if (!recoveryPlan.continuation) {
           await emitNonInteractiveFinalMessage({
             message: 'No interrupted turn to continue.',

@@ -20523,7 +20523,6 @@ describe('DaemonSessionProvider', () => {
                 promptId,
                 cancelledAt: 12000,
                 elapsedMs: 11000,
-                reason: 'unknown',
               },
             },
           },
@@ -20587,7 +20586,6 @@ describe('DaemonSessionProvider', () => {
         ...(timed ? { elapsedMs: 11000 } : {}),
       });
       if (!timed) expect(live).not.toHaveProperty('elapsedMs');
-      expect(live).not.toHaveProperty('reason');
       await act(async () => {
         await history?.loadMore();
         await flushPromises();
@@ -20604,7 +20602,6 @@ describe('DaemonSessionProvider', () => {
         elapsedMs: 11000,
         serverTimestamp: 12000,
         sourceRecordIds: ['current-record'],
-        reason: 'unknown',
       });
       expect(retainedBytes).toBe(
         blocks.reduce(
@@ -23823,8 +23820,6 @@ describe('DaemonSessionProvider', () => {
       let ownerGuard: ReturnType<typeof useDaemonSessionOwnerGuard> | undefined;
       let captureSpy: { mockRestore(): void } | undefined;
       let catchObserved = false;
-      let startReleased = false;
-      let admissionRejected = false;
       let connection: DaemonConnectionState | undefined;
       let streaming: ReturnType<typeof useDaemonStreamingState> | undefined;
       const committedStreaming: Array<typeof streaming> = [];
@@ -23855,12 +23850,9 @@ describe('DaemonSessionProvider', () => {
               return {
                 isCurrent: () => {
                   const current = owner.isCurrent();
-                  if (admissionRejected && !catchObserved) {
+                  if (!catchObserved) {
                     catchObserved = true;
-                    queueMicrotask(() => {
-                      startReleased = true;
-                      start.resolve();
-                    });
+                    queueMicrotask(() => start.resolve());
                   }
                   return current;
                 },
@@ -23870,13 +23862,12 @@ describe('DaemonSessionProvider', () => {
             container!.querySelector('button')!.click();
             await flushPromises();
           });
-          expect(startReleased).toBe(false);
+          expect(catchObserved).toBe(false);
         }
         const commitsBeforeFailure = committedStreaming.length;
         await act(async () => {
           if (mode !== 'coalesced-failure')
             container!.querySelector('button')!.click();
-          admissionRejected = true;
           admission.reject(
             mode === 'definite-rejection'
               ? new DaemonHttpError(403, undefined, 'Continuation rejected')
@@ -23891,7 +23882,6 @@ describe('DaemonSessionProvider', () => {
           );
         } else {
           expect(catchObserved).toBe(true);
-          expect(startReleased).toBe(true);
           expect(
             new Set(committedStreaming.slice(commitsBeforeFailure)),
           ).toEqual(new Set(['idle']));

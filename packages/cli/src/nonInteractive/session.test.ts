@@ -11,7 +11,6 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { Content } from '@google/genai';
-import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { runNonInteractiveStreamJson } from './session.js';
 import type {
   CLIUserMessage,
@@ -298,9 +297,7 @@ describe('runNonInteractiveStreamJson', () => {
   });
 
   type CapturedControlContext = {
-    onContinueLastTurn?: (
-      confirmation?: string,
-    ) => Promise<Record<string, unknown>>;
+    onContinueLastTurn?: () => Promise<Record<string, unknown>>;
     onInterrupt?: () => void;
     abortSignal?: AbortSignal;
     getActiveTurnAbortSignal?: () => AbortSignal | undefined;
@@ -316,9 +313,7 @@ describe('runNonInteractiveStreamJson', () => {
 
     (ControlContext as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       (options: {
-        onContinueLastTurn?: (
-          confirmation?: string,
-        ) => Promise<Record<string, unknown>>;
+        onContinueLastTurn?: () => Promise<Record<string, unknown>>;
       }) => {
         controlContext = options;
         return {};
@@ -333,9 +328,7 @@ describe('runNonInteractiveStreamJson', () => {
         if (request.request.subtype !== 'continue_last_turn') {
           return undefined;
         }
-        const result = await controlContext?.onContinueLastTurn?.(
-          request.request.confirmCancellation,
-        );
+        const result = await controlContext?.onContinueLastTurn?.();
         continueResults.push(result);
         return result;
       })();
@@ -563,84 +556,6 @@ describe('runNonInteractiveStreamJson', () => {
     expect(getHistoryTail).toHaveBeenCalledWith(50);
     expect(continueResults).toEqual([
       { accepted: false, interruption: 'none' },
-    ]);
-    expect(runNonInteractiveMock).not.toHaveBeenCalled();
-  });
-
-  it('requires the current legacy record confirmation before scheduling continuation', async () => {
-    const { continueResults } = installContinueDispatch();
-    const content: Content = { role: 'user', parts: [{ text: 'resume me' }] };
-    markApiHistoryPrompt(content, 'client-legacy');
-    createInitializedLlmClient([content]);
-    vi.mocked(
-      config.getChatRecordingService()!.readActiveTranscriptChain,
-    ).mockResolvedValue([
-      {
-        ...createResumedUserRecord('resume me'),
-        promptId: 'client-legacy',
-        daemonPromptId: 'daemon-legacy',
-      },
-      {
-        ...createResumedTelemetryRecord('daemon-legacy'),
-        uuid: 'legacy-terminal',
-        subtype: 'turn_result',
-        systemPayload: {
-          promptId: 'daemon-legacy',
-          state: 'cancelled',
-          cancelledAt: 1,
-          endedAt: 2,
-        },
-      },
-    ]);
-    const confirmed = createContinueRequest('confirmed');
-    confirmed.request = {
-      subtype: 'continue_last_turn',
-      confirmCancellation: 'legacy-terminal',
-    };
-    mockInputReader.read = async function* () {
-      yield createControlRequest('initialize');
-      yield createContinueRequest('unconfirmed');
-      await vi.waitFor(() => expect(continueResults).toHaveLength(1));
-      yield confirmed;
-    };
-    await runNonInteractiveStreamJson(config, '');
-    expect(continueResults).toEqual([
-      {
-        accepted: false,
-        interruption: 'interrupted_prompt',
-        cancellationConfirmationId: 'legacy-terminal',
-      },
-      { accepted: true, interruption: 'interrupted_prompt' },
-    ]);
-    expect(runNonInteractiveMock).toHaveBeenCalledWith(
-      config,
-      expect.anything(),
-      '',
-      expect.any(String),
-      expect.objectContaining({
-        continueInterrupted: true,
-        confirmCancellation: 'legacy-terminal',
-      }),
-    );
-  });
-
-  it('rejects a stale confirmation after the cancelled boundary has disappeared', async () => {
-    const { continueResults } = installContinueDispatch();
-    createInitializedLlmClient([
-      { role: 'user', parts: [{ text: 'new task' }] },
-    ]);
-    const stale = createContinueRequest();
-    stale.request = {
-      subtype: 'continue_last_turn',
-      confirmCancellation: 'old-terminal',
-    };
-    mockInputReader.read = async function* () {
-      yield createControlRequest('initialize');
-      yield stale;
-    };
-    await runNonInteractiveStreamJson(config, '');
-    expect(continueResults).toEqual([
-      { accepted: false, interruption: 'interrupted_prompt' },
     ]);
     expect(runNonInteractiveMock).not.toHaveBeenCalled();
   });
