@@ -37,7 +37,7 @@ class BackfillWitnessesTest {
                                         "SELECT version FROM flyway_schema_history"
                                                 + " WHERE success = TRUE AND type = 'BASELINE'",
                                         String.class))
-                .isEqualTo("2");
+                .isEqualTo("3");
     }
 
     @Test
