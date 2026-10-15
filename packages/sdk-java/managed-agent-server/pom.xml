@@ -371,10 +371,11 @@
                 <configuration>
                     <includes><include>**/HostedMonitorRun*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <!-- The class's two letters are independent fixtures
-                         sharing one fork: each letter's @Timeout ceiling
-                         (600 s) plus the healthy runtime must fit, the
-                         per-ceiling relation the CI profile pins. -->
+                    <!-- The class's five letters (fg8e/fg8f/fg8a/fg8b/fg8d)
+                         are independent fixtures sharing one fork: each
+                         letter's @Timeout ceiling (600 s) plus the healthy
+                         runtime must fit, the per-ceiling relation the CI
+                         profile pins. -->
                     <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
