@@ -12,6 +12,7 @@ import type {
   GoalRecord,
   GoalStateCause,
 } from '@qwen-code/qwen-code-core';
+import { CompressionStatus } from '@qwen-code/qwen-code-core';
 import { collectSessionData } from './collect.js';
 import { toJsonl } from './formatters/jsonl.js';
 import type { ExportConfig } from './types.js';
@@ -309,10 +310,14 @@ describe('collectSessionData', () => {
         cwd: '',
         version: '1.0.0',
         systemPayload: {
-          info: { originalTokenCount: 180_000, newTokenCount },
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
           compressedHistory: [],
         },
-      }) as unknown as ChatRecord;
+      }) as ChatRecord;
 
     const exportUsage = async (messages: ChatRecord[]) =>
       (
@@ -416,6 +421,38 @@ describe('collectSessionData', () => {
 
       expect(metadata?.contextUsagePercent).toBe(15);
       expect(metadata?.contextWindowSize).toBe(200_000);
+    });
+
+    it('keeps the last reading when a compression reports no size', async () => {
+      const metadata = await exportUsage([
+        reply(
+          'a1',
+          { promptTokenCount: 50_000, totalTokenCount: 60_000 },
+          100_000,
+        ),
+        compression(0),
+        compression(Number.NaN),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(50);
+    });
+
+    it('uses the next reply after a compression', async () => {
+      const metadata = await exportUsage([
+        reply(
+          'a1',
+          { promptTokenCount: 180_000, totalTokenCount: 185_000 },
+          200_000,
+        ),
+        compression(30_000),
+        reply(
+          'a2',
+          { promptTokenCount: 150_000, totalTokenCount: 152_000 },
+          200_000,
+        ),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(75);
     });
   });
 

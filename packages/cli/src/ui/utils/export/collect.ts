@@ -282,8 +282,10 @@ function calculateTokenStats(records: ChatRecord[]): {
       }
       // Context usage is the prompt size, as in the footer and on resume. The
       // total also counts this turn's output, which is not in the context yet.
-      // The recorder stores a prompt size the provider left out as 0, so fall
-      // back on any falsy value, and let no zero reading displace a real one.
+      // The recorder stores a prompt size the provider left out as 0, so this
+      // falls back on any falsy value and lets no zero reading displace a real
+      // one. Resume keeps a recorded 0 instead; export prefers the last real
+      // reading because it reports a single number for the whole session.
       const contextTokenCount =
         record.usageMetadata?.promptTokenCount ||
         record.usageMetadata?.totalTokenCount;
@@ -297,8 +299,10 @@ function calculateTokenStats(records: ChatRecord[]): {
     }
 
     // A compression shrinks the context until the next reply reports a new
-    // prompt size. Resume and the footer read its new size, so do the same,
-    // keeping the window of the reply before it.
+    // prompt size, so its new size replaces the last reading, keeping the
+    // window of the reply before it. Unlike resume, a size of 0 or a
+    // non-finite one is skipped, for the same reason a zero prompt size is
+    // above: export reports the last real reading rather than an empty one.
     if (
       record.type === 'system' &&
       record.subtype === 'chat_compression' &&
@@ -307,7 +311,11 @@ function calculateTokenStats(records: ChatRecord[]): {
       const info = (
         record.systemPayload as ChatCompressionRecordPayload | undefined
       )?.info;
-      if (typeof info?.newTokenCount === 'number') {
+      if (
+        typeof info?.newTokenCount === 'number' &&
+        Number.isFinite(info.newTokenCount) &&
+        info.newTokenCount > 0
+      ) {
         lastValidRecord = {
           contextTokenCount: info.newTokenCount,
           contextWindowSize: lastValidRecord.contextWindowSize,
