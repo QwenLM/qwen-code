@@ -84,6 +84,25 @@ describe('parseCodexMemories', () => {
     expect(result.warnings).toEqual([]);
   });
 
+  it.each(['General Tips', 'rollout_summary_files'])(
+    'excludes nested non-memory section %s from its parent',
+    (section) => {
+      const result = parseHandbook(
+        '# Task Group: Atlas\ncwd: /work/atlas\n## Reusable knowledge\n' +
+          `- Scoped fact.\n### ${section}\n- Not a memory.\n` +
+          '#### User preferences\n- Not a nested memory.\n' +
+          '### Release details\n- Next fact.\n',
+      );
+      expect(result.candidates.map((entry) => entry.content)).toEqual([
+        'Scoped fact.',
+        'Next fact.',
+      ]);
+      if (section === 'General Tips') {
+        expect(result.warnings.join('\n')).toContain('General Tips skipped');
+      }
+    },
+  );
+
   it('extracts supported group sections with canonical project and provenance', () => {
     const source = `${GROUP}
 ## User preferences

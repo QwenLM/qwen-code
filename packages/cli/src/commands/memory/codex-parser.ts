@@ -300,6 +300,21 @@ export function parseCodexMemories(files: SourceFile[]): {
         pending.push(...node.children);
     }
     const allHeadings = headings(tree.children, lines);
+    const skippedSections = allHeadings
+      .filter((heading) =>
+        ['general tips', 'rollout_summary_files'].includes(
+          heading.title.toLowerCase(),
+        ),
+      )
+      .map((heading) => ({
+        start: heading.start,
+        end:
+          allHeadings.find(
+            (next) => next.start > heading.start && next.level <= heading.level,
+          )?.start ?? lines.length,
+      }));
+    const isSkipped = (line: number) =>
+      skippedSections.some((range) => line > range.start && line < range.end);
     const summary = file.path === 'memory_summary.md';
     const sectionTypes = summary ? SUMMARY_SECTIONS : HANDBOOK_SECTIONS;
     const groupOccurrences = new Map<string, number>();
@@ -311,6 +326,7 @@ export function parseCodexMemories(files: SourceFile[]): {
     let canonicalScope: string[] = [];
     let recognized = 0;
     for (const heading of allHeadings) {
+      if (isSkipped(heading.start)) continue;
       if (!summary && heading.level === 1) {
         group = /^Task Group:\s*\S/i.test(heading.title) ? heading : undefined;
         task = undefined;
@@ -390,6 +406,7 @@ export function parseCodexMemories(files: SourceFile[]): {
             )?.start ?? lines.length,
         }));
       const belongs = (line: number) =>
+        !isSkipped(line) &&
         !nested.some((range) => line > range.start && line < range.end);
       for (const block of codeBlocks) {
         if (
