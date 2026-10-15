@@ -115,13 +115,11 @@ const mount = {
 };
 const handles = new Map([[rootHandle.fd, workspace]]);
 const opened = new Set();
+// Translate unconditionally, as managed-csi-mount.test.ts does: this fixture
+// fakes the mount, so the owned descriptors are the ones in `handles` whether
+// or not the host really exposes /proc/self/fd.
 const mappedAddress = (file) => {
-  if (
-    process.platform !== 'linux' ||
-    actualPlatform.value === 'linux' ||
-    typeof file !== 'string'
-  )
-    return file;
+  if (process.platform !== 'linux' || typeof file !== 'string') return file;
   const matched = /^\/proc\/self\/fd\/(\d+)(?:\/(.*))?$/.exec(file);
   if (!matched) return file;
   const address = handles.get(Number(matched[1]));

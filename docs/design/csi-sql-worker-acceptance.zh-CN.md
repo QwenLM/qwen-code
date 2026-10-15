@@ -30,11 +30,11 @@ worker 使用生产认证、native fetch、composer、文件工具和 retained-h
 数据库、listener、worker 进程与工作目录均由测试拥有，在 `finally` 清理。
 placement/protection descriptor 是显式 fixture，不是 Kubernetes 观察。仅在测试
 中将固定 fixture Pod endpoint 映射到自有 loopback worker；header、body、lease
-与 incarnation 保持不变。macOS 上明确标记 mount/proc-fd 映射，底层仍使用真实
-inode 和文件 handle。Linux 文件 backend 可以使用真实 proc-fd 地址，但 mount
-来源仍是 fixture。不 stub worker 结果、native 回读、SQL 授权、文件工具或 history
-composer。验收证明这些边界下的 SQL/HTTP/文件链路，不证明原生 CSI mount 或
-Kubernetes 部署。
+与 incarnation 保持不变。在所有平台上都明确标记 mount/proc-fd 映射，底层仍使用
+真实 inode 和文件 handle，因此文件 backend 不依赖宿主是否暴露 `/proc/self/fd`；
+mount 来源仍是 fixture。不 stub worker 结果、native 回读、SQL 授权、文件工具或
+history composer。验收证明这些边界下的 SQL/HTTP/文件链路，不证明原生 CSI mount
+或 Kubernetes 部署。
 
 ## 文件与范围
 

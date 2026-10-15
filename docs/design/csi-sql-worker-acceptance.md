@@ -35,12 +35,13 @@ The database, listeners, worker process and working directory are owned by the
 test and are removed in `finally`. Placement/protection descriptors are an
 explicit fixture, not Kubernetes observations. A test-only HTTP destination
 mapping routes the fixed fixture Pod endpoint to the owned loopback worker;
-headers, body, lease and incarnation remain unchanged. On macOS a labelled
-mount/proc-fd mapping delegates to genuine inodes and file handles. Linux can
-use actual proc-fd addressing for the file backend, while mount provenance
-remains a fixture. No worker result, native readback, SQL authorization, file
-tool or history composer is stubbed. This qualifies the SQL/HTTP/file chain
-under these boundaries, not a native CSI mount or Kubernetes deployment.
+headers, body, lease and incarnation remain unchanged. On every platform a
+labelled mount/proc-fd mapping delegates to genuine inodes and file handles,
+so the file backend does not depend on the host exposing `/proc/self/fd`,
+while mount provenance remains a fixture. No worker result, native readback,
+SQL authorization, file tool or history composer is stubbed. This qualifies
+the SQL/HTTP/file chain under these boundaries, not a native CSI mount or
+Kubernetes deployment.
 
 ## Files and scope
 
