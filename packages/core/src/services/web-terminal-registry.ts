@@ -60,7 +60,7 @@ export type WebTerminalWriteResult = 'written' | 'backpressure' | 'unavailable';
 /** Upper bound on replayed scrollback per PTY session (roughly 4 MB). */
 const MAX_BUFFER_CHUNKS = 4000;
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
-const MAX_UNACKNOWLEDGED_INPUT_BYTES = 256 * 1024;
+const MAX_BUFFERED_INPUT_BYTES = 256 * 1024;
 export const MAX_CONCURRENT_WEB_TERMINALS = 8;
 /** Reclaim a PTY session after this long with no connected listener. */
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
@@ -70,7 +70,7 @@ interface PtySession {
   workspaceCwd: string;
   buffer: string[];
   bufferBytes: number;
-  unacknowledgedInputBytes: number;
+  bufferedInputBytes(): number | undefined;
   exited: boolean;
   exitCode?: number;
   outputListeners: Set<(data: string) => void>;
@@ -90,6 +90,13 @@ interface PtySession {
 }
 
 interface SpawnedWebTerminalPty extends WebTerminalPty {
+  write(data: string | Buffer): void;
+  _isReady?: boolean;
+  _socket?: { writableLength?: number };
+  _agent?: { inSocket?: { writableLength: number } };
+  _writeStream?: {
+    _writeQueue: Array<{ buffer: Buffer; offset: number }>;
+  };
   onData(callback: (data: string) => void): { dispose(): void } | undefined;
   onExit(
     callback: (e: { exitCode: number; signal?: number }) => void,
@@ -294,10 +301,6 @@ export class WebTerminalRegistry {
         earlyOutput.push(data);
         return;
       }
-      session.unacknowledgedInputBytes = Math.max(
-        0,
-        session.unacknowledgedInputBytes - Buffer.byteLength(data),
-      );
       if (queryTerminal) {
         try {
           queryTerminal.write(data);
@@ -360,6 +363,7 @@ export class WebTerminalRegistry {
     };
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
+    let deferredInputBytes = 0;
     const spawnPty = (useBundled: boolean) =>
       ptyImpl.module.spawn(file, args, {
         name: 'xterm-256color',
@@ -397,7 +401,11 @@ export class WebTerminalRegistry {
       exitDisposable = spawned.onExit(handleExit);
       proc = {
         pid: spawned.pid,
-        write: (data) => spawned.write(data),
+        write: (data) => {
+          const deferred = spawned._isReady === false;
+          spawned.write(Buffer.from(data));
+          if (deferred) deferredInputBytes += Buffer.byteLength(data);
+        },
         resize: (cols, rows) => spawned.resize(cols, rows),
         kill: () => {
           spawned.kill();
@@ -460,7 +468,20 @@ export class WebTerminalRegistry {
       workspaceCwd: options.workspaceCwd,
       buffer: [],
       bufferBytes: 0,
-      unacknowledgedInputBytes: 0,
+      bufferedInputBytes: () => {
+        // node-pty's public write() has no drain signal. Inspect the actual
+        // input queue: stdout can be unrelated to consumed input (no-echo/raw
+        // programs), and Windows queues writes before its first output byte.
+        if (spawned._isReady === false) return deferredInputBytes;
+        deferredInputBytes = 0;
+        if (spawned._writeStream) {
+          return spawned._writeStream._writeQueue.reduce(
+            (bytes, task) => bytes + task.buffer.length - task.offset,
+            0,
+          );
+        }
+        return (spawned._agent?.inSocket ?? spawned._socket)?.writableLength;
+      },
       exited: false,
       outputListeners: new Set(),
       exitListeners: new Set(),
@@ -525,16 +546,18 @@ export class WebTerminalRegistry {
     const bytes = Buffer.byteLength(data);
     const isRecoveryControl =
       data.length === 1 && '\x03\x04\x1a\x1c'.includes(data);
-    if (
-      !isRecoveryControl &&
-      session.unacknowledgedInputBytes !== 0 &&
-      session.unacknowledgedInputBytes + bytes > MAX_UNACKNOWLEDGED_INPUT_BYTES
-    ) {
-      return 'backpressure';
+    if (!isRecoveryControl) {
+      const bufferedBytes = session.bufferedInputBytes();
+      if (bufferedBytes === undefined) return 'unavailable';
+      if (
+        bufferedBytes !== 0 &&
+        bufferedBytes + bytes > MAX_BUFFERED_INPUT_BYTES
+      ) {
+        return 'backpressure';
+      }
     }
     try {
       session.pty.write(data);
-      if (!isRecoveryControl) session.unacknowledgedInputBytes += bytes;
       return 'written';
     } catch {
       return 'unavailable';

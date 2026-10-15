@@ -7,6 +7,7 @@
 import type { MockInstance } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '@xterm/headless';
+import { Writable } from 'node:stream';
 
 const { Terminal } = pkg;
 
@@ -51,15 +52,18 @@ describe('WebTerminalRegistry', () => {
   let conoutDispose: ReturnType<typeof vi.fn>;
   let disposeData: ReturnType<typeof vi.fn>;
   let disposeExit: ReturnType<typeof vi.fn>;
+  let inputSocket: { writableLength: number };
 
   const createSpawnedPty = () => ({
     pid: 1,
     write,
     resize,
     kill,
+    _socket: inputSocket,
     // node-pty's WindowsPtyAgent internals, which releaseConPtyHost drives
     // directly instead of going through kill(). See #11303.
     _agent: {
+      inSocket: inputSocket,
       _pty: 42,
       _useConptyDll: false,
       _ptyNative: { kill: nativeKill },
@@ -169,7 +173,10 @@ describe('WebTerminalRegistry', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    write = vi.fn();
+    inputSocket = { writableLength: 0 };
+    write = vi.fn((data: string | Buffer) => {
+      inputSocket.writableLength += Buffer.byteLength(data);
+    });
     resize = vi.fn();
     kill = vi.fn();
     nativeKill = vi.fn();
@@ -350,7 +357,7 @@ describe('WebTerminalRegistry', () => {
 
     // DA is last, so its answer also waits for all preceding queries to parse.
     await vi.waitFor(() => {
-      expect(write).toHaveBeenCalledExactlyOnceWith('\x1b[?1;2c');
+      expect(write).toHaveBeenCalledExactlyOnceWith(Buffer.from('\x1b[?1;2c'));
     });
     expect(received).toEqual(chunks);
     expect(registry.readSnapshot('terminal:queries')).toMatchObject({
@@ -769,7 +776,7 @@ describe('WebTerminalRegistry', () => {
     });
   });
 
-  it('forwards live output and bounds unacknowledged PTY input', async () => {
+  it('bounds queued input across reconnects without treating output as a drain', async () => {
     const registry = await start('terminal:io');
     const listener = vi.fn();
     const detachListener = registry.addOutputListener('terminal:io', listener);
@@ -790,8 +797,12 @@ describe('WebTerminalRegistry', () => {
 
     onData('ready');
     expect(listener).toHaveBeenCalledWith('ready');
+    expect(registry.write('terminal:io', '12345')).toBe('backpressure');
+
+    inputSocket.writableLength = 0;
     expect(registry.write('terminal:io', '12345')).toBe('written');
-    expect(registry.write('terminal:io', 'x')).toBe('backpressure');
+    expect(registry.write('terminal:io', 'x')).toBe('written');
+    registry.dispose();
   });
 
   it('accepts one complete oversized input frame on an idle session', async () => {
@@ -801,6 +812,134 @@ describe('WebTerminalRegistry', () => {
     expect(registry.write('terminal:paste', paste)).toBe('written');
     expect(registry.write('terminal:paste', paste)).toBe('backpressure');
     expect(write).toHaveBeenCalledOnce();
+    registry.dispose();
+  });
+
+  it('accepts more input after a silent socket drain, including after reconnect', async () => {
+    const registry = await start('terminal:silent');
+    const detach = registry.addOutputListener('terminal:silent', vi.fn());
+
+    expect(registry.write('terminal:silent', 'x'.repeat(300 * 1024))).toBe(
+      'written',
+    );
+    inputSocket.writableLength = 0;
+    expect(registry.write('terminal:silent', 'next command\r')).toBe('written');
+    inputSocket.writableLength = 0;
+    detach?.();
+    registry.addOutputListener('terminal:silent', vi.fn());
+    expect(registry.write('terminal:silent', 'after reconnect\r')).toBe(
+      'written',
+    );
+    expect(registry.readSnapshot('terminal:silent')?.output).toBe('');
+    registry.dispose();
+  });
+
+  it('measures the remaining bytes in the POSIX backend write queue', async () => {
+    const queue: Array<{ buffer: Buffer; offset: number }> = [];
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _writeStream: { _writeQueue: queue },
+    }));
+    write.mockImplementation((data: string | Buffer) => {
+      queue.push({ buffer: Buffer.from(data), offset: 0 });
+    });
+    const registry = await start('terminal:posix', 'linux');
+
+    expect(registry.write('terminal:posix', 'é'.repeat(128 * 1024))).toBe(
+      'written',
+    );
+    expect(registry.write('terminal:posix', 'x')).toBe('backpressure');
+    onData('unrelated output');
+    expect(registry.write('terminal:posix', 'x')).toBe('backpressure');
+    queue[0].offset = 2;
+    expect(registry.write('terminal:posix', 'é')).toBe('written');
+    expect(registry.write('terminal:posix', 'x')).toBe('backpressure');
+    queue.length = 0;
+    expect(registry.write('terminal:posix', 'next\r')).toBe('written');
+    registry.dispose();
+  });
+
+  it('bounds deferred Windows startup input until its input socket drains', async () => {
+    const spawned = { ...createSpawnedPty(), _isReady: false };
+    spawn.mockReturnValue(spawned);
+    write.mockImplementation(() => {});
+    const registry = await start('terminal:starting', 'win32');
+
+    expect(registry.write('terminal:starting', 'x'.repeat(256 * 1024))).toBe(
+      'written',
+    );
+    expect(registry.write('terminal:starting', 'x')).toBe('backpressure');
+    expect(registry.write('terminal:starting', '\x03')).toBe('written');
+    spawned._isReady = true;
+    inputSocket.writableLength = 256 * 1024 + 1;
+    onData('prompt');
+    expect(registry.write('terminal:starting', 'x')).toBe('backpressure');
+    inputSocket.writableLength = 0;
+    expect(registry.write('terminal:starting', 'next\r')).toBe('written');
+    registry.dispose();
+  });
+
+  it('does not mistake the Windows output socket for its input queue', async () => {
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _socket: { writableLength: 0 },
+    }));
+    const registry = await start('terminal:windows', 'win32');
+
+    inputSocket.writableLength = 256 * 1024;
+    expect(registry.write('terminal:windows', 'x')).toBe('backpressure');
+    inputSocket.writableLength = 0;
+    expect(registry.write('terminal:windows', 'x')).toBe('written');
+    onExit({ exitCode: 0 });
+    expect(registry.write('terminal:windows', 'x')).toBe('unavailable');
+    registry.release('terminal:windows');
+    expect(registry.write('terminal:windows', 'x')).toBe('unavailable');
+  });
+
+  it('uses the socket queue for older POSIX backends', async () => {
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _agent: undefined,
+    }));
+    const registry = await start('terminal:socket', 'linux');
+
+    inputSocket.writableLength = 256 * 1024;
+    expect(registry.write('terminal:socket', 'x')).toBe('backpressure');
+    inputSocket.writableLength = 0;
+    expect(registry.write('terminal:socket', 'x')).toBe('written');
+    registry.dispose();
+  });
+
+  it('counts UTF-8 bytes when an input socket does not decode strings', async () => {
+    const socket = new Writable({ decodeStrings: false, write() {} });
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _agent: { ...createSpawnedPty()._agent, inSocket: socket },
+    }));
+    write.mockImplementation((data: string | Buffer) => socket.write(data));
+    const registry = await start('terminal:utf8', 'win32');
+
+    expect(registry.write('terminal:utf8', 'é'.repeat(128 * 1024))).toBe(
+      'written',
+    );
+    expect(socket.writableLength).toBe(256 * 1024);
+    expect(registry.write('terminal:utf8', 'x')).toBe('backpressure');
+    registry.dispose();
+    socket.destroy();
+  });
+
+  it('fails closed if a backend exposes no input queue', async () => {
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _agent: undefined,
+      _socket: undefined,
+    }));
+    const registry = await start('terminal:unknown');
+
+    expect(registry.write('terminal:unknown', 'x')).toBe('unavailable');
+    expect(write).not.toHaveBeenCalled();
+    expect(registry.write('terminal:unknown', '\x03')).toBe('written');
+    registry.dispose();
   });
 
   it.skipIf(process.platform === 'win32')(
