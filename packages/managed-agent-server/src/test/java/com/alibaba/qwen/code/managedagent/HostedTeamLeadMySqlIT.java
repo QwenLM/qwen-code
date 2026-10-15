@@ -87,7 +87,7 @@ class HostedTeamLeadMySqlIT {
     private final String tenant = "h4eb1-" + UUID.randomUUID();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
-    // A member whose prompt says WAIT or HOLD replies only once its latch opens.
+    // WAIT replies after release; HOLD ends after cancellation without replying.
     private final Map<String, CountDownLatch> releases = new ConcurrentHashMap<>();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
@@ -329,7 +329,9 @@ class HostedTeamLeadMySqlIT {
                         && !releases.computeIfAbsent(name, key -> new CountDownLatch(1)).await(80, TimeUnit.SECONDS)) {
                     throw new AssertionError("Member " + name + " was never released");
                 }
-                reply(exchange, List.of(), name.toUpperCase() + "_REPORT all clean");
+                if (!member.group(2).equals("HOLD")) {
+                    reply(exchange, List.of(), name.toUpperCase() + "_REPORT all clean");
+                }
                 return;
             }
             Matcher lead = LEAD.matcher(first);
