@@ -20,9 +20,17 @@ const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
 // The banner is deliberately a single line, so a probe failure only survives in
 // the debug log. Spy on the logger to pin that it is actually written rather
 // than dropped by the `catch` (review R1-1).
+//
+// `isEnabled` matches production rather than being hard-coded off: the real
+// `createDebugLogger` returns `isEnabled: () => getActiveSession() !== null`,
+// and `Config`'s constructor binds a session (`setDebugLogSession(this)`) before
+// `getUserStartupWarnings` runs. Modelling the logger as disabled while the spy
+// still records is a state the call site never reaches, and it would redden this
+// test the moment the idiomatic `if (debugLogger.isEnabled())` guard is added
+// around the write (review R3-1).
 vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
   createDebugLogger: () => ({
-    isEnabled: () => false,
+    isEnabled: () => true,
     debug: vi.fn(),
     info: vi.fn(),
     warn: warnSpy,

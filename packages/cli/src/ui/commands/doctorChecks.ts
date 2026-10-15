@@ -308,9 +308,32 @@ function checkToolRegistry(context: CommandContext): DoctorCheckResult {
   };
 }
 
+/**
+ * A single-line summary of a probe failure, for `/doctor` only.
+ *
+ * The startup banner deliberately carries none of the probe's own output, but
+ * `/doctor` is an explicit request for diagnostics, so the reason belongs here.
+ * A bundled binary that cannot run prints a loader/allocator dump
+ * (`<jemalloc>: Unsupported system page size`, …) that reads like Qwen Code
+ * itself ran out of memory, so only the first line is kept and it is truncated:
+ * enough to tell "the binary could not run" from "the probe was misconfigured"
+ * without reproducing the dump.
+ */
+function summarizeProbeFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const firstLine = message.split('\n', 1)[0]!.trim();
+  if (firstLine.length === 0) {
+    return t('the probe did not report a reason');
+  }
+  return firstLine.length > 160 ? `${firstLine.slice(0, 157)}...` : firstLine;
+}
+
 async function checkRipgrep(
   context: CommandContext,
 ): Promise<DoctorCheckResult> {
+  const installHint = t(
+    'Install ripgrep for faster file search: https://github.com/BurntSushi/ripgrep',
+  );
   try {
     const useBuiltin = context.services.config?.getUseBuiltinRipgrep() ?? false;
     const result = await canUseRipgrep(useBuiltin);
@@ -327,16 +350,22 @@ async function checkRipgrep(
       name: t('Ripgrep'),
       status: 'warn',
       message: t('not available'),
-      detail: t(
-        'Install ripgrep for faster file search: https://github.com/BurntSushi/ripgrep',
-      ),
+      detail: installHint,
     };
-  } catch {
+  } catch (error) {
+    // A thrown probe and a probe that answered "no" both leave the user on
+    // built-in grep, so the install hint belongs on this branch too — without
+    // it the startup banner's promise that the reason survives somewhere does
+    // not hold for a default run, where the debug log is gated off.
     return {
       category: t('Tools'),
       name: t('Ripgrep'),
       status: 'warn',
       message: t('check failed'),
+      detail: t('{{reason}} {{hint}}', {
+        reason: summarizeProbeFailure(error),
+        hint: installHint,
+      }),
     };
   }
 }

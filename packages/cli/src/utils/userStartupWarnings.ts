@@ -51,9 +51,11 @@ const rootDirectoryCheck: WarningCheck = {
  * diagnostics (`<jemalloc>: Unsupported system page size`, `memory allocation of
  * 160 bytes failed`, …), which in a terminal reads like Qwen Code itself ran out
  * of memory right before the user starts debugging (#13704). Nothing is lost by
- * keeping the banner to one line: `ripgrepAvailabilityCheck` writes the reason
- * to the debug log, and `/doctor` reports the ripgrep state with the install
- * hint.
+ * keeping the banner to one line: `/doctor` reports the ripgrep state together
+ * with the reason and the install hint, and `ripgrepAvailabilityCheck` also
+ * writes the reason to the debug log — the latter only when
+ * `QWEN_DEBUG_LOG_FILE` is enabled, which `--debug` sets and a default run does
+ * not.
  */
 const RIPGREP_UNAVAILABLE_WARNING =
   'Ripgrep not available: falling back to built-in grep, which is slower on large codebases. Install ripgrep for faster file content search.';
@@ -74,7 +76,8 @@ const ripgrepAvailabilityCheck: WarningCheck = {
       // banner stays one line, but the reason has to survive somewhere, and on
       // this path nothing else records it: `resolveHealthyRipgrep` re-throws a
       // *system* rg failure before reaching its own `debugLogger.warn`, so an
-      // empty `catch` would drop the only copy.
+      // empty `catch` would drop the only copy. (`/doctor` re-probes and reports
+      // the reason on its own, but it does not run here.)
       debugLogger.warn(`Ripgrep probe failed: ${error}`);
       return RIPGREP_UNAVAILABLE_WARNING;
     }
