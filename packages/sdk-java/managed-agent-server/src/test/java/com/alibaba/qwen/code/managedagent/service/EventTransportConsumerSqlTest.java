@@ -13,25 +13,28 @@ import com.alibaba.qwen.code.managedagent.service.EventTransportConsumer.Materia
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import org.apache.rocketmq.client.apis.message.MessageView;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import org.apache.rocketmq.client.apis.message.MessageView;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * The MQ2c consumer roles against the real schema (H2, MySQL mode): every
- * decision is read from SQL — the activation fence from the Session and its
- * journal head, the wake dedup from the consumer-progress watermark, the
- * materialization dedup from the message projection's covered sequence —
- * and the broker is stood in for by handing the listener the message.
+ * The MQ2c consumer roles against the real schema (H2, MySQL mode): every decision is read from SQL
+ * — the activation fence from the Session and its journal head, the wake dedup from the
+ * consumer-progress watermark, the materialization dedup from the message projection's covered
+ * sequence — and the broker is stood in for by handing the listener the message.
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:transport-consumer;MODE=MySQL;"
@@ -92,6 +95,78 @@ class EventTransportConsumerSqlTest {
 
         verify(harness, times(2)).activateForWake(TENANT, session);
         assertThat(wakeWatermark(session)).isEqualTo(5);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aPrivateWakeCannotInsertOrAdvanceProgressOrActivate(boolean requestPinned) {
+        String session = session("ACTIVE");
+        if (requestPinned) {
+            jdbc.update(
+                    "UPDATE ma_session SET runtime_request_key = ?"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                    DIGEST,
+                    TENANT,
+                    session);
+        } else {
+            jdbc.update(
+                    "UPDATE ma_session SET tool_profile = ?"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                    CsiFilesRetirementProfile.PROFILE,
+                    TENANT,
+                    session);
+        }
+        head(session, "ACTIVE", 5, -60);
+        var sessionBefore =
+                jdbc.queryForMap(
+                        "SELECT * FROM ma_session" + " WHERE tenant_id = ? AND session_id = ?",
+                        TENANT,
+                        session);
+        var headBefore =
+                jdbc.queryForMap(
+                        "SELECT * FROM ma_session_head" + " WHERE tenant_id = ? AND session_id = ?",
+                        TENANT,
+                        session);
+        assertThat(sessionBefore.get("csi_guard")).isEqualTo(true);
+
+        deliver(wake(session, WORKSPACE, 3));
+        assertThat(wakeWatermark(session)).isNull();
+
+        jdbc.update(
+                "UPDATE ma_event_stream SET wake_covered_sequence = 1 WHERE tenant_id = ?"
+                        + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                TENANT,
+                session);
+        var progressBefore =
+                jdbc.queryForMap(
+                        "SELECT * FROM ma_event_stream WHERE tenant_id = ? AND session_id = ? AND"
+                                + " stream_kind = 'SESSION' AND stream_id = X''",
+                        TENANT,
+                        session);
+        deliver(wake(session, WORKSPACE, 5));
+        assertThat(
+                        jdbc.queryForMap(
+                                "SELECT * FROM ma_event_stream WHERE tenant_id = ? AND session_id ="
+                                        + " ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                                TENANT,
+                                session))
+                .isEqualTo(progressBefore);
+        assertThat(
+                        jdbc.queryForMap(
+                                "SELECT * FROM ma_session"
+                                        + " WHERE tenant_id = ? AND session_id = ?",
+                                TENANT,
+                                session))
+                .isEqualTo(sessionBefore);
+        assertThat(
+                        jdbc.queryForMap(
+                                "SELECT * FROM ma_session_head"
+                                        + " WHERE tenant_id = ? AND session_id = ?",
+                                TENANT,
+                                session))
+                .isEqualTo(headBefore);
+        verify(harness, never()).activateForWake(anyString(), anyString());
+        assertThat(activated).isEmpty();
     }
 
     @Test
@@ -195,17 +270,20 @@ class EventTransportConsumerSqlTest {
         String session = session("ACTIVE");
         event(session, 1, "session.updated");
         event(session, 2, "session.updated");
-        jdbc.update("UPDATE ma_event_stream SET covered_sequence=1, replay_floor_sequence=1"
-                + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''",
+        jdbc.update(
+                "UPDATE ma_event_stream SET covered_sequence=1, replay_floor_sequence=1 WHERE"
+                    + " tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''",
                 TENANT, session);
         var before = jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence,"
-                + " projection_version, updated_at FROM ma_event_stream WHERE tenant_id=? AND"
-                + " session_id=? AND stream_kind='SESSION' AND stream_id=X''", TENANT, session);
+                + " projection_version, updated_at FROM ma_event_stream WHERE"
+                                + " tenant_id=? AND session_id=? AND stream_kind='SESSION' AND"
+                                + " stream_id=X''", TENANT, session);
         TransportConsumerStore store = new TransportConsumerStore(jdbc);
         assertThat(store.claimWake(TENANT, session, 50)).isTrue();
         assertThat(jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence,"
-                + " projection_version, updated_at FROM ma_event_stream WHERE tenant_id=? AND"
-                + " session_id=? AND stream_kind='SESSION' AND stream_id=X''", TENANT, session))
+                + " projection_version, updated_at FROM ma_event_stream WHERE"
+                                    + " tenant_id=? AND session_id=? AND stream_kind='SESSION' AND"
+                                    + " stream_id=X''", TENANT, session))
                 .isEqualTo(before);
         assertThat(consumer.materialize(publicEvent(session, 2))).isEqualTo(MaterializeOutcome.QUEUED);
         assertThat(projectionWatermark(session)).isEqualTo(2);
@@ -369,8 +447,9 @@ class EventTransportConsumerSqlTest {
                 + " NULL, ?, '{}', FALSE, NULL, ?)",
                 TENANT, session, sequence, "evt-" + UUID.randomUUID(), type,
                 1_760_000_000_000L + sequence);
-        jdbc.update("UPDATE ma_event_stream SET last_sequence = ? WHERE"
-                + " tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''", sequence, TENANT,
+        jdbc.update(
+                "UPDATE ma_event_stream SET last_sequence = ? WHERE tenant_id = ? AND session_id ="
+                        + " ? AND stream_kind = 'SESSION' AND stream_id = X''", sequence, TENANT,
                 session);
     }
 

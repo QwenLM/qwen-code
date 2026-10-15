@@ -5,18 +5,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.function.LongSupplier;
-import org.junit.jupiter.api.Test;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 
 public class SessionResourceCollectionCollectorTest extends ToolPublicationRetentionStoreTest {
     private static final String CONTENT = "managed-tool-result-content";
@@ -30,26 +30,42 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     void retirementInventoryCompletionIsAtomicWithVerifiedGcSettlement() {
         initSession();
         head(session);
-        jdbc.update("UPDATE ma_session_head SET journal_revision = 2, compacted_through_revision = 1 WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update(
+                "UPDATE ma_session_head SET journal_revision = 2, compacted_through_revision = 1"
+                        + " WHERE tenant_id = ? AND session_id = ?",
                 tenant, session);
         retire();
         var collector = collector(true, Duration.ZERO);
         assertThatThrownBy(collector::runOnce).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("journal collection is incomplete");
-        assertThat(jdbc.queryForObject("SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+        assertThat(jdbc.queryForObject(
+                                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ?"
+                                        + " AND session_id = ?",
                 Boolean.class, tenant, session)).isFalse();
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND tenant_id = ? AND session_id = ?",
+        assertThat(jdbc.queryForObject(
+                                "SELECT state FROM ma_operation WHERE operation_kind ="
+                                    + " 'SESSION_RESOURCE_GC' AND tenant_id = ? AND session_id = ?",
                 String.class, tenant, session)).isNotEqualTo("SUCCEEDED");
-        jdbc.update("UPDATE ma_session_head SET compacted_through_revision = journal_revision WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update(
+                "UPDATE ma_session_head SET compacted_through_revision = journal_revision WHERE"
+                        + " tenant_id = ? AND session_id = ?",
                 tenant, session);
-        jdbc.update("UPDATE ma_operation SET available_at = 0, claim_until = NULL WHERE operation_kind = 'SESSION_RESOURCE_GC' AND tenant_id = ? AND session_id = ?",
+        jdbc.update(
+                "UPDATE ma_operation SET available_at = 0, claim_until = NULL WHERE operation_kind"
+                        + " = 'SESSION_RESOURCE_GC' AND tenant_id = ? AND session_id = ?",
                 tenant, session);
         assertThat(collector.runOnce()).isTrue();
-        assertThat(jdbc.queryForObject("SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+        assertThat(jdbc.queryForObject(
+                                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ?"
+                                        + " AND session_id = ?",
                 Boolean.class, tenant, session)).isTrue();
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND tenant_id = ? AND session_id = ?",
+        assertThat(jdbc.queryForObject(
+                                "SELECT state FROM ma_operation WHERE operation_kind ="
+                                    + " 'SESSION_RESOURCE_GC' AND tenant_id = ? AND session_id = ?",
                 String.class, tenant, session)).isEqualTo("SUCCEEDED");
-        assertThat(jdbc.queryForObject("SELECT journal_revision FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session))
+        assertThat(jdbc.queryForObject(
+                                "SELECT journal_revision FROM ma_session_head WHERE tenant_id = ?"
+                                        + " AND session_id = ?", Long.class, tenant, session))
                 .isEqualTo(2);
     }
 
@@ -59,12 +75,15 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     private void head(String sessionId) {
-        jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, tenant_id, harness_session_id, workspace_id, session_id,"
-                        + " storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash,"
-                        + " journal_revision, committed_sequence, last_commit_digest, activation_epoch,"
-                        + " compacted_through_revision, recovery_status, created_at, updated_at)"
-                        + " VALUES ('MANAGED_SESSION', ?, ?, ?, ?, 'workspace-1', ?, 1, 'SEALED', 1, 'original',"
-                         + " '2000-01-01 00:00:00', ?, 1, 1, ?, 1, 1, 'READY', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+        jdbc.update(
+                "INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, tenant_id,"
+                    + " harness_session_id, workspace_id, session_id, storage_version, state,"
+                    + " writer_generation, writer_id, writer_lease_until, lease_token_hash,"
+                    + " journal_revision, committed_sequence, last_commit_digest, activation_epoch,"
+                    + " compacted_through_revision, recovery_status, created_at, updated_at) VALUES"
+                    + " ('MANAGED_SESSION', ?, ?, ?, ?, 'workspace-1', ?, 1, 'SEALED', 1,"
+                    + " 'original', '2000-01-01 00:00:00', ?, 1, 1, ?, 1, 1, 'READY',"
+                    + " CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
                 ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(sessionId), tenant, sessionId, sessionId, "a".repeat(64), "b".repeat(64));
     }
 
@@ -79,28 +98,33 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     private void publish(String resourceId, String kind, byte[] bytes, String state, String storage,
             int schemaVersion) {
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id,"
-                + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
-                + " object_key, publish_command_id, state, created_at, last_verified_at)"
-                + " VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                + " CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+                + " session_id, resource_id, kind, schema_version, byte_length, sha256,"
+                    + " storage_kind, inline_bytes, object_key, publish_command_id, state,"
+                    + " created_at, last_verified_at) VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, ?,"
+                    + " ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
                 ManagedSchemaKeys.key(resScope, resourceId), resScope, tenant, session, resourceId, kind, schemaVersion, bytes.length,
                 ToolPublicationContract.sha256(bytes), storage, bytes,
                 "TOOL_PUBLICATION".equals(storage) ? "object-" + resourceId : null, resourceId, state);
     }
 
     private void reference(String resourceId) {
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id,"
-                        + " workspace_id, session_id, journal_revision, resource_id, created_at)"
-                        + " VALUES (?, 'JOURNAL', ?, 1, ?, ?, 'workspace-1', ?, 1, ?, CURRENT_TIMESTAMP(6))",
+        jdbc.update(
+                "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                    + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                    + " journal_revision, resource_id, created_at) VALUES (?, 'JOURNAL', ?, 1, ?,"
+                    + " ?, 'workspace-1', ?, 1, ?, CURRENT_TIMESTAMP(6))",
                 resScope, ManagedSchemaKeys.key(resScope, "journal"), ManagedSchemaKeys.key(resScope, resourceId), tenant, session, resourceId);
     }
 
     private void seedLedger() {
         String id = "session-resources-" + resScope;
         long now = ToolPublicationRetentionStore.now(jdbc);
-        jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id, session_id,"
-                        + " target_kind, target_key, request_digest, request_json, phase, state, created_at, updated_at)"
-                        + " VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, '{}', 'COLLECTING', 'PENDING', ?, ?)",
+        jdbc.update(
+                "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key,"
+                    + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
+                    + " target_key, request_digest, request_json, phase, state, created_at,"
+                    + " updated_at) VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?,"
+                    + " ?, '{}', 'COLLECTING', 'PENDING', ?, ?)",
                 ManagedSchemaKeys.operationKey(OperationKind.SESSION_RESOURCE_GC, resScope, resScope, id), resScope, resScope, id,
                 tenant, session, resScope, ManagedSchemaKeys.key(id), now, now);
     }
@@ -111,24 +135,31 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
 
     private void recovery(JdbcTemplate target, String id, String state) {
         String op = addRecoveryOperation(target, id, state);
-        target.update("INSERT INTO ma_operation_work (operation_key, work_kind, target_key, target_id, tenant_id, session_id, state, payload_json, created_at, updated_at)"
-                        + " VALUES (?, 'SESSION', ?, ?, ?, ?, 'PENDING', '{}', 0, 0)", op, ManagedSchemaKeys.key(session), session, tenant, session);
+        target.update(
+                "INSERT INTO ma_operation_work (operation_key, work_kind, target_key, target_id,"
+                    + " tenant_id, session_id, state, payload_json, created_at, updated_at) VALUES"
+                    + " (?, 'SESSION', ?, ?, ?, ?, 'PENDING', '{}', 0, 0)", op, ManagedSchemaKeys.key(session), session, tenant, session);
     }
 
     private String addRecoveryOperation(JdbcTemplate target, String id, String state) {
         String op = ManagedSchemaKeys.operationKey(OperationKind.WORKSPACE_RECOVERY, resScope, ManagedSchemaKeys.key("storage-1"), id);
         long now = ToolPublicationRetentionStore.now(target);
-        target.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id,"
-                        + " session_id, target_kind, target_key, request_digest, request_json, phase, state, created_at, updated_at)"
-                        + " VALUES (?, ?, ?, ?, 'WORKSPACE_RECOVERY', ?, ?, 'STORAGE', ?, ?, '{}', 'CAPTURE', ?, ?, ?)",
+        target.update(
+                "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key,"
+                    + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
+                    + " target_key, request_digest, request_json, phase, state, created_at,"
+                    + " updated_at) VALUES (?, ?, ?, ?, 'WORKSPACE_RECOVERY', ?, ?, 'STORAGE', ?,"
+                    + " ?, '{}', 'CAPTURE', ?, ?, ?)",
                 op, resScope, resScope, id, tenant, session, ManagedSchemaKeys.key("storage-1"), "a".repeat(64), state, now, now);
         return op;
     }
 
     private void tombstone(String id, String operation, long time) {
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key,"
-                        + " retirement_operation_id, retirement_generation, retired_at, created_at, updated_at)"
-                        + " VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 1, ?, ?, ?)", tenant, id, ManagedSchemaKeys.key(tenant),
+        jdbc.update(
+                "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key,"
+                    + " session_key, session_scope_key, retirement_operation_id,"
+                    + " retirement_generation, retired_at, created_at, updated_at) VALUES (?, ?,"
+                    + " 'CONTROL', ?, ?, ?, ?, 1, ?, ?, ?)", tenant, id, ManagedSchemaKeys.key(tenant),
                 ManagedSchemaKeys.key(id), ManagedSessionStore.sessionScopeKey(tenant, id), operation, time, time, time);
     }
 
@@ -140,8 +171,10 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     private Map<String, Object> ledger() {
-        var row = jdbc.queryForMap("SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20,3))*1000 AS claim_until_epoch"
-                + " FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
+        var row = jdbc.queryForMap(
+                        "SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20,3))*1000 AS"
+                                + " claim_until_epoch FROM ma_operation WHERE operation_kind ="
+                                + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
         var progress = row.get("result_json") == null ? new ObjectMapper().createObjectNode()
                 : ManagedToolResultStore.parse((String) row.get("result_json"));
         row.put("collected_bytes", progress.path("collectedBytes").asLong());
@@ -299,7 +332,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(((Number) blocked.get("gc_next_at")).longValue())
                 .isBetween(nowMillis + 50_000, nowMillis + 70_000);
         assertThat(rows().getFirst().get("inline_bytes")).isNotNull();
-        jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_kind = 'WORKSPACE_RECOVERY' AND operation_id = X'6f702d7265636f76657279'",
+        jdbc.update(
+                "UPDATE ma_operation SET state = ? WHERE operation_kind = 'WORKSPACE_RECOVERY' AND"
+                        + " operation_id = X'6f702d7265636f76657279'",
                 "CAPTURING".equals(state) ? "SEALED" : "VERIFIED");
         jdbc.update("UPDATE ma_operation SET available_at = 0"
                 + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
@@ -327,7 +362,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         var deferred = ledger();
         assertThat(deferred.get("collected_at")).isNull();
         assertThat(deferred.get("gc_blocker")).isEqualTo("collection_retry");
-        jdbc.update("UPDATE ma_operation SET state = 'SEALED' WHERE operation_kind = 'WORKSPACE_RECOVERY' AND operation_id = X'6f702d6c617465'");
+        jdbc.update(
+                "UPDATE ma_operation SET state = 'SEALED' WHERE operation_kind ="
+                        + " 'WORKSPACE_RECOVERY' AND operation_id = X'6f702d6c617465'");
         jdbc.update("UPDATE ma_operation SET available_at = 0"
                 + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
         assertThat(collector.runOnce()).isTrue();
@@ -340,7 +377,8 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         try (var connection = jdbc.getDataSource().getConnection()) {
             product = connection.getMetaData().getDatabaseProductName();
         }
-        // Only InnoDB has the next-key and record locks this pins; H2 neither blocks nor sees the insert.
+        // Only InnoDB has the next-key and record locks this pins; H2 neither blocks nor sees the
+        // insert.
         org.junit.jupiter.api.Assumptions.assumeTrue(product.equals("MySQL") || product.equals("MariaDB"));
         initSession();
         head(session);
@@ -352,13 +390,15 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(claim).isNotNull();
         try (var registrar = jdbc.getDataSource().getConnection();
                 var pages = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            // A registration in flight: its pin row is inserted but not committed when the page runs.
+            // A registration in flight: its pin row is inserted but not committed when the page
+            // runs.
             registrar.setAutoCommit(false);
             recovery(new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(registrar, true)),
                     "op-inflight", "CAPTURING");
             var page = pages.submit(() -> collector.collect(claim));
             Thread.sleep(1000);
-            // The locking re-check waits on the uncommitted pin; a plain read would not see it and collect.
+            // The locking re-check waits on the uncommitted pin; a plain read would not see it and
+            // collect.
             assertThat(page.isDone()).isFalse();
             registrar.commit();
             assertThat(page.get(30, java.util.concurrent.TimeUnit.SECONDS)).isFalse();
@@ -411,13 +451,15 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         var claim = collector.claim();
         assertThat(claim).isNotNull();
         try (var pages = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            // The page passes its re-check first and holds its transaction just before the byte drop.
+            // The page passes its re-check first and holds its transaction just before the byte
+            // drop.
             var page = pages.submit(() -> collector.collect(claim));
             assertThat(dropReached.await(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
             long started = System.nanoTime();
         recovery("op-after", "CAPTURING");
             long waitedMillis = (System.nanoTime() - started) / 1_000_000;
-            // The pin could not be written until the page committed its byte drop: the page's gap lock
+            // The pin could not be written until the page committed its byte drop: the page's gap
+            // lock
             // serialized it, so no registration can pin bytes that are being dropped.
             assertThat(page.get(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
             assertThat(waitedMillis).isGreaterThanOrEqualTo(1000);
@@ -538,10 +580,11 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         String other = "session-b";
         String otherScope = ManagedSessionStore.sessionScopeKey(tenant, other);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id,"
-                + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
-                + " publish_command_id, state, created_at, last_verified_at)"
-                + " VALUES (?, ?, ?, 'workspace-1', ?, 'segment', ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'segment',"
-                + " 'PUBLISHED', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+                + " session_id, resource_id, kind, schema_version, byte_length, sha256,"
+                    + " storage_kind, inline_bytes, publish_command_id, state, created_at,"
+                    + " last_verified_at) VALUES (?, ?, ?, 'workspace-1', ?, 'segment', ?, 1, ?, ?,"
+                    + " 'MYSQL_INLINE', ?, 'segment', 'PUBLISHED', CURRENT_TIMESTAMP(6),"
+                    + " CURRENT_TIMESTAMP(6))",
                 ManagedSchemaKeys.key(otherScope, "segment"), otherScope, tenant, other, CONTENT, 64, ToolPublicationContract.sha256(new byte[64]),
                 new byte[64]);
         tx.executeWithoutResult(status -> {
@@ -573,9 +616,11 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         collector(true, Duration.ZERO).runOnce();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation",
                 Long.class)).isEqualTo(32);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation c"
-                + " JOIN ma_session r ON r.session_scope_key = c.session_scope_key"
-                + " AND r.session_scope_key = c.session_scope_key WHERE r.session_id = X'7374616c652d3333'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM ma_operation c JOIN ma_session r ON"
+                                        + " r.session_scope_key = c.session_scope_key AND"
+                                        + " r.session_scope_key = c.session_scope_key WHERE"
+                                        + " r.session_id = X'7374616c652d3333'", Long.class)).isZero();
     }
 
     @Test
@@ -590,14 +635,17 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         publish("e-overbound", CONTENT, new byte[2 * 1024 * 1024], "PUBLISHED", "MYSQL_INLINE");
         publish("f-version", PAGE, new byte[5], "PUBLISHED", "MYSQL_INLINE", 2);
         publish("g-unknown-layout", CONTENT, new byte[6]);
-        jdbc.update("UPDATE ma_resource SET object_key = 'injected'"
-                + " WHERE session_scope_key = ? AND resource_id = X'672d756e6b6e6f776e2d6c61796f7574'", resScope);
+        jdbc.update(
+                "UPDATE ma_resource SET object_key = 'injected' WHERE session_scope_key = ? AND"
+                        + " resource_id = X'672d756e6b6e6f776e2d6c61796f7574'", resScope);
         publish("h-version-layout", CONTENT, new byte[7]);
-        jdbc.update("UPDATE ma_resource SET object_version_id = 'injected'"
-                + " WHERE session_scope_key = ? AND resource_id = X'682d76657273696f6e2d6c61796f7574'", resScope);
+        jdbc.update(
+                "UPDATE ma_resource SET object_version_id = 'injected' WHERE session_scope_key = ?"
+                        + " AND resource_id = X'682d76657273696f6e2d6c61796f7574'", resScope);
         publish("i-encryption-layout", CONTENT, new byte[8]);
-        jdbc.update("UPDATE ma_resource SET encryption_key_id = 'injected'"
-                + " WHERE session_scope_key = ? AND resource_id = X'692d656e6372797074696f6e2d6c61796f7574'", resScope);
+        jdbc.update(
+                "UPDATE ma_resource SET encryption_key_id = 'injected' WHERE session_scope_key = ?"
+                        + " AND resource_id = X'692d656e6372797074696f6e2d6c61796f7574'", resScope);
         retire();
         assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
         var collected = java.util.Set.of("a-referenced", "b-monitor", "e-overbound", "f-version");
@@ -624,11 +672,13 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         var ledger = ledger();
         assertThat(((Number) ledger.get("collected_bytes")).longValue()).isEqualTo(500);
         assertThat(ledger.get("collected_at")).isNotNull();
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource"
-                + " WHERE session_scope_key = ? AND resource_id = X'656c696769626c65'", String.class, resScope))
+        assertThat(jdbc.queryForObject(
+                                "SELECT state FROM ma_resource WHERE session_scope_key = ? AND"
+                                        + " resource_id = X'656c696769626c65'", String.class, resScope))
                 .isEqualTo("COLLECTED");
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource"
-                + " WHERE session_scope_key = ? AND resource_id = X'6672656564'", String.class, resScope))
+        assertThat(jdbc.queryForObject(
+                                "SELECT state FROM ma_resource WHERE session_scope_key = ? AND"
+                                        + " resource_id = X'6672656564'", String.class, resScope))
                 .isEqualTo("PUBLISHED");
     }
 
@@ -656,8 +706,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
             assertThat(((Number) ledger().get("collected_bytes")).longValue()).isEqualTo(1000);
             // An expired claim is handed off and finishes exactly once.
-            jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0)"
-                    + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
+            jdbc.update(
+                    "UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind ="
+                            + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
             assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
             var finished = ledger();
             assertThat(((Number) finished.get("collected_bytes")).longValue()).isEqualTo(1050);
@@ -718,8 +769,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
         publish("collected", CONTENT, new byte[64]);
-        jdbc.update("UPDATE ma_session_head SET state = 'SEALED',"
-                + " writer_lease_until = '2000-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update(
+                "UPDATE ma_session_head SET state = 'SEALED', writer_lease_until = '2000-01-01"
+                        + " 00:00:00' WHERE tenant_id = ? AND session_id = ?",
                 tenant, session);
         retire();
         assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
@@ -746,8 +798,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 if (sql.contains("ma_operation") && sql.contains("FOR UPDATE")
                         && reads.incrementAndGet() == 2) {
                     plain.update("UPDATE ma_operation SET claim_owner = 'b-owner',"
-                            + " claim_generation = claim_generation + 1, claim_until = FROM_UNIXTIME(? / 1000.0)"
-                            + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?",
+                            + " claim_generation = claim_generation + 1, claim_until ="
+                                        + " FROM_UNIXTIME(? / 1000.0) WHERE operation_kind ="
+                                        + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?",
                             System.currentTimeMillis() + 300_000, resScope);
                 }
                 return super.query(sql, mapper, args);
@@ -783,10 +836,11 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         String other = "session-2";
         String otherScope = ManagedSessionStore.sessionScopeKey(tenant, other);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id,"
-                + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
-                + " publish_command_id, state, created_at, last_verified_at)"
-                + " VALUES (?, ?, ?, 'workspace-1', ?, 'segment-000', ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'segment-000',"
-                + " 'PUBLISHED', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+                + " session_id, resource_id, kind, schema_version, byte_length, sha256,"
+                    + " storage_kind, inline_bytes, publish_command_id, state, created_at,"
+                    + " last_verified_at) VALUES (?, ?, ?, 'workspace-1', ?, 'segment-000', ?, 1,"
+                    + " ?, ?, 'MYSQL_INLINE', ?, 'segment-000', 'PUBLISHED', CURRENT_TIMESTAMP(6),"
+                    + " CURRENT_TIMESTAMP(6))",
                 ManagedSchemaKeys.key(otherScope, "segment-000"), otherScope, tenant, other, CONTENT, 64, ToolPublicationContract.sha256(new byte[64]),
                 new byte[64]);
         retire();
@@ -798,8 +852,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             assertThat(row.get("state")).isEqualTo("PUBLISHED");
             assertThat(row.get("inline_bytes")).isNotNull();
         });
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
-                + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", Long.class, otherScope)).isZero();
+        assertThat(jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
+                                        + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", Long.class, otherScope)).isZero();
     }
 
     @Test
@@ -838,8 +893,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         tombstone(later, "purge-later", now - 1000);
         assertThat(collector.runOnce()).isFalse();
         String laterScope = ManagedSessionStore.sessionScopeKey(tenant, later);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
-                + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", Long.class, laterScope)).isZero();
+        assertThat(jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
+                                        + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", Long.class, laterScope)).isZero();
     }
 
     @Test
@@ -976,8 +1032,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             assertThat(ledger().get("gc_blocker")).isEqualTo("reader_active");
             assertThat(appender.list).singleElement().satisfies(event -> assertThat(
                     event.getFormattedMessage()).contains("blocker=reader_active"));
-            jdbc.update("UPDATE ma_operation SET available_at = 0"
-                    + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
+            jdbc.update(
+                    "UPDATE ma_operation SET available_at = 0 WHERE operation_kind ="
+                            + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
             assertThat(collector.runOnce()).isFalse();
             assertThat(ledger().get("gc_blocker")).isEqualTo("reader_active");
             assertThat(appender.list).hasSize(1);
@@ -998,8 +1055,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         publishThroughStore(sessions, grant.writerGeneration(), "produced-content", CONTENT, new byte[1024]);
         publishThroughStore(sessions, grant.writerGeneration(), "produced-page", PAGE, new byte[256]);
         publishThroughStore(sessions, grant.writerGeneration(), "produced-manifest", MANIFEST, new byte[64]);
-        jdbc.update("UPDATE ma_session_head SET state = 'SEALED',"
-                + " writer_lease_until = '2000-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update(
+                "UPDATE ma_session_head SET state = 'SEALED', writer_lease_until = '2000-01-01"
+                        + " 00:00:00' WHERE tenant_id = ? AND session_id = ?",
                 tenant, session);
         retire();
         assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
@@ -1061,8 +1119,10 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         // and the cataloged publication object marked COLLECTED in the same transaction.
         jdbc.update("UPDATE ma_resource SET inline_bytes = NULL"
                 + " WHERE session_scope_key = ? AND resource_id = X'6672656564'", resScope);
-        jdbc.update("UPDATE ma_resource SET scope_key = ?, publication_id = ?, slot_key = 'segment:stdout:0', capture_state = ?"
-                + " WHERE session_scope_key = ? AND resource_id = ?", ToolPublicationDataStore.scope(tenant, "workspace-1", session),
+        jdbc.update(
+                "UPDATE ma_resource SET scope_key = ?, publication_id = ?, slot_key ="
+                        + " 'segment:stdout:0', capture_state = ? WHERE session_scope_key = ? AND"
+                        + " resource_id = ?", ToolPublicationDataStore.scope(tenant, "workspace-1", session),
                 "pub-collected", "COLLECTED", resScope, "freed" );
         var reader = new WorkspaceRecoveryReader(jdbc, null);
         var source = new ObjectMapper().createObjectNode();
@@ -1126,8 +1186,10 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         // behind (VERIFIED) is not evidence of collection: the byte loss stays fail-closed.
         jdbc.update("UPDATE ma_resource SET inline_bytes = NULL"
                 + " WHERE session_scope_key = ? AND resource_id = X'696e666c69676874'", resScope);
-        jdbc.update("UPDATE ma_resource SET scope_key = ?, publication_id = ?, slot_key = 'segment:stdout:0', capture_state = ?"
-                + " WHERE session_scope_key = ? AND resource_id = ?", ToolPublicationDataStore.scope(tenant, "workspace-1", session),
+        jdbc.update(
+                "UPDATE ma_resource SET scope_key = ?, publication_id = ?, slot_key ="
+                        + " 'segment:stdout:0', capture_state = ? WHERE session_scope_key = ? AND"
+                        + " resource_id = ?", ToolPublicationDataStore.scope(tenant, "workspace-1", session),
                 "pub-inflight", "VERIFIED", resScope, "inflight" );
         var reader = new WorkspaceRecoveryReader(jdbc, null);
         var source = new ObjectMapper().createObjectNode();
@@ -1193,5 +1255,35 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     private long ledgerCount(String sessionScope) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
                 + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", Long.class, sessionScope);
+    }
+
+    @Test
+    void retainedPrivatePinRefusesAStaleClaimAndPreservesInlineBytes() {
+        initSession();
+        head(session);
+        publish("private-content", CONTENT, new byte[100]);
+        retire();
+        seedLedger();
+        var collector = collector(true, Duration.ZERO);
+        var claim = collector.claim();
+        assertThat(claim).isNotNull();
+        jdbc.update(
+                "UPDATE ma_session SET runtime_request_key = ? WHERE tenant_id = ? AND session_id ="
+                        + " ?",
+                "a".repeat(64),
+                tenant,
+                session);
+        var before = rows();
+        var beforeLedger = ledger();
+        assertThatThrownBy(() -> collector.collect(claim))
+                .isInstanceOfSatisfying(
+                        ApiException.class,
+                        error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("csi_managed_mutation_unavailable"));
+        assertThat(rows()).usingRecursiveComparison().isEqualTo(before);
+        assertThat(ledger()).isEqualTo(beforeLedger);
+        assertThat(collector.runOnce()).isFalse();
+        assertThat(rows()).usingRecursiveComparison().isEqualTo(before);
     }
 }
