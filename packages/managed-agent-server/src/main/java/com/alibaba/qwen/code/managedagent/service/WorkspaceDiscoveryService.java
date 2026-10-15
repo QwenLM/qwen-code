@@ -4,15 +4,13 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.WorkspaceSummary;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
-import java.util.HexFormat;
 import java.util.List;
 
 @Service
@@ -89,15 +87,14 @@ public class WorkspaceDiscoveryService {
     }
 
     private static String scope(String tenantId, String actorId) {
+        byte[] tenant = tenantId.getBytes(StandardCharsets.UTF_8);
+        byte[] actor = actorId.getBytes(StandardCharsets.UTF_8);
+        byte[] value = ByteBuffer.allocate(Integer.BYTES + tenant.length
+                + actor.length).putInt(tenant.length).put(tenant)
+                .put(actor).array();
         try {
-            byte[] tenant = tenantId.getBytes(StandardCharsets.UTF_8);
-            byte[] actor = actorId.getBytes(StandardCharsets.UTF_8);
-            byte[] value = ByteBuffer.allocate(Integer.BYTES + tenant.length
-                    + actor.length).putInt(tenant.length).put(tenant)
-                    .put(actor).array();
-            return HexFormat.of().formatHex(MessageDigest
-                    .getInstance("SHA-256").digest(value));
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.sha256Hex(value);
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException(error);
         }
     }
