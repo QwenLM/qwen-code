@@ -12,6 +12,8 @@ import { getStartupContextLength } from '@qwen-code/qwen-code-core/core/environm
 import {
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
+  getLastApiHistoryPromptId,
+  getLastApiPromptCancellation,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
@@ -277,10 +279,6 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
-import {
-  getLastApiHistoryPromptId,
-  getLastApiPromptCancellation,
-} from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -9378,7 +9376,9 @@ export class Session implements SessionContext {
         request,
         promptId,
         goalPermit,
-        historyPromptId !== undefined ? { promptId: historyPromptId } : undefined,
+        historyPromptId !== undefined
+          ? { promptId: historyPromptId }
+          : undefined,
       );
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
