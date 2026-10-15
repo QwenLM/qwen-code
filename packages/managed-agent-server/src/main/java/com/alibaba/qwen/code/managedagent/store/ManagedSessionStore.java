@@ -1503,8 +1503,23 @@ public class ManagedSessionStore {
         if (bytes.length > ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES) {
             throw payloadTooLarge("Agent instructions exceed 64 KiB.");
         }
+        return publishAgentResource(tenantId, workspaceId, sessionId,
+                "managed-agent-instructions", "agent-instructions-", bytes);
+    }
+
+    @Transactional
+    public ToolResultResourceRef publishAgentSkills(String tenantId,
+            String workspaceId, String sessionId, List<java.util.Map<String, Object>> skills) {
+        validateScope(tenantId, workspaceId, sessionId);
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
+        return publishAgentResource(tenantId, workspaceId, sessionId,
+                "managed-agent-skills", "agent-skills-", AgentDefinitionExtensions.skillsBytes(skills));
+    }
+
+    private ToolResultResourceRef publishAgentResource(String tenantId,
+            String workspaceId, String sessionId, String kind, String prefix, byte[] bytes) {
         String digest = sha256(bytes);
-        String resourceId = "agent-instructions-" + digest;
+        String resourceId = prefix + digest;
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         Timestamp now = databaseNow();
         ResourceRow existing = findResource(scopeKey, resourceId);
@@ -1514,14 +1529,14 @@ public class ManagedSessionStore {
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
                         + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
-                        + " 'managed-agent-instructions', 1, ?, ?, 'MYSQL_INLINE', ?, ?,"
-                        + " 'PUBLISHED', ?, ?)",
+                        + " ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
                     resourceKey(scopeKey, resourceId),
                     scopeKey,
                     tenantId,
                     workspaceId,
                     sessionId,
                     resourceId,
+                    kind,
                     bytes.length,
                     digest,
                     bytes,
@@ -1531,16 +1546,15 @@ public class ManagedSessionStore {
         } else {
             requireResourceScope(existing, tenantId, workspaceId, sessionId, resourceId);
             verifyStoredResource(existing);
-            if (!"managed-agent-instructions".equals(existing.kind())
+            if (!kind.equals(existing.kind())
                     || existing.schemaVersion() != 1
                     || existing.byteLength() != bytes.length
                     || !digest.equals(existing.digest())) {
                 throw conflict("managed_session_resource_conflict",
-                        "Agent instructions resource does not match.");
+                        "Agent configuration resource does not match.");
             }
         }
-        return new ToolResultResourceRef(resourceId,
-                "managed-agent-instructions", 1, bytes.length, digest);
+        return new ToolResultResourceRef(resourceId, kind, 1, bytes.length, digest);
     }
 
     @Transactional
@@ -2454,7 +2468,10 @@ public class ManagedSessionStore {
                         && (resource.byteLength() > 0 && resource.byteLength() <= toolResultLimit(resource.kind())
                             || "managed-agent-instructions".equals(resource.kind())
                                 && resource.byteLength() >= 0
-                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES))
+                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES
+                            || "managed-agent-skills".equals(resource.kind())
+                                && resource.byteLength() > 0
+                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES))
                 || resource.bytes() == null
                 || resource.objectKey() != null
                 || resource.objectVersionId() != null

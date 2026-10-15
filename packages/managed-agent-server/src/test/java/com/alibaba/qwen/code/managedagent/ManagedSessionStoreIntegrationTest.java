@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -31,6 +32,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -78,6 +80,35 @@ class ManagedSessionStoreIntegrationTest {
 
     @Autowired
     private ManagedExtensionRecordStore records;
+
+    @Autowired
+    private ManagedSessionStore sessionStore;
+
+    @Test
+    void publishesStaticSkillsAsImmutableSessionScopedResources() throws Exception {
+        String session = "agent-skills-" + UUID.randomUUID();
+        sessionStore.acquireWriter(TENANT, session, TOKEN_A,
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, WRITER_A, 60000L));
+        List<Map<String, Object>> skills = List.of(Map.of("name", "review", "description", "Review changes",
+                "body", "Read the diff.\n", "base_directory", ".qwen/skills/review"));
+        var published = sessionStore.publishAgentSkills(TENANT, WORKSPACE, session, skills);
+        var replayed = sessionStore.publishAgentSkills(TENANT, WORKSPACE, session, skills);
+        assertThat(replayed).isEqualTo(published);
+        assertThat(published.kind()).isEqualTo("managed-agent-skills");
+        var resource = sessionStore.readResource(TENANT, WORKSPACE, session, published.resourceId(), TOKEN_A);
+        assertThat(objectMapper.readTree(resource.bytes())).isEqualTo(objectMapper.valueToTree(skills));
+        assertThat(resource.digest()).isEqualTo(published.digest());
+        assertThat(resource.byteLength()).isEqualTo(published.byteLength());
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> sessionStore.readResource(TENANT,
+                "other-workspace", session, published.resourceId(), TOKEN_A)).isInstanceOf(RuntimeException.class);
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                "[]".getBytes(StandardCharsets.UTF_8), TENANT, session, published.resourceId());
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> sessionStore.readResource(TENANT,
+                WORKSPACE, session, published.resourceId(), TOKEN_A)).isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.api.ApiException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_session_resource_corrupt"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> sessionStore.publishAgentSkills(TENANT,
+                WORKSPACE, session, skills)).isInstanceOf(RuntimeException.class);
+    }
 
     @Test
     void promotesAtomicallyAndRefusesOlderHttpReadersIncludingReplay() throws Exception {

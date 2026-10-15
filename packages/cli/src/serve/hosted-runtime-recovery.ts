@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -38,6 +39,22 @@ import {
   type HostedChildAgentSession,
 } from './hosted-child-agent-session.js';
 import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import {
+  HOSTED_SKILL_APPROVAL_REFUSAL,
+  HOSTED_SKILL_BATCH_REFUSAL,
+  type HostedSkillCatalog,
+} from './hosted-skill-catalog.js';
+import {
+  hostedHookOccurrenceId,
+  HostedHookRecoveryRequiredError,
+  type HostedHookSession,
+} from './hosted-hook-session.js';
+import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
+import {
+  HookEventName,
+  PreToolUseHookOutput,
+  type HookOutput,
+} from '@qwen-code/qwen-code-core/hooks/types.js';
 import {
   sessionCommandEvidenceText,
   type HostedSessionCommandSession,
@@ -557,6 +574,8 @@ async function answerAbandonedTurnCalls(input: {
    * never a cancellation nobody witnessed. */
   unobserved?: ReadonlySet<string>;
   commands?: HostedSessionCommandSession;
+  skills?: HostedSkillCatalog;
+  hooks?: HostedHookSession;
   /** A journal projection the caller already holds: one snapshot serves
    * the caller's classification and this answering pass instead of two
    * full walks of the committed events (the settle's projection walk). */
@@ -573,13 +592,26 @@ async function answerAbandonedTurnCalls(input: {
     input.promptId,
     records,
   );
-  const owed = new Map<string, { name: string; messageId: string }>();
-  for (const record of records.filter((entry) => entry.type === 'assistant'))
-    for (const part of record.message?.parts ?? []) {
+  const owed = new Map<
+    string,
+    { name: string; messageId: string; args: unknown; mixedSkillBatch: boolean }
+  >();
+  for (const record of records.filter((entry) => entry.type === 'assistant')) {
+    const parts = record.message?.parts ?? [];
+    const mixedSkillBatch = parts.some(
+      (part) => part.functionCall && part.functionCall.name !== 'skill',
+    );
+    for (const part of parts) {
       const call = part.functionCall;
       if (call?.id && call.name && !answered.has(call.id) && !owed.has(call.id))
-        owed.set(call.id, { name: call.name, messageId: record.uuid });
+        owed.set(call.id, {
+          name: call.name,
+          messageId: record.uuid,
+          args: call.args ?? {},
+          mixedSkillBatch,
+        });
     }
+  }
   let answeredNow = 0;
   for (const [functionCallId, call] of owed) {
     const callKey = hostedChildRunIdFor(input.promptId, functionCallId);
@@ -612,7 +644,17 @@ async function answerAbandonedTurnCalls(input: {
             callId: functionCallId,
           });
     let parts: Part[];
-    if (planDecision !== undefined) {
+    if (uncommitted === 'hosted' && call.name === 'skill' && input.skills) {
+      parts = await hostedSkillResponse(
+        input.session,
+        input.skills,
+        input.promptId,
+        functionCallId,
+        call.args,
+        call.mixedSkillBatch,
+        input.hooks,
+      );
+    } else if (planDecision !== undefined) {
       parts = convertToFunctionResponse(call.name, functionCallId, [
         { text: planDecision },
       ]);
@@ -827,6 +869,79 @@ function sentMessageText(
 /** The interruption every settle or resume route below names. */
 const INTERRUPTED_HARNESS = 'the Harness that asked was interrupted';
 
+async function hostedSkillResponse(
+  session: ManagedSession,
+  catalog: HostedSkillCatalog,
+  promptId: string,
+  callId: string,
+  args: unknown,
+  mixedSkillBatch: boolean,
+  hooks?: HostedHookSession,
+): Promise<Part[]> {
+  const refused = (reason: string) =>
+    convertToFunctionErrorResponse('skill', callId, [], reason);
+  if (mixedSkillBatch) return refused(HOSTED_SKILL_BATCH_REFUSAL);
+  const initialProblem = catalog.validationError(args);
+  if (initialProblem) return refused(initialProblem);
+  if (hooks) {
+    const marker = session.authority.extensionRecord(
+      'hook_execution',
+      hostedHookOccurrenceId(HookEventName.PreToolUse, `${promptId}:${callId}`),
+    );
+    if (!marker) throw new HostedHookRecoveryRequiredError();
+    const record = parseHookExecution(marker.record);
+    if (record.run.execution === 'not_started_proven')
+      return refused('The turn was cancelled before this tool call ran.');
+    if (!record.resultRef) throw new HostedHookRecoveryRequiredError();
+    const original = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(
+        await session.resources.read(record.inputRef),
+      ),
+    ) as {
+      tool_name?: string;
+      tool_use_id?: string;
+      prompt_id?: string;
+      tool_input?: unknown;
+    };
+    if (
+      record.hookId !== '__plan__' ||
+      record.eventName !== HookEventName.PreToolUse ||
+      original.tool_name !== 'skill' ||
+      original.tool_use_id !== callId ||
+      original.prompt_id !== promptId ||
+      !isDeepStrictEqual(original.tool_input, args)
+    )
+      throw new HostedHookRecoveryRequiredError();
+    const saved = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(
+        await session.resources.read(record.resultRef),
+      ),
+    ) as { output?: HookOutput };
+    const output = saved.output && new PreToolUseHookOutput(saved.output);
+    const permission = output?.getPermissionDecision();
+    if (
+      output?.shouldStopExecution() ||
+      output?.isBlockingDecision() ||
+      permission === 'deny'
+    )
+      return refused(
+        (permission === 'deny' && output?.getPermissionDecisionReason()) ||
+          output?.getEffectiveReason() ||
+          'PreToolUse Hook denied the call.',
+      );
+    if (permission === 'ask') return refused(HOSTED_SKILL_APPROVAL_REFUSAL);
+    const updated = saved.output?.hookSpecificOutput?.['updatedInput'];
+    if (updated && typeof updated === 'object' && !Array.isArray(updated))
+      args = updated;
+  }
+  const problem = catalog.validationError(args);
+  return problem
+    ? convertToFunctionErrorResponse('skill', callId, [], problem)
+    : convertToFunctionResponse('skill', callId, [
+        { text: catalog.response(args) },
+      ]);
+}
+
 /**
  * Answers, by what committed, the calls an interrupted Turn committed but
  * never answered — a team call's writes, a background launch's admission —
@@ -871,6 +986,8 @@ export function answerResumedTurnCalls(input: {
   teams?: HostedTeamSession;
   messages?: HostedSessionMessageSession;
   commands?: HostedSessionCommandSession;
+  skills?: HostedSkillCatalog;
+  hooks?: HostedHookSession;
 }): Promise<number> {
   return answerAbandonedTurnCalls({
     ...input,
@@ -949,6 +1066,8 @@ export async function fillParkedRoundAgentGaps(input: {
   /** H4d-b: the message funnel, so a committed send_message keeps the
    * answer it earned instead of the never-admitted one. */
   messages?: HostedSessionMessageSession;
+  skills?: HostedSkillCatalog;
+  hooks?: HostedHookSession;
   signal?: AbortSignal;
   consume?: (childRunId: string) => void;
 }): Promise<number> {
@@ -1026,6 +1145,9 @@ export async function fillParkedRoundAgentGaps(input: {
   const fits = (parts: Part[]): boolean =>
     templateRecord(parts).byteLength <=
     HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+  const mixedSkillBatch = (assistant.message?.parts ?? []).some(
+    (part) => part.functionCall && part.functionCall.name !== 'skill',
+  );
   let filled = 0;
   for (const part of assistant.message?.parts ?? []) {
     const callId = part.functionCall?.id;
@@ -1035,6 +1157,23 @@ export async function fillParkedRoundAgentGaps(input: {
     // The journaled set gates only the fold, never the replay-safe marks —
     // both sibling arms in this diff document and follow the same rule.
     const foldOwed = !journaled.has(callId);
+    if (name === 'skill' && input.skills) {
+      if (foldOwed) {
+        await writeFold(
+          await hostedSkillResponse(
+            input.managed,
+            input.skills,
+            input.promptId,
+            callId,
+            part.functionCall?.args ?? {},
+            mixedSkillBatch,
+            input.hooks,
+          ),
+        );
+        filled += 1;
+      }
+      continue;
+    }
     const children = input.children;
     const sent =
       name === 'send_message'

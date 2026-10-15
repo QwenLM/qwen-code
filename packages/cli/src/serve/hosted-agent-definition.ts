@@ -18,6 +18,7 @@ export interface HostedAgentDefinition {
   digest: string;
   model?: { id: string };
   instructionsRef?: ManagedSessionDurableRef;
+  skillsRef?: ManagedSessionDurableRef;
 }
 
 export function parseHostedAgentDefinition(
@@ -29,7 +30,7 @@ export function parseHostedAgentDefinition(
     throw new Error('Invalid agent definition.');
   const pin = value as Record<string, unknown>;
   const fields = create
-    ? ['agentId', 'revision', 'digest', 'model', 'instructionsRef']
+    ? ['agentId', 'revision', 'digest', 'model', 'instructionsRef', 'skillsRef']
     : ['agentId', 'revision', 'digest'];
   if (
     Object.keys(pin).some((key) => !fields.includes(key)) ||
@@ -71,6 +72,19 @@ export function parseHostedAgentDefinition(
     )
       throw new Error('Invalid agent instructions reference.');
     result.instructionsRef = ref;
+  }
+  if (pin['skillsRef'] !== undefined) {
+    const ref = assertManagedSessionDurableRef(
+      pin['skillsRef'] as ManagedSessionJsonValue,
+      'agent skills',
+    );
+    if (
+      ref.kind !== 'managed-agent-skills' ||
+      ref.schemaVersion !== 1 ||
+      ref.byteLength > 48 * 1024
+    )
+      throw new Error('Invalid agent skills reference.');
+    result.skillsRef = ref;
   }
   return result;
 }
