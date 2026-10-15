@@ -1,15 +1,15 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.aliyun.oss.OSSException;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ApiExceptionHandlerTest {
     @Test

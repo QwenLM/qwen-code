@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+
 import java.util.Map;
 
 /** @deprecated Use the shared runtime-broker identity reader. */
