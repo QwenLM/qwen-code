@@ -129,4 +129,6 @@ bootstrap stdin 协议为 `protocolVersion=1`。`ensure` 的 `launch=false` 持�
 
 source reactor 完成 SDK 249 例 unit（跳过 9 例）、Broker 1,005 例（跳过 9 例）及服务端 2,937 例 unit/H2（跳过 7 例），零失败。MySQL 8.4.11 的 72 例集成测试全部通过。最终门槛发现 main 带入的 CSI 集成 fixture 存在 import/switch 缩进错误；仅修正导入顺序和缩进，导入集合及非 import 行内容不变后，以 `-DskipTests verify checkstyle:check` 续跑，通过三个模块的 Checkstyle 和 SpotBugs。未为这一纯格式改动重复已完成的测试套件。
 
+随后合并 main，保留其子 Turn 取消行为，为 SSH 专用生命周期 fixture 补齐新增依赖。八处继承的 SQL fixture 插入改用规范时间列，其中 journal 使用数据库毫秒时钟。合并后的树通过 247 例聚焦 Java unit/H2、全部 72 例 MySQL 8.4 集成测试、Checkstyle 和 SpotBugs；完整 build、typecheck、bundle，以及 54 例模型/prompt/环境测试、21 例原生 bootstrap/目录 storage 测试和 34 例 WebShell 产物测试均通过。
+
 尚未执行 Linux 和跨物理机器验收，也未运行完整部署的 WebShell → Java → MySQL → 远端 Shell publication 链路；各组件已分别验证。没有配置或修改生产节点。这些缺口意味着当前不能宣称已通过生产验收。
