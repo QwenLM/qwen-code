@@ -31910,6 +31910,179 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('splits side-task archive requests at the route limit', async () => {
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'session_archive',
+      'session_archive_idle_guard',
+    ];
+    const sideTasks = Array.from({ length: 101 }, (_, index) => ({
+      sessionId: `side-${index}`,
+      title: `Side task ${index}`,
+      workspaceCwd: '/tmp/project',
+      archivable: true,
+    }));
+    mockWorkspace.client.archiveSessionsData.mockImplementation(
+      async (sessionIds) => {
+        if (sessionIds.includes('side-100')) throw new Error('offline');
+        return {
+          archived: [...sessionIds],
+          alreadyArchived: [],
+          resolvedConflicts: [],
+          notFound: [],
+          errors: [],
+        };
+      },
+    );
+    const onToast = vi.fn();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const { container } = renderApp({ onToast });
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    act(() => {
+      testState.latestArtifactPanelProps?.onOpenSideTask?.(sideTasks[0]!);
+      testState.latestArtifactPanelProps?.onOpenSideTask?.(sideTasks[100]!);
+    });
+    await flush();
+    const catalogRequestCount =
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length;
+
+    await act(async () => {
+      await testState.latestArtifactPanelProps?.onArchiveSideTasks?.(sideTasks);
+    });
+
+    expect(mockWorkspace.client.archiveSessionsData).toHaveBeenCalledTimes(2);
+    expect(mockWorkspace.client.archiveSessionsData).toHaveBeenNthCalledWith(
+      1,
+      sideTasks.slice(0, 100).map((sideTask) => sideTask.sessionId),
+      { requireIdle: true },
+    );
+    expect(mockWorkspace.client.archiveSessionsData).toHaveBeenNthCalledWith(
+      2,
+      [sideTasks[100]!.sessionId],
+      { requireIdle: true },
+    );
+    expect(
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length,
+    ).toBeGreaterThan(catalogRequestCount);
+    expect(container.querySelector('button[title="Side task 0"]')).toBeNull();
+    expect(
+      container.querySelector('button[title="Side task 100"]'),
+    ).not.toBeNull();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('side-100: offline'),
+    );
+    consoleError.mockRestore();
+  });
+
+  it('refreshes side-task archive eligibility when the menu opens', async () => {
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'session_archive',
+      'session_archive_idle_guard',
+    ];
+    const activeRequests: Array<
+      ReturnType<typeof deferred<DaemonSessionSummary[]>>
+    > = [];
+    const archivedRequests: Array<
+      ReturnType<typeof deferred<DaemonSessionSummary[]>>
+    > = [];
+    mockWorkspace.client.listWorkspaceSessions.mockImplementation(
+      (_workspaceCwd, options) => {
+        const request = deferred<DaemonSessionSummary[]>();
+        (options?.archiveState === 'archived'
+          ? archivedRequests
+          : activeRequests
+        ).push(request);
+        return request.promise;
+      },
+    );
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    expect(activeRequests.length).toBeGreaterThan(0);
+    expect(archivedRequests.length).toBeGreaterThan(0);
+    await act(async () => {
+      for (const request of activeRequests) {
+        request.resolve([
+          {
+            sessionId: 'side-transitioning',
+            workspaceCwd: '/tmp/project',
+            displayName: 'Transitioning task',
+            activeWorkState: 'active',
+            hasActivePrompt: true,
+          },
+        ]);
+      }
+      for (const request of archivedRequests) request.resolve([]);
+      await Promise.all([
+        ...activeRequests.map((request) => request.promise),
+        ...archivedRequests.map((request) => request.promise),
+      ]);
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.sideTasks).toEqual([
+      expect.objectContaining({
+        sessionId: 'side-transitioning',
+        archivable: false,
+      }),
+    ]);
+    const activeRequestCount = activeRequests.length;
+    const archivedRequestCount = archivedRequests.length;
+
+    act(() => {
+      testState.latestArtifactPanelProps?.onSideTaskMenuOpen?.();
+    });
+    await flush();
+    expect(activeRequests.length).toBeGreaterThan(activeRequestCount);
+    expect(archivedRequests.length).toBeGreaterThan(archivedRequestCount);
+    const refreshedActiveRequests = activeRequests.slice(activeRequestCount);
+    const refreshedArchivedRequests =
+      archivedRequests.slice(archivedRequestCount);
+    await act(async () => {
+      for (const request of refreshedActiveRequests) {
+        request.resolve([
+          {
+            sessionId: 'side-transitioning',
+            workspaceCwd: '/tmp/project',
+            displayName: 'Transitioning task',
+            activeWorkState: 'idle',
+            hasActivePrompt: false,
+          },
+        ]);
+      }
+      for (const request of refreshedArchivedRequests) request.resolve([]);
+      await Promise.all([
+        ...refreshedActiveRequests.map((request) => request.promise),
+        ...refreshedArchivedRequests.map((request) => request.promise),
+      ]);
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.sideTasks).toEqual([
+      expect.objectContaining({
+        sessionId: 'side-transitioning',
+        archivable: true,
+      }),
+    ]);
+  });
+
   it('archives settled side tasks without reviving stale catalog or saved tabs', async () => {
     mockConnection.capabilities.features = [
       'session_side_task',

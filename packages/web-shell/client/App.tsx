@@ -109,6 +109,7 @@ import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
 import {
+  SESSION_ARCHIVE_BATCH_SIZE,
   SESSION_LIST_PAGE_SIZE,
   SESSION_LIVE_STATE_FEATURE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
@@ -5340,6 +5341,9 @@ export function App({
     });
   const [sideTaskCatalogRefreshNonce, setSideTaskCatalogRefreshNonce] =
     useState(0);
+  const refreshSideTaskCatalog = useCallback(() => {
+    setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+  }, []);
   const sideTaskCatalogRequestGenerationRef = useRef(0);
   const removedSideTaskSessionIdsRef = useRef(new Set<string>());
   useLayoutEffect(() => {
@@ -11425,13 +11429,30 @@ export function App({
         .map((sideTask) => sideTask.sessionId);
       if (sessionIds.length === 0) return;
       try {
-        const result = await workspace.client.archiveSessionsData(sessionIds, {
-          requireIdle: true,
-        });
+        const batches = Array.from(
+          {
+            length: Math.ceil(sessionIds.length / SESSION_ARCHIVE_BATCH_SIZE),
+          },
+          (_, index) =>
+            sessionIds.slice(
+              index * SESSION_ARCHIVE_BATCH_SIZE,
+              (index + 1) * SESSION_ARCHIVE_BATCH_SIZE,
+            ),
+        );
+        const settledResults = await Promise.allSettled(
+          batches.map((batch) =>
+            workspace.client.archiveSessionsData(batch, {
+              requireIdle: true,
+            }),
+          ),
+        );
+        const results = settledResults.flatMap((result) =>
+          result.status === 'fulfilled' ? [result.value] : [],
+        );
         const archived = new Set([
-          ...result.archived,
-          ...result.alreadyArchived,
-          ...result.notFound,
+          ...results.flatMap((result) => result.archived),
+          ...results.flatMap((result) => result.alreadyArchived),
+          ...results.flatMap((result) => result.notFound),
         ]);
         if (archived.size > 0) {
           sideTaskCatalogRequestGenerationRef.current += 1;
@@ -11447,8 +11468,21 @@ export function App({
           removeSideTaskTabs(archived);
           setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
         }
-        if (result.errors.length > 0) {
-          throw new Error(result.errors.map((entry) => entry.error).join('; '));
+        const errorMessages = [
+          ...results.flatMap((result) =>
+            result.errors.map((entry) => `${entry.sessionId}: ${entry.error}`),
+          ),
+          ...settledResults.flatMap((result, index) =>
+            result.status === 'rejected'
+              ? batches[index]!.map(
+                  (sessionId) =>
+                    `${sessionId}: ${formatError(result.reason, t('sidebar.archiveFailed'))}`,
+                )
+              : [],
+          ),
+        ];
+        if (errorMessages.length > 0) {
+          throw new Error(errorMessages.join('; '));
         }
       } catch (error) {
         reportError(error, t('sidebar.archiveFailed'));
@@ -20704,6 +20738,7 @@ export function App({
     onUnarchiveSideTasks: sideTaskRestoreAvailable
       ? unarchiveSideTasks
       : undefined,
+    onSideTaskMenuOpen: refreshSideTaskCatalog,
     onCreateSideTaskSession: createSideTaskSession,
     onSideTaskCreated: handleSideTaskCreated,
     onSideTaskTitleChange: handleSideTaskTitleChange,

@@ -2475,6 +2475,65 @@ describe('ArtifactPanel add menu', () => {
     );
   });
 
+  it('keeps long archived side-task lists within a scrollable submenu', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            archivedSideTasks={Array.from({ length: 40 }, (_, index) => ({
+              sessionId: `side-archived-${index}`,
+              title: `Archived research ${index}`,
+            }))}
+            onCreateSideTask={vi.fn()}
+            onOpenSideTask={vi.fn()}
+            onUnarchiveSideTasks={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const sideTask = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Side task'));
+    act(() => {
+      sideTask?.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+      );
+    });
+    const archived = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.includes('Archived (40)'));
+    act(() => archived?.click());
+
+    const archivedMenu = Array.from(
+      document.body.querySelectorAll<HTMLElement>(
+        '[data-slot="dropdown-menu-sub-content"]',
+      ),
+    ).find((menu) => menu.textContent?.includes('Archived research 39'));
+    expect(archivedMenu).toBeDefined();
+    expect(archivedMenu?.className).toContain(
+      'max-h-(--radix-dropdown-menu-content-available-height)',
+    );
+    expect(archivedMenu?.className).toContain('overflow-y-auto');
+  });
+
   it('forwards model management policy and the refusal callback to the side task panel', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
