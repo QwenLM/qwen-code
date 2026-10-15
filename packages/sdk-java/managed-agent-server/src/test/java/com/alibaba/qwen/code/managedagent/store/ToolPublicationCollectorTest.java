@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -63,7 +64,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     }
 
     protected void retryNow() {
-        jdbc.update("UPDATE ma_operation SET available_at = 0, claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+        jdbc.update("UPDATE ma_operation SET available_at = 0, claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
     }
 
     private String addPublication(String publication, String sessionId) {
@@ -118,7 +119,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override public <T> List<T> query(String sql, RowMapper<T> mapper, Object... args) {
                 var rows = super.query(sql, mapper, args);
-                if (sql.startsWith("SELECT * FROM ma_output_capture")
+                if (sql.contains(" FROM ma_output_capture WHERE scope_key = ?")
                         && !rows.isEmpty() && rows.getFirst() instanceof java.util.Map<?, ?> row && "RETIRING".equals(row.get("retention_state"))) {
                     evaluations.incrementAndGet();
                 }
@@ -412,9 +413,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         }
         for (String resource : List.of("message-1", "checkpoint-1")) {
             String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind,"
-                            + " schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                            + " VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                     ManagedSchemaKeys.key(resourceScope, resource), resourceScope, tenant, session, resource,
                     resource.equals("message-1") ? "managed-message" : "managed-checkpoint", scope, new byte[] {2});
         }
@@ -553,7 +552,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var objects = new DeletingObjects() {
             @Override public void deleteIfPresent(String key) {
                 assertThat(second.runOnce()).isFalse();
-                jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+                jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 assertThat(second.runOnce()).isTrue();
                 super.deleteIfPresent(key);
             }
@@ -597,7 +596,8 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var fail = new AtomicBoolean(true);
         var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override public int update(String sql, Object... args) {
-                if (sql.startsWith("UPDATE ma_output_capture SET retention_state = 'COLLECTED'") && fail.getAndSet(false)) {
+                if (sql.startsWith("UPDATE ma_output_capture SET ")
+                        && sql.contains("retention_state = 'COLLECTED'") && fail.getAndSet(false)) {
                     throw new org.springframework.dao.DataAccessResourceFailureException("SQL confirm failed");
                 }
                 return super.update(sql, args);
@@ -622,7 +622,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
                 if (expire.getAndSet(false)) {
-                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+                    jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 }
             }
         };
@@ -653,7 +653,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
                 if (expire.getAndSet(false)) {
-                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+                    jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 }
             }
         };

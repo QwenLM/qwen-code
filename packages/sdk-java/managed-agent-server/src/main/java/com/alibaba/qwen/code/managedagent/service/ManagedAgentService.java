@@ -499,11 +499,14 @@ public class ManagedAgentService {
 
     /**
      * H4f: stops the child Session's running Turn on behalf of its parent
-     * run's committed stop request, called only by the child result relay.
-     * The key derives from the parent, the run and the Turn, so a redriven
-     * stop replays its admission and never mints a second cancel; a Turn
-     * that already ended answers without effect. The child acts under no
-     * caller: the request is the parent authority's own durable record.
+     * run's committed stop request. Two drivers share it: the child result
+     * relay while the parent is ACTIVE, and the close cascade (#13875)
+     * once the close is admitted — the keyed command makes the hand-off
+     * replay-safe. The key derives from the parent, the run and the Turn,
+     * so a redriven stop replays its admission and never mints a second
+     * cancel; a Turn that already ended answers without effect. The child
+     * acts under no caller: the request is the parent authority's own
+     * durable record.
      */
     public CommandAdmission cancelChildTurn(String tenantId,
             String parentSessionId, String childSessionId, String childRunId,

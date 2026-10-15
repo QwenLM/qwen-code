@@ -218,7 +218,7 @@ class ManagedTurnQueryTest {
         String sessionId = emptySession(tenant);
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, created_at, updated_at, completed_at)"
+                        + " status, gmt_create, gmt_modified, completed_at)"
                         + " VALUES (?, ?, 'turn_input', ?, 'not json',"
                         + " 'digest', 'COMPLETED', 1000, 1000, 2000)",
                 tenant, sessionId, UUID.randomUUID().toString());
@@ -411,7 +411,7 @@ class ManagedTurnQueryTest {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
                         + " status, dispatch_owner, dispatch_lease_until,"
-                        + " error_code, created_at, updated_at, completed_at)"
+                        + " error_code, gmt_create, gmt_modified, completed_at)"
                         + " VALUES (?, ?, ?, ?, '[]', 'digest', ?,"
                         + " 'turn-query-test', ?, ?, ?, ?, ?)",
                 tenant, sessionId, turnId, UUID.randomUUID().toString(),

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.canonical;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.closed;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.id;
@@ -55,8 +57,7 @@ final class CsiNativeToolReservation {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = statement(connection,
-                            "SELECT * FROM ma_resource WHERE session_scope_key = ? AND resource_id"
-                                    + " > ? ORDER BY resource_id LIMIT 100 FOR UPDATE")) {
+                            "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id > ? ORDER BY resource_id LIMIT 100 FOR UPDATE")) {
                 JdbcRepositorySupport.setStringParameter(statement, 1, scope(original));
                 JdbcRepositorySupport.setStringParameter(statement, 2, cursor);
                 try (ResultSet rows = statement.executeQuery()) {
@@ -138,10 +139,7 @@ final class CsiNativeToolReservation {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = statement(connection,
-                            "SELECT * FROM ma_tool_execution WHERE (binding_id = ? OR"
-                                    + " harness_session_id = ? OR runtime_session_id = ?) AND"
-                                    + " execution_call_id_hash > ? ORDER BY execution_call_id_hash"
-                                    + " LIMIT 100 FOR UPDATE")) {
+                            "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE (binding_id = ? OR harness_session_id = ? OR runtime_session_id = ?) AND execution_call_id_hash > ? ORDER BY execution_call_id_hash LIMIT 100 FOR UPDATE")) {
                 JdbcRepositorySupport.setStringParameter(statement, 1, original.bindingId());
                 JdbcRepositorySupport.setStringParameter(
                         statement, 2, original.request().getIsolationKey());
@@ -577,12 +575,7 @@ final class CsiNativeToolReservation {
             return;
         }
         try (PreparedStatement statement = statement(connection,
-                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
-                            + " workspace_id, session_id, resource_id, kind, schema_version,"
-                            + " byte_length, sha256, storage_kind, inline_bytes,"
-                            + " publish_command_id, state, created_at, last_verified_at) VALUES (?,"
-                            + " ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED',"
-                            + " ?, ?)")) {
+                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)")) {
             JdbcRepositorySupport.setStringParameter(
                     statement,
                     1,
@@ -601,9 +594,9 @@ final class CsiNativeToolReservation {
             JdbcRepositorySupport.setStringParameter(statement, 9, text(ref, "digest"));
             statement.setBytes(10, bytes);
             JdbcRepositorySupport.setStringParameter(statement, 11, id(ref, "resourceId"));
-            var now = java.sql.Timestamp.from(JdbcRepositorySupport.databaseNowPrecise(connection));
-            statement.setTimestamp(12, now);
-            statement.setTimestamp(13, now);
+            var now = JdbcRepositorySupport.databaseNowPrecise(connection);
+            JdbcRepositorySupport.setInstant(statement, 12, now);
+            JdbcRepositorySupport.setInstant(statement, 13, now);
             require(statement.executeUpdate() == 1);
         }
     }

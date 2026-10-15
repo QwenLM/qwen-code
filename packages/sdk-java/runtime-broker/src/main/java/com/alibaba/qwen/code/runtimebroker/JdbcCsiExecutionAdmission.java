@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.canonical;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.id;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.number;
@@ -264,9 +266,7 @@ public final class JdbcCsiExecutionAdmission {
             JdbcCsiActivationAdmission.NativeHead head, String batchId) throws SQLException {
         DispatchCheckpoint result = null;
         try (PreparedStatement statement = connection.prepareStatement(
-                        "SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                            + " AND workspace_id = ? AND operation = 'commitCheckpoint' ORDER BY"
-                            + " journal_revision FOR UPDATE")) {
+                        "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND workspace_id = ? AND operation = 'commitCheckpoint' ORDER BY journal_revision FOR UPDATE")) {
             statement.setQueryTimeout(10);
             JdbcRepositorySupport.setIdentity(
                     statement, 1, original.request().getScope().getTenantId());
