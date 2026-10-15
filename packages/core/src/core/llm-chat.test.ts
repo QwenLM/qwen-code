@@ -13318,6 +13318,7 @@ describe('LlmChat', async () => {
         async () => streams[callIndex++]!,
       );
 
+      const emittedCalls: unknown[] = [];
       const stream = await recordingChat.sendMessageStream(
         'gemini-pro',
         { message: 'essay' },
@@ -13325,8 +13326,9 @@ describe('LlmChat', async () => {
         { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
       );
       await expect(async () => {
-        for await (const _event of stream) {
-          // Consume until the provider error propagates.
+        for await (const event of stream) {
+          if (event.type === StreamEventType.CHUNK)
+            emittedCalls.push(...(event.value.functionCalls ?? []));
         }
       }).rejects.toThrow('cut after a buffered terminal tool call');
 
@@ -13335,6 +13337,15 @@ describe('LlmChat', async () => {
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       const record = recordAssistantTurn.mock.calls[0]![0];
       expect(record.message).toEqual(history.at(-1)?.parts);
+      // The buffered terminal call was never delivered, so neither history
+      // nor the record may keep it as an orphan tool request.
+      expect(emittedCalls).toEqual([]);
+      expect(history.at(-1)?.parts).toEqual([
+        { text: 'visible escalated text' },
+      ]);
+      expect(
+        history.at(-1)?.parts?.some((part) => part.functionCall),
+      ).toBeFalsy();
       // The record carries the escalated attempt's usage and leaves its Goal
       // billing to the recorder; the truncated attempt was billed per attempt.
       expect(record.tokens).toEqual(escalatedUsage);

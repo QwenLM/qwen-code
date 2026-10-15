@@ -3679,6 +3679,9 @@ export class LlmChat {
     // automatic escalation limit) in params.config.maxOutputTokens. Recompute
     // both from the saved prompt estimate: a matching value is automatic and
     // must not disable MAX_TOKENS recovery; any other value is a caller cap.
+    // Known limit: the snapshot does not persist who set the value, so a
+    // caller cap exactly equal to one of these automatic limits replays as
+    // automatic and may be raised by recovery.
     const savedRequest = options?.preparedRequest;
     const savedMaxOutputTokens = savedRequest
       ? params.config?.maxOutputTokens
@@ -5908,7 +5911,25 @@ export class LlmChat {
               const exposedFunctionCall = escalatedVisibleParts.some(
                 (part) => part.functionCall !== undefined,
               );
-              if (exposedFunctionCall) {
+              // The stream-error path persists a partial turn holding a tool
+              // call even when the call was a buffered terminal chunk that was
+              // never delivered; drop it too so abandonment rebuilds the turn
+              // from the delivered parts only, with no orphan tool request.
+              const committedUndeliveredFunctionCall =
+                !exposedFunctionCall &&
+                escalatedCommittedModelContent !== undefined &&
+                self.history.includes(escalatedCommittedModelContent) &&
+                (escalatedCommittedModelContent.parts ?? []).some(
+                  (part) => part.functionCall !== undefined,
+                );
+              if (committedUndeliveredFunctionCall) {
+                // Keep the attempt's usage, which arrived with the withheld
+                // terminal chunk, for the rebuilt record.
+                escalatedVisibleTokens =
+                  self.pendingPartialAssistantRecord?.tokens ??
+                  escalatedVisibleTokens;
+              }
+              if (exposedFunctionCall || committedUndeliveredFunctionCall) {
                 self.popPendingPartialAssistantTurn();
               }
               abandonEscalatedAttempt?.();
