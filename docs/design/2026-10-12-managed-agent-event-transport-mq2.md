@@ -224,16 +224,7 @@ with only the Harness stood in for. The rows:
   so once the journal is free a later notice still activates it. On a
   Session the new owner holds, its Harness runs the wake input from the
   journal — the notice was never the carrier.
-- **Post-commit latency.** The deployed composite (hub, then the public
-  transport) and a flag-off composite (hub only) publish the same batches,
-  interleaved: the committing thread's publish time and the hub
-  subscriber's delivery time may not grow by a millisecond at p95 locally.
-  Shared CI runners use a 20 ms allowance for scheduler noise; the raw
-  measurements are still recorded. The journal wire's after-commit hand-off
-  stays under 20 ms at p95. In three
-  local runs (macOS, 300 rounds each) the transport added 13–186 µs at p95
-  and the journal hand-off measured 0.35–1.5 ms; CI writes its own figures
-  to `target/event-transport-latency.json`.
+- **Post-commit latency.** The deployed composite (hub, then the public transport) and a flag-off composite (hub only) publish the same batches: the committing thread's publish time and the subscriber's post-publish read time may not grow by a millisecond at p95, and the journal wire's after-commit hand-off stays under 20 ms at p95. The original 300-round burst and on-before-off order are retained; there is no per-round broker drain or CI-specific budget. `target/event-transport-latency.json` contains the aggregate values. `event-transport-latency-samples.json` retains every round, including warm-up, with separate publish and hub-read wall/CPU durations; sequence 1–75 is warm-up. `event-transport-latency-stages.json` records hub and transport hand-off durations inside the real production publisher, correlated by session, sequence, thread and transport count (zero for flag-off). `event-transport-latency.jfr` retains those events plus execution samples, lock parks, monitor contention and GC pauses throughout the burst. The production event is disabled by default and allocates no timing record or reads the clock until a recording explicitly enables it. Diagnostics are saved before latency assertions and uploaded on failure. The subscriber measurement includes the whole publish call and subsequent read; it does not measure the instant when the hub first became ready. Separate percentiles must not be subtracted to attribute time to an individual stage. Existing aggregate results alone do not establish whether a breach was caused by scheduling, queue contention or subscriber reads.
 - **Misconfiguration fails startup.** A NORMAL (not LITE) topic, which the
   subscription probe alone passes, is refused by a new send probe — one
   synchronous message to the probe's own lite topic — before any envelope
