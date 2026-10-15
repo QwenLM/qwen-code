@@ -627,7 +627,8 @@ class Query:
     async def __anext__(self) -> SDKMessage:
         if self._exhausted:
             raise StopAsyncIteration
-        await self._ensure_started()
+        if not self._started:
+            await self._ensure_started()
         item = await self._message_queue.get()
 
         if item is _DONE:

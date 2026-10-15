@@ -471,6 +471,35 @@ async def test_ensure_started_raises_after_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anext_after_close_before_start_does_not_start_transport() -> None:
+    transport = FakeTransport()
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(),
+        prompt="hello",
+        session_id=VALID_UUID,
+    )
+    await query.close()
+
+    with pytest.raises(RuntimeError, match="Query is closed"):
+        await anext(query)
+    assert query._started is False
+    assert transport.writes == []
+
+
+@pytest.mark.asyncio
+async def test_started_iterator_finishes_after_explicit_close() -> None:
+    transport = FakeTransport()
+    query = await _start_query(transport)
+    await query.close()
+
+    for _ in range(2):
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(query), timeout=1)
+    assert transport.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_anext_after_exhaustion_raises_stop_async_iteration() -> None:
     """After the async iterator is exhausted, subsequent __anext__ calls must
     raise StopAsyncIteration immediately instead of blocking."""
@@ -543,8 +572,13 @@ async def test_initialize_failure_no_unhandled_task_exception(
 
     # Don't respond to initialize — let the control-request timeout fire.
     # The error propagates through _message_queue.
+    assert query._initialize_task is not None
+    await query._initialize_task
     with pytest.raises(ControlRequestTimeoutError):
         await query.__anext__()
+
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(query), timeout=1)
 
     await query.close()
 
