@@ -28,6 +28,14 @@ test('measures PR triggers and job-level timeouts, excluding scheduled workflows
       [2, 10, 1],
     );
   }
+  assert.deepEqual(
+    measureWorkflow(
+      workflow
+        .replace('pull_request:', "'pull_request' :")
+        .replace('timeout-minutes: 10', '"timeout-minutes" : 10'),
+    ),
+    [2, 10, 1],
+  );
   assert.equal(
     measureWorkflow(workflow.replace('pull_request', 'schedule')),
     null,

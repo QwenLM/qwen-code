@@ -21,7 +21,9 @@ export function measureWorkflow(source) {
   const triggers = block(source, /^(?:on|true|'on'|"on"):/);
   if (
     !triggers.some((line) =>
-      /^  (pull_request|pull_request_target|merge_group):/.test(line),
+      /^  (['"]?)(pull_request|pull_request_target|merge_group)\1\s*:/.test(
+        line,
+      ),
     )
   ) {
     return null;
@@ -31,8 +33,9 @@ export function measureWorkflow(source) {
     if (/^  [\w-]+:\s*(?:#.*)?$/.test(line)) jobs.push(null);
     else if (/^  [^#\s]/.test(line))
       throw new Error('Expected block-style job');
-    if (/^    timeout-minutes:/.test(line)) {
-      const timeout = /^    timeout-minutes:\s*(\d+)\s*(?:#.*)?$/.exec(line);
+    const timeoutKey = /^    (['"]?)timeout-minutes\1\s*:\s*/;
+    if (timeoutKey.test(line)) {
+      const timeout = /^(\d+)\s*(?:#.*)?$/.exec(line.replace(timeoutKey, ''));
       // Expressions have no fixed declared budget; count them as unbounded.
       if (timeout && jobs.length) jobs[jobs.length - 1] = Number(timeout[1]);
     }
