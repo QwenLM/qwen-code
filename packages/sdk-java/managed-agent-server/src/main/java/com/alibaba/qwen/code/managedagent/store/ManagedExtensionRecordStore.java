@@ -535,7 +535,7 @@ public class ManagedExtensionRecordStore {
         if (previous.isEmpty()) {
             jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key,"
                     + " tenant_id, workspace_id, session_id, domain, record_id, revision,"
-                    + " record_resource_id, created_at, settled_at, first_sequence) VALUES"
+                    + " record_resource_id, gmt_create, settled_at, first_sequence) VALUES"
                     + " ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, tenantId,
                     workspaceId, sessionId, MODEL_CONTEXT_DOMAIN, MODEL_CONTEXT_ID, sequence,
                     resource.resourceId(), occurredAt, occurredAt, sequence);
@@ -549,8 +549,8 @@ public class ManagedExtensionRecordStore {
                 + " AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scope, key);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
                 + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                + " resource_id, created_at) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?,"
-                + " CURRENT_TIMESTAMP(6))", scope, key, sequence,
+                + " resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?,"
+                + " " + ManagedSchemaTime.SQL_NOW + ")", scope, key, sequence,
                 ManagedSchemaKeys.key(scope, resource.resourceId()), tenantId, workspaceId,
                 sessionId, resource.resourceId());
     }

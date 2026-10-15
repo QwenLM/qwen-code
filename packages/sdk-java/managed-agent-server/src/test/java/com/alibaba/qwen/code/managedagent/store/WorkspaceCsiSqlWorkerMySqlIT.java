@@ -1,12 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -25,6 +18,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -43,11 +42,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.flywaydb.core.Flyway;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** Real MySQL/native HTTP/file chain; placement and mount provenance are explicit fixtures. */
 class WorkspaceCsiSqlWorkerMySqlIT {
@@ -174,19 +175,19 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                                 ? journal.readOwnerResource("tenant", query.get("workspaceId"), sessionId,
                                         suffix.substring("/resources/".length()), token)
                                 : transaction.execute(status -> switch (suffix) {
-                            case "/writers:acquire" -> journal.acquireWriter("tenant", sessionId, token,
-                                    read(raw, ManagedSessionStoreModels.AcquireWriterRequest.class));
-                            case "/writers:renew" -> journal.renewWriter("tenant", sessionId, token,
-                                    read(raw, ManagedSessionStoreModels.RenewWriterRequest.class));
-                            case "/writers:seal" -> journal.sealWriter("tenant", sessionId, token,
-                                    read(raw, ManagedSessionStoreModels.SealWriterRequest.class));
-                            case "/transactions:commit", "/transactions:commit-v2" -> journal.commit("tenant", sessionId,
-                                    token, read(raw, ManagedSessionStoreModels.CommitTransactionRequest.class));
-                            case "/restore" -> journal.restore("tenant", query.get("workspaceId"), sessionId, token);
-                            case "/transactions" -> journal.transactions("tenant", query.get("workspaceId"), sessionId,
-                                    token, Long.parseLong(query.get("afterRevision")), Integer.parseInt(query.get("limit")));
-                            default -> throw new IllegalArgumentException("Unknown owned Session store route");
-                        });
+                                    case "/writers:acquire" -> journal.acquireWriter("tenant", sessionId, token,
+                                            read(raw, ManagedSessionStoreModels.AcquireWriterRequest.class));
+                                    case "/writers:renew" -> journal.renewWriter("tenant", sessionId, token,
+                                            read(raw, ManagedSessionStoreModels.RenewWriterRequest.class));
+                                    case "/writers:seal" -> journal.sealWriter("tenant", sessionId, token,
+                                            read(raw, ManagedSessionStoreModels.SealWriterRequest.class));
+                                    case "/transactions:commit", "/transactions:commit-v2" -> journal.commit("tenant", sessionId,
+                                            token, read(raw, ManagedSessionStoreModels.CommitTransactionRequest.class));
+                                    case "/restore" -> journal.restore("tenant", query.get("workspaceId"), sessionId, token);
+                                    case "/transactions" -> journal.transactions("tenant", query.get("workspaceId"), sessionId,
+                                            token, Long.parseLong(query.get("afterRevision")), Integer.parseInt(query.get("limit")));
+                                    default -> throw new IllegalArgumentException("Unknown owned Session store route");
+                                });
                         if (response instanceof ManagedSessionStoreModels.StoredResource resource) {
                             exchange.getResponseHeaders().set("Cache-Control", "no-store");
                             exchange.getResponseHeaders().set("X-Qwen-Resource-Kind", resource.kind());
