@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
-
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;

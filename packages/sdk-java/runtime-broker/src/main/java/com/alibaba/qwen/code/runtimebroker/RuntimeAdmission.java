@@ -43,8 +43,8 @@ final class RuntimeAdmission {
             RuntimeSessionRecord session, java.time.Instant now) {
         requireRelease(binding, session);
         if (!binding.sameIdentity(claim) || !binding.getRequest().isManagedContext()
-                || !"local-process".equals(binding.getRequest().getProvisionerKind())
-                || !"session".equals(binding.getRequest().getScope().getIsolationClass())
+                || !LocalProcessRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                || !WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                 || !binding.getRequest().getIsolationKey().equals(session.getSession().getHarnessSessionId())
                 || session.getState() != RuntimeSessionRecord.State.RELEASING
                 || binding.getState() != RuntimeBindingRecord.State.DRAINING || !binding.isDrainRequested()

@@ -24,7 +24,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -399,6 +398,9 @@ public class ManagedSessionStore {
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
+        // A root that predates this writer still needs its scope keys and the
+        // SESSION event stream the session read path joins on.
+        materializeSessionRoot(tenantId, sessionId);
         bindControlSessionStorage(tenantId, request.workspaceId(), sessionId);
         // Materialize the key before any locking read: missing-key RR locks can
         // deadlock independent tenants when both first writers insert a head.
@@ -659,6 +661,9 @@ public class ManagedSessionStore {
                 || "READY".equals(request.recoveryStatus())) {
             throw invalid("recoveryStatus must be a blocked state.");
         }
+        // The 128-character column width is enforced one layer up by
+        // @Size(max = 128) on BlockRecoveryRequest — byte-counting here
+        // would reject non-ASCII codes that legitimately fit VARCHAR(128).
         validateText(request.recoveryDetailCode(), "recoveryDetailCode",
                 MAX_TEXT_BYTES);
         var continuation = lockCsiContinuation(tenantId, sessionId);
@@ -2724,6 +2729,10 @@ public class ManagedSessionStore {
 
     private void ensureSessionRoot(String tenantId, String sessionId) {
         insertSessionRoot(tenantId, sessionId);
+        materializeSessionRoot(tenantId, sessionId);
+    }
+
+    private void materializeSessionRoot(String tenantId, String sessionId) {
         long now = databaseEpochMillis(databaseNow());
         String tenantKey = JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);

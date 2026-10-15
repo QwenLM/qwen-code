@@ -1,17 +1,11 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ChildResultRelay;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -20,6 +14,14 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.Scheduled;
+
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedAgentPropertiesTest {
     private static final String DURABLE_KEY = "qwen.managed-agent.runtime-broker.durable-local-process";

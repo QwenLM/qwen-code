@@ -664,11 +664,20 @@ function sentMessageText(
   // cannot take it by name either.
   const missed: string[] = [];
   const ended: string[] = [];
+  const settling: string[] = [];
+  const stopping: string[] = [];
+  const unconfirmed: string[] = [];
   for (const [index, member] of team.members.entries()) {
     const committed = reached.find((each) => each.position === index + 1);
     if (committed?.arrived) continue;
-    if (isEndedMember(hostedMemberView(chains, member.childRunId)))
-      ended.push(member.name);
+    if (committed?.unconfirmed) {
+      unconfirmed.push(member.name);
+      continue;
+    }
+    const view = hostedMemberView(chains, member.childRunId);
+    if (view.stoppingBeforeStart) settling.push(member.name);
+    else if (view.stopping) stopping.push(member.name);
+    else if (isEndedMember(view)) ended.push(member.name);
     else missed.push(member.name);
   }
   return (
@@ -678,6 +687,15 @@ function sentMessageText(
       : '') +
     (ended.length > 0
       ? `\nIt did not reach ${ended.join(', ')}, which ${ended.length === 1 ? 'has' : 'have'} ended and cannot take it.`
+      : '') +
+    (settling.length > 0
+      ? `\nIt did not reach ${settling.join(', ')}, whose latest continuation ${settling.length === 1 ? 'is' : 'are'} being stopped before starting. Check task_list after ${settling.length === 1 ? 'it settles' : 'they settle'}; if ${settling.length === 1 ? 'it ends' : 'they end'} without starting, send by name if still needed.`
+      : '') +
+    (stopping.length > 0
+      ? `\nIt did not reach ${stopping.join(', ')}, which ${stopping.length === 1 ? 'is' : 'are'} being stopped and cannot take it. For more work after ${stopping.length === 1 ? 'it ends' : 'they end'}, launch ${stopping.length === 1 ? 'a new member' : 'new members'} under new names.`
+      : '') +
+    (unconfirmed.length > 0
+      ? `\nDelivery to ${unconfirmed.join(', ')} could not be confirmed. Check with ${unconfirmed.length === 1 ? 'that member' : 'those members'} before sending it again.`
       : '')
   );
 }

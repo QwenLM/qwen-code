@@ -85,6 +85,7 @@ const broker = vi.hoisted(() => ({
   release: vi.fn(),
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
+  backgroundProcessStatus: vi.fn(),
   monitorControl: vi.fn(),
 }));
 // child_run's shell kind and monitor_run are enabled by the H3 enablement
@@ -112,6 +113,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     release = broker.release;
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
+    backgroundProcessStatus = broker.backgroundProcessStatus;
     monitorControl = broker.monitorControl;
   },
 }));
@@ -202,6 +204,7 @@ const parts: Part[] = calls.map((call) => ({
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  broker.backgroundProcessStatus.mockResolvedValue({ state: 'unknown' });
   expectWritesStopped = false;
   for (const method of [
     broker.authorizeLifecycle,
@@ -4941,6 +4944,7 @@ function backgroundTurnRig(
     lane?: HostedShellTurnOptions;
     notStartedProven?: boolean;
     reserveRefused?: boolean;
+    publicationMissing?: boolean;
   } = {},
 ) {
   enablement.childRun = true;
@@ -4995,6 +4999,12 @@ function backgroundTurnRig(
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
+        if (options.publicationMissing)
+          throw new ManagedSessionStoreHttpError(
+            404,
+            'publication_not_found',
+            'Publication does not exist',
+          );
         return {
           state: options.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED',
         };
@@ -5459,7 +5469,37 @@ describe('hosted Monitor admission arm', () => {
     );
   });
 
-  it('rejects an unproven not_started refuse before settling the Shell record', async () => {
+  it('never borrows the Shell process ledger to settle an unproven watch record', async () => {
+    // The absence fallback is scoped to `request?.background`. A monitor_run
+    // record has a separate lifecycle owner, so an unproven grant close must
+    // not be rescued by the background process ledger — not even when that
+    // ledger reports no process at all.
+    const { call, parts } = monitorCall();
+    const rejectedStart: ToolResultEnvelope = {
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+      error: {
+        message:
+          'Monitor watch requires a delegated Linux cgroup v2 root on this Runtime.',
+      },
+    };
+    const rig = monitorTurnRig(rejectedStart, { notStartedProven: false });
+    turn = rig.turn;
+    // Even a ledger answer that *would* prove absence for a background Shell
+    // must never be read on the Monitor path.
+    broker.backgroundProcessStatus.mockResolvedValue(undefined);
+    await expect(
+      rig.turn.execute([call], parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+    expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
+    expect(rig.monitors.calls.some(([name]) => name === 'settleFailed')).toBe(
+      false,
+    );
+  });
+
+  it('does not override a grant owner that reports the Shell started', async () => {
     const { call, parts } = backgroundCall();
     const rejectedStart: ToolResultEnvelope = {
       executionStatus: 'not_started',
@@ -5472,9 +5512,11 @@ describe('hosted Monitor admission arm', () => {
     };
     const rig = backgroundTurnRig(rejectedStart, { notStartedProven: false });
     turn = rig.turn;
+    broker.backgroundProcessStatus.mockResolvedValue(undefined);
     await expect(
       rig.turn.execute([call], parts, 'model', new AbortController().signal),
     ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
     expect(
       rig.orchestrator.calls.some(([name]) => name === 'settleFailed'),
     ).toBe(false);
@@ -6131,6 +6173,91 @@ it('settles the admitted child run when grant reservation exhausts its retries',
     'close_not_started',
   ]);
 });
+
+it('settles an in-turn dispatch with no publication and no durable process row', async () => {
+  const { call, parts } = backgroundCall();
+  const rig = backgroundTurnRig(
+    { executionStatus: 'success', responseParts: [], capture: null },
+    { reserveRefused: true, publicationMissing: true },
+  );
+  turn = rig.turn;
+  broker.backgroundProcessStatus.mockResolvedValue(undefined);
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(rig.order).toContain('close_not_started');
+  expect(rig.orchestrator.calls.at(-1)).toEqual([
+    'settleFailed',
+    {
+      id: 'shell-execution',
+      params: { stopReason: 'start_failed', started: false },
+    },
+  ]);
+  expect(broker.backgroundProcessStatus).toHaveBeenCalledWith(
+    'shell-execution',
+  );
+});
+
+it('keeps an in-flight dispatch blocked when cancellation fails before process admission', async () => {
+  const { call, parts } = backgroundCall();
+  const rig = backgroundTurnRig(
+    { executionStatus: 'success', responseParts: [], capture: null },
+    { publicationMissing: true },
+  );
+  turn = rig.turn;
+  broker.executeV3.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(503, 'store_unavailable'),
+  );
+  broker.cancel.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(503, 'store_unavailable'),
+  );
+  broker.backgroundProcessStatus.mockResolvedValue(undefined);
+
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+  expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+  ]);
+});
+
+it.each(['present', 'unavailable'] as const)(
+  'keeps an in-turn dispatch blocked when its process proof is %s',
+  async (proof) => {
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const { call, parts } = backgroundCall();
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      { reserveRefused: true, publicationMissing: true },
+    );
+    turn = rig.turn;
+    if (proof === 'present')
+      broker.backgroundProcessStatus.mockResolvedValue({ state: 'executing' });
+    else
+      broker.backgroundProcessStatus.mockRejectedValue(
+        new HostedWorkspaceBrokerRejection(503, 'store_unavailable'),
+      );
+    await expect(
+      turn.execute([call], parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+    expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+      'admit',
+      'dispatchStarted',
+    ]);
+    if (proof === 'unavailable')
+      expect(stderr).toHaveBeenCalledWith(
+        'qwen serve: Background process absence could not be confirmed for shell-execution (status 503, code store_unavailable).',
+      );
+  },
+);
 
 it('settles the admitted child run when executeV3 fails without the proven 409', async () => {
   // R3-24: dispatch_started is durable and the v3 start then fails with

@@ -1,15 +1,16 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Shares the real original-publication fixture without widening the maintenance API. */
 public final class WorkspaceRecoveryReaderAssertions {
@@ -58,7 +59,9 @@ public final class WorkspaceRecoveryReaderAssertions {
         Map<String, Object> result = new LinkedHashMap<>();
         for (String table : List.of("ma_session_head", "ma_resource",
                 "ma_output_capture", "ma_resource", "ma_resource_ref",
-                "ma_tool_execution", "ma_runtime_binding")) result.put(table, jdbc.queryForList("SELECT * FROM " + table));
+                "ma_tool_execution", "ma_runtime_binding")) {
+            result.put(table, jdbc.queryForList("SELECT * FROM " + table));
+        }
         return result;
     }
 }

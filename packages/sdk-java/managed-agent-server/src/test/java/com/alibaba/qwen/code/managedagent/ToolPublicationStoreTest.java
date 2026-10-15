@@ -1,19 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ALLOCATION;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.CAPTURE_BYTES;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.checkpointPayload;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ref;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.resource;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -49,6 +36,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
@@ -69,6 +57,18 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ALLOCATION;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.CAPTURE_BYTES;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.checkpointPayload;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ref;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.resource;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ToolPublicationStoreTest {
     private static final String MARKER = COMMIT_MARKER;
@@ -775,7 +775,9 @@ class ToolPublicationStoreTest {
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
-                if (!terminal) hold();
+                if (!terminal) {
+                    hold();
+                }
             }
 
             private void hold() {
@@ -792,7 +794,9 @@ class ToolPublicationStoreTest {
 
             @Override
             public InputStream open(String key) {
-                if (terminal) hold();
+                if (terminal) {
+                    hold();
+                }
                 return new ByteArrayInputStream(objects.get(key));
             }
 
@@ -1107,7 +1111,9 @@ class ToolPublicationStoreTest {
                 .put("streamId", "stdout").put("firstOrdinal", 0).put("offset", 0);
         var pageSegments = page.putArray("segments");
         pageSegments.add(JSON.createObjectNode().put("byteLength", firstSegment.length()).put("digest", digest(firstSegment)));
-        if (!large) pageSegments.add(JSON.createObjectNode().put("byteLength", 1).put("digest", digest("c")));
+        if (!large) {
+            pageSegments.add(JSON.createObjectNode().put("byteLength", 1).put("digest", digest("c")));
+        }
         assertThatThrownBy(() -> data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
                 "wrong-page-slot", "page:stdout:1", "managed-tool-result-page",
                 page.toString().getBytes(StandardCharsets.UTF_8)))
@@ -1233,7 +1239,9 @@ class ToolPublicationStoreTest {
         ObjectNode wrongExecution = verification.deepCopy().put("executionCallId", "another-execution");
         assertThatThrownBy(() -> admissions.verifyReceipt(key, WRITER_TOKEN, wrongExecution))
                 .hasMessageContaining("receipt conflicts");
-        if (partial) return;
+        if (partial) {
+            return;
+        }
         if ("intact".equals(damage) || large) {
             com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryReaderAssertions.verifyOriginalPublication(
                     jdbc, bucket, key, admission, manifestRef, receiptSequence, firstSegment.getBytes(StandardCharsets.UTF_8));
@@ -1604,7 +1612,9 @@ class ToolPublicationStoreTest {
                 return new ByteArrayInputStream(segment) {
                     @Override
                     public synchronized int read(byte[] target, int offset, int length) {
-                        if (available() == 0) return -1;
+                        if (available() == 0) {
+                            return -1;
+                        }
                         if (slow[0]) {
                             try {
                                 Thread.sleep(250);
@@ -2383,8 +2393,14 @@ class ToolPublicationStoreTest {
         store = newStore(ALLOCATION, 1);
         CountDownLatch start = new CountDownLatch(1);
         try (var pool = Executors.newFixedThreadPool(2)) {
-            var one = pool.submit(() -> { start.await(); return reserve(); });
-            var two = pool.submit(() -> { start.await(); return reserve(); });
+            var one = pool.submit(() -> {
+                start.await();
+                return reserve();
+            });
+            var two = pool.submit(() -> {
+                start.await();
+                return reserve();
+            });
             start.countDown();
             assertThat(one.get()).isEqualTo(two.get());
         }

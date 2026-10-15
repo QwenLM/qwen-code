@@ -1,18 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
@@ -23,12 +12,8 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.UUID;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,6 +28,22 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
 class ToolPublicationControllerTest {
     @ParameterizedTest
     @CsvSource({"false,1,false", "true,1,true", "true,0,false", "true,,false"})
@@ -55,13 +56,18 @@ class ToolPublicationControllerTest {
         ToolPublicationController controller = new ToolPublicationController(
                 mock(ToolPublicationStore.class), data, mock(ToolPublicationAdmissionStore.class), properties);
         var result = new ObjectMapper().createObjectNode();
-        if (asynchronous) result.put("state", "PENDING");
-        else result.put("digest", "legacy-receipt");
+        if (asynchronous) {
+            result.put("state", "PENDING");
+        } else {
+            result.put("digest", "legacy-receipt");
+        }
         when(data.publishSegment(any(), eq("publication"), eq("token"), eq("operation"),
                 eq("stdout"), eq(0), any(), eq(null), eq(asynchronous))).thenReturn(result);
         MockHttpServletRequest request = new MockHttpServletRequest();
         request.setContent(new byte[] {1});
-        if (header != null) request.addHeader(ToolPublicationController.ASYNC_HEADER, header);
+        if (header != null) {
+            request.addHeader(ToolPublicationController.ASYNC_HEADER, header);
+        }
         var response = controller.segment(new TenantContext("tenant", null), "session", "publication",
                 "stdout", 0, "workspace", "token", "operation", null, request);
         assertThat(response.getStatusCode().value()).isEqualTo(asynchronous ? 202 : 200);

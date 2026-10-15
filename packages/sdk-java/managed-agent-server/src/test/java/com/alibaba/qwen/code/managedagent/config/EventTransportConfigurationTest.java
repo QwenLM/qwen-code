@@ -1,15 +1,5 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.RETURNS_SELF;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.EventTransportConsumer;
 import com.alibaba.qwen.code.managedagent.service.LiteTopicEventTransport;
@@ -20,8 +10,6 @@ import com.alibaba.qwen.code.managedagent.store.EventTransport;
 import com.alibaba.qwen.code.managedagent.store.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
-import java.util.List;
 import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
@@ -36,6 +24,19 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.time.Clock;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * The EventTransport wiring without a broker. Flag off, the MQ2
