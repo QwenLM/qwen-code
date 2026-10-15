@@ -204,11 +204,10 @@ public class SshWorkspaceService implements AutoCloseable {
             }
             var result = probe(node, intent.path(), ".");
             Map<String, Object> identity = SshWorkspaceStore.object(result, "identity");
-            Map<String, Object> marker = new LinkedHashMap<>();
+            Map<String, Object> marker = new LinkedHashMap<>(identity);
             marker.put("version", 2);
             marker.put("tenantId", tenant);
             marker.put("storageId", intent.storageId());
-            marker.putAll(identity);
             marker.put("registrationId", intent.registrationId());
             Map<String, Object> registration = Map.of("nodeId", intent.nodeId(), "identity", identity, "marker", marker,
                     "qwenVersion", node.qwenVersion());

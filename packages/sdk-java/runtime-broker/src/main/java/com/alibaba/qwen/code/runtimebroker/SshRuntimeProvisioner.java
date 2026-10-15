@@ -14,8 +14,12 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /** Places one Session-isolated generation on a trusted SSH host. */
 public final class SshRuntimeProvisioner implements RuntimeProvisioner {
@@ -27,11 +31,8 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
     private final Function<RuntimeScope, SshRuntimeStorage> storages;
     private final SshConnectionManager connections;
     private final HttpRuntimeTransport transport;
-    private final ExecutorService executor = Executors.newCachedThreadPool(task -> {
-        Thread thread = new Thread(task, "runtime-ssh-provisioner");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ExecutorService executor = new ThreadPoolExecutor(4, 4, 0, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(64), Thread.ofPlatform().daemon().name("runtime-ssh-provisioner-", 0).factory());
     private final ConcurrentMap<List<Object>, Owned> owned = new ConcurrentHashMap<>();
     private volatile boolean closed;
 
@@ -72,7 +73,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
     @Override
     public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle knownHandle) {
-        return CompletableFuture.supplyAsync(() -> {
+        return submit(() -> {
             RuntimeResourceHandle handle = handle(request, seed);
             if (knownHandle != null && (!supported(knownHandle)
                     || !BrokerValues.sameJsonMap(knownHandle.getValue(), handle.getValue()))) {
@@ -84,12 +85,12 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
             var result = connections.bootstrap(node(text(handle, "nodeId")), ensure(request, seed, handle, false));
             verifyResource(result, handle);
             return handle;
-        }, executor);
+        });
     }
 
     @Override
     public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
-        return CompletableFuture.supplyAsync(() -> {
+        return submit(() -> {
             RuntimeResourceHandle handle = handle(request, seed);
             SshRuntimeNode node = node(text(handle, "nodeId"));
             Map<String, Object> result = awaitStartup(node, handle,
@@ -99,13 +100,13 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
                         "Original SSH worker has not completed startup.", true);
             }
             return ready(request, seed, handle, node, result, null);
-        }, executor);
+        });
     }
 
     @Override
     public CompletionStage<RuntimeObservation> reconcile(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, RuntimeLease lastLease) {
-        return CompletableFuture.supplyAsync(() -> {
+        return submit(() -> {
             requireHandle(request, seed, handle);
             SshRuntimeNode node = node(text(handle, "nodeId"));
             Map<String, Object> result = awaitStartup(node, handle,
@@ -119,7 +120,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
                 case "INTENT", "STARTING" -> RuntimeObservation.starting(handle);
                 default -> RuntimeObservation.unknown(handle);
             };
-        }, executor);
+        });
     }
 
     @Override
@@ -129,13 +130,14 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public CompletionStage<Void> confirm(RuntimeProvisionRequest request, RuntimeLease lease) {
-        return CompletableFuture.runAsync(() -> {
+        return submit(() -> {
             Owned original = owned.get(leaseKey(lease));
             if (original == null || !original.request().equals(request)) {
                 throw conflict();
             }
             transport.attest(lease, request, original.seed()).toCompletableFuture().join();
-        }, executor);
+            return null;
+        });
     }
 
     @Override
@@ -166,7 +168,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
         if (!supportsDrainedStop(binding) || !binding.isDrainRequested() || binding.getProvisionSeed() == null) {
             return RuntimeProvisioner.super.stopDrained(binding);
         }
-        return CompletableFuture.supplyAsync(() -> {
+        return submit(() -> {
             RuntimeResourceHandle handle = binding.getResourceHandle() == null
                     ? handle(binding.getRequest(), binding.getProvisionSeed()) : binding.getResourceHandle();
             requireHandle(binding.getRequest(), binding.getProvisionSeed(), handle);
@@ -211,15 +213,25 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
             }
             return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
                     seed.getProvisionRequestId(), handle, stoppedAt);
-        }, executor);
+        });
     }
 
     @Override
     public void close() {
         closed = true;
-        executor.shutdownNow();
+        // Let queued control futures run their closed checks instead of abandoning them.
+        executor.shutdown();
         owned.clear();
         connections.close();
+    }
+
+    private <T> CompletionStage<T> submit(Supplier<T> operation) {
+        try {
+            return CompletableFuture.supplyAsync(operation, executor);
+        } catch (RejectedExecutionException full) {
+            return CompletableFuture.failedFuture(new RuntimeBrokerException(503, "ssh_runtime_busy",
+                    "SSH Runtime control capacity is unavailable.", true));
+        }
     }
 
     private RuntimeLease ready(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,

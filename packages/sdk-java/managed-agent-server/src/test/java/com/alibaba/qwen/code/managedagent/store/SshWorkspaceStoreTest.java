@@ -256,7 +256,8 @@ class SshWorkspaceStoreTest {
     void expiredOwnersCannotWriteFailureOrCompleteRegistration() {
         var operation = store.begin("tenant", "actor", "key", "mac", "/work/project", "Project");
         var intent = store.claim("tenant", "actor", operation.operationId(), "expired");
-        jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6))");
+        jdbc.update("UPDATE ma_operation SET claim_until = "
+                + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW + " - 1000");
         store.fail(intent, "expired", "network_timeout", false);
         assertThat(store.get("tenant", "actor", operation.operationId()).status()).isEqualTo("running");
         assertThatThrownBy(() -> store.reserve(intent, "expired", registration(intent))).isInstanceOf(ApiException.class);

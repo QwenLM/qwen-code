@@ -26,6 +26,8 @@ Java 服务负责静态节点目录、SSH 连接、Workspace 登记、授权和 
 
 私有入口 `qwen managed-runtime-bootstrap` 每次执行一项操作后退出，版本化 JSON 协议提供环境/目录探测、幂等 storage 登记、generation ensure、只读 observe 和严格 stop。响应包含结果或带类型错误，凭据不写日志。远端 generation 状态和日志仅对配置账户开放。
 
+bootstrap 子进程在节点的独占转发锁之外运行，避免一个慢操作阻塞同节点已有 worker 的 HTTP 请求。共享的在途屏障仍保证关闭时先等待命令完成，再释放控制器文件锁。Provisioner 控制操作限制为 4 个线程和 64 个排队任务，超载返回可重试的 `ssh_runtime_busy`。遗忘某节点/endpoint 的最后一个 lease 时取消对应本地转发并删除缓存地址；取消失败时保留路由，直至确认监听器已消失。其他 worker 的转发及共用 publication 连接继续保留。direct provider 的登记也在匹配的退役完成后，或 release 明确使 delegate 的 lease 不可用后删除。仍可用的持久化 lease 在 release 后保留路由，因为被 fence 的观察者可能与获胜观察者使用同一 lease。
+
 ## Workspace 登记与 storage
 
 在 `/api/agent/web-shell/v1` 下新增 POST 接口：
@@ -41,9 +43,13 @@ Java 服务负责静态节点目录、SSH 连接、Workspace 登记、授权和 
 
 WebShell 在现有 Workspace 选择器中增加可选登记对话框。检查目录后发起登记，重试保留幂等键和 operation，成功后选中新 Workspace，继续普通 Session 创建流程。预览不授予创建权限；创建时重新授权并验证远端身份。
 
+登记文案包含在交互式 WebShell 入口中，从只读 transcript 入口排除，保持其原有 bundle 体积预算。
+
 现有 storage/物理 owner 记录增加 `SSH_LOCAL`，现有 operation journal 增加 `WORKSPACE_CREATE`。Workspace 和创建者 OWNER 权限原子提交，不增加节点数据库或 worker 池表。网络操作在 SQL 事务外完成，事务内重新核对登记版本及物理所有权。共用的主机 guard 串行化本地与 SSH 登记，跨节点、跨 tenant 拒绝父子重叠根目录和物理别名。登记 claim 过期后不能写入成功或失败；后续查询可重新认领原 operation。已有 actor 范围的幂等键在新准入检查之前回放。追加下一个 schema migration 并更新 initializer/catalog 检查，不改历史迁移。
 
 身份包含规范目录、稳定主机身份、设备号、inode、可信创建时间及登记 marker。Linux 与现有本地 physical-key 算法一致，macOS 提供原生平台身份；缺少可信身份时拒绝。SSH 别名不能绕过同一物理目录的所有权。worker 固定 storage/root 登记，在 context 安装和后续调用中验证；Session 的 `cwdRelative` 限定在登记根目录内，同 storage 的 Turn 继续由既有 holder 串行化。
+
+登记 journal 使用共享 schema 的 `gmt_create`/`gmt_modified` 列，claim 截止时间和完成时间采用数据库派生的毫秒时钟。物理 key 复用本地 storage 所有权算法；服务端登记 marker 字段优先于探测得到的身份字段。
 
 ## 生命周期
 
@@ -57,7 +63,9 @@ WebShell 在现有 Workspace 选择器中增加可选登记对话框。检查目
 
 对于已持久化为 `not_started` 且显式 `capture:null` 的 SSH Shell v3 调用，Broker 只能向原执行发送 `committed`、`manifest:null`、`historyRevision:null` 的 ACK。direct 和 deferred 引用分别保留原 wire 身份；Runtime Session 释放后仍可重试丢失的 ACK。已预留的 SQL publication 必须先通过 `close_not_started` 关闭：其 state 变为 `NOT_STARTED`，producer phase 保持 `OPEN`，生命周期检查仍拒绝隔离标记、终结输出或原执行身份变化。普通 capture 结果继续要求原有 publication 回执。
 
-每个 SSH managed-context worker 必须启用 POSIX ledger；本地 managed-context worker 也会使用 launcher 提供的 ledger。前台 Shell v3 同样登记进程组，取消时检查组退出证据。每次 SSH 前台 Shell 结果结算前，worker 清理该调用登记进程组中的残留成员并证明组已退出，包括 leader 正常退出的情况；其他并发组不受影响。退出证据失败时执行保持 UNKNOWN 并保留 holder；此保证不覆盖通过 `setsid` 逃逸的后代。ledger 登记、写入或清理失败，会永久取消该 incarnation 产生 clean proof 的资格。尽力清理的 `close()` 和 CSI 专用的严格 drain gate 均不能直接作为 SSH 证明，CSI 行为保持原样。
+为此，共享生命周期结算需要识别已预留但明确未启动即关闭的 publication，此行为也适用于已有的本地和 CSI Session。回执 wire parser 接受显式无 capture 的结构，但它本身不构成提交授权。Broker 验证已保存的 SSH binding 和精确原 execution 后才能发出该 ACK；capture 结果发布和 worker ACK 验证保留原有 manifest/history 要求，CSI 退役仍要求原有停止证据。
+
+每个 SSH managed-context worker 必须启用 POSIX ledger；本地 managed-context worker 也会使用 launcher 提供的 ledger。前台 Shell v3 同样登记进程组，取消时检查组退出证据。每次 SSH 前台 Shell 结果结算前，worker 清理该调用登记进程组中的残留成员并证明组已退出，包括 leader 正常退出的情况；其他并发组不受影响。退出证据失败时执行保持 UNKNOWN 并保留 holder；此保证不覆盖通过 `setsid` 逃逸的后代。ledger 登记、写入或清理失败，会永久取消该 incarnation 产生 clean proof 的资格。尽力清理的 `close()` 和 CSI 专用的严格 drain gate 均不能直接作为 SSH 证明，CSI 退役条件保持原样。
 
 ## 管理员配置与灰度
 
@@ -105,12 +113,20 @@ bootstrap stdin 协议为 `protocolVersion=1`。`ensure` 的 `launch=false` 持�
 
 验收覆盖重复/丢失启动响应下每 generation 一个 PID、跨 Turn 复用、同机 worker 独立、同 storage 串行、文件及前台 Shell 结果/取消/ACK、正常关闭的 clean proof 与无登记残留、隧道/Broker 故障后的原 worker 重连，以及 kill、重启、目录替换、ledger 故障、未知执行时的保守失败。本地、static、CSI 均需回归。未测试的远端平台明确标为未验证。
 
-### 已记录验证，2026-10-15 至 2026-10-16
+### 初始实现验证，2026-10-15 至 2026-10-16
 
-原生 macOS arm64、Node.js v24.12.0、JDK 21.0.8 环境下，CLI 进程测试、完整 Harness/tool-turn 741 例回归及 WebShell 聚焦 126 例均通过。扩展 Java unit/H2 运行覆盖 SDK 249 例（跳过 9 例）、Broker 984 例（跳过 2 例）及服务端 2,911 例（跳过 7 例）。修正测试中的 schema 预期、恢复 fixture 和审计记录后，通过 132 例 source-reactor 复验确认受影响类。Maven 验证、Checkstyle 和 SpotBugs 均通过。MySQL 8.4.11 的 72 例集成测试全部通过，覆盖 V3 到 V4 迁移、登记、同 storage holder、恢复及生命周期结果发布/停止证明；此前在报告版本为 26.7.0 的本地 Homebrew 服务上也通过了聚焦验证。最终实现经过两遍干净自审和独立审查。
+初始实现在原生 macOS arm64、Node.js v24.12.0、JDK 21.0.8 环境下通过 CLI 进程测试、完整 Harness/tool-turn 741 例回归及 WebShell 聚焦 126 例。扩展 Java unit/H2 运行覆盖 SDK 249 例（跳过 9 例）、Broker 984 例（跳过 2 例）及服务端 2,911 例（跳过 7 例）。修正测试中的 schema 预期、恢复 fixture 和审计记录后，通过 132 例 source-reactor 复验确认受影响类。Maven 验证、Checkstyle 和 SpotBugs 均通过。MySQL 8.4.11 的 72 例集成测试全部通过，覆盖 V3 到 V4 迁移、登记、同 storage holder、恢复及生命周期结果发布/停止证明；此前在报告版本为 26.7.0 的本地 Homebrew 服务上也通过了聚焦验证。该初始实现经过两遍干净自审和独立审查。上述计数早于随后合并 main 及审查修复。
 
 最后一轮完整 `npm run build`、`npm run typecheck` 和 `npm run bundle` 均通过。使用刚生成的 `dist/cli.js` 冒烟验证了目录探测/登记、不可变 intent、首次启动、重复 ensure 复用同一 PID，以及带匹配证明的正常停止。
 
 原生 macOS 上的七项真实 loopback SSH 测试使用本任务自有 sshd、临时凭据/known_hosts 和高位 loopback 端口，覆盖存活 worker 复用、双向转发、Broker JVM halt 后原 master 接管、原 worker 消失、Runtime Session 释放后 direct/deferred no-start 原 ACK 重试，以及根据已有 clean proof 补建 SQL 停止回执。结果发布对端使用有界 HTTP 测试 stub；WebShell 桌面/移动端冒烟使用 mock HTTP 响应。
+
+### 审查修复验证，2026-10-16
+
+合并 main 后，独立原生 OpenSSH 红绿验证通过六项通信/生命周期场景：bootstrap 期间同节点请求继续完成、反复清理转发、临时 direct 路由清理、共用转发存续、取消响应丢失，以及关闭时的控制权屏障。测试使用隔离的 SSH 环境和 HTTP stub，未覆盖完整 Qwen worker/SQL 链路。独立控制队列复现发现 `shutdownNow` 会遗留八个未完成的 future；改为有序关闭后，八个 future 均以异常完成。已提交的回归也覆盖排队请求完成。
+
+环境访问清单三例全部通过，完整 WebShell 构建产物测试 34 例全部通过。transcript JavaScript 测量为 1,331,210 个 UTF-16 单元，低于未修改的 1,331,500 上限。完整 build、typecheck、bundle 及受影响 TypeScript lint 均通过。
+
+source reactor 完成 SDK 249 例 unit（跳过 9 例）、Broker 1,005 例（跳过 9 例）及服务端 2,937 例 unit/H2（跳过 7 例），零失败。MySQL 8.4.11 的 72 例集成测试全部通过。最终门槛发现 main 带入的 CSI 集成 fixture 存在 import/switch 缩进错误；仅修正导入顺序和缩进，导入集合及非 import 行内容不变后，以 `-DskipTests verify checkstyle:check` 续跑，通过三个模块的 Checkstyle 和 SpotBugs。未为这一纯格式改动重复已完成的测试套件。
 
 尚未执行 Linux 和跨物理机器验收，也未运行完整部署的 WebShell → Java → MySQL → 远端 Shell publication 链路；各组件已分别验证。没有配置或修改生产节点。这些缺口意味着当前不能宣称已通过生产验收。

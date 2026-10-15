@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -61,6 +63,48 @@ class RoutingRuntimeProvisionerTest {
             assertTrue(router.isUsable(lease), "a durable discard cannot invalidate a winning observer");
             await(router.reconcile(request, seed, new RuntimeResourceHandle(ssh.kind(), 1, Map.of()), lease));
             assertEquals(1, ssh.observations);
+        }
+    }
+
+    @Test
+    void releaseForgetsOnlyADelegateThatHasActuallyStopped() throws Exception {
+        for (boolean durable : List.of(false, true)) {
+            var provider = new Provider(durable ? "ssh-process" : "local-process", durable);
+            var released = new ArrayList<RuntimeLease>();
+            try (var router = new RoutingRuntimeProvisioner(Map.of(provider.kind(), provider), scope -> provider.kind(),
+                    (kind, lease) -> {}, released::add)) {
+                var request = router.createRequest(SCOPE, "harness");
+                var lease = await(router.provision(request));
+                await(router.release(request, lease));
+                assertEquals(durable, router.isUsable(lease));
+                assertEquals(durable ? List.of() : List.of(lease), released);
+            }
+        }
+    }
+
+    @Test
+    void retirementForgetsRoutingOnlyAfterAMatchingStopReceipt() throws Exception {
+        var provider = new Provider("local-process", true);
+        var released = new ArrayList<RuntimeLease>();
+        try (var router = new RoutingRuntimeProvisioner(Map.of(provider.kind(), provider), scope -> provider.kind(),
+                (kind, lease) -> {}, released::add)) {
+            var request = router.createRequest(SCOPE, "harness");
+            var bindings = new InMemoryRuntimeBindingRepository();
+            var binding = bindings.findOrCreate(request);
+            var claim = bindings.claimOperation(binding.getBindingId(), "owner", Duration.ofMinutes(1));
+            var lease = await(router.provision(request, claim.getProvisionSeed()));
+            var ready = claim.withAttestation(lease, new RuntimeResourceHandle(provider.kind(), 1, Map.of()),
+                    Instant.now(), Instant.now());
+            var draining = ready.withDrainRequested(true, Instant.now())
+                    .withState(RuntimeBindingRecord.State.DRAINING, lease, Instant.now());
+            provider.badProof = true;
+            assertFalse(await(router.stopDrained(draining)).matches(draining));
+            assertTrue(router.isUsable(lease));
+            assertTrue(released.isEmpty());
+            provider.badProof = false;
+            assertTrue(await(router.stopDrained(draining)).matches(draining));
+            assertFalse(router.isUsable(lease));
+            assertEquals(List.of(lease), released);
         }
     }
 
@@ -133,6 +177,8 @@ class RoutingRuntimeProvisionerTest {
         private final boolean durable;
         private int starts;
         private int observations;
+        private boolean live = true;
+        private boolean badProof;
 
         private Provider(String kind, boolean durable) {
             this.kind = kind;
@@ -167,6 +213,25 @@ class RoutingRuntimeProvisionerTest {
         @Override
         public boolean supportsDrainedStop() {
             return durable;
+        }
+
+        @Override
+        public boolean isUsable(RuntimeLease lease) {
+            return live;
+        }
+
+        @Override
+        public CompletionStage<Void> release(RuntimeProvisionRequest request, RuntimeLease lease) {
+            if (!durable) live = false;
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+            if (!badProof) live = false;
+            return CompletableFuture.completedFuture(new RuntimeDrainReceipt(
+                    badProof ? "wrong-binding" : binding.getBindingId(), binding.getGeneration(),
+                    binding.getProvisionSeed().getProvisionRequestId(), binding.getResourceHandle(), Instant.now()));
         }
 
         @Override

@@ -146,7 +146,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                         if (!com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND.equals(kind)) {
                             ssh.connections().registerDirect(lease);
                         }
-                    });
+                    }, ssh.connections()::forget);
         }
         RuntimeProvisioner provisioner = workspaces == null ? baseProvisioner
                 : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);

@@ -43,7 +43,7 @@ public class WorkspaceStorageGuard {
     private final Map<Storage, Path> roots;
     private final boolean enabled;
     private final IdentityReader identities;
-    private final SshWorkspaceStore ssh;
+    private SshWorkspaceStore ssh;
     private final ObjectMapper json = new ObjectMapper();
 
     @Autowired
@@ -61,7 +61,6 @@ public class WorkspaceStorageGuard {
         this.transaction = new TransactionTemplate(manager);
         this.enabled = properties.getRuntimeBroker().isVerifiedWorkspaceRecoveryEnabled();
         this.identities = identities;
-        this.ssh = properties.getRuntimeBroker().getSsh().getNodes().isEmpty() ? null : new SshWorkspaceStore(jdbc, manager);
         this.roots = enabled ? properties.getRuntimeBroker().getWorkspaceMounts().stream()
                 .collect(Collectors.toMap(mount -> new Storage(mount.tenantId(), mount.storageId()),
                         mount -> Path.of(mount.root()), (left, right) -> {
@@ -71,6 +70,11 @@ public class WorkspaceStorageGuard {
 
     public boolean enabled() {
         return enabled;
+    }
+
+    @Autowired
+    void configureSsh(SshWorkspaceStore store, ManagedAgentProperties properties) {
+        this.ssh = properties.getRuntimeBroker().getSsh().getNodes().isEmpty() ? null : store;
     }
 
     public String inspect(String tenantId, String storageId) {

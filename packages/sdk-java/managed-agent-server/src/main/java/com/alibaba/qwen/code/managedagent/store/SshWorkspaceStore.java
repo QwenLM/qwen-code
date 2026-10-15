@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.SshRuntimeStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -64,14 +65,14 @@ public class SshWorkspaceStore {
             Map<String, Object> request = Map.of("actorId", actor, "nodeId", node, "path", path,
                     "displayName", name, "workspaceId", workspace, "storageId", storage,
                     "registrationId", UUID.randomUUID().toString());
-            long now = System.currentTimeMillis();
             jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id,"
                             + " target_kind, target_key, target_id, actor_key, actor_id, idempotency_key, idempotency_digest,"
-                            + " request_digest, request_json, state, phase, created_at, updated_at)"
-                            + " VALUES (?, ?, ?, ?, ?, 'WORKSPACE', ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'PENDING', ?, ?)",
+                            + " request_digest, request_json, state, phase, gmt_create, gmt_modified)"
+                            + " VALUES (?, ?, ?, ?, ?, 'WORKSPACE', ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'PENDING', "
+                            + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                     operationKey(tenant, id), ManagedSchemaKeys.key(tenant), OPERATION, bytes(id), bytes(tenant),
                     ManagedSchemaKeys.key(workspace), bytes(workspace), ManagedWorkspaceRegistry.actorKey(tenant, actor),
-                    bytes(actor), bytes(key), ManagedSchemaKeys.key(key), digest, encode(request), now, now);
+                    bytes(actor), bytes(key), ManagedSchemaKeys.key(key), digest, encode(request));
             return new Operation(id, "workspace_create", "pending", null, null, false);
         });
     }
@@ -113,8 +114,9 @@ public class SshWorkspaceStore {
                 return null;
             }
             int updated = jdbc.update("UPDATE ma_operation SET state = 'RUNNING', phase = 'RUNNING', claim_owner = ?,"
-                            + " claim_generation = claim_generation + 1, claim_until = TIMESTAMPADD(SECOND, 120, CURRENT_TIMESTAMP(6))"
-                            + " WHERE operation_key = ? AND (claim_until IS NULL OR claim_until < CURRENT_TIMESTAMP(6))",
+                            + " claim_generation = claim_generation + 1, claim_until = " + ManagedSchemaTime.SQL_NOW + " + 120000,"
+                            + " gmt_modified = " + ManagedSchemaTime.SQL_NOW
+                            + " WHERE operation_key = ? AND (claim_until IS NULL OR claim_until < " + ManagedSchemaTime.SQL_NOW + ")",
                     owner, operationKey(tenant, id));
             if (updated != 1) {
                 return null;
@@ -132,9 +134,7 @@ public class SshWorkspaceStore {
             WorkspaceStorageKindGuard.lockDomain(jdbc, intent.tenantId());
             requireClaim(intent, owner);
             Map<String, Object> identity = object(registration, "identity");
-            LocalStorageOwners.requireNonOverlapping(jdbc, new WorkspaceStorageGuard.Identity(
-                    string(identity, "root"), string(identity, "hostId"), string(identity, "device"),
-                    string(identity, "inode"), string(identity, "birthTime")));
+            LocalStorageOwners.requireNonOverlapping(jdbc, physicalIdentity(identity));
             String physical = physicalKey(identity);
             String root = string(identity, "root");
             jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id,"
@@ -235,7 +235,7 @@ public class SshWorkspaceStore {
 
     private void requireClaim(Intent intent, String owner) {
         if (jdbc.queryForList("SELECT operation_key FROM ma_operation WHERE operation_key = ? AND claim_owner = ?"
-                + " AND state = 'RUNNING' AND claim_until > CURRENT_TIMESTAMP(6) FOR UPDATE", String.class,
+                + " AND state = 'RUNNING' AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE", String.class,
                 operationKey(intent.tenantId(), intent.operationId()), owner).size() != 1) {
             throw new ApiException(HttpStatus.CONFLICT, "operation_claim_lost", "Registration claim expired.");
         }
@@ -243,9 +243,10 @@ public class SshWorkspaceStore {
 
     private int finish(Intent intent, String owner, String state, String code) {
         return jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, failure_code = ?, claim_owner = NULL, claim_until = NULL,"
-                        + " updated_at = ?, completed_at = ? WHERE operation_key = ? AND claim_owner = ? AND state = 'RUNNING'"
-                        + " AND claim_until > CURRENT_TIMESTAMP(6)",
-                state, state, code, System.currentTimeMillis(), "COMPLETED".equals(state) ? System.currentTimeMillis() : null,
+                        + " gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", completed_at = CASE WHEN ? = 'COMPLETED' THEN "
+                        + ManagedSchemaTime.SQL_NOW + " ELSE NULL END WHERE operation_key = ? AND claim_owner = ? AND state = 'RUNNING'"
+                        + " AND claim_until > " + ManagedSchemaTime.SQL_NOW,
+                state, state, code, state,
                 operationKey(intent.tenantId(), intent.operationId()), owner);
     }
 
@@ -274,8 +275,12 @@ public class SshWorkspaceStore {
     }
 
     public static String physicalKey(Map<String, Object> identity) {
-        return ManagedSchemaKeys.key("local-storage/1", string(identity, "hostId"), string(identity, "device"),
-                string(identity, "inode"), string(identity, "birthTime"));
+        return LocalStorageOwners.physicalKey(physicalIdentity(identity));
+    }
+
+    private static WorkspaceStorageGuard.Identity physicalIdentity(Map<String, Object> identity) {
+        return new WorkspaceStorageGuard.Identity(string(identity, "root"), string(identity, "hostId"),
+                string(identity, "device"), string(identity, "inode"), string(identity, "birthTime"));
     }
 
     static String physicalKey(JdbcTemplate jdbc, String tenant, String storage) {

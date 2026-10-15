@@ -202,6 +202,97 @@ class SshConnectionManagerTest {
     }
 
     @Test
+    void aBlockedBootstrapDoesNotBlockRuntimeTrafficOnTheSameNode() throws Exception {
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var lease = new RuntimeLease("runtime", URI.create("http://127.0.0.1:41234"), "token", "lease", 1);
+        try (var manager = manager(URI.create("http://127.0.0.1:8080"), (command, input, timeout) -> {
+            if (input.length == 0) return success();
+            entered.countDown();
+            try {
+                if (!release.await(3, TimeUnit.SECONDS)) throw new AssertionError("Bootstrap was not released");
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(failure);
+            }
+            return new SshConnectionManager.CommandResult(0,
+                    JsonCodec.encode(Map.of("protocolVersion", 1, "ok", true, "result", Map.of())));
+        }); var executor = Executors.newFixedThreadPool(2)) {
+            manager.register(lease, NODE);
+            URI forwarded = manager.resolveEndpoint(lease);
+            var bootstrap = executor.submit(() -> manager.bootstrap(NODE, Map.of("operation", "probe")));
+            assertTrue(entered.await(1, TimeUnit.SECONDS));
+            try {
+                assertEquals(forwarded, executor.submit(() -> manager.resolveEndpoint(lease)).get(1, TimeUnit.SECONDS));
+            } finally {
+                release.countDown();
+            }
+            bootstrap.get(1, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void forgetCancelsOnlyTheLastRouteUsingAForwardAndRemovesDirectLeases() {
+        var commands = new ArrayList<List<String>>();
+        var endpoint = URI.create("http://127.0.0.1:41234");
+        var first = new RuntimeLease("first", endpoint, "first-token", "first-lease", 1);
+        var second = new RuntimeLease("second", endpoint, "second-token", "second-lease", 1);
+        try (var manager = manager(URI.create("http://127.0.0.1:8080"), (command, input, timeout) -> {
+            commands.add(command);
+            return success();
+        })) {
+            manager.register(first, NODE);
+            manager.register(second, NODE);
+            URI forwarded = manager.resolveEndpoint(first);
+            assertEquals(forwarded, manager.resolveEndpoint(second));
+            manager.forget(first);
+            assertThrows(RuntimeBrokerException.class, () -> manager.resolveEndpoint(first));
+            assertEquals(forwarded, manager.resolveEndpoint(second));
+            assertEquals(0, commands.stream().filter(command -> command.contains("cancel")).count());
+            manager.forget(second);
+            assertThrows(RuntimeBrokerException.class, () -> manager.resolveEndpoint(second));
+            var cancellation = commands.stream().filter(command -> command.contains("cancel")).toList();
+            assertEquals(1, cancellation.size());
+            assertTrue(cancellation.getFirst().contains("127.0.0.1:" + forwarded.getPort() + ":127.0.0.1:41234"));
+            manager.forget(second);
+            assertEquals(1, commands.stream().filter(command -> command.contains("cancel")).count());
+            manager.registerDirect(first);
+            manager.forget(first);
+            assertThrows(RuntimeBrokerException.class, () -> manager.resolveEndpoint(first));
+        }
+    }
+
+    @Test
+    void failedCancellationRetainsTheForwardUntilItsListenerIsGone() throws Exception {
+        var listener = new AtomicReference<java.net.ServerSocket>();
+        var commands = new ArrayList<List<String>>();
+        var lease = new RuntimeLease("runtime", URI.create("http://127.0.0.1:41234"), "token", "lease", 1);
+        try (var manager = manager(URI.create("http://127.0.0.1:8080"), (command, input, timeout) -> {
+            commands.add(command);
+            if (command.contains("forward")) {
+                String forward = command.get(command.indexOf("-L") + 1);
+                try {
+                    listener.set(new java.net.ServerSocket(Integer.parseInt(forward.split(":")[1]), 1,
+                            java.net.InetAddress.getByName("127.0.0.1")));
+                } catch (java.io.IOException failure) {
+                    throw new AssertionError(failure);
+                }
+            }
+            return command.contains("cancel") ? new SshConnectionManager.CommandResult(255, new byte[0]) : success();
+        })) {
+            manager.register(lease, NODE);
+            URI forwarded = manager.resolveEndpoint(lease);
+            try (var bound = listener.get()) {
+                assertThrows(RuntimeBrokerException.class, () -> manager.forget(lease));
+                assertEquals(forwarded, manager.resolveEndpoint(lease));
+            }
+            manager.forget(lease);
+            assertThrows(RuntimeBrokerException.class, () -> manager.resolveEndpoint(lease));
+            assertEquals(2, commands.stream().filter(command -> command.contains("cancel")).count());
+        }
+    }
+
+    @Test
     void anUnresponsiveNodeDoesNotHoldTheConnectionLockForAnotherNode() throws Exception {
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);

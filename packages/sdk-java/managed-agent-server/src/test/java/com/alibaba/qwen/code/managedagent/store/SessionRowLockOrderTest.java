@@ -161,6 +161,7 @@ class SessionRowLockOrderTest {
     // runtime-access record's accessors, none of which reaches either side.
     // SSH storage adds same-name verify/1 and storageKey/2 references;
     // their SQL touches only storage ownership and migration history.
+    // Its physicalKey/1 delegates to the pure local identity hash.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
             Map.ofEntries(
                     Map.entry("ChildResultRelayStore.java",
@@ -206,6 +207,8 @@ class SessionRowLockOrderTest {
                             Set.of("SessionMessageRelayStore.pending/2")),
                     Map.entry("SessionResourceCollectionCollector.java",
                             Set.of("SessionResourceCollectionCollector.runOnce/0")),
+                    Map.entry("SshWorkspaceStore.java",
+                            Set.of("SshWorkspaceStore.physicalKey/1")),
                     Map.entry("ToolPublicationAdmissionStore.java",
                             Set.of("AcknowledgementBundle.captureIdentity/0",
                                     "AcknowledgementBundle.finished/0",

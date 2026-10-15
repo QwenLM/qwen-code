@@ -203,6 +203,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/managed/managed-task-messages.ts',
       './client/components/managed/managed-task-messages.transcript-stub.ts',
     ],
+    [
+      './client/components/managed/managed-workspace-messages.ts',
+      './client/components/managed/managed-workspace-messages.transcript-stub.ts',
+    ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
     normalizePath(resolve(__dirname, stub)),

@@ -21,7 +21,6 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +29,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /** Owns SSH control sockets and ephemeral forwarding addresses, never remote workers. */
 public final class SshConnectionManager implements AutoCloseable {
@@ -44,6 +44,7 @@ public final class SshConnectionManager implements AutoCloseable {
     private final Map<List<Object>, Route> routes = new ConcurrentHashMap<>();
     private final Set<List<Object>> direct = ConcurrentHashMap.newKeySet();
     private final Map<String, Object> nodeLocks = new ConcurrentHashMap<>();
+    private final ReentrantReadWriteLock bootstraps = new ReentrantReadWriteLock();
     private final Thread exitHook;
     private volatile boolean closed;
 
@@ -102,7 +103,9 @@ public final class SshConnectionManager implements AutoCloseable {
             throw new IllegalArgumentException("SSH bootstrap request exceeds its size limit");
         }
         CommandResult exchange;
-        synchronized (nodeLock(node)) {
+        bootstraps.readLock().lock();
+        try {
+            requireOpen();
             Connection connection = connection(node);
             List<String> command = base(node, connection.socket());
             command.addAll(List.of("-o", "ControlMaster=no"));
@@ -110,6 +113,8 @@ public final class SshConnectionManager implements AutoCloseable {
             command.add(quote(node.nodeExecutable()) + " " + quote(node.qwenEntry())
                     + " managed-runtime-bootstrap");
             exchange = runner.run(List.copyOf(command), input, COMMAND_TIMEOUT);
+        } finally {
+            bootstraps.readLock().unlock();
         }
         if (exchange.exitCode() != 0 || exchange.stdout().length > RECORD_LIMIT) {
             throw unavailable(null);
@@ -137,15 +142,19 @@ public final class SshConnectionManager implements AutoCloseable {
         throw protocol();
     }
 
-    public synchronized void register(RuntimeLease lease, SshRuntimeNode node) {
+    public void register(RuntimeLease lease, SshRuntimeNode node) {
         requireRemoteEndpoint(lease.getEndpoint());
-        requireOpen();
-        List<Object> key = leaseKey(lease);
-        Route previous = routes.get(key);
-        if (direct.contains(key) || previous != null && !previous.node().equals(node)) {
-            throw conflict();
+        synchronized (nodeLock(node)) {
+            synchronized (this) {
+                requireOpen();
+                List<Object> key = leaseKey(lease);
+                Route previous = routes.get(key);
+                if (direct.contains(key) || previous != null && !previous.node().equals(node)) {
+                    throw conflict();
+                }
+                routes.putIfAbsent(key, new Route(node, lease.getEndpoint()));
+            }
         }
-        routes.putIfAbsent(key, new Route(node, lease.getEndpoint()));
     }
 
     /** Used only after the routing provisioner has selected an explicitly direct provider. */
@@ -167,9 +176,17 @@ public final class SshConnectionManager implements AutoCloseable {
             }
             throw conflict();
         }
+        Connection connection = connection(route.node());
+        URI forwarded = connection.forwards().get(route.endpoint());
+        if (forwarded != null) {
+            return forwarded;
+        }
         synchronized (nodeLock(route.node())) {
-            Connection connection = connection(route.node());
-            URI forwarded = connection.forwards().get(route.endpoint());
+            requireOpen();
+            if (routes.get(leaseKey(lease)) != route || connections.get(route.node().nodeId()) != connection) {
+                throw unavailable(null);
+            }
+            forwarded = connection.forwards().get(route.endpoint());
             if (forwarded != null) {
                 return forwarded;
             }
@@ -195,11 +212,57 @@ public final class SshConnectionManager implements AutoCloseable {
                 + (publicationEndpoint.getRawPath() == null ? "" : publicationEndpoint.getRawPath()));
     }
 
-    public synchronized void forget(RuntimeLease lease) {
-        routes.remove(leaseKey(lease));
+    public void forget(RuntimeLease lease) {
+        List<Object> key = leaseKey(lease);
+        Route route;
+        synchronized (this) {
+            direct.remove(key);
+            route = routes.get(key);
+        }
+        if (route == null) {
+            return;
+        }
+        synchronized (nodeLock(route.node())) {
+            if (routes.get(key) != route) {
+                return;
+            }
+            Connection connection = connections.get(route.node().nodeId());
+            if (connection != null && routes.values().stream().filter(route::equals).count() == 1) {
+                URI forwarded = connection.forwards().get(route.endpoint());
+                if (forwarded != null) {
+                    List<String> command = control(route.node(), connection.socket(), "cancel");
+                    command.addAll(List.of("-L", "127.0.0.1:" + forwarded.getPort()
+                            + ":127.0.0.1:" + route.endpoint().getPort(), route.node().sshHost()));
+                    if (runner.run(List.copyOf(command), new byte[0], COMMAND_TIMEOUT).exitCode() != 0
+                            && !forwardClosed(forwarded)) {
+                        throw unavailable(null);
+                    }
+                    connection.forwards().remove(route.endpoint());
+                }
+            }
+            routes.remove(key, route);
+        }
     }
 
     private Connection connection(SshRuntimeNode node) {
+        requireOpen();
+        Connection previous = connections.get(node.nodeId());
+        if (previous != null) {
+            if (!previous.node().equals(node)) {
+                throw conflict();
+            }
+            verifyConfiguration(node, previous.socket());
+            if (checkConnection(node, previous.socket())) {
+                requireOpen();
+                return previous;
+            }
+        }
+        synchronized (nodeLock(node)) {
+            return connect(node, previous);
+        }
+    }
+
+    private Connection connect(SshRuntimeNode node, Connection failed) {
         requireOpen();
         Connection old = connections.get(node.nodeId());
         if (old != null && !old.node().equals(node)) {
@@ -208,11 +271,8 @@ public final class SshConnectionManager implements AutoCloseable {
         Path socket = socketDirectory.resolve("n" + identity(node.nodeId()));
         verifyConfiguration(node, socket);
         if (old != null || Files.exists(socket, LinkOption.NOFOLLOW_LINKS)) {
-            requirePrivateSocket(socket);
-            List<String> check = control(node, socket, "check");
-            check.add(node.sshHost());
-            if (runner.run(List.copyOf(check), new byte[0], COMMAND_TIMEOUT).exitCode() == 0) {
-                return old == null ? rememberConnection(new Connection(node, socket, new HashMap<>())) : old;
+            if ((old == null || old != failed) && checkConnection(node, socket)) {
+                return old == null ? rememberConnection(new Connection(node, socket, new ConcurrentHashMap<>())) : old;
             }
             removeUnreachableSocket(socket);
         }
@@ -223,7 +283,14 @@ public final class SshConnectionManager implements AutoCloseable {
         if (runner.run(List.copyOf(command), new byte[0], COMMAND_TIMEOUT).exitCode() != 0) {
             throw unavailable(null);
         }
-        return rememberConnection(new Connection(node, socket, new HashMap<>()));
+        return rememberConnection(new Connection(node, socket, new ConcurrentHashMap<>()));
+    }
+
+    private boolean checkConnection(SshRuntimeNode node, Path socket) {
+        requirePrivateSocket(socket);
+        List<String> check = control(node, socket, "check");
+        check.add(node.sshHost());
+        return runner.run(List.copyOf(check), new byte[0], COMMAND_TIMEOUT).exitCode() == 0;
     }
 
     private Connection rememberConnection(Connection created) {
@@ -369,6 +436,14 @@ public final class SshConnectionManager implements AutoCloseable {
         }
     }
 
+    private static boolean forwardClosed(URI endpoint) {
+        try (ServerSocket ignored = new ServerSocket(endpoint.getPort(), 1, InetAddress.getByName("127.0.0.1"))) {
+            return true;
+        } catch (IOException stillBound) {
+            return false;
+        }
+    }
+
     private static String quote(String value) {
         return "'" + value.replace("'", "'\\''") + "'";
     }
@@ -401,6 +476,8 @@ public final class SshConnectionManager implements AutoCloseable {
             closed = true;
             pending = List.copyOf(nodeLocks.values());
         }
+        bootstraps.writeLock().lock();
+        bootstraps.writeLock().unlock();
         for (Object lock : pending) {
             synchronized (lock) {
                 // A late launch must finish cleanup before the controller lock changes owner.

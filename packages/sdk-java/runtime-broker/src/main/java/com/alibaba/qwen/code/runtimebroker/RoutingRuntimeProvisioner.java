@@ -8,12 +8,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /** Dispatches saved provider identity without changing placement or lease identity. */
 public final class RoutingRuntimeProvisioner implements RuntimeProvisioner {
     private final Map<String, RuntimeProvisioner> delegates;
     private final Function<RuntimeScope, String> kindSelector;
     private final BiConsumer<String, RuntimeLease> leaseRegistrar;
+    private final Consumer<RuntimeLease> leaseReleaser;
     private final ConcurrentMap<List<Object>, String> issued = new ConcurrentHashMap<>();
 
     public RoutingRuntimeProvisioner(Map<String, RuntimeProvisioner> delegates,
@@ -23,9 +25,16 @@ public final class RoutingRuntimeProvisioner implements RuntimeProvisioner {
 
     public RoutingRuntimeProvisioner(Map<String, RuntimeProvisioner> delegates,
             Function<RuntimeScope, String> kindSelector, BiConsumer<String, RuntimeLease> leaseRegistrar) {
+        this(delegates, kindSelector, leaseRegistrar, lease -> {});
+    }
+
+    public RoutingRuntimeProvisioner(Map<String, RuntimeProvisioner> delegates,
+            Function<RuntimeScope, String> kindSelector, BiConsumer<String, RuntimeLease> leaseRegistrar,
+            Consumer<RuntimeLease> leaseReleaser) {
         this.delegates = Map.copyOf(delegates);
         this.kindSelector = java.util.Objects.requireNonNull(kindSelector, "kindSelector");
         this.leaseRegistrar = java.util.Objects.requireNonNull(leaseRegistrar, "leaseRegistrar");
+        this.leaseReleaser = java.util.Objects.requireNonNull(leaseReleaser, "leaseReleaser");
         if (delegates.isEmpty() || delegates.entrySet().stream()
                 .anyMatch(entry -> !entry.getValue().supportsKind(entry.getKey()))) {
             throw new IllegalArgumentException("Each routed provider must own its exact kind");
@@ -112,6 +121,7 @@ public final class RoutingRuntimeProvisioner implements RuntimeProvisioner {
         return provider(binding.getRequest()).stopDrained(binding).thenApply(receipt -> {
             if (receipt != null && receipt.matches(binding) && binding.getLease() != null) {
                 issued.remove(leaseKey(binding.getLease()), binding.getRequest().getProvisionerKind());
+                leaseReleaser.accept(binding.getLease());
             }
             return receipt;
         });
@@ -141,7 +151,13 @@ public final class RoutingRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public CompletionStage<Void> release(RuntimeProvisionRequest request, RuntimeLease lease) {
-        return provider(request).release(request, lease);
+        RuntimeProvisioner delegate = provider(request);
+        return delegate.release(request, lease).thenRun(() -> {
+            if (!delegate.isUsable(lease)) {
+                issued.remove(leaseKey(lease), request.getProvisionerKind());
+                leaseReleaser.accept(lease);
+            }
+        });
     }
 
     @Override

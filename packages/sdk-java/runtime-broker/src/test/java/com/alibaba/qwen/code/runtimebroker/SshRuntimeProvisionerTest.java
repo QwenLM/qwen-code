@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
@@ -15,7 +16,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
@@ -111,6 +114,97 @@ class SshRuntimeProvisionerTest {
     void tearDown() {
         provisioner.close();
         server.stop(0);
+    }
+
+    @Test
+    void boundsConcurrentControlWorkAndReturnsRetryableOverload() throws Exception {
+        var entered = new CountDownLatch(4);
+        var release = new CountDownLatch(1);
+        try (var manager = new SshConnectionManager(URI.create("http://127.0.0.1:8080"),
+                controlDirectory.resolve("bounded"), (command, input, timeout) -> {
+                    if (input.length == 0) return new SshConnectionManager.CommandResult(0, new byte[0]);
+                    entered.countDown();
+                    try {
+                        if (!release.await(5, TimeUnit.SECONDS)) throw new AssertionError("Controls were not released");
+                    } catch (InterruptedException failure) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(failure);
+                    }
+                    var request = JsonCodec.parseObject(input, "bounded control");
+                    return new SshConnectionManager.CommandResult(0, JsonCodec.encode(Map.of("protocolVersion", 1,
+                            "ok", true, "result", Map.of("resourceId", request.get("resourceId"), "state", "INTENT"))));
+                }); var limited = new SshRuntimeProvisioner(ignored -> NODE, ignored -> STORAGE, manager, transport)) {
+            var request = limited.createRequest(SCOPE, "session");
+            var controls = new ArrayList<CompletionStage<RuntimeResourceHandle>>();
+            try {
+                for (int i = 0; i < 4; i++) {
+                    controls.add(limited.ensureResource(request, RuntimeProvisionSeed.create("active-" + i, 1), null));
+                }
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                for (int i = 0; i < 64; i++) {
+                    controls.add(limited.ensureResource(request, RuntimeProvisionSeed.create("queued-" + i, 1), null));
+                }
+                var overflow = limited.ensureResource(request, RuntimeProvisionSeed.create("overflow", 1), null);
+                var failure = assertThrows(ExecutionException.class, () -> await(overflow));
+                var unavailable = (RuntimeBrokerException) failure.getCause();
+                assertEquals("ssh_runtime_busy", unavailable.getCode());
+                assertTrue(unavailable.isRetryable());
+            } finally {
+                release.countDown();
+            }
+            for (var control : controls) await(control);
+        }
+    }
+
+    @Test
+    void closingCompletesQueuedControlsInsteadOfAbandoningTheirFutures() throws Exception {
+        var entered = new CountDownLatch(4);
+        var release = new CountDownLatch(1);
+        var lease = new RuntimeLease("runtime", URI.create("http://127.0.0.1:41234"), "token", "lease", 1);
+        try (var manager = new SshConnectionManager(URI.create("http://127.0.0.1:8080"),
+                controlDirectory.resolve("closing"), (command, input, timeout) -> {
+                    if (input.length == 0) return new SshConnectionManager.CommandResult(0, new byte[0]);
+                    entered.countDown();
+                    try {
+                        if (!release.await(5, TimeUnit.SECONDS)) throw new AssertionError("Controls were not released");
+                    } catch (InterruptedException failure) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(failure);
+                    }
+                    var request = JsonCodec.parseObject(input, "closing control");
+                    return new SshConnectionManager.CommandResult(0, JsonCodec.encode(Map.of("protocolVersion", 1,
+                            "ok", true, "result", Map.of("resourceId", request.get("resourceId"), "state", "INTENT"))));
+                }); var limited = new SshRuntimeProvisioner(ignored -> NODE, ignored -> STORAGE, manager, transport)) {
+            var request = limited.createRequest(SCOPE, "session");
+            var controls = new ArrayList<CompletionStage<Void>>();
+            try {
+                for (int i = 0; i < 4; i++) {
+                    limited.ensureResource(request, RuntimeProvisionSeed.create("active-" + i, 1), null);
+                }
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                for (int i = 0; i < 8; i++) controls.add(limited.confirm(request, lease));
+                var closing = CompletableFuture.runAsync(limited::close);
+                try {
+                    assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+                        while (true) {
+                            try {
+                                manager.registerDirect(lease);
+                            } catch (RuntimeBrokerException closed) {
+                                assertEquals("ssh_runtime_unavailable", closed.getCode());
+                                return;
+                            }
+                            Thread.sleep(1);
+                        }
+                    });
+                } finally {
+                    release.countDown();
+                }
+                closing.get(3, TimeUnit.SECONDS);
+                for (var control : controls) assertThrows(ExecutionException.class, () -> await(control));
+            } finally {
+                release.countDown();
+            }
+        }
     }
 
     @Test
