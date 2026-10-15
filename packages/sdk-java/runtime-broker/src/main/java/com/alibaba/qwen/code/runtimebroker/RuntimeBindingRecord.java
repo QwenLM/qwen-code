@@ -420,7 +420,12 @@ public final class RuntimeBindingRecord {
             throw new IllegalArgumentException("Recovery evidence cannot be overwritten");
         }
         if ((state == State.LOST && replacement.state != State.LOST
-                && !(replacement.state == State.RELEASED && replacement.drainReceipt != null))
+                && !(replacement.state == State.RELEASED && replacement.drainReceipt != null)
+                && !(replacement.state == State.DRAINING && drainRequested
+                        && replacement.request.getScope().getLifecycleAuthority() != null
+                        && replacement.drainReceipt != null && replacement.drainReceipt.matches(this)
+                        && hasSameLease(replacement.lease)
+                        && Objects.equals(resourceHandle, replacement.resourceHandle)))
                 || state == State.OPERATOR_RECOVERY
                         && replacement.state != State.OPERATOR_RECOVERY
                         && replacement.state != State.LOST) {

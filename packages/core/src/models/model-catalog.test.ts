@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../config/config.js';
 import { DefaultOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/default.js';
 import { AuthType } from '../core/contentGenerator.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
@@ -618,6 +619,22 @@ describe('model catalog', () => {
     expect(lookupModelCatalog('glm-5.3-flash')?.modalities?.image).toBe(true);
   });
 
+  it.each([
+    ['glm-4.5v', 'glm-4-5v', 64_000, 16_384],
+    ['glm-4.6v', 'glm-4-6v', 128_000, 32_768],
+    ['glm-4.6v-flash', 'glm-4-6v-flash', 128_000, 32_768],
+  ] as const)(
+    'preserves vision limits and modalities under the alias of %s',
+    (dotted, dashed, context, output) => {
+      expect(versionSpellingAlias(dotted)).toBe(dashed);
+      expect(versionSpellingAlias(dashed)).toBe(dotted);
+      expect(lookupModelCatalog(dashed)).toEqual(lookupModelCatalog(dotted));
+      expect(tokenLimit(dashed)).toBe(context);
+      expect(tokenLimit(dashed, 'output')).toBe(output);
+      expect(defaultModalities(dashed)).toEqual({ image: true, video: true });
+    },
+  );
+
   it('keeps a release date off the alias machinery', () => {
     // models.dev publishes dated ids whose last dash-then-digits boundary is
     // the release date, not a minor version. Respelling it commits a spelling
@@ -638,6 +655,8 @@ describe('model catalog', () => {
     // alone reads it as a minor version. Three committed gpt-4o ids carry one.
     expect(versionSpellingAlias('gpt-4o-2024-11-20')).toBeUndefined();
     expect(versionSpellingAlias('gpt-4.1-2025-04-14')).toBeUndefined();
+    expect(versionSpellingAlias('gemma-4-26b-a4b-it')).toBeUndefined();
+    expect(versionSpellingAlias('gemma-4.26b-a4b-it')).toBeUndefined();
     // The guard stays narrow enough to keep respelling real minor versions,
     // including a leading-zero one (`0` is a date digit but not a date run).
     expect(versionSpellingAlias('qwen2-5-72b-instruct')).toBe(

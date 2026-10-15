@@ -1,13 +1,14 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
-import java.net.InetAddress;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
+
+import java.net.InetAddress;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class BrokerSecurityTest {
     private static final String KEY =
@@ -326,6 +327,19 @@ class BrokerSecurityTest {
         // null for them, so the authority fallback must classify them).
         properties.getAuth().setAllowInsecureBind(false);
         properties.getHarness().setBaseUrl("http://127.1:4170");
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void refusesChannelsEnabledWithoutAnIsolatedInternalListener()
+            throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getChannels().setEnabled(true);
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("internal-server.port");
+        properties.getInternalServer().setPort(4183);
         assertThatCode(() -> security(properties, "127.0.0.1"))
                 .doesNotThrowAnyException();
     }

@@ -119,7 +119,9 @@ class HostedHarnessClientTest {
                 assertThrows(expected, detach::run);
             }
             detached.set(true);
-            assertEquals(!confirmed, laterHeartbeats.await(200, TimeUnit.MILLISECONDS));
+            assertEquals(!confirmed, confirmed
+                    ? laterHeartbeats.await(200, TimeUnit.MILLISECONDS)
+                    : laterHeartbeats.await(5, TimeUnit.SECONDS));
         }
     }
 
@@ -237,6 +239,52 @@ class HostedHarnessClientTest {
             assertNull(detach.get());
             client.detachLifecycle(session, authority);
             assertEquals(Map.of("authority", authority), detach.get());
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
+    void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\"],"));
+        createSessionRoute();
+        AtomicInteger calls = new AtomicInteger();
+        AtomicBoolean wrongPhase = new AtomicBoolean();
+        server.createContext("/session/" + SESSION_ID + "/lifecycle", exchange -> {
+            calls.incrementAndGet();
+            var request = JsonSupport.parseObject(readBody(exchange), "lifecycle");
+            var receipt = new java.util.LinkedHashMap<>(request);
+            receipt.remove("authority");
+            receipt.put("operationId", "close-2");
+            if (wrongPhase.get()) receipt.put("phase", "other");
+            sendSessionJson(exchange, 200, JsonSupport.encode(receipt));
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            var request = Map.<String, Object>of("protocolVersion", 2, "phase", phase,
+                    "toolProfile", "hosted-workspace-shell/1", "kind", "close",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", SESSION_ID),
+                    "authority", Map.of("operationId", "close-2", "claimGeneration", 3));
+            assertEquals("close-2", client.settleLifecycle(session, request).get("operationId"));
+            wrongPhase.set(true);
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, request));
+            var unsupported = new java.util.LinkedHashMap<>(request);
+            unsupported.put("toolProfile", "hosted-workspace-shell/2");
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
+            unsupported.put("protocolVersion", 3);
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
+            assertEquals(2, calls.get());
+        }
+    }
+
+    @Test
+    void oldHarnessDoesNotAdvertiseLifecycleV2() {
+        createSessionRoute();
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            assertTrue(client.capabilities().getLifecycleV2Profiles().isEmpty());
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session,
+                    Map.of("protocolVersion", 2, "toolProfile", "hosted-workspace-shell/1")));
         }
     }
 
@@ -683,6 +731,89 @@ class HostedHarnessClientTest {
                 "\"cancellationTakeover\":true"));
     }
 
+    // #13753 I2: the child Workspace capability describes the host, so it
+    // rides every create and load, survives the lifecycle copy, and is
+    // absent unless the control plane serves child Workspaces.
+    @Test
+    void carriesTheChildWorkspaceCapabilityOnlyWhenEnabled() {
+        CreateHarnessSession.Builder create = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .approvalMode(DaemonApprovalMode.DEFAULT);
+        assertFalse(create.build().toJson().containsKey("childWorkspaces"));
+        assertEquals(Boolean.TRUE,
+                create.childWorkspaces(true).build().toJson().get("childWorkspaces"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID, null, true);
+        assertFalse(load.toJson().containsKey("childWorkspaces"));
+        assertFalse(load.withChildWorkspaces(false).toJson().containsKey("childWorkspaces"));
+        LoadHarnessSession enabled = load.withChildWorkspaces(true);
+        assertEquals(Boolean.TRUE, enabled.toJson().get("childWorkspaces"));
+        assertEquals(Boolean.TRUE, enabled.toJson().get("passiveManagedRuntimeRecovery"));
+        Map<String, Object> lifecycle = enabled.forLifecycle("op-1", 3).toJson();
+        assertEquals(Boolean.TRUE, lifecycle.get("childWorkspaces"));
+        assertNotNull(lifecycle.get("lifecycleAuthority"));
+        Map<String, Object> reversed = load.forLifecycle("op-1", 3)
+                .withChildWorkspaces(true).toJson();
+        assertEquals(Boolean.TRUE, reversed.get("childWorkspaces"));
+        assertEquals(lifecycle.get("lifecycleAuthority"), reversed.get("lifecycleAuthority"));
+    }
+
+    @Test
+    void parsesAnAgentWaitRuntimeRecovery() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithAgentWaitRuntimeRecovery()));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
+            assertNotNull(recovery);
+            assertEquals("await_agent", recovery.getPhase());
+            // Every wait run is observable through the relay ledger, so the
+            // predicates the coordinator gates on hold for this phase.
+            assertFalse(recovery.hasUnknownOutcome());
+            assertTrue(recovery.isContinuationReady());
+            assertTrue(recovery.isCancellationReady());
+            assertEquals("run-1", recovery.getExecutions().get(0)
+                    .getExecutionCallId());
+            assertEquals("agent", recovery.getExecutions().get(0)
+                    .getToolName());
+            assertEquals("executing", recovery.getExecutions().get(0)
+                    .getStatus().get("state"));
+            assertEquals("settled", recovery.getExecutions().get(1)
+                    .getStatus().get("state"));
+        }
+    }
+
+    @Test
+    void agentWaitWithoutExecutionsIsNotReady() {
+        // The wire parser already enforces 1-1024 executions; the predicate
+        // keeps the same floor so an empty wait never readies a continuation
+        // or a cancellation — the daemon's no-results guard would error the
+        // turn instead of failing loudly at admission.
+        HarnessRuntimeRecovery recovery = new HarnessRuntimeRecovery(
+                "await_agent", "checkpoint-4", "activation-4", List.of());
+        assertFalse(recovery.isContinuationReady());
+        assertFalse(recovery.isCancellationReady());
+    }
+
+    @Test
+    void agentWaitWithUnknownOutcomeIsNotReady() {
+        // A wait run the relay can no longer observe reports unknown: the
+        // all-known conjunct must keep the gates shut, or the coordinator
+        // would re-enter a wait it cannot observe (R1-15).
+        HarnessRuntimeRecovery recovery = new HarnessRuntimeRecovery(
+                "await_agent", "checkpoint-4", "activation-4", List.of(
+                        new HarnessRuntimeExecutionRecovery("call-1", "agent",
+                                "execution-1", "runtime-session", null,
+                                "known", Map.of("state", "executing")),
+                        new HarnessRuntimeExecutionRecovery("call-2", "agent",
+                                "execution-2", "runtime-session", null,
+                                "unknown", Map.of("state", "executing"))));
+        assertTrue(recovery.hasUnknownOutcome());
+        assertFalse(recovery.isContinuationReady());
+        assertFalse(recovery.isCancellationReady());
+    }
+
     @Test
     void parsesAResultsReadyRuntimeRecovery() {
         AtomicReference<String> continuationBody = new AtomicReference<>();
@@ -958,6 +1089,43 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void refusesVersionedTitleBeforeSendingToAnOlderHarness() {
+        createSessionRoute();
+        AtomicInteger writes = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
+            writes.incrementAndGet();
+            sendSessionJson(exchange, 200, "{}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(DaemonProtocolException.class, () -> client.updateSessionTitle(session, "A", 1));
+        }
+        assertEquals(0, writes.get());
+    }
+
+    @Test
+    void sendsAndChecksTheDurableTitleRevision() {
+        createSessionRoute();
+        server.removeContext("/capabilities");
+        server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
+                capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                        "\"hostedHarness\":{\"titleProtocolVersion\":1,\"features\":[\"hosted_approval_resume_v1\",\"hosted_model_round_recovery_v1\"],"), false));
+        AtomicReference<String> body = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
+            body.set(readBody(exchange));
+            sendSessionJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID
+                    + "\",\"persisted\":true,\"managedRenameRevision\":\"7\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            assertEquals(1, client.capabilities().getTitleProtocolVersion());
+            assertEquals(List.of("hosted_approval_resume_v1", "hosted_model_round_recovery_v1"),
+                    client.capabilities().getFeatures());
+            client.updateSessionTitle(createSession(client), "A", 7);
+        }
+        assertTrue(body.get().contains("\"managedRenameRevision\":\"7\""));
+    }
+
+    @Test
     void commitsSessionTitleThroughThePrivateHarnessRoute() {
         createSessionRoute();
         AtomicReference<String> titleBody = new AtomicReference<>();
@@ -996,6 +1164,38 @@ class HostedHarnessClientTest {
         }
 
         assertEquals(1, closes.get());
+    }
+
+    @ParameterizedTest
+    @MethodSource("captureByteBudgets")
+    void createCarriesOptionalCaptureByteBudget(Long budget) {
+        AtomicReference<Map<String, Object>> payload = new AtomicReference<>();
+        server.createContext("/session", exchange -> {
+            payload.set(JsonSupport.parseObject(readBody(exchange), "Capture create request"));
+            sendSessionJson(exchange, 200, sessionJson());
+        });
+        CreateHarnessSession.Builder request = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .toolProfile("hosted-workspace-shell/1");
+        if (budget != null) request.captureBytes(budget);
+        try (HostedHarnessClient client = newClient()) {
+            client.createSession(request.build());
+        }
+        if (budget == null) assertFalse(payload.get().containsKey("captureBytes"));
+        else assertEquals(budget.longValue(), ((Number) payload.get().get("captureBytes")).longValue());
+    }
+
+    private static Stream<Arguments> captureByteBudgets() {
+        return Stream.of(Arguments.of((Long) null), Arguments.of(1L),
+                Arguments.of(1048576L), Arguments.of(1L << 41));
+    }
+
+    @Test
+    void rejectsCaptureByteBudgetsOutsideTheHarnessContract() {
+        for (long value : new long[] {-1, 0, (1L << 41) + 1, Long.MAX_VALUE}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> CreateHarnessSession.builder().captureBytes(value));
+        }
     }
 
     @Test
@@ -1127,6 +1327,96 @@ class HostedHarnessClientTest {
                             SESSION_ID)));
             assertFalse(failure.getCause() instanceof DaemonHttpException);
         }
+    }
+
+    @Test
+    void automationOperationRejectsANonSettledState() {
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 202, "{\"state\":\"running\","
+                        + "\"operationId\":\"op-1\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.runAutomationOperation(
+                            mockRef(), Map.of("operationId", "op-1")));
+            assertTrue(failure.getCause().getMessage()
+                    .contains("did not settle the automation operation"));
+        }
+    }
+
+    @Test
+    void automationOperationRejectsACrossedOperationEcho() {
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 202, "{\"state\":\"settled\","
+                        + "\"operationId\":\"op-other\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.runAutomationOperation(
+                            mockRef(), Map.of("operationId", "op-1")));
+            assertTrue(failure.getCause().getMessage()
+                    .contains("settled a different automation operation"));
+        }
+    }
+
+    @Test
+    void automationOperationRejectsNonSuccessStatuses() {
+        // A codeless intermediary 503 is an ambiguous answer, retried as
+        // unknown; a refusal with a code flows out translated.
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 503, "Service Unavailable",
+                        true));
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.runAutomationOperation(
+                            mockRef(), Map.of("operationId", "op-1")));
+            assertTrue(failure.getCause() instanceof DaemonHttpException);
+        }
+    }
+
+    @Test
+    void automationOperationCarriesAservicedRefusalCode() {
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 409, "{\"error\":\"x\","
+                        + "\"code\":\"automation_retired\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            DaemonHttpException failure = assertThrows(
+                    DaemonHttpException.class,
+                    () -> client.runAutomationOperation(
+                            mockRef(), Map.of("operationId", "op-1")));
+            assertEquals(409, failure.getStatusCode());
+            assertEquals("automation_retired", failure.getErrorCode());
+        }
+    }
+
+    @Test
+    void automationOperationCarriesTheSettledAnswerThrough() {
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 202, "{\"state\":\"settled\","
+                        + "\"operationId\":\"op-1\",\"replayed\":true}",
+                        true));
+
+        try (HostedHarnessClient client = newClient()) {
+            Map<String, Object> answer = client.runAutomationOperation(
+                    mockRef(), Map.of("operationId", "op-1"));
+            assertEquals("settled", answer.get("state"));
+            assertEquals(Boolean.TRUE, answer.get("replayed"));
+        }
+    }
+
+    private static HarnessSessionRef mockRef() {
+        return new HarnessSessionRef(SESSION_ID, CLIENT_ID, BOOT_ID,
+                "/workspace", null, null, null);
     }
 
     private HostedHarnessClient newClient() {
@@ -1296,6 +1586,30 @@ class HostedHarnessClientTest {
                 + "\"executionCallId\":\"execution-1\","
                 + "\"runtimeSessionId\":\"runtime-1\","
                 + "\"progressCursor\":null,\"outcome\":\"unknown\"}]}}}";
+    }
+
+    private static String sessionJsonWithAgentWaitRuntimeRecovery() {
+        return "{\"sessionId\":\"" + SESSION_ID
+                + "\",\"workspaceCwd\":\"/control\","
+                + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
+                + "\",\"lastEventId\":0,\"eventEpoch\":\""
+                + EVENT_EPOCH
+                + "\",\"_meta\":{\"qwen.daemon.managedRuntimeRecovery\":{"
+                + "\"phase\":\"await_agent\","
+                + "\"checkpointId\":\"checkpoint-3\","
+                + "\"activationId\":\"activation-3\",\"executions\":[{"
+                + "\"functionCallId\":\"function-1\","
+                + "\"toolName\":\"agent\","
+                + "\"executionCallId\":\"run-1\","
+                + "\"runtimeSessionId\":\"prompt-1\","
+                + "\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"executing\"}},{"
+                + "\"functionCallId\":\"function-2\","
+                + "\"toolName\":\"agent\","
+                + "\"executionCallId\":\"run-2\","
+                + "\"runtimeSessionId\":\"prompt-1\","
+                + "\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"settled\"}}]}}}";
     }
 
     private static String sessionJsonWithResultsReadyRuntimeRecovery() {

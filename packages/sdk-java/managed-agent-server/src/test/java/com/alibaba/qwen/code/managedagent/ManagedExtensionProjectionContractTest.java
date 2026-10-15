@@ -1,14 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,7 +18,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Replays the language-neutral managed-extension-projection/1 fixtures (H0c)
@@ -44,7 +45,10 @@ class ManagedExtensionProjectionContractTest {
                                 JSON.createObjectNode().put("kind", "shell")))
                         .put("child_agent", body.taskKindOf().apply(
                                 JSON.createObjectNode()
-                                        .put("kind", "child_agent"))));
+                                        .put("kind", "child_agent")))
+                        .put("workflow", body.taskKindOf().apply(
+                                JSON.createObjectNode()
+                                        .put("kind", "workflow"))));
             } else {
                 // Probe with a record-shaped node carrying the identity
                 // fields a mapping could regress into reading — the real
@@ -63,7 +67,7 @@ class ManagedExtensionProjectionContractTest {
         });
         Map<String, Object> expected = new TreeMap<>(JSON.convertValue(
                 fixtures.required("recordBodies"), TreeMap.class));
-        // The bodies H6 added to the projection contract after H4.
+        // The bodies H6 and H4d added to the projection contract after H4.
         expected.putAll(JSON.convertValue(
                 fixtures.required("additionalRecordBodies"), TreeMap.class));
         assertEquals(JSON.convertValue(expected, TreeMap.class),

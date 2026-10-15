@@ -2,14 +2,16 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
-import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedHookProtocol;
+import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
+import com.alibaba.qwen.code.runtimebroker.ManagedMonitorProtocol;
+import com.alibaba.qwen.code.runtimebroker.ManagedShellProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.ManagedShellProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -20,13 +22,14 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.util.Map;
+
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private final HttpRuntimeTransport delegate;
@@ -318,8 +321,13 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(session.getScope())) {
+            throw new RuntimeBrokerException(501, "csi_control_not_qualified",
+                    "Generic CSI runtime controls are not qualified.", false);
+        }
         if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
-                || ManagedShellProtocol.isOperation(operation)) {
+                || ManagedShellProtocol.isOperation(operation)
+                || ManagedMonitorProtocol.isOperation(operation)) {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
@@ -327,11 +335,14 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 ManagedHookProtocol.validateSession(session, operation);
             } else if (ManagedShellProtocol.isOperation(operation)) {
                 ManagedShellProtocol.validateSession(session, operation);
+            } else if (ManagedMonitorProtocol.isOperation(operation)) {
+                ManagedMonitorProtocol.validateSession(session, operation);
             } else {
                 ManagedMcpProtocol.validateSession(session, operation);
             }
             boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation)
-                    || ManagedShellProtocol.isRecovery(operation);
+                    || ManagedShellProtocol.isRecovery(operation)
+                    || ManagedMonitorProtocol.isRecovery(operation);
             Context context = context(lease, session, !recovery, ManagedHookProtocol.isOperation(operation));
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {

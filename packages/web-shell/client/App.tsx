@@ -1,4 +1,10 @@
 import {
+  createComposerTagForItem,
+  fileReferenceInsertText,
+  FILE_PROVIDER_ID,
+  sanitizeAtMentionItem,
+} from './hooks/useAtMentionSources';
+import {
   isModelSetupCommand,
   resolveModelManagement,
   type WebShellModelManagementOptions,
@@ -14,7 +20,10 @@ import { useWebShellNavigation } from './navigation';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
-import { isSessionWriterBlockedCode } from './daemon/session/session-context';
+import {
+  isSessionWriterBlockedCode,
+  sessionContextKey,
+} from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import {
@@ -185,6 +194,7 @@ import {
 import { TodoPanel } from './components/panels/TodoPanel';
 import {
   EnvironmentPanel,
+  isTaskInProgress,
   type EnvironmentAgentTask,
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
@@ -236,6 +246,12 @@ import {
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
+import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
+import {
+  useDaemonTargetOptional,
+  useInterceptHostLinks,
+} from './config/daemon-target';
+import { useFanoutOrigins, useHostFanout } from './config/host-fanout';
 import { SplitView } from './components/SplitView';
 import { ChevronLeftIcon, GaugeIcon, LayersIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
@@ -271,6 +287,7 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
+import { artifactDisplayName } from './components/artifacts/artifactUtils';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
@@ -289,7 +306,11 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
-import { McpAppHostContext } from './mcpAppHostContext';
+import { McpAppHostContext, McpAppMessagesContext } from './mcpAppHostContext';
+import {
+  useMcpAppMessages,
+  type McpAppPromptSubmission,
+} from './hooks/useMcpAppMessages';
 import {
   isItemVisible,
   isSettingVisible,
@@ -307,6 +328,10 @@ import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
+import {
+  WorkspaceHostsEnabled,
+  rememberWorkspaceHost,
+} from './config/workspace-hosts';
 import {
   addWorkspaceToDaemon,
   clearRemoteWorkspaceAddStep,
@@ -350,6 +375,7 @@ import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShort
 import {
   isAgentCollaborationEnabledForWorkspace,
   workspaceLabel,
+  disambiguateWorkspaceLabels,
   workspaceLabelForCwd,
 } from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
@@ -441,7 +467,11 @@ import {
   shouldDisableComposerInput,
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
-import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
+import {
+  isDefinitelyRejectedPromptAdmission,
+  isMcpAppPromptAdmissionRejected,
+  PromptDispatchCancelledError,
+} from './utils/promptAdmission';
 import { base64ToBlob } from './utils/base64';
 import type {
   ACPToolCall,
@@ -552,9 +582,9 @@ function isWebTerminalTarget(event: Event): boolean {
 // so a docked panel mounting under an open DialogShell would pause the
 // modal's trap. The surface covers the viewport, so the keyboard is the only
 // escape route; wrap it at the tabbable edges like FocusScope's loop does.
-function getFullscreenSurfaceTabEdges(
-  container: HTMLElement,
-): [HTMLElement | null, HTMLElement | null] {
+function getArtifactPanelTabStops(
+  container: HTMLElement | ShadowRoot,
+): HTMLElement[] {
   const candidates: HTMLElement[] = [];
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT, {
     acceptNode(node) {
@@ -572,20 +602,23 @@ function getFullscreenSurfaceTabEdges(
       ) {
         return NodeFilter.FILTER_SKIP;
       }
-      return element.tabIndex >= 0
+      return element.tabIndex >= 0 || element.shadowRoot
         ? NodeFilter.FILTER_ACCEPT
         : NodeFilter.FILTER_SKIP;
     },
   });
   while (walker.nextNode()) {
-    candidates.push(walker.currentNode as HTMLElement);
+    const element = walker.currentNode as HTMLElement;
+    if (element.tabIndex >= 0) candidates.push(element);
+    if (element.shadowRoot) {
+      candidates.push(...getArtifactPanelTabStops(element.shadowRoot));
+    }
   }
-  const visible = candidates.filter((element) =>
+  return candidates.filter((element) =>
     typeof element.checkVisibility === 'function'
       ? element.checkVisibility({ checkVisibilityCSS: true })
       : true,
   );
-  return [visible[0] ?? null, visible[visible.length - 1] ?? null];
 }
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
@@ -730,11 +763,13 @@ function resolvePreparedSubmit(
 
 interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
+  source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
+  beforeDispatch?: (clientId: string | undefined) => void;
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
@@ -1642,6 +1677,7 @@ export interface WebShellProps {
   onSubmitBefore?: (params: {
     sessionId: string | undefined;
     prompt: string;
+    source?: 'mcp-app';
   }) => Promise<void>;
 }
 
@@ -1925,6 +1961,7 @@ interface ArtifactPanelPersistedState {
 }
 
 type PersistedArtifactPanelTab =
+  | Extract<ArtifactPanelTab, { kind: 'files' }>
   | Extract<ArtifactPanelTab, { kind: 'web_preview' }>
   | Omit<Extract<ArtifactPanelTab, { kind: 'turn_calls' }>, 'promptLabel'>
   | Pick<
@@ -2055,6 +2092,15 @@ function parsePersistedArtifactPanelTab(
   }
   const common = { id: tab['id'], title: tab['title'] };
   switch (tab['kind']) {
+    case 'files':
+      if (typeof tab['workspaceCwd'] !== 'string' || !tab['workspaceCwd'])
+        return;
+      return {
+        ...common,
+        kind: 'files',
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'] as string | undefined,
+      };
     case 'turn_calls':
       if (
         tab['id'] !== 'turn_calls' ||
@@ -2232,6 +2278,8 @@ function serializeArtifactPanelTabs(
   return tabs.flatMap((tab): PersistedArtifactPanelTab[] => {
     const { id, title } = tab;
     switch (tab.kind) {
+      case 'files':
+        return [tab];
       case 'web_preview':
         return [
           { id, title, kind: tab.kind, url: tab.url, viewport: tab.viewport },
@@ -3752,9 +3800,29 @@ export function App({
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  // Multi-daemon (#13727): saved hosts stay connected read-only alongside
+  // the provider that owns this App subtree; the picker and sidebar consume
+  // their live workspaces/sessions; embedded shells have no controller and
+  // fan out to nothing.
+  const daemonTarget = useDaemonTargetOptional();
+  // Same-origin links pointing at a connected host become in-app focus
+  // switches instead of document reloads (#13727).
+  useInterceptHostLinks();
+  const fanoutOrigins = useFanoutOrigins();
+  const { workspacesByOrigin, refreshAll: refreshAllHosts } =
+    useHostFanout(fanoutOrigins);
+  const focusedHostOrigin = useMemo(
+    () =>
+      new URL(
+        workspace.baseUrl || window.location.origin,
+        window.location.origin,
+      ).origin,
+    [workspace.baseUrl],
+  );
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
+
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const refreshWorkspaceBrand = workspace.refreshBrand;
   const workspaces = useMemo(() => {
@@ -3769,6 +3837,23 @@ export function App({
     }
     return capabilityWorkspaces;
   }, [lockedWorkspaceCapability, workspace.capabilities?.workspaces]);
+  const workspaceHostsEnabled = useContext(WorkspaceHostsEnabled);
+  // Keep the connected host's saved project identities fresh so the sidebar
+  // can group local and remote projects and navigate back across hosts.
+  useEffect(() => {
+    if (!workspaceHostsEnabled || !workspace.capabilities?.workspaces) return;
+    rememberWorkspaceHost(
+      new URL(
+        workspace.baseUrl || window.location.origin,
+        window.location.origin,
+      ).origin,
+      workspace.capabilities.workspaces.filter((ws) => ws.kind !== 'live'),
+    );
+  }, [
+    workspaceHostsEnabled,
+    workspace.baseUrl,
+    workspace.capabilities?.workspaces,
+  ]);
   const ordinaryWorkspaces = useMemo(
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
@@ -3836,17 +3921,37 @@ export function App({
         label: string;
         primary: boolean;
         trusted: boolean;
+        hostOrigin?: string;
       }>
     | undefined
   >(undefined);
   const nextComposerWorkspaces = !lockedWorkspaceCwd
-    ? ordinaryWorkspaces.map((entry) => ({
-        id: entry.id,
-        cwd: entry.cwd,
-        label: workspaceLabel(entry),
-        primary: entry.primary,
-        trusted: entry.trusted,
-      }))
+    ? [
+        ...ordinaryWorkspaces.map((entry) => ({
+          id: entry.id,
+          cwd: entry.cwd,
+          label: workspaceLabel(entry),
+          primary: entry.primary,
+          trusted: entry.trusted,
+          hostOrigin: focusedHostOrigin,
+        })),
+        // Fan-out hosts offer their own live workspaces in the same picker
+        // (#13727); composite ids keep a cwd that exists on two hosts one
+        // selectable option each — selection routes through the hosted
+        // callback with the option's hostOrigin.
+        ...fanoutOrigins.flatMap((origin) =>
+          (workspacesByOrigin.get(origin) ?? [])
+            .filter((entry) => entry.kind !== 'live')
+            .map((entry) => ({
+              id: `${origin}${entry.id}`,
+              cwd: entry.cwd,
+              label: workspaceLabel(entry),
+              primary: entry.primary,
+              trusted: entry.trusted,
+              hostOrigin: origin,
+            })),
+        ),
+      ]
     : undefined;
   const currentComposerWorkspaces = composerWorkspacesRef.current;
   if (
@@ -3859,11 +3964,14 @@ export function App({
         current.cwd !== next.cwd ||
         current.label !== next.label ||
         current.primary !== next.primary ||
-        current.trusted !== next.trusted
+        current.trusted !== next.trusted ||
+        current.hostOrigin !== next.hostOrigin
       );
     })
   ) {
-    composerWorkspacesRef.current = nextComposerWorkspaces;
+    composerWorkspacesRef.current = nextComposerWorkspaces
+      ? disambiguateWorkspaceLabels(nextComposerWorkspaces)
+      : undefined;
   }
   const composerWorkspaces = composerWorkspacesRef.current;
   const workspacesRef = useRef(ordinaryWorkspaces);
@@ -5116,6 +5224,15 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const filesAvailable =
+    workspaceContextActive &&
+    rightPanelItems.includes('files') &&
+    Boolean(
+      resolveArtifactWorkspaceOwner(
+        workspace.capabilities,
+        connection.workspaceCwd,
+      ),
+    );
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
   const trajectoryAvailable = rightPanelItems.includes('trajectory');
@@ -5562,7 +5679,7 @@ export function App({
         id: `artifact:${artifactId}`,
         kind: 'artifact',
         artifactId,
-        title: artifact?.title ?? 'Artifact',
+        title: artifact ? artifactDisplayName(artifact) : 'Artifact',
         ...(connection.workspaceCwd
           ? { workspaceCwd: connection.workspaceCwd }
           : {}),
@@ -5871,7 +5988,11 @@ export function App({
         kind: 'trajectory',
         title: t('trajectory.title'),
         sessionId: sourceSessionId,
-        loadPage: createTrajectoryPageLoader(workspace.client, sourceSessionId),
+        loadPage: createTrajectoryPageLoader(
+          workspace.client,
+          sourceSessionId,
+          sessionContextKey(connection.sessionContext),
+        ),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -5884,7 +6005,12 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t, workspace.client],
+    [
+      getDefaultReviewPanelWidth,
+      t,
+      workspace.client,
+      connection.sessionContext,
+    ],
   );
   const openContextUsagePanel = useCallback(
     (
@@ -6491,6 +6617,7 @@ export function App({
     ).some(
       (tab) =>
         (tab.kind === 'terminal' && webTerminalAvailable) ||
+        (tab.kind === 'files' && filesAvailable) ||
         (tab.kind === 'web_preview' && webPreviewAvailable) ||
         (tab.kind === 'workflow' &&
           tab.sessionId === connection.sessionId &&
@@ -6510,6 +6637,34 @@ export function App({
       artifactPanelStateBySessionRef.current.delete(nextSessionId);
       artifactPanelStateBySessionRef.current.set(nextSessionId, currentState);
     };
+    const retainCurrentTrajectory = () => {
+      const retainedTabs = artifactPanelTabsRef.current.filter(
+        (tab) =>
+          previousSessionId === nextSessionId &&
+          trajectoryAvailable &&
+          tab.kind === 'trajectory' &&
+          tab.loadPage ===
+            createTrajectoryPageLoader(
+              workspace.client,
+              tab.sessionId,
+              sessionContextKey(connection.sessionContext),
+            ),
+      );
+      setArtifactPanelTabs(
+        retainedTabs.map((tab) =>
+          tab.kind === 'trajectory'
+            ? { ...tab, historyGapRevision: (tab.historyGapRevision ?? 0) + 1 }
+            : tab,
+        ),
+      );
+      setActiveArtifactPanelTabId(
+        retainedTabs.some(
+          (tab) => tab.id === activeArtifactPanelTabIdRef.current,
+        )
+          ? activeArtifactPanelTabIdRef.current
+          : null,
+      );
+    };
     if (connection.loadingTranscript) {
       saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
@@ -6520,8 +6675,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (connection.status !== 'connected') {
@@ -6534,8 +6688,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (artifactsLoading) {
@@ -6548,8 +6701,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
 
@@ -6586,6 +6738,7 @@ export function App({
     const deferredPersistedTabs = (persisted?.tabs ?? []).filter(
       (tab) =>
         (tab.kind === 'terminal' && !webTerminalAvailable) ||
+        (tab.kind === 'files' && !filesAvailable) ||
         (tab.kind === 'web_preview' && !webPreviewAvailable) ||
         (tab.kind === 'workflow' &&
           tab.sessionId === connection.sessionId &&
@@ -6670,6 +6823,8 @@ export function App({
                         }
                       : undefined;
                 }
+                case 'files':
+                  return filesAvailable ? tab : undefined;
                 case 'web_preview':
                   return webPreviewAvailable ? tab : undefined;
                 case 'file': {
@@ -6797,6 +6952,7 @@ export function App({
                     loadPage: createTrajectoryPageLoader(
                       workspace.client,
                       tab.sessionId,
+                      sessionContextKey(connection.sessionContext),
                     ),
                   };
                 }
@@ -6848,12 +7004,13 @@ export function App({
       const desiredActiveTabId =
         savedState?.activeTabId ?? persisted?.activeTabId ?? null;
       const tabsOpenedDuringRestore = artifactPanelTabsRef.current;
-      const newlyOpenedIds = new Set(
-        tabsOpenedDuringRestore.map((tab) => tab.id),
+      const openedById = new Map(
+        tabsOpenedDuringRestore.map((tab) => [tab.id, tab]),
       );
+      const restoredIds = new Set(mergedRestoredTabs.map((tab) => tab.id));
       const candidateTabs = [
-        ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
-        ...tabsOpenedDuringRestore,
+        ...mergedRestoredTabs.map((tab) => openedById.get(tab.id) ?? tab),
+        ...tabsOpenedDuringRestore.filter((tab) => !restoredIds.has(tab.id)),
       ];
       const mergedTabs = candidateTabs.filter(
         (tab) =>
@@ -6921,6 +7078,7 @@ export function App({
     };
   }, [
     artifactsLoading,
+    connection.sessionContext,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
@@ -6933,6 +7091,7 @@ export function App({
     sessionActions,
     trajectoryAvailable,
     webTerminalAvailable,
+    filesAvailable,
     webPreviewAvailable,
     workspace.baseUrl,
     workspace.client,
@@ -6976,6 +7135,36 @@ export function App({
     },
     [getDefaultReviewPanelWidth],
   );
+  const openFilesPanel = useCallback(() => {
+    const owner = resolveArtifactWorkspaceOwner(
+      workspace.capabilities,
+      connection.workspaceCwd,
+    );
+    if (!filesAvailable || !owner) return;
+    rememberArtifactPanelTrigger();
+    const tab: ArtifactPanelTab = {
+      id: `files:${owner.id ?? owner.cwd}`,
+      kind: 'files',
+      title: t('files.title'),
+      workspaceCwd: owner.cwd,
+      workspaceId: owner.id,
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      Math.min(getMaxArtifactPanelWidth(), Math.max(width, 740)),
+    );
+    setArtifactPanelOpen(true);
+  }, [
+    connection.workspaceCwd,
+    filesAvailable,
+    getMaxArtifactPanelWidth,
+    rememberArtifactPanelTrigger,
+    t,
+    workspace.capabilities,
+  ]);
   const openSubagentPanelForSession = useCallback(
     (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
       if (getSubagentDetailsUnavailableReason(tool)) return;
@@ -7332,16 +7521,20 @@ export function App({
   );
   const openFilePreview = useCallback(
     (
-      change: TurnOutputFileChange,
+      change: TurnOutputFileChange | string,
       previewWorkspaceCwd?: string,
       previewWorkspaceId?: string,
     ) => {
-      const previewContent = getFileChangePreviewContent(change);
+      const path = typeof change === 'string' ? change : change.path;
+      const previewContent =
+        typeof change === 'string'
+          ? undefined
+          : getFileChangePreviewContent(change);
       const tab: ArtifactPanelTab = {
-        id: `file:${previewWorkspaceCwd ?? ''}:${change.path}`,
+        id: `file:${previewWorkspaceCwd ?? ''}:${path}`,
         kind: 'file',
-        title: displayPath(change.path, previewWorkspaceCwd),
-        workspacePath: change.path,
+        title: displayPath(path, previewWorkspaceCwd),
+        workspacePath: path,
         ...(previewWorkspaceCwd ? { workspaceCwd: previewWorkspaceCwd } : {}),
         ...(previewWorkspaceId ? { workspaceId: previewWorkspaceId } : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
@@ -7927,6 +8120,13 @@ export function App({
     () => sessionTasks.filter(isComposerTask),
     [sessionTasks],
   );
+  // The header dot promises only what the panel can show, so it follows the
+  // same section gating and the same in-progress rule as the panel's rows.
+  const environmentRunning =
+    (environmentPanelItems.includes('subagents') &&
+      environmentAgentTasks.some((task) => isTaskInProgress(task.status))) ||
+    (environmentPanelItems.includes('backgroundTasks') &&
+      backgroundTasks.some((task) => isTaskInProgress(task.status)));
   const monitorDetailsSessionIdRef = useRef(connection.sessionId);
   monitorDetailsSessionIdRef.current = connection.sessionId;
   const openMonitorPanelFromTool = useCallback(
@@ -9068,7 +9268,11 @@ export function App({
       const target =
         (event.composedPath()[0] as Element | undefined) ??
         (event.target as Element | null);
-      if (!target || surface.contains(target) || target.contains(surface)) {
+      if (
+        !target ||
+        event.composedPath().includes(surface) ||
+        target.contains(surface)
+      ) {
         return;
       }
       // The elevated toast host and any Radix layer opened from the panel
@@ -9106,8 +9310,9 @@ export function App({
   }, [dockedFullscreenActive, portalRoot]);
   const handleArtifactPanelSurfaceKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      if (!artifactPanelFullscreen) return;
+      if (!artifactPanelFullscreen && !useFloatingArtifactPanel) return;
       if (
+        event.defaultPrevented ||
         event.key !== 'Tab' ||
         event.altKey ||
         event.ctrlKey ||
@@ -9115,10 +9320,35 @@ export function App({
       ) {
         return;
       }
-      const [first, last] = getFullscreenSurfaceTabEdges(event.currentTarget);
-      const focused = getShadowAwareActiveElement(event.currentTarget);
+      if (!event.nativeEvent.composedPath().includes(event.currentTarget))
+        return;
+      const candidates = getArtifactPanelTabStops(event.currentTarget);
+      const first = candidates[0];
+      const last = candidates[candidates.length - 1];
+      let focused = getShadowAwareActiveElement(event.currentTarget);
+      while (focused?.shadowRoot?.activeElement) {
+        focused = focused.shadowRoot.activeElement;
+      }
       if (!first || !last) {
         if (focused === event.currentTarget) event.preventDefault();
+        return;
+      }
+      // Radix's drawer loop only sees light DOM, so own Tab before it can
+      // wrap from the filter past the file tree's shadow-root rows.
+      if (useFloatingArtifactPanel) {
+        const index = candidates.indexOf(focused as HTMLElement);
+        const next =
+          index < 0
+            ? event.shiftKey
+              ? last
+              : first
+            : candidates[
+                (index + (event.shiftKey ? -1 : 1) + candidates.length) %
+                  candidates.length
+              ];
+        event.preventDefault();
+        event.stopPropagation();
+        next?.focus();
         return;
       }
       if (!event.shiftKey && focused === last) {
@@ -9132,7 +9362,7 @@ export function App({
         last.focus();
       }
     },
-    [artifactPanelFullscreen],
+    [artifactPanelFullscreen, useFloatingArtifactPanel],
   );
   // The drawer's Radix dismiss layer only checks `event.key === 'Escape'`
   // (no isComposing guard), so while composing in a panel input an Escape
@@ -10928,8 +11158,11 @@ export function App({
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
+        source?: 'mcp-app';
+        isCurrent?: () => boolean;
+        beforeDispatch?: (clientId: string | undefined) => void;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
-        onAdmitted?: () => void;
+        onAdmitted?: (admission: { promptId: string }) => void;
         onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
@@ -10944,6 +11177,7 @@ export function App({
           'InvalidStateError',
         );
       }
+      const preserveComposer = opts?.source === 'mcp-app';
       let preparedPrompt = text;
       let preparedInputAnnotations = opts?.inputAnnotations
         ? [...opts.inputAnnotations]
@@ -11001,6 +11235,7 @@ export function App({
       };
       const admissionSourceIsCurrent = (allocatedSessionId?: string) =>
         admissionOwnerIsCurrent(allocatedSessionId) &&
+        (opts?.isCurrent?.() ?? true) &&
         !sessionWriteBlockedRef.current &&
         sessionWriteBlockGenerationRef.current ===
           admissionSource.writeBlockGeneration;
@@ -11012,6 +11247,7 @@ export function App({
               sessionId: admissionSource.sessionId,
               prompt: preparedPrompt,
               inputAnnotations: preparedInputAnnotations,
+              ...(opts?.source ? { source: opts.source } : {}),
             });
             const resolved = resolvePreparedSubmit(
               preparedPrompt,
@@ -11029,6 +11265,7 @@ export function App({
             await submitBefore({
               sessionId: admissionSource.sessionId,
               prompt: preparedPrompt,
+              ...(opts?.source ? { source: opts.source } : {}),
             });
           }
         } catch (err) {
@@ -11047,6 +11284,7 @@ export function App({
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
           // cancelled prompt.
           restoreCancelledSubmitState();
+          if (preserveComposer && !isAbortError(err)) throw err;
           return;
         }
         if (!appMountedRef.current) return;
@@ -11112,6 +11350,7 @@ export function App({
         : existingSessionWorkspaceCwd;
       const isSlashPreparedSubmit = preparedPrompt.trimStart().startsWith('/');
       if (
+        !preserveComposer &&
         !opts?.retry &&
         opts?.optimisticUserMessage !== false &&
         !isSlashPreparedSubmit
@@ -11140,6 +11379,7 @@ export function App({
           snapshot: sessionOwnerGuard.capture(),
         };
       } else if (
+        !preserveComposer &&
         !opts?.retry &&
         opts?.optimisticUserMessage !== false &&
         isSlashPreparedSubmit
@@ -11149,14 +11389,16 @@ export function App({
         // resend the already-succeeded earlier prompt.
         disarmSubmittedPromptRetry();
       }
-      setShowRetryHint(false);
+      if (!preserveComposer) setShowRetryHint(false);
       finishPreparing();
       if (opts?.ownerRef) opts.ownerRef.current = sessionOwnerGuard.capture();
-      clearFollowup();
-      if (opts?.commitComposerAccepted) {
-        opts.commitComposerAccepted();
-      } else if (opts?.clearComposerOnPromptStart) {
-        editorRef.current?.clear();
+      if (!preserveComposer) {
+        clearFollowup();
+        if (opts?.commitComposerAccepted) {
+          opts.commitComposerAccepted();
+        } else if (opts?.clearComposerOnPromptStart) {
+          editorRef.current?.clear();
+        }
       }
       let admissionStarted = false;
       let admitted = false;
@@ -11168,6 +11410,7 @@ export function App({
       // attachments only once it is admitted, so both points try.
       const trackInFlightPrompt = () => {
         if (
+          preserveComposer ||
           inFlightPrompt ||
           opts?.retry ||
           opts?.optimisticUserMessage === false ||
@@ -11190,6 +11433,7 @@ export function App({
         ...(opts?.submittedPrompt !== undefined
           ? { submittedPrompt: opts.submittedPrompt }
           : {}),
+        ...(opts?.source ? { source: opts.source } : {}),
         images,
         files,
         inputAnnotations:
@@ -11198,14 +11442,21 @@ export function App({
             : undefined,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
+        ...(opts?.beforeDispatch
+          ? { beforeDispatch: opts.beforeDispatch }
+          : {}),
         onAdmissionStarted: () => {
-          admissionStarted = true;
           opts?.onAdmissionStarted?.(
             connectionRef.current.sessionId ?? allocatedSessionId,
           );
+          admissionStarted = true;
         },
         onAdmitted: (admission) => {
           admitted = true;
+          if (preserveComposer && admissionOwnerIsCurrent()) {
+            disarmSubmittedPromptRetry();
+            setShowRetryHint(false);
+          }
           if (sessionIdAfterEnsure && promptWorkspaceCwd) {
             sessionCatalogController.promptAdmitted(
               promptWorkspaceCwd,
@@ -11216,7 +11467,7 @@ export function App({
           if (inFlightPrompt && admission?.promptId) {
             inFlightPrompt.promptId = admission.promptId;
           }
-          opts?.onAdmitted?.();
+          opts?.onAdmitted?.(admission);
         },
       };
       if (
@@ -11263,7 +11514,9 @@ export function App({
         if (
           admissionStarted &&
           !admitted &&
-          !isDefinitelyRejectedPromptAdmission(error) &&
+          !(preserveComposer
+            ? isMcpAppPromptAdmissionRejected(error)
+            : isDefinitelyRejectedPromptAdmission(error)) &&
           promptWorkspaceCwd
         ) {
           sessionCatalogController.promptAdmissionUncertain(promptWorkspaceCwd);
@@ -11739,6 +11992,9 @@ export function App({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canSendMidTurnNow =
+    connection.capabilities?.features.includes('session_mid_turn_send_now') ===
+    true;
   const canInjectMidTurnMedia =
     connection.capabilities?.features.includes('session_attachments') === true;
   const composerAttachmentsEnabled =
@@ -11750,6 +12006,7 @@ export function App({
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    sendQueuedPromptNow,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -11779,6 +12036,96 @@ export function App({
     editorRef,
     reportError,
     t,
+  });
+
+  const mcpAppQueueBusyRef = useRef(queuedPrompts.length > 0);
+  mcpAppQueueBusyRef.current = queuedPrompts.length > 0;
+  const submitMcpAppMessage = useCallback(
+    async (text: string, submission: McpAppPromptSubmission) => {
+      const sessionId = connectionRef.current.sessionId;
+      const clientId = connectionRef.current.clientId;
+      const workspaceCwd = getComposerWorkspaceCwd();
+      const sourceVersion = composerSourceVersionRef.current;
+      const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
+      const isCurrent = () => {
+        const current = connectionRef.current;
+        return (
+          appMountedRef.current &&
+          !submission.signal.aborted &&
+          submission.isCurrent() &&
+          current.status === 'connected' &&
+          !current.runtimeStopped &&
+          Boolean(sessionId && clientId) &&
+          current.sessionId === sessionId &&
+          current.clientId === clientId &&
+          getComposerWorkspaceCwd() === workspaceCwd &&
+          composerSourceVersionRef.current === sourceVersion &&
+          !sessionWriteBlockedRef.current &&
+          sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
+          !current.standaloneSession?.creationRecovery &&
+          !isSessionWriterBlockedCode(current.standaloneSession?.errorCode) &&
+          current.standaloneSession?.errorCode !==
+            'working_directory_missing' &&
+          current.standaloneSession?.errorCode !==
+            'working_directory_compromised' &&
+          !(
+            unknownPromptAdmissionRef.current?.payloadAvailable &&
+            unknownPromptAdmissionRef.current.sessionId === sessionId
+          )
+        );
+      };
+      const assertCurrent = () => {
+        if (!isCurrent()) throw new DOMException('Cancelled', 'AbortError');
+      };
+      const assertIdle = () => {
+        if (
+          streamingStateRef.current !== 'idle' ||
+          sessionHasActivePromptRef.current ||
+          isGoalGateBlocked() ||
+          mcpAppQueueBusyRef.current ||
+          queuedShellCommandsRef.current.length > 0 ||
+          shellSubmitInFlightRef.current
+        ) {
+          throw new Error(t('mcpApp.message.busy'));
+        }
+      };
+      assertCurrent();
+      assertIdle();
+      if (promptPreparationOwnerRef.current) {
+        throw new Error(t('mcpApp.message.busy'));
+      }
+      return sendPrompt(text, undefined, undefined, {
+        source: 'mcp-app',
+        isCurrent,
+        beforeAdmission: async () => {
+          assertCurrent();
+          assertIdle();
+        },
+        beforeDispatch: (dispatchClientId) => {
+          try {
+            assertCurrent();
+            if (dispatchClientId !== clientId) {
+              throw new DOMException('Session client changed', 'AbortError');
+            }
+            submission.onDispatched();
+          } catch (error) {
+            throw new PromptDispatchCancelledError('Cancelled before sending', {
+              cause: error,
+            });
+          }
+        },
+        onAdmissionStarted: assertCurrent,
+        onAdmitted: submission.onAdmitted,
+      });
+    },
+    [getComposerWorkspaceCwd, isGoalGateBlocked, sendPrompt, t],
+  );
+  const mcpAppMessages = useMcpAppMessages({
+    enabled: connection.status === 'connected' && !connection.runtimeStopped,
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    captureOwner: () => sessionOwnerGuard.capture({ includeRecovery: true }),
+    submit: submitMcpAppMessage,
   });
 
   const enqueuePrompt = useCallback(
@@ -13706,9 +14053,9 @@ export function App({
   // so the panel is revealed even when the click comes while scrolled up.
   const showContextUsage = useCallback(
     (commandText: string, detail: boolean) => {
-      // Read-only: every entry point (keyboard, status-bar button, in-chat
-      // "context detail" click) runs immediately, even mid-turn — only the
-      // echo is skipped while streaming so the active turn is not split.
+      // Read-only: every entry point (keyboard, status-bar button) runs
+      // immediately, even mid-turn — only the echo is skipped while streaming
+      // so the active turn is not split.
       if (!requireActiveSessionForLocalCommand()) return;
       const owner = sessionOwnerGuard.capture();
       echoLocalCommandIfIdle(commandText);
@@ -13736,22 +14083,10 @@ export function App({
       t,
     ],
   );
-  // Stable identity: ChatEditor is memoized and an inline closure would
-  // re-render it on every app render.
-  const handleShowContextUsage = useCallback(
-    () => showContextUsage('/context', false),
-    [showContextUsage],
-  );
   const contextUsageAvailable = !shouldBlockComposerSubmit({
     connectionStatus: connection.status,
     hasSession: Boolean(connection.sessionId),
   });
-
-  // Stable reference: this travels through the memoized MessageList →
-  // MessageItem chain, so an inline closure would defeat their memo.
-  const handleShowContextDetail = useCallback(() => {
-    showContextUsage('/context detail', true);
-  }, [showContextUsage]);
 
   const pendingBranchRequestsRef = useRef(new Map<string, Promise<void>>());
   const branchCurrentSession = useCallback(
@@ -14486,6 +14821,15 @@ export function App({
         );
         workspaceBrowseActiveRef.current = false;
         completeRemoteWorkspaceAdd();
+        const targetOrigin = workspaceAddSelectedLocation;
+        if (daemonTarget?.coversOrigin(targetOrigin)) {
+          // Multi-daemon (#13727): an already-connected host needs no
+          // navigation — focus it in-app and hand the new workspace's
+          // preselection to the remounted picker state.
+          daemonTarget.focusHost({ origin: targetOrigin });
+          refreshAllHosts();
+          return;
+        }
         // Navigate to the target daemon so the user lands on the new
         // workspace. Deliberately a plain switch, NOT
         // selectRemoteWorkspaceLocation(): that helper arms the
@@ -14493,17 +14837,20 @@ export function App({
         // daemon we just registered on would boot into a fresh, empty Add
         // Workspace dialog on top of the workspace the user already added.
         // The add is finished — there is no flow left to continue.
-        navigateToDaemon(
-          workspaceAddSelectedLocation,
-          getDaemonToken(workspaceAddSelectedLocation),
-        );
+        navigateToDaemon(targetOrigin, getDaemonToken(targetOrigin));
         return;
       }
       await handleAddWorkspace(cwd, persist, displayName);
       workspaceBrowseActiveRef.current = false;
       completeRemoteWorkspaceAdd();
     },
-    [handleAddWorkspace, workspace.baseUrl, workspaceAddSelectedLocation],
+    [
+      handleAddWorkspace,
+      workspace.baseUrl,
+      workspaceAddSelectedLocation,
+      daemonTarget,
+      refreshAllHosts,
+    ],
   );
 
   const closeAddWorkspaceDialog = useCallback(() => {
@@ -14611,6 +14958,28 @@ export function App({
       void switchWorkspace(cwd);
     },
     [switchWorkspace],
+  );
+  // A workspace picked on another connected host (#13727): focus that host
+  // in-app (no document reload), carrying the target cwd and any typed draft
+  // text so the remounted composer lands ready to submit there. Attachments
+  // cannot cross the provider remount and are dropped.
+  const handleSelectHostedWorkspace = useCallback(
+    (hostOrigin: string, cwd: string | undefined) => {
+      if (!daemonTarget || hostOrigin === focusedHostOrigin) {
+        handleSelectComposerWorkspace(cwd);
+        return;
+      }
+      daemonTarget.focusHostWithHandoff(
+        { origin: hostOrigin },
+        {
+          kind: 'create',
+          origin: hostOrigin,
+          workspaceCwd: cwd,
+          draftText: composerTextRef.current.trim() || undefined,
+        },
+      );
+    },
+    [daemonTarget, focusedHostOrigin, handleSelectComposerWorkspace],
   );
   const handleSelectComposerStandalone = useCallback(() => {
     if (connectionRef.current.sessionId) {
@@ -15101,6 +15470,62 @@ export function App({
         setStandaloneRetrySessionId(undefined);
       });
   }, [loadSidebarSession]);
+
+  // A session row opened from a fan-out host group (#13727): same in-app
+  // focus switch as the hosted composer pick, with an 'open' intent drained
+  // by the handoff effect below.
+  const handleOpenHostSession = useCallback(
+    (origin: string, sessionId: string, workspaceCwd?: string) => {
+      if (!daemonTarget) return;
+      if (origin === focusedHostOrigin) {
+        showChat();
+        void loadSidebarSession(sessionId, workspaceCwd);
+        return;
+      }
+      daemonTarget.focusHostWithHandoff(
+        { origin },
+        { kind: 'open', origin, sessionId, workspaceCwd },
+      );
+    },
+    [daemonTarget, focusedHostOrigin, loadSidebarSession, showChat],
+  );
+
+  // Drain the intent carried across a focused-host switch (#13727): fires
+  // once the NEW host's provider is connected; stale intents from an
+  // aborted switch (user moved to a third host meanwhile) are dropped.
+  const pendingHostHandoff = daemonTarget?.pendingHandoff;
+  useEffect(() => {
+    if (!daemonTarget || !pendingHostHandoff) return;
+    if (workspace.status !== 'connected') return;
+    if (pendingHostHandoff.origin !== daemonTarget.activeOrigin) {
+      daemonTarget.takePendingHandoff();
+      return;
+    }
+    const taken = daemonTarget.takePendingHandoff();
+    if (!taken) return;
+    if (taken.kind === 'open' && taken.sessionId) {
+      showChat();
+      void loadSidebarSession(taken.sessionId, taken.workspaceCwd);
+      return;
+    }
+    // 'create': preselect the picked workspace on this host and put any
+    // carried draft text back into the composer.
+    if (taken.draftText) {
+      handleComposerTextChange(taken.draftText);
+      editorRef.current?.insertText(taken.draftText);
+    }
+    if (taken.workspaceCwd) {
+      handleSelectComposerWorkspace(taken.workspaceCwd);
+    }
+  }, [
+    daemonTarget,
+    pendingHostHandoff,
+    workspace.status,
+    showChat,
+    loadSidebarSession,
+    handleComposerTextChange,
+    handleSelectComposerWorkspace,
+  ]);
 
   const handleCheckStandaloneRecovery = useCallback(async () => {
     const recovery = connectionRef.current.standaloneSession?.creationRecovery;
@@ -18363,7 +18788,18 @@ export function App({
         if (escArmedActionRef.current !== null) {
           resetEscapeState();
         }
-        if (e.key === 'Tab' && e.shiftKey && !live.interactionBlocked) {
+        if (
+          e.key === 'Tab' &&
+          e.shiftKey &&
+          !live.interactionBlocked &&
+          !e
+            .composedPath()
+            .some(
+              (node) =>
+                node instanceof Element &&
+                node.matches('[role="dialog"], [role="alertdialog"]'),
+            )
+        ) {
           e.preventDefault();
           live.handleCycleMode();
         }
@@ -19835,6 +20271,34 @@ export function App({
     onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
+    onOpenFiles: filesAvailable ? openFilesPanel : undefined,
+    onReferenceFile:
+      workspaceContextActive && !dialogOpen && mainView === 'chat'
+        ? (path: string) => {
+            const tag = createComposerTagForItem(
+              FILE_PROVIDER_ID,
+              sanitizeAtMentionItem({
+                id: `file:${path}`,
+                label: path.split('/').at(-1) ?? path,
+                description: path,
+                kind: 'insert',
+                fileKind: 'file',
+              }),
+              fileReferenceInsertText(path),
+            );
+            if (!tag) return;
+            if (useFloatingArtifactPanel) {
+              closeArtifactPanel();
+            } else {
+              setArtifactPanelFullscreen(false);
+            }
+            editorRef.current?.addTags([tag], {
+              placement: 'inline',
+              position: 'end',
+            });
+            requestAnimationFrame(() => editorRef.current?.focus());
+          }
+        : undefined,
     onOpenWebPreview: workspaceContextActive ? openWebPreviewTab : undefined,
     onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
@@ -19942,6 +20406,7 @@ export function App({
       {/* prettier-ignore */}
       <BrandProvider value={resolvedBrand}>
       <I18nProvider language={selectedLanguage}>
+        <McpAppMessagesContext.Provider value={mcpAppMessages.context}>
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
@@ -19957,6 +20422,7 @@ export function App({
           data-compact-sidebar={compactShell ? '' : undefined}
           lang={selectedLanguage}
         >
+          {mcpAppMessages.review}
           {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
           {!onToast && (
             <ToastHost
@@ -20564,6 +21030,7 @@ export function App({
                     showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
+                  onOpenHostSession={handleOpenHostSession}
                   onLoadStandaloneSession={(sessionId) => {
                     setMainView('chat');
                     return loadSidebarSession(
@@ -20775,6 +21242,14 @@ export function App({
                     </div>
                   ) : (
                     <ChatContextHeader
+                      location={
+                        workspaceHostsEnabled && mainView === 'chat' ? (
+                          <WorkspaceLocation
+                            cwd={connection.workspaceCwd}
+                            hostOrigin={focusedHostOrigin}
+                          />
+                        ) : undefined
+                      }
                       content={
                         titleHeaderItemVisible
                           ? (sessionDisplayName ?? t('session.new'))
@@ -20786,6 +21261,7 @@ export function App({
                       environmentAvailable={
                         mainView === 'chat' && environmentHeaderItemVisible
                       }
+                      environmentRunning={environmentRunning}
                       rightPanelOpen={artifactPanelOpen}
                       rightPanelAvailable={
                         mainView === 'chat' &&
@@ -21737,7 +22213,11 @@ export function App({
                                   terminalBackgroundShellTaskIds
                                 }
                                 pendingApproval={pendingToolApproval}
-                                onShowContextDetail={handleShowContextDetail}
+                                onShowContextDetail={
+                                  contextUsageAvailable
+                                    ? openCurrentContextUsagePanel
+                                    : undefined
+                                }
                                 loadingTranscript={connection.loadingTranscript}
                                 catchingUp={connection.catchingUp}
                                 hasOlderHistory={transcriptHistory.hasMore}
@@ -22000,6 +22480,7 @@ export function App({
                           className={styles.approvalOverlay}
                         >
                           <ToolApproval
+                            showBrowserNotifications
                             disabled={isExitPlanApprovalRequest(pendingToolApproval) && modeControlsBusy}
                             planExecutionMode={connection.planExecutionMode}
                             request={pendingToolApproval}
@@ -22308,7 +22789,9 @@ export function App({
                                 sessionHasActivePrompt
                               }
                               onDelete={removeQueuedPrompt}
+                              canSendMidTurnNow={canSendMidTurnNow}
                               onInsert={insertQueuedPrompt}
+                              onSendNow={sendQueuedPromptNow}
                               onEdit={editQueuedPrompt}
                               onImagePreview={openImagePanel}
                               onAttachmentPreview={openAttachmentPanel}
@@ -22511,9 +22994,6 @@ export function App({
                           contextUsageAlwaysVisible={
                             contextUsageAlwaysVisible
                           }
-                          onShowContextUsage={
-                            contextUsageAvailable ? handleShowContextUsage : undefined
-                          }
                           contextUsageControls={
                             connection.sessionId
                               ? contextUsageControls[connection.sessionId]
@@ -22574,6 +23054,11 @@ export function App({
                           onSelectWorkspace={
                             composerWorkspaceSelectEnabled
                               ? handleSelectComposerWorkspace
+                              : undefined
+                          }
+                          onSelectHostedWorkspace={
+                            composerWorkspaceSelectEnabled
+                              ? handleSelectHostedWorkspace
                               : undefined
                           }
                           standaloneTargetSupported={
@@ -22903,6 +23388,15 @@ export function App({
                       event.preventDefault();
                       return;
                     }
+                    const target = event.composedPath()[0];
+                    if (
+                      target instanceof HTMLInputElement &&
+                      target.hasAttribute('data-workspace-file-filter') &&
+                      target.value
+                    ) {
+                      event.preventDefault();
+                      return;
+                    }
                     // Fullscreen is the topmost surface: Escape shrinks the
                     // panel back to its drawer width. Without this the
                     // drawer's dismiss layer would close the panel instead.
@@ -22912,15 +23406,20 @@ export function App({
                   }}
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
-                  <WebShellCustomizationProvider value={customization}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      onOpenTerminal={
-                        webTerminalAvailable ? openTerminalTab : undefined
-                      }
-                      variant="drawer"
-                    />
-                  </WebShellCustomizationProvider>
+                  <div
+                    className="flex min-h-0 flex-1"
+                    onKeyDown={handleArtifactPanelSurfaceKeyDown}
+                  >
+                    <WebShellCustomizationProvider value={customization}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        onOpenTerminal={
+                          webTerminalAvailable ? openTerminalTab : undefined
+                        }
+                        variant="drawer"
+                      />
+                    </WebShellCustomizationProvider>
+                  </div>
                 </DrawerContent>
               </Drawer>
             )}
@@ -23002,6 +23501,7 @@ export function App({
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
+        </McpAppMessagesContext.Provider>
       </I18nProvider>
       </BrandProvider>
     </ThemeProvider>

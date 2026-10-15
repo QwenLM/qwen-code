@@ -40,6 +40,19 @@ delete process.env['SANDBOX_SET_UID_GID'];
 // pinning: tests that want the variable set it in-body.
 delete process.env['QWEN_RUNTIME_DIR'];
 
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// QWEN_HOME is the OPERATOR's config home, and inheriting it lets the host's
+// real ~/.qwen leak into this suite: every unpinned settings read
+// (loadSettings, createMinimalSettings, ...) then parses the operator's
+// files, so one corrupted real settings.json on the shared autofix gate host
+// failed 389 tests across 13 files at once. Pinning rather than deleting:
+// deletion falls back to os.homedir(), which is the same leak. Tests that
+// exercise the variable set it in-body.
+process.env['QWEN_HOME'] = mkdtempSync(join(tmpdir(), 'qwen-cli-test-home-'));
+
 // Registration capacity is an OPERATOR daemon setting, and `createServeApp` /
 // `runQwenServe` read it straight from the ambient environment when no explicit
 // option or `daemonEnv` is supplied. A maintainer who exports the documented
@@ -48,6 +61,21 @@ delete process.env['QWEN_RUNTIME_DIR'];
 // one. Deleting rather than pinning, so tests that want a capacity still pass
 // one explicitly.
 delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
+
+// The operator's home directory is ambient state too, and the operator
+// settings read (config/execution-sandbox-settings.ts) fails CLOSED on a
+// malformed `~/.qwen/settings.json`: on a machine whose real user settings
+// file is corrupt — observed on the shared autofix verification runners —
+// every test that loads settings or starts a serve stack fails with a
+// FatalConfigError it has nothing to do with. Pinning QWEN_HOME to an empty
+// per-file directory keeps the suite off the operator's settings. Tests that
+// exercise QWEN_HOME resolution itself set or delete the variable in-body.
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+process.env['QWEN_HOME'] = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'qwen-cli-test-home-'),
+);
 
 import { configure } from '@testing-library/react';
 

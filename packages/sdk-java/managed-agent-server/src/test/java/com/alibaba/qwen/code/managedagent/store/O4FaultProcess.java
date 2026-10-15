@@ -3,15 +3,15 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 /** Child JVM exits only after the parent releases it, or is killed at a durable boundary. */
 public final class O4FaultProcess {
@@ -20,14 +20,19 @@ public final class O4FaultProcess {
         String mode = args[0];
         var source = new DriverManagerDataSource(args[1], args[2],
                 System.getenv().getOrDefault("QWEN_O4_MYSQL_PASSWORD", ""));
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var retention = new ToolPublicationRetentionStore(jdbc, manager);
         Path root = Path.of(args[6]);
         var objects = new O4FileObjects(root) {
             @Override public void putIfAbsent(String key, byte[] bytes) {
+                if ("put-before".equals(mode)) {
+                    pause();
+                }
                 super.putIfAbsent(key, bytes);
-                pause();
+                if (!"put-before".equals(mode)) {
+                    pause();
+                }
             }
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
@@ -53,12 +58,14 @@ public final class O4FaultProcess {
                         }
                         Thread.sleep(20);
                     }
-                } catch (IOException | InterruptedException error) { throw new IllegalStateException(error); }
+                } catch (IOException | InterruptedException error) {
+                    throw new IllegalStateException(error);
+                }
             }
         };
         var key = new ObjectMapper().createObjectNode().put("tenantId", args[3])
                 .put("workspaceId", "workspace-1").put("sessionId", args[4]);
-        if ("put".equals(mode)) {
+        if ("put".equals(mode) || "put-before".equals(mode)) {
             retention.put(key, args[5], "pub-1", "exact/one", new byte[] {7}, objects);
         } else if ("delete".equals(mode)) {
             var props = new ManagedAgentProperties();
@@ -70,8 +77,12 @@ public final class O4FaultProcess {
                 try {
                     int count = input.read(new byte[1]);
                     Files.writeString(root.resolve("result"), "returned:" + count);
-                } catch (ApiException error) { Files.writeString(root.resolve("result"), error.getCode()); }
+                } catch (ApiException error) {
+                    Files.writeString(root.resolve("result"), error.getCode());
+                }
             }
-        } else { throw new IllegalArgumentException("Unknown fault mode"); }
+        } else {
+            throw new IllegalArgumentException("Unknown fault mode");
+        }
     }
 }
