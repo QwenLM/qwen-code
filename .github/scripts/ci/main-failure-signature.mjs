@@ -259,6 +259,18 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
     }
   }
 
+  // Packaging and Cargo failures may report no test ID. Keep a standing
+  // Desktop failure on one issue while preserving its platform and step.
+  if (workflowName === 'Desktop Checks' && tests.length === 0) {
+    const ids = new Set();
+    for (const job of failedJobs) {
+      for (const step of job.steps.length ? job.steps : ['']) {
+        ids.add(`Desktop Checks > ${job.name}${step ? ` > ${step}` : ''}`);
+      }
+    }
+    for (const id of ids) tests.push({ id, key: testKey(id) });
+  }
+
   // Guard-derived ids are the only run-level diagnoses in the set: the
   // collision they name is stable across every merge stacked on a standing
   // red, so they title the issue and are searched first. First-seen order

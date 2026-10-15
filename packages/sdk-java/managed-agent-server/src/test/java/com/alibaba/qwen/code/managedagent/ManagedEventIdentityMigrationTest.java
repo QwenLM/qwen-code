@@ -1,14 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -18,6 +15,8 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedEventIdentityMigrationTest {
     @Test
@@ -70,7 +69,8 @@ class ManagedEventIdentityMigrationTest {
         boolean advanced;
         do {
             advanced = transactions.execute(status -> store.materializeNextBatch(tenant, session, 200)).advanced();
-        } while (advanced);
+        }
+        while (advanced);
         jdbc.update("UPDATE ma_snapshot SET published_at = published_at - 6000 WHERE tenant_id = ? AND session_id = ?", tenant, session);
         transactions.executeWithoutResult(status -> store.materializeNextBatch(tenant, session, 200));
         var identities =
