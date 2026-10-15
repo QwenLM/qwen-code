@@ -381,7 +381,7 @@ public class SessionLifecycleCoordinator {
                         // The completed CLOSE is the cleanup authority.
                     } else if (bound) {
                         if (runtimeWarmer.supportsWorkspaceClose()) {
-                            if (claimed.lifecycleProtocolVersion() != 1) {
+                            if (!operationIsLifecycle(claimed)) {
                                 runtimeWarmer.requestWorkspaceClose(tenantId,
                                         sessionId);
                             }
@@ -676,8 +676,12 @@ public class SessionLifecycleCoordinator {
                 // durable proof it reached the Harness; a neverInitialized
                 // receipt was synthesized and persisted by the store itself
                 // for a Session the Harness never booted, with zero Harness
-                // contact (review round 11, R11-2).
-                harnessSettled.set(!effects.path("neverInitialized").asBoolean(false));
+                // contact (review round 11, R11-2), and a storeSynthesized
+                // one is the store's own journal-derived build for a booted
+                // Session whose settle likewise never reached the Harness
+                // (review round 14, R14-2).
+                harnessSettled.set(!effects.path("neverInitialized").asBoolean(false)
+                        && !effects.path("storeSynthesized").asBoolean(false));
             }
             if (operation.lifecycleProtocolVersion() == 2
                     && !effects.path("neverInitialized").asBoolean()) {

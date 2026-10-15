@@ -3123,6 +3123,37 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
+    @Override
+    @Transactional
+    public void markOperationAnswered(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
+        long now = lifecycleDatabaseTime();
+        // Watermark only: the row stays leased and no reschedule runs here —
+        // the catch block's own retryOperation (or a throw losing it) decides
+        // what happens next. The point is that the answered fact is durable
+        // before any recovery read can throw it away (review round 14,
+        // R14-3).
+        jdbc.update(
+                "UPDATE ma_operation SET budget_exempt_attempt ="
+                    + " budget_exempt_attempt + 1, updated_at = ? WHERE scope_key = ? AND"
+                    + " operation_kind IN "
+                        + SESSION_OPERATION_KINDS
+                        + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
+                        + " operation_id = ? AND state = 'RUNNING' AND delivery_state ="
+                        + " 'LEASED' AND claim_owner = ? AND claim_generation = ? AND"
+                        + " claim_until > CURRENT_TIMESTAMP(6)",
+                now,
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                sessionOperationTarget(sessionId),
+                tenantId,
+                sessionId,
+                operationId,
+                owner,
+                claimGeneration);
+    }
+
     public Admission replayCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest) {
         CommandRecord command = findCommand(tenantId, operation,

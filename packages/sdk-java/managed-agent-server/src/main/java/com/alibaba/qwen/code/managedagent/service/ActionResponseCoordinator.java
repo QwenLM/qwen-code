@@ -164,6 +164,14 @@ public class ActionResponseCoordinator {
                     operation, error.getCode());
             return;
         } catch (RuntimeException error) {
+            if (harnessAnswered) {
+                // Persist this attempt's answered watermark before any
+                // recovery read can throw it away — a re-claimed attempt
+                // must not read budgetExemptAttempt == 0 for a decision the
+                // Harness already committed (review round 14, R14-3).
+                sessions.markOperationAnswered(tenant, session, operation,
+                        owner, op.claimGeneration());
+            }
             // A lost answer may follow a committed decision. Inspect the projection
             // again before returning this command to the outbox.
             Response current = actions.response(tenant, session, operation);

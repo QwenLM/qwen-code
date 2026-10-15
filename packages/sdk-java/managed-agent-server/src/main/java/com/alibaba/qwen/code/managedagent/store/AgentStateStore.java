@@ -399,6 +399,16 @@ public interface AgentStateStore {
                 claimGeneration, availableAt);
     }
 
+    /**
+     * Records that the current attempt reached the Harness (the decision was
+     * committed), so a later failure of this attempt stays budget-exempt even
+     * when the recovery reads that would reschedule it throw before that
+     * write (review round 14, R14-3). The row stays leased; the watermark
+     * only makes a re-claimed attempt read budgetExemptAttempt &gt; 0.
+     */
+    void markOperationAnswered(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration);
+
     Admission replayCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest);
 

@@ -177,7 +177,12 @@ public class WorkspaceLifecycleStore {
                 return null;
             }
             receipt.put("neverInitialized", true);
+            receipt.put("storeSynthesized", true);
         } else {
+            // A receipt synthesized here is built from the journal and store
+            // alone — the Harness was never asked to settle (review round 14,
+            // R14-2).
+            receipt.put("storeSynthesized", true);
             JsonNode definitionRef = header.path("definitionRef");
             JsonNode definition = records.readRecordResource(operation.tenantId(), operation.sessionId(), definitionRef);
             receipt.set("definitionRef", definitionRef);

@@ -1283,6 +1283,74 @@ class OperationRetryTerminalStateTest {
         }
     }
 
+    // A store-synthesized receipt built from the journal for a booted Session
+    // whose definition has no hookCatalog is likewise not proof a prior settle
+    // reached the Harness — the latch now keys on the store's own marker too
+    // (review round 14, R14-2). Same budget edges as the neverInitialized
+    // sibling.
+    @ParameterizedTest(name = "attemptCount = {0}")
+    @ValueSource(ints = {10, 40})
+    void aStoreSynthesizedReceiptDoesNotReachTheSettledBudget(
+            int attemptCount) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(attemptCount, 0, 1);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(harness.isAvailable()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
+                lifecycle = mock(
+                        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
+        // The store synthesized and persisted the receipt from the journal
+        // alone — no Harness contact — and it carries the store's own marker.
+        when(lifecycle.recoverEffects(any())).thenReturn(
+                new ObjectMapper().createObjectNode()
+                        .put("storeSynthesized", true));
+        doThrow(mock(com.alibaba.qwen.code.daemon.DaemonHttpException.class))
+                .when(harness).detachLifecycle(any());
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
+        coordinator.setWorkspaceLifecycleStore(lifecycle);
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(harness, never()).settleLifecycle(any());
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("workspace_lifecycle_hooks_unsettled"));
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(),
+                    eq("session_close_completion_unsettled"));
+            verify(store, never()).completeOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
     // A writer check that itself fails is treated as live, so a permanent
     // refusal thrown before the Harness was asked to stop is published the
     // same way — budget-exempt, with the refusal's code — rather than
@@ -1459,6 +1527,61 @@ class OperationRetryTerminalStateTest {
                     eq("workspace_lifecycle_protocol_unavailable"));
             verify(store, never()).completeOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The v2 (SHELL/MCP) twin: a bound v2 CLOSE that exhausts its budget with
+    // no live writer must not mint the DRAINING fence authorization either —
+    // operationIsLifecycle covers v1 and v2 alike, so the drain-route guard
+    // keys on it rather than on the v1 version alone (review round 14,
+    // R14-1).
+    @Test
+    void boundV2SessionExhaustionSkipsTheV0DrainRequest() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(10, 0, 2);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(false);
+        when(runtimeWarmer.closeWorkspace("tenant", "session"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
+        coordinator.setWorkspaceLifecycleStore(mock(
+                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class));
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(runtimeWarmer, never()).requestWorkspaceClose(
+                    anyString(), anyString());
+            verify(runtimeWarmer).closeWorkspace("tenant", "session");
+            verify(runtimeWarmer, never()).drain(anyString());
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("workspace_lifecycle_protocol_unavailable"));
         } finally {
             coordinator.stopRenewals();
         }
@@ -2137,6 +2260,53 @@ class OperationRetryTerminalStateTest {
         verify(harness).resolveAction("tenant", "session", "action-1", body);
         verify(sessions).retryOperation(eq("tenant"), eq("session"),
                 eq("op-action"), anyString(), eq(3L), anyLong(), eq(true));
+        verify(actions, never()).complete(any(), anyString(),
+                eq("action_response_delivery_failed"), any(), anyBoolean(),
+                anyLong());
+    }
+
+    // The answered watermark must be durable before the catch block's
+    // recovery reads, not only at the rescheduling write that ends it: a
+    // store fault in the catch's re-inspection must not lose it and leave a
+    // re-claimed attempt reading budgetExemptAttempt == 0 for a decision the
+    // Harness already committed (review round 14, R14-3).
+    @Test
+    void anAnsweredAttemptPersistsTheWatermarkBeforeTheCatchBlocksReads()
+            throws Exception {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
+        OperationRecord claimed = actionOperation(10);
+        JsonNode body = actionBody();
+        when(sessions.claimOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        // The try block's read returns the response; the catch block's
+        // recovery re-read throws (a store fault after the Harness answered
+        // 200).
+        when(actions.response("tenant", "session", "op-action")).thenReturn(
+                new ManagedActionStore.Response("action-1", body, null, null))
+                .thenThrow(new IllegalStateException("store blip"));
+        when(actions.find("tenant", "session", "action-1")).thenReturn(
+                Optional.of(new ManagedActionStore.Action("action-1",
+                        "requested", body, null, null)));
+        // harness.resolveAction returns normally: the Harness answered 200.
+
+        ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
+                sessions, actions, harness,
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-action");
+        } catch (RuntimeException expected) {
+            // The catch block's recovery read threw; it escapes deliver().
+        }
+
+        verify(harness).resolveAction("tenant", "session", "action-1", body);
+        // The watermark was persisted before the throwing recovery read.
+        verify(sessions).markOperationAnswered(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), eq(3L));
         verify(actions, never()).complete(any(), anyString(),
                 eq("action_response_delivery_failed"), any(), anyBoolean(),
                 anyLong());

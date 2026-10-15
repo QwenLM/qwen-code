@@ -314,6 +314,9 @@ class WorkspaceLifecycleStoreTest {
             effects.addObject().put("event", event).set("recordRef", ref);
         }
         if (recover) {
+            // recoverEffects synthesizes the receipt from the journal and
+            // marks it as its own build (review round 14, R14-2).
+            receipt.put("storeSynthesized", true);
             JsonNode recovered = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
             assertThat(recovered).isNotNull();
             assertThat(fixture.json.readTree(recovered.toString())).isEqualTo(receipt);
