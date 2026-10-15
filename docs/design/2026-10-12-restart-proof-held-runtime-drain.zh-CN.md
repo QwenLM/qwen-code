@@ -39,7 +39,7 @@ Broker 才是"什么仍被持有"的真相源：每个存活的后台 run 都有
 
 ### Close
 
-不变。close 已经用 `release({ drain: true })` drain `heldRuntimeTurns`，容忍精确的 404、对任何未证明的拒绝诚实 park。加载时回填集合就是全部改动。
+close 用 `release({ drain: true })` drain `heldRuntimeTurns`，容忍精确的 404、对任何未证明的拒绝诚实 park。评审后（#13986 R2-1）容忍面扩大了一处：与 Harness 一同重启的 Broker 无法证明释放，会答它声明为可重试的 503 `runtime_reconciliation_required`，Runtime 由 Workspace 级联接管。close 也容忍这个回答——否则该 Session 永远无法退役——同时未证明的 drain 仍让 monitor loop 停在 `runtime_lost`，绝不报 `stop_requested`。
 
 ## 4. 验收
 
@@ -50,4 +50,5 @@ Broker 才是"什么仍被持有"的真相源：每个存活的后台 run 都有
 ## 5. 边界
 
 - 只管 direct Harness API 路径。control-plane 的 Session close 有自己的 `drainHarnessSession` 兜底，不在本切片内。
+- lifecycle-v2 Session 的直接 close 永不执行 drain 块，因此其加载完全跳过恢复——该集合唯一的读取点位于仅限 v1 的 close 块内（#13986 评审）。
 - 评审波次推迟的 28 条 Suggestion 是另一批卫生工作（#13930 跟踪）；本切片只做 R1-2。

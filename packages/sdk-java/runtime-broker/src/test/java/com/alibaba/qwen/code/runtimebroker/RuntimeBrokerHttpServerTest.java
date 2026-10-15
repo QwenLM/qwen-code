@@ -89,6 +89,25 @@ class RuntimeBrokerHttpServerTest {
         }
     }
 
+    @Test
+    void activeHoldsMapsScopeResolutionFailures() throws Exception {
+        // #13986 R1-8: every sibling resolver call answers the module's
+        // mapped code; an unmapped throw here would escape as the generic
+        // 500 runtime_broker_internal_error instead.
+        try (Fixture fixture = new Fixture(false,
+                id -> {
+                    throw new IllegalStateException("scope directory gone");
+                })) {
+            HttpResponse<String> response = fixture.post(
+                    "/tool-sessions:active-holds", Map.of("protocolVersion", 1,
+                            "requestId", "holds", "harnessSessionId", "harness"));
+            assertEquals(503, response.statusCode(), response.body());
+            assertTrue(
+                    response.body().contains("runtime_hold_inventory_scope_failed"),
+                    response.body());
+        }
+    }
+
     private static ToolExecutionRecord admitHold(Fixture fixture,
             RuntimeSessionRecord session, String callId, String dispatchMode) {
         return fixture.executions.findOrCreate(ToolExecutionRecord.prepared(
@@ -902,6 +921,11 @@ class RuntimeBrokerHttpServerTest {
         }
 
         private Fixture(boolean v3) throws Exception {
+            this(v3, null);
+        }
+
+        private Fixture(boolean v3, HarnessSessionResolver resolverOverride)
+                throws Exception {
             RuntimeScope scope = new RuntimeScope("tenant", "workspace",
                     "generation", "/workspace", "capability", "workspace");
             RuntimePublicationVerifier verifier = v3 ? new RuntimePublicationVerifier() {
@@ -927,7 +951,9 @@ class RuntimeBrokerHttpServerTest {
                 }
             } : null;
             service = new RuntimeBrokerService(
-                    id -> CompletableFuture.completedFuture(scope),
+                    resolverOverride != null
+                            ? resolverOverride
+                            : id -> CompletableFuture.completedFuture(scope),
                     new StaticRuntimeProvisioner(new RuntimeLease("instance",
                             URI.create("http://127.0.0.1:1234"), "token", "lease", 1)),
                     transport, new InMemoryRuntimeBindingRepository(),

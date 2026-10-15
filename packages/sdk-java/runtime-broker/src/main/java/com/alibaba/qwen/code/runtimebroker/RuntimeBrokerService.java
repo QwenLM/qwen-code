@@ -1259,7 +1259,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String harnessSessionId) {
         requireOpen();
         String id = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
-        return safeStage(() -> sessionResolver.resolveTenant(id))
+        return mapFailure(safeStage(() -> sessionResolver.resolveTenant(id)),
+                "runtime_hold_inventory_scope_failed",
+                "Runtime hold inventory scope resolution failed")
                 .thenApply(tenant -> listActiveHoldIdsSync(id, tenant));
     }
 

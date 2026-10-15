@@ -76,9 +76,14 @@ This dodges three specific faults:
 
 ### Close
 
-Unchanged. The close already drains `heldRuntimeTurns` with
-`release({ drain: true })`, tolerating the precise 404 and parking honestly on
-anything unproven. Seeding the set at load is the whole change.
+The close drains `heldRuntimeTurns` with `release({ drain: true })`,
+tolerating the precise 404 and parking honestly on anything unproven. One
+tolerance widened on review (#13986 R2-1): a Broker that restarted beside the
+Harness cannot prove the release and answers its declared-retryable 503
+`runtime_reconciliation_required`, leaving the Runtime to the Workspace-level
+cascade. The close tolerates that answer too — otherwise the Session could
+never be retired — while the unproven drain keeps the monitor loops on a
+`runtime_lost` settle, never `stop_requested`.
 
 ## 4. Acceptance
 
@@ -100,5 +105,8 @@ journal's turn records. The routine-refusal → hold → close-drain half is the
 
 - The direct Harness API path only. The control-plane Session close has its
   own `drainHarnessSession` backstop and is out of scope.
+- A lifecycle-v2 Session's direct close never runs the drain block, so its
+  load skips the restore entirely — the set's only reader sits in the v1-only
+  close block (#13986 review).
 - The 28 deferred Suggestions from the review wave are a separate hygiene
   batch (#13930 tracks them); this slice is R1-2 alone.

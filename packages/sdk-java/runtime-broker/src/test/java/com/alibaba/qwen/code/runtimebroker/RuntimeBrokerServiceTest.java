@@ -4758,6 +4758,19 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void pathSafeIdsPinTheWorkersLengthBound() {
+        // The character set is pinned above; this pins the 512 length bound.
+        // The TypeScript half asserts the same boundary in
+        // hosted-workspace-broker.test.ts ("accepts exactly the id shape the
+        // close drain maps idempotently"): widening one side without the
+        // other makes every legitimate Broker answer fail the worker's
+        // validator, and the load degrades to restoring nothing (#13986 R1-5).
+        BrokerValues.requirePathSafe("x".repeat(512), "id");
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requirePathSafe("x".repeat(513), "id"));
+    }
+
+    @Test
     void invalidExecutionInputsUseTheCodedErrorChannel() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",
