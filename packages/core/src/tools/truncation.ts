@@ -14,6 +14,7 @@ import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logToolOutputTruncated } from '../telemetry/loggers.js';
 import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 const debugLogger = createDebugLogger('TRUNCATION');
 
@@ -59,6 +60,67 @@ export const COMBINED_PASS_TOLERANCE_FACTOR = 2;
  * the fallback kicks in, so the diagnostics comparison must tolerate that band.
  */
 export const TRUNCATION_FALLBACK_ENVELOPE_SLACK = 500;
+
+/**
+ * Chars-per-token heuristic used to compare a char-based truncation budget
+ * against a token-based context window. Kept deliberately high so the
+ * estimate errs toward leaving the window room rather than over-filling it;
+ * the fixed char thresholds already treat chars as a rough proxy for tokens,
+ * so this stays within the same precision envelope.
+ */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Output tokens held back for the model's own reply when sizing a tool
+ * result against the remaining window. Without a reserve, a result sized to
+ * exactly the remaining window would leave nothing for the answer, which is
+ * the failure this guards against.
+ */
+export const CONTEXT_AWARE_OUTPUT_RESERVE_TOKENS = 8192;
+
+/**
+ * Smallest char budget a context-tightened result may be squeezed to. Below
+ * this the preview stops being useful, so we floor here instead of returning
+ * almost nothing.
+ */
+export const CONTEXT_AWARE_MIN_CHARS = 1000;
+
+/**
+ * Tightens a tool-output truncation threshold to the space actually left in
+ * the model's context window.
+ *
+ * The configured threshold is a fixed char budget that ignores how full the
+ * conversation already is. When the window is nearly full, a result that
+ * fits the fixed budget can still fill the window and leave the model too
+ * little room to answer, which surfaces as a hard stream error instead of a
+ * graceful degrade. This returns the smaller of the configured threshold and
+ * the estimated remaining window (minus a reserve for the reply), floored at
+ * CONTEXT_AWARE_MIN_CHARS. The full output is still persisted by the caller,
+ * so tightening loses nothing recoverable.
+ *
+ * Returns the configured threshold unchanged when the window size is unknown
+ * or the window still has room, so normal turns are never affected.
+ */
+export function contextAwareTruncateThreshold(
+  config: Config,
+  configuredThresholdChars: number,
+  reservedOutputTokens: number = CONTEXT_AWARE_OUTPUT_RESERVE_TOKENS,
+): number {
+  const windowSize = config.getContentGeneratorConfig()?.contextWindowSize;
+  if (!windowSize || windowSize <= 0) {
+    return configuredThresholdChars;
+  }
+  const usedTokens = uiTelemetryService.getLastPromptTokenCount();
+  const remainingTokens = windowSize - usedTokens - reservedOutputTokens;
+  if (remainingTokens <= 0) {
+    return CONTEXT_AWARE_MIN_CHARS;
+  }
+  const remainingChars = remainingTokens * CHARS_PER_TOKEN;
+  if (remainingChars >= configuredThresholdChars) {
+    return configuredThresholdChars;
+  }
+  return Math.max(CONTEXT_AWARE_MIN_CHARS, remainingChars);
+}
 
 /**
  * Truncates large tool output and saves the full content to a temp file.
