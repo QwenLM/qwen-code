@@ -8,6 +8,8 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  'Toggle the Superfast decision gate (local System One model)':
+    'Toggle the Superfast decision gate (local System One model)',
   'Cannot disable an extension-provided MCP server here.':
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':

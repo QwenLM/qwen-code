@@ -15,6 +15,9 @@ export { Storage } from './config/storage.js';
 // Permission system
 export * from './permissions/index.js';
 
+// Superfast System One decision gate
+export * from './superfast/decision-gate.js';
+
 // Model configuration
 export {
   DEFAULT_QWEN_MODEL,
