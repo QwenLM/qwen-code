@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -92,7 +93,7 @@ class WorkspaceMigrationStoreTest {
         } else {
             jdbc.update("UPDATE ma_storage_owner SET storage_kind = 'CSI'");
         }
-        var registration = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var registration = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
         byte[] marker = Files.readAllBytes(source.resolve(".qwen-managed-storage.json"));
         assertThatThrownBy(() -> store(true)).isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
             assertThat(error.getCode()).isEqualTo("workspace_unavailable");
@@ -100,7 +101,7 @@ class WorkspaceMigrationStoreTest {
         });
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(registration);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(registration);
         assertThat(Files.readAllBytes(source.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
     }
 
@@ -302,8 +303,14 @@ class WorkspaceMigrationStoreTest {
     void sharesFenceOwnershipWithTheJdbcBrokerAndClearsBothReaders() {
         var bindings = new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
                 new AesGcmSecretProtector("test", new byte[32]));
+        jdbc.update("UPDATE ma_storage SET gmt_modified = 1");
         var operation = new WorkspaceMigrationStore(jdbc, manager, guard, bindings,
                 request.toString().getBytes(StandardCharsets.UTF_8), true);
+        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage", Long.class)).isGreaterThan(1);
+        jdbc.update("UPDATE ma_storage SET gmt_modified = 1");
+        new WorkspaceMigrationStore(jdbc, manager, guard, bindings,
+                request.toString().getBytes(StandardCharsets.UTF_8), true);
+        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage", Long.class)).isEqualTo(1);
         String id = request.path("migrationOperationId").asText();
         assertThat(bindings.isStorageFenced("tenant", "storage", id)).isTrue();
         var scope = new RuntimeScope("tenant", "workspace", "1", source.toString(),
@@ -337,7 +344,7 @@ class WorkspaceMigrationStoreTest {
     @ParameterizedTest
     @ValueSource(strings = {"PENDING", "RUNNING"})
     void refusesUnfinishedTitleDeliveryEvenWithAFailedPublicReceipt(String state) {
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified,"
                 + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
                 + " context_revision, workspace_config_ref, workspace_policy_ref)"
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
@@ -348,7 +355,7 @@ class WorkspaceMigrationStoreTest {
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
         ManagedReceipts.insertCommand(jdbc, "tenant", "RENAME_SESSION", "rename", "digest", "session", null, "FAILED", null, 1);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
-                + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, available_at, created_at, updated_at)"
+                + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, available_at, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, ?, 'RENAME', 'rename:1', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', ?, 'SUBMITTED', ?, 0, 1, 1)",
                 WorkspaceOperations.hash("rename"), scope, scope, WorkspaceOperations.hash("session"), state, state);
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
@@ -360,15 +367,15 @@ class WorkspaceMigrationStoreTest {
 
     @Test
     void rejectsDescriptorDriftBeforeRetirementAndReusesTheNormalBindingReader() {
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified,"
                 + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
                 + " context_revision, workspace_config_ref, workspace_policy_ref)"
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         ManagedReceipts.insertCreation(jdbc, "tenant", "owner".getBytes(StandardCharsets.UTF_8), "create", "sha256:test", "session", null, 1);
-        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, updated_at) VALUES (?, ?, 'SESSION', ?, 1)", "tenant", "session", new byte[0]);
-        assertThat(jdbc.query("SELECT * FROM ma_session", (row, index) -> ManagedAgentStore.readBinding(row))
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, gmt_modified) VALUES (?, ?, 'SESSION', ?, 1)", "tenant", "session", new byte[0]);
+        assertThat(jdbc.query("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session", (row, index) -> ManagedAgentStore.readBinding(row))
                 .getFirst().getStorageId()).isEqualTo("storage");
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_member_uninitialized");
         jdbc.update("UPDATE ma_session SET workspace_config_ref = 'changed'");
@@ -379,7 +386,7 @@ class WorkspaceMigrationStoreTest {
         jdbc.update("UPDATE ma_session SET workspace_id = NULL, workspace_generation = NULL,"
                 + " workspace_storage_id = NULL, cwd_relative = NULL, context_config_ref = NULL, context_revision = NULL,"
                 + " workspace_config_ref = NULL, workspace_policy_ref = NULL");
-        assertThat(jdbc.query("SELECT * FROM ma_session", (row, index) -> ManagedAgentStore.readBinding(row))
+        assertThat(jdbc.query("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session", (row, index) -> ManagedAgentStore.readBinding(row))
                 .getFirst()).isNull();
     }
 
@@ -405,7 +412,7 @@ class WorkspaceMigrationStoreTest {
     void refusesAStorageWhoseChildWorkspaceIsStillOpen() {
         jdbc.update("INSERT INTO ma_workspace (tenant_id, parent_session_id, child_run_id,"
                 + " child_workspace_id, workspace_id, workspace_generation, storage_id, parent_cwd_relative,"
-                + " workspace_kind, child_state, parent_workspace_id, display_name, config_ref, policy_ref, state, created_at, updated_at) VALUES ('tenant', 'parent', 'run', ?, ?, 1,"
+                + " workspace_kind, child_state, parent_workspace_id, display_name, config_ref, policy_ref, state, gmt_create, gmt_modified) VALUES ('tenant', 'parent', 'run', ?, ?, 1,"
                 + " 'storage', '.', 'CHILD_GIT', 'ready', 'workspace', 'Child', 'config', 'policy', 'ACTIVE', 0, 0)", "0".repeat(32), "0".repeat(32));
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
         // A landed merge still owes its cleanup.

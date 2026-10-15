@@ -58,7 +58,7 @@ public final class WorkspaceCsiSessionMain {
                 required("K2_JDBC_PASSWORD"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision(required("K2_AGENT_REVISION"));
-        Created created = create(new JdbcTemplate(source), new DataSourceTransactionManager(source),
+        Created created = create(new ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source),
                 json, properties, request);
         System.out.println(json.writeValueAsString(created));
     }

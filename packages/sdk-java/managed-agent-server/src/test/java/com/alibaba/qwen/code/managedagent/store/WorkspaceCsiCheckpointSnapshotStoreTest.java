@@ -13,6 +13,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -108,17 +110,9 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         outcomeRef = ref("outcome", "managed-tool-outcome", outcome);
         // SQL mapping fixture only; native journal semantics are tested separately by the TS consumer.
         byte[] records = "{}\n".getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version,"
-                        + " state, writer_generation, journal_revision, committed_sequence, last_commit_digest, activation_epoch,"
-                        + " latest_checkpoint_resource_id, compacted_through_revision, recovery_status, created_at, updated_at)"
-                        + " VALUES (?, ?, 'MANAGED_SESSION', 'harness', 'tenant', 'workspace', 'harness', 1, 'SEALED', 1, 1, 1, ?, 1, 'checkpoint', 0, 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, journal_revision, committed_sequence, last_commit_digest, activation_epoch, latest_checkpoint_resource_id, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, 'MANAGED_SESSION', 'harness', 'tenant', 'workspace', 'harness', 1, 'SEALED', 1, 1, 1, ?, 1, 'checkpoint', 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("harness"), "c".repeat(64));
-        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
-                        + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence,"
-                        + " event_count, events_digest, commit_digest, writer_generation, writer_id, writer_token_hash, activation_epoch,"
-                        + " latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, record_digest, created_at)"
-                        + " VALUES ('tenant', 'workspace', 'harness', 1, ?, 'transaction', 'recordToolResult', 'execution', ?,"
-                        + " 1, 1, 1, ?, ?, 1, 'writer', ?, 1, 'checkpoint', 'identity', ?, ?, ?, CURRENT_TIMESTAMP)",
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, events_digest, commit_digest, writer_generation, writer_id, writer_token_hash, activation_epoch, latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES ('tenant', 'workspace', 'harness', 1, ?, 'transaction', 'recordToolResult', 'execution', ?, 1, 1, 1, ?, ?, 1, 'writer', ?, 1, 'checkpoint', 'identity', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 "d".repeat(64), outcomeRef.path("digest").asText(), "e".repeat(64), "c".repeat(64), "f".repeat(64), records, records.length, hash(records));
         resource("checkpoint", "managed-checkpoint", JSON.createObjectNode());
         resource("outcome", "managed-tool-outcome", outcome);
@@ -146,8 +140,8 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
 
     @Test
     void mapsOriginalInlineRowsWithoutWritesOrCredentials() {
-        JsonNode resourcesBefore = JSON.valueToTree(jdbc.queryForList("SELECT * FROM ma_resource"));
-        var holderBefore = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        JsonNode resourcesBefore = JSON.valueToTree(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource"));
+        var holderBefore = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
         JsonNode snapshot = export();
         assertThat(snapshot.path("format").asText()).isEqualTo(WorkspaceCsiCheckpointSnapshotStore.FORMAT);
         assertThat(snapshot.path("originalCSI").path("runtimeGeneration").asText()).isEqualTo("1");
@@ -163,9 +157,9 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         assertThat(source.closes).isEqualTo(1);
         assertThat(source.rollbacks).isEqualTo(1);
         assertThat(source.statements).allMatch(sql -> sql.startsWith("SELECT"));
-        assertThat((JsonNode) JSON.valueToTree(jdbc.queryForList("SELECT * FROM ma_resource")))
+        assertThat((JsonNode) JSON.valueToTree(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource")))
                 .isEqualTo(resourcesBefore);
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(holderBefore);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(holderBefore);
     }
 
     @ParameterizedTest
@@ -205,12 +199,12 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
     })
     void refusesBrokenOriginalPinsWithoutMutation(String damage) {
         jdbc.update(damage);
-        JsonNode resourcesBefore = JSON.valueToTree(jdbc.queryForList("SELECT * FROM ma_resource"));
+        JsonNode resourcesBefore = JSON.valueToTree(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource"));
         assertThatThrownBy(this::export).isInstanceOf(IllegalStateException.class)
                 .hasMessage("Original CSI checkpoint snapshot is unavailable.").hasNoCause();
         assertThat(source.statements).allMatch(sql -> sql.startsWith("SELECT"));
         assertThat(source.rollbacks).isEqualTo(1);
-        assertThat((JsonNode) JSON.valueToTree(jdbc.queryForList("SELECT * FROM ma_resource")))
+        assertThat((JsonNode) JSON.valueToTree(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource")))
                 .isEqualTo(resourcesBefore);
     }
 
@@ -304,12 +298,12 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                 jdbc.batchUpdate("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
                         + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence,"
                         + " event_count, events_digest, previous_commit_digest, commit_digest, writer_generation, writer_id, writer_token_hash, activation_epoch,"
-                        + " latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, record_digest, created_at)"
+                        + " latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, record_digest, gmt_create)"
                         + " SELECT t.tenant_id, t.workspace_id, t.session_id, ?, ?,"
                         + " ?, t.operation, ?, t.content_digest, ?, ?,"
                         + " t.event_count, t.events_digest, t.commit_digest, t.commit_digest, t.writer_generation, t.writer_id, t.writer_token_hash,"
                         + " t.activation_epoch, t.latest_checkpoint_resource_id, t.record_encoding, t.record_bytes,"
-                        + " t.byte_length, t.record_digest, t.created_at FROM ma_session_journal_tx t"
+                        + " t.byte_length, t.record_digest, t.gmt_create FROM ma_session_journal_tx t"
                         + " WHERE t.journal_revision = 1", rows);
                 jdbc.update("UPDATE ma_session_head SET journal_revision = ?, committed_sequence = ?", count, count);
             }
@@ -393,12 +387,9 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         String scope = ManagedSessionStore.sessionScopeKey("tenant", "harness");
         String resource = ManagedSessionStore.resourceKey(scope, id);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
-                + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                + " VALUES (?, ?, 'tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', CURRENT_TIMESTAMP)",
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 resource, scope, id, kind, bytes.length, hash(bytes), bytes);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                + " journal_revision, resource_id, created_at) VALUES (?, 'JOURNAL', ?, 1, ?, 'tenant', 'workspace', 'harness', 1, ?, CURRENT_TIMESTAMP)", scope, scope, resource, id);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, journal_revision, resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, 'tenant', 'workspace', 'harness', 1, ?, " + ManagedSchemaTime.SQL_NOW + ")", scope, scope, resource, id);
     }
 
     private void publicationObject(String scope, String slot, String id, String kind, JsonNode body) {

@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -309,7 +311,7 @@ public final class WorkspaceRecoveryStore {
 
     private JsonNode nextRef(String session) {
         pinned(session);
-        var rows = jdbc.query("SELECT * FROM ma_operation_work WHERE operation_key = ?"
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_key = ?"
                 + " AND work_kind = 'RECOVERY_EVIDENCE' AND session_id = ? AND state = 'PENDING' ORDER BY target_key LIMIT 1",
                 (row, index) -> WorkspaceOperations.work(row), operations.key(KIND, id), session);
         return rows.isEmpty() ? JSON.nullNode() : parse((String) rows.getFirst().get("metadata_json"));
@@ -362,7 +364,7 @@ public final class WorkspaceRecoveryStore {
     }
 
     private JsonNode assetPage(String after) {
-        var rows = jdbc.query("SELECT * FROM ma_operation_work WHERE operation_key = ?"
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_key = ?"
                 + " AND work_kind = 'RESOURCE' AND target_key > ? ORDER BY target_key LIMIT ?",
                 (row, index) -> WorkspaceOperations.work(row), operations.key(KIND, assetOperation()), after, PAGE + 1);
         ObjectNode page = JSON.createObjectNode();
@@ -528,7 +530,7 @@ public final class WorkspaceRecoveryStore {
     }
 
     static JsonNode currentSource(JdbcTemplate jdbc, String tenant, String storage, String session, boolean lockSources) {
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT s.*, e.last_sequence FROM ma_session s JOIN ma_event_stream e"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.SESSION.columns("s") + ", e.last_sequence FROM ma_session s JOIN ma_event_stream e"
                 + " ON e.tenant_id = s.tenant_id AND e.session_id = s.session_id AND e.stream_kind = 'SESSION' AND e.stream_id = ?"
                 + " WHERE s.tenant_id = ? AND s.session_id = ? AND s.workspace_storage_id = ?" + (lockSources ? " FOR UPDATE" : ""), new byte[0], tenant, session, storage);
         check(rows.size() == 1, "source_drift");
@@ -536,7 +538,7 @@ public final class WorkspaceRecoveryStore {
         check(("qwen-code".equals(row.get("agent_id")) || row.get("agent_definition_digest") != null)
                 && Set.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED")
                 .contains(row.get("status")), "source_drift");
-        var receipts = WorkspaceOperations.rows(jdbc, "SELECT actor_id, idempotency_key, request_digest, turn_id, created_at"
+        var receipts = WorkspaceOperations.rows(jdbc, "SELECT actor_id, idempotency_key, request_digest, turn_id, gmt_create"
                 + " FROM ma_request_receipt WHERE tenant_key = ? AND session_id = ? AND namespace = 'SESSION_CREATE_ACTOR' AND tenant_id = ?",
                 WorkspaceOperations.hash(tenant), session, tenant);
         check(receipts.size() == 1, "source_drift");
@@ -568,19 +570,20 @@ public final class WorkspaceRecoveryStore {
         ObjectNode creation = source.putObject("creation")
                 .put("actorIdHex", HexFormat.of().formatHex((byte[]) receipt.get("actor_id")));
         fields(creation, receipt, "idempotencyKey", "idempotency_key", "requestDigest", "request_digest",
-                "turnId", "turn_id", "createdAt", "created_at");
+                "turnId", "turn_id", "createdAt", "gmt_create");
         // Missing keys gap-lock other tenants; the retention authority lock prevents new writers here.
         boolean lockHead = lockSources && count(jdbc,
                 "SELECT COUNT(*) FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(session)) != 0;
-        var heads = jdbc.query("SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'"
+        var heads = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'"
                 + (lockHead ? " FOR UPDATE" : ""),
                 (result, index) -> {
                     var value = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(result);
-                    value.put("writer_lease_until", result.getTimestamp("writer_lease_until"));
-                    LocalDateTime lease = result.getObject("writer_lease_until", LocalDateTime.class);
-                    value.put("writer_lease_fingerprint", lease == null ? null : lease.toString());
+                    value.put("writer_lease_until", ManagedSchemaTime.timestamp(result, "writer_lease_until"));
+                    Timestamp lease = ManagedSchemaTime.timestamp(result, "writer_lease_until");
+                    value.put("writer_lease_fingerprint", lease == null ? null
+                            : LocalDateTime.ofInstant(lease.toInstant(), java.time.ZoneOffset.UTC).toString());
                     return value;
                 }, com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(session));
@@ -740,7 +743,7 @@ public final class WorkspaceRecoveryStore {
     }
 
     private List<Map<String, Object>> sessionRows(String operation, String after, int limit) {
-        return jdbc.query("SELECT * FROM ma_operation_work WHERE operation_key = ? AND work_kind = 'SESSION'"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_key = ? AND work_kind = 'SESSION'"
                 + " AND session_id > ? ORDER BY session_id LIMIT ?", (row, index) -> WorkspaceOperations.work(row),
                 operations.key(KIND, operation), after, limit);
     }
@@ -768,7 +771,7 @@ public final class WorkspaceRecoveryStore {
     }
 
     private static Timestamp now(JdbcTemplate jdbc) {
-        return Objects.requireNonNull(jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class));
+        return Objects.requireNonNull(jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", Timestamp.class));
     }
 
     private static void fields(ObjectNode target, Map<String, Object> row, String... mapping) {

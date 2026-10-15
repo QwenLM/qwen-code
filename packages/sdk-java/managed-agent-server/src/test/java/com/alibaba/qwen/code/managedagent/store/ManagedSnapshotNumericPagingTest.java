@@ -152,7 +152,7 @@ class ManagedSnapshotNumericPagingTest {
                             new ManagedAgentProperties());
             jdbc.update(
                     "INSERT INTO"
-                        + " ma_session(tenant_id,session_id,agent_id,created_at,updated_at,tenant_key,session_key,session_scope_key)"
+                        + " ma_session(tenant_id,session_id,agent_id,gmt_create,gmt_modified,tenant_key,session_key,session_scope_key)"
                         + " VALUES(?,?,?,0,0,?,?,?)",
                     "tenant",
                     "session",
@@ -163,7 +163,7 @@ class ManagedSnapshotNumericPagingTest {
             int sequence = ties ? count - 5 : count;
             jdbc.update(
                     "INSERT INTO"
-                        + " ma_event_stream(tenant_id,session_id,stream_kind,stream_id,last_sequence,covered_sequence,updated_at)"
+                        + " ma_event_stream(tenant_id,session_id,stream_kind,stream_id,last_sequence,covered_sequence,gmt_modified)"
                         + " VALUES(?,?,'SESSION',?,?,?,0)",
                     "tenant",
                     "session",
@@ -178,7 +178,7 @@ class ManagedSnapshotNumericPagingTest {
             jdbc.batchUpdate(
                     "INSERT INTO"
                         + " ma_message(tenant_id,session_id,item_id,turn_id,item_type,item_role,item_status,attributes_json,"
-                        + "first_sequence,last_sequence,created_at,updated_at,revision,parts_json)"
+                        + "first_sequence,last_sequence,gmt_create,gmt_modified,revision,parts_json)"
                         + " VALUES(?,?,?,?,'message','assistant','completed','{}',?,?,0,0,1,'[]')",
                     rows);
             project();

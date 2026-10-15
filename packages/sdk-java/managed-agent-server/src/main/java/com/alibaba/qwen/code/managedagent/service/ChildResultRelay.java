@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -623,8 +624,8 @@ public class ChildResultRelay {
     }
 
     private static String escapeXml(String text) {
-        return text.replace("&", "&amp;").replace("<", "&lt;")
-                .replace(">", "&gt;");
+        return StringUtils.replaceEach(text, new String[] {"&", "<", ">"},
+                new String[] {"&amp;", "&lt;", "&gt;"});
     }
 
     /** #13753 I2: the run's fixed `workspaceMode` names a child Workspace. */

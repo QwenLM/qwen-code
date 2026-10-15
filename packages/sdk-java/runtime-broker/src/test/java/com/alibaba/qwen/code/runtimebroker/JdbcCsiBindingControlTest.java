@@ -204,12 +204,7 @@ class JdbcCsiBindingControlTest {
         var created = fixture.bindings().findOrCreate(request());
         var claimed = fixture.bindings().claimOperation(created.getBindingId(), "owner", LEASE);
         try (var connection = fixture.source().getConnection(); var statement = connection.prepareStatement(
-                                "INSERT INTO ma_operation (operation_key, scope_key, operation_id,"
-                                        + " operation_kind, tenant_id, target_kind, target_key,"
-                                        + " target_revision, request_digest, request_json, state,"
-                                        + " phase, created_at, updated_at) VALUES (?, ?, ?,"
-                                        + " 'CSI_RETIREMENT', 'tenant', 'RUNTIME_BINDING', ?, 1,"
-                                        + " 'digest', '{}', 'ADMITTED', 'ADMITTED', 0, 0)")) {
+                                "INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id, target_kind, target_key, target_revision, request_digest, request_json, state, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, 'CSI_RETIREMENT', 'tenant', 'RUNTIME_BINDING', ?, 1, 'digest', '{}', 'ADMITTED', 'ADMITTED', 0, 0)")) {
             String id = UUID.randomUUID().toString();
             statement.setString(
                     1,
@@ -244,12 +239,7 @@ class JdbcCsiBindingControlTest {
         var source = source();
         try (var connection = source.getConnection()) {
             try (var statement = connection.prepareStatement(
-                            "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile,"
-                                + " runtime_request_key, workspace_id, workspace_generation,"
-                                + " workspace_storage_id, cwd_relative, context_config_ref,"
-                                + " context_revision, workspace_config_ref, workspace_policy_ref,"
-                                + " created_at, updated_at) VALUES ('tenant', ?, 'qwen-code', ?, ?,"
-                                + " 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
+                            "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile, runtime_request_key, workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', ?, ?, 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
                 JdbcRepositorySupport.setIdentity(statement, 1, SESSION);
                 statement.setString(2, CsiFilesRetirementProfile.PROFILE);
                 statement.setString(3, request().requestKey());
