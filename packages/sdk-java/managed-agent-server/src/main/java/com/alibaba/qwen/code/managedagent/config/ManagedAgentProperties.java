@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -155,8 +157,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !"local-process".equals(runtimeBroker.getProvisioner())
-                        || !"session".equals(runtimeBroker.getIsolationClass())
+                        || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                        || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || runtimeBroker.getWorkspaceMounts().isEmpty()
                         || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
@@ -201,7 +203,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
             // A merge runs once the child Session is closed (#13753 I2), and
             // only a durable local-process Broker can close one.
             if (!runtimeBroker.isEnabled()
-                    || !"local-process".equals(runtimeBroker.getProvisioner())
+                    || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                     || !"session".equals(runtimeBroker.getIsolationClass())
                     || !runtimeBroker.isDurableLocalProcess()
                     || runtimeBroker.getWorkspaceMounts().isEmpty()) {
@@ -882,7 +884,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private int port = 4182;
         private boolean allowNonLoopback;
         private String token = "";
-        private String provisioner = "local-process";
+        private String provisioner = LocalProcessRuntimeProvisioner.KIND;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration v3ResultWindow = Duration.ofMinutes(30);
         private String workspaceId = "";
