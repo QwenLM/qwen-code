@@ -91,6 +91,10 @@ export function WorkspaceFileBrowser({
     maxBytes: maxUploadBytes,
     targetKey: `${workspaceCwd}:${uploadClient ? 'enabled' : 'disabled'}`,
   });
+  const progressRef = useRef(
+    new Map<string, { size: number; progress: number }>(),
+  );
+  const previousDoneRef = useRef(new Set<string>());
   const [dropDirectory, setDropDirectory] = useState<string>();
   const uploadedRef = useRef<((path: string) => void) | undefined>(undefined);
   const treePanelRef = usePanelRef();
@@ -337,17 +341,62 @@ export function WorkspaceFileBrowser({
     );
   };
   const failedUploads = uploads.filter((upload) => upload.status === 'error');
-  const progressItems = uploads.filter((upload) => upload.status !== 'error');
-  const totalBytes = progressItems.reduce(
-    (sum, upload) => sum + Math.max(1, upload.file.size),
-    0,
-  );
+  // Success notices expire after three seconds; byte accounting lasts until idle.
+  if (!isBusy) {
+    progressRef.current.clear();
+    previousDoneRef.current = new Set(
+      uploads
+        .filter((upload) => upload.status === 'done')
+        .map((upload) => upload.id),
+    );
+  } else {
+    for (const upload of uploads) {
+      if (upload.status === 'error') progressRef.current.delete(upload.id);
+      else if (!previousDoneRef.current.has(upload.id))
+        progressRef.current.set(upload.id, {
+          size: Math.max(1, upload.file.size),
+          progress: upload.progress,
+        });
+    }
+  }
+  const progressItems = [...progressRef.current.values()];
+  const totalBytes = progressItems.reduce((sum, item) => sum + item.size, 0);
   const progress = totalBytes
-    ? progressItems.reduce(
-        (sum, upload) => sum + Math.max(1, upload.file.size) * upload.progress,
-        0,
-      ) / totalBytes
+    ? progressItems.reduce((sum, item) => sum + item.size * item.progress, 0) /
+      totalBytes
     : 0;
+  const uploadErrorText = (upload: (typeof uploads)[number]) =>
+    `${safeDisplayText(upload.file.name)}: ${
+      upload.error ??
+      (upload.errorCode === 'tooLarge'
+        ? t('composer.upload.error.tooLarge', {
+            limit: `${Math.round(maxUploadBytes / (1024 * 1024))} MiB`,
+          })
+        : upload.errorCode === 'tooManyFiles'
+          ? t('composer.upload.error.tooManyFiles', {
+              count: upload.skippedCount ?? 0,
+            })
+          : t('composer.upload.error.noDaemon'))
+    }`;
+  const uploadProgress = isBusy && (
+    <div
+      className={styles.uploadProgress}
+      role="progressbar"
+      aria-label={t('composer.upload.uploading')}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(progress * 100)}
+    >
+      <div style={{ width: `${Math.max(2, progress * 100)}%` }} />
+    </div>
+  );
+  const preventFileDrop = (event: DragEvent<HTMLElement>) => {
+    if (event.dataTransfer.types.includes('Files')) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'none';
+    }
+  };
 
   const runMenuAction = async (
     action: () => void | Promise<void>,
@@ -371,6 +420,9 @@ export function WorkspaceFileBrowser({
     path
       ? `${workspaceCwd.replace(separator === '\\' ? /[\\/]+$/ : /\/+$/, '')}${separator}${path.replaceAll('/', separator)}`
       : workspaceCwd;
+  const workspaceName = safeDisplayText(
+    workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1) ?? workspaceCwd,
+  );
   const absoluteMenuPath = absolutePath(menu?.path ?? '');
   const canPreview =
     selectedPath && /\.(?:md|markdown|html?)$/i.test(selectedPath);
@@ -382,6 +434,8 @@ export function WorkspaceFileBrowser({
       className={styles.browser}
       data-testid="workspace-file-browser"
       style={{ colorScheme: theme }}
+      onDragOver={preventFileDrop}
+      onDrop={preventFileDrop}
     >
       {menu && (
         <DropdownMenu
@@ -475,7 +529,7 @@ export function WorkspaceFileBrowser({
           className={styles.path}
           title={safeDisplayText(absolutePath(selectedPath ?? ''))}
         >
-          {safeDisplayText(workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1))}
+          {workspaceName}
           {selectedPath && <> / {safeDisplayText(selectedPath)}</>}
         </span>
         {canPreview && (
@@ -517,6 +571,39 @@ export function WorkspaceFileBrowser({
       {actionError && (
         <div className={styles.notices} role="alert">
           {actionError}
+        </div>
+      )}
+      <div
+        className="sr-only"
+        role="status"
+        data-testid="workspace-file-upload-status"
+      >
+        {uploads
+          .filter(
+            (upload) => upload.status === 'done' || upload.status === 'error',
+          )
+          .map((upload) =>
+            upload.status === 'done'
+              ? `${t('composer.upload.done')}: ${safeDisplayText(upload.resultPath)}`
+              : uploadErrorText(upload),
+          )
+          .join('; ')}
+      </div>
+      {failedUploads.length > 0 && (
+        <div className={styles.notices}>
+          {failedUploads.map((upload) => (
+            <div className={styles.uploadError} key={upload.id}>
+              <span>{uploadErrorText(upload)}</span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t('composer.upload.dismiss')}
+                onClick={() => removeUpload(upload.id)}
+              >
+                <XIcon />
+              </Button>
+            </div>
+          ))}
         </div>
       )}
       <ResizablePanelGroup
@@ -569,7 +656,10 @@ export function WorkspaceFileBrowser({
           >
             {dropDirectory !== undefined && uploadClient && (
               <div className={styles.dropHint}>
-                {t('files.uploadTo')}: {safeDisplayText(dropDirectory)}
+                {t('files.uploadTo')}:{' '}
+                {dropDirectory === '.'
+                  ? workspaceName
+                  : safeDisplayText(dropDirectory)}
               </div>
             )}
             <div className={styles.search}>
@@ -675,59 +765,11 @@ export function WorkspaceFileBrowser({
                 ))}
               </div>
             )}
-            <div className="sr-only" role="status">
-              {uploads
-                .filter((upload) => upload.status === 'done')
-                .map(
-                  (upload) =>
-                    `${t('composer.upload.done')}: ${safeDisplayText(upload.resultPath)}`,
-                )
-                .join('; ')}
-            </div>
-            {failedUploads.length > 0 && (
-              <div className={styles.notices}>
-                {failedUploads.map((upload) => (
-                  <div className={styles.uploadError} key={upload.id}>
-                    <span role="alert">
-                      {safeDisplayText(upload.file.name)}:{' '}
-                      {upload.error ??
-                        (upload.errorCode === 'tooLarge'
-                          ? t('composer.upload.error.tooLarge', {
-                              limit: `${Math.round(maxUploadBytes / (1024 * 1024))} MiB`,
-                            })
-                          : upload.errorCode === 'tooManyFiles'
-                            ? t('composer.upload.error.tooManyFiles', {
-                                count: upload.skippedCount ?? 0,
-                              })
-                            : t('composer.upload.error.noDaemon'))}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={t('composer.upload.dismiss')}
-                      onClick={() => removeUpload(upload.id)}
-                    >
-                      <XIcon />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {isBusy && (
-              <div
-                className={styles.uploadProgress}
-                role="progressbar"
-                aria-label={t('composer.upload.uploading')}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Math.round(progress * 100)}
-              >
-                <div style={{ width: `${Math.max(2, progress * 100)}%` }} />
-              </div>
-            )}
+            {treeVisible && uploadProgress}
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
+      {!treeVisible && uploadProgress}
     </section>
   );
 }

@@ -701,6 +701,26 @@ describe('artifact workspace authority', () => {
     },
   );
 
+  it('does not expose uploads for an id-less legacy workspace even with both capabilities', () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/primary',
+      features: ['workspace_file_upload', 'workspace_qualified_rest_core'],
+    } as unknown as typeof mockWorkspace.capabilities;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd="/primary" />,
+      ),
+    );
+    expect(
+      latestArtifactWorkspaceTarget!.actions.uploadWorkspaceFile,
+    ).toBeUndefined();
+    expect(mockWorkspace.client.workspaceByCwd).not.toHaveBeenCalled();
+  });
+
   it.each(['capability', 'owner'])(
     'rejects captured and pending uploads after %s revocation',
     async (revocation) => {
