@@ -2260,14 +2260,16 @@ export function useComposerCore(
   const restoreSelectedHistoryMatch = useCallback(
     (text: string) => {
       const view = viewRef.current;
+      // A panel recall counts as history browsing on both backends, so the
+      // debounced draft save and the session/workspace-switch draft
+      // migration keep skipping the restored text; the next edit clears the
+      // flag and re-arms persistence (handleMobileChange or a programmatic
+      // write on touch, the CodeMirror update listener on desktop).
+      historyBrowseActiveRef.current = true;
       if (!view) {
         if (isTouchComposer) {
           // Plain-text restore: inline tag chips are not recreated on the
-          // textarea backend. Counts as history browsing so the debounced
-          // draft save and the session/workspace-switch draft migration keep
-          // skipping the restored text; the next genuine edit clears the
-          // flag in handleMobileChange and re-arms persistence.
-          historyBrowseActiveRef.current = true;
+          // textarea backend.
           setMobileText(text);
         }
         return;
@@ -4041,6 +4043,7 @@ export function useComposerCore(
       if (isTouchComposer) {
         const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
         if (text) {
+          historyBrowseActiveRef.current = false;
           if (options?.mode === 'replace') {
             setMobileText(text);
           } else {
@@ -4163,6 +4166,7 @@ export function useComposerCore(
       if (isTouchComposer) {
         // Unlike the CodeMirror path, no focus: on touch devices a
         // programmatic focus would pop the virtual keyboard unexpectedly.
+        historyBrowseActiveRef.current = false;
         setMobileText(text);
         return;
       }
@@ -4449,6 +4453,7 @@ export function useComposerCore(
         setComposerTags([...input.tags]);
       }
       if (input.text !== undefined) {
+        historyBrowseActiveRef.current = false;
         setMobileText(input.text);
       }
       let submitTimer: number | null = null;
@@ -4591,6 +4596,11 @@ export function useComposerCore(
       );
       if (accepted === false) {
         restoreSelectedHistoryMatch(match);
+        // The restore armed the browse flag (and so skipped scheduling a
+        // save), but a rejected submit leaves the entry as the live draft:
+        // re-arm persistence and schedule the save explicitly.
+        historyBrowseActiveRef.current = false;
+        scheduleDraftSaveRef.current();
         return;
       }
       onDismissFollowupRef.current?.();

@@ -138,8 +138,9 @@ Record any runtime limitations separately from mocked browser results.
 - Commands and skills preserve existing drafts and tags; history can be opened,
   selected, or dismissed. Live voice remains accessible.
 - History search restores a selected input and the draft focus without
-  submitting. Every editing row button keeps a 44px target and stays inside the
-  viewport at 390px and 240px widths.
+  submitting. The editing row's always-rendered controls (Expand editor, and
+  Hide keyboard while the textarea is focused) keep a 44px target and stay
+  inside the viewport at 390px and 240px widths.
 - Run focused unit/browser tests, build, typecheck, bundle, and two clean
   self-audit passes plus independent review.
 

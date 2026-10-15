@@ -330,7 +330,8 @@ for (const width of [390, 240]) {
     // dropped button fails the test instead of shrinking the iterated set.
     // (Hide keyboard renders only while the textarea is focused; fill does
     // focus it. The standalone dev host always opts into the Add entry, so
-    // the no-Add contextual buttons are covered by unit tests instead.)
+    // the no-Add contextual buttons — Input history and the Shell toggle —
+    // never render here and this loop does not measure them.)
     await expect(
       page.getByRole('button', { name: 'Expand editor', exact: true }),
     ).toHaveCount(1);
