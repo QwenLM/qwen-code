@@ -3,12 +3,13 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.store.EventIdentity;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import org.springframework.stereotype.Component;
+
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
-import org.springframework.stereotype.Component;
 
 @Component
 public class HarnessEventProjector {
@@ -20,7 +21,7 @@ public class HarnessEventProjector {
             Map<String, Object> data = object(event.data());
             String stopReason = string(data.get("stopReason"));
             boolean cancelled = stopReason != null
-                    && stopReason.toLowerCase().contains("cancel");
+                    && stopReason.toLowerCase(java.util.Locale.ROOT).contains("cancel");
             String type = cancelled ? "turn.cancelled" : "turn.completed";
             String status = cancelled ? "CANCELLED" : "COMPLETED";
             return new ProjectedEvent(type,

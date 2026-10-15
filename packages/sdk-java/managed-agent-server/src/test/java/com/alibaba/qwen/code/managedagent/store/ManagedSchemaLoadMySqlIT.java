@@ -1,9 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -11,6 +9,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedSchemaLoadMySqlIT extends ManagedSchemaSessionMySqlIT {
     @Test
@@ -108,15 +108,11 @@ class ManagedSchemaLoadMySqlIT extends ManagedSchemaSessionMySqlIT {
                 "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
                     + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
                     + " target_key, request_digest, request_json, state, phase, delivery_state,"
-                    + " created_at, updated_at) VALUES (?, ?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
+                    + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
                     + " ?, ?, 'COMPLETED', 'COMPLETED', 'COMPLETED', ?, ?)",
                 operations);
         jdbc.batchUpdate(
-                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id,"
-                    + " resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
-                    + " inline_bytes, publish_command_id, state, created_at) VALUES (?, ?, ?, ?, ?,"
-                    + " 'managed-context', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED',"
-                    + " CURRENT_TIMESTAMP(6))",
+                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, ?, ?, 'managed-context', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 resources);
     }
 }

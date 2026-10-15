@@ -1,19 +1,18 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
 import java.sql.Connection;
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The RR witness of the verdict/mint seam: under REPEATABLE READ the committing transaction's
@@ -38,8 +37,8 @@ class ManagedExtensionRecordVerdictReconcileMySqlIT {
             try {
                 shared.update(
                         "INSERT INTO ma_session (tenant_id,"
-                                + " session_id, agent_id, status, created_at,"
-                                + " updated_at) VALUES (?, ?, 'qwen-code',"
+                                + " session_id, agent_id, status, gmt_create,"
+                                + " gmt_modified) VALUES (?, ?, 'qwen-code',"
                                 + " 'ACTIVE', 1, 1)",
                         TENANT,
                         parent);
@@ -49,7 +48,7 @@ class ManagedExtensionRecordVerdictReconcileMySqlIT {
                                 + " workspace_id, session_id, domain, record_id,"
                                 + " operation_hash, revision,"
                                 + " record_resource_id, task_kind, task_state,"
-                                + " delivery_target, delivery_state, created_at)"
+                                + " delivery_target, delivery_state, gmt_create)"
                                 + " VALUES (?, ?, ?, 'workspace', ?, 'child_run',"
                                 + " ?, 'h', 1, 'res-x', 'child_agent', 'running',"
                                 + " 'session', 'planned', 1)",
@@ -79,7 +78,7 @@ class ManagedExtensionRecordVerdictReconcileMySqlIT {
                         mintJdbc.update(
                                 "INSERT INTO ma_session"
                                         + " (tenant_id, session_id, agent_id,"
-                                        + " status, created_at, updated_at,"
+                                        + " status, gmt_create, gmt_modified,"
                                         + " parent_session_id,"
                                         + " parent_child_run_id) VALUES (?, ?,"
                                         + " 'qwen-code', 'ACTIVE', 1, 1, ?, ?)",

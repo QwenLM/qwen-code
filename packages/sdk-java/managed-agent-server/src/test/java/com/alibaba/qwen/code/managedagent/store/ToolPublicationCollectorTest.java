@@ -1,20 +1,22 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.jdbc.core.RowMapper;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreTest {
     protected static class DeletingObjects extends MemoryObjects {
@@ -62,7 +64,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     }
 
     protected void retryNow() {
-        jdbc.update("UPDATE ma_operation SET available_at = 0, claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+        jdbc.update("UPDATE ma_operation SET available_at = 0, claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
     }
 
     private String addPublication(String publication, String sessionId) {
@@ -117,8 +119,10 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override public <T> List<T> query(String sql, RowMapper<T> mapper, Object... args) {
                 var rows = super.query(sql, mapper, args);
-                if (sql.startsWith("SELECT * FROM ma_output_capture")
-                        && !rows.isEmpty() && rows.getFirst() instanceof java.util.Map<?, ?> row && "RETIRING".equals(row.get("retention_state"))) { evaluations.incrementAndGet(); }
+                if (sql.contains(" FROM ma_output_capture WHERE scope_key = ?")
+                        && !rows.isEmpty() && rows.getFirst() instanceof java.util.Map<?, ?> row && "RETIRING".equals(row.get("retention_state"))) {
+                    evaluations.incrementAndGet();
+                }
                 return rows;
             }
         };
@@ -126,7 +130,9 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var gc = collector(template, objects, true);
         long before = ToolPublicationRetentionStore.now(jdbc);
         int firstSweepTicks = (protectedCount + 1 + 31) / 32;
-        for (int tick = 0; tick < firstSweepTicks && !"COLLECTED".equals(state()); tick++) { gc.runOnce(); }
+        for (int tick = 0; tick < firstSweepTicks && !"COLLECTED".equals(state()); tick++) {
+            gc.runOnce();
+        }
         long after = ToolPublicationRetentionStore.now(jdbc);
         assertThat(state()).as("healthy publication collects within the first sweep at 32 due candidates per tick")
                 .isEqualTo("COLLECTED");
@@ -178,7 +184,9 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                     + " WHERE scope_key = ?", scope);
             default -> throw new AssertionError(expectedBlocker);
         }
-        if (!"session_not_retired".equals(expectedBlocker)) { retire(); }
+        if (!"session_not_retired".equals(expectedBlocker)) {
+            retire();
+        }
         long before = ToolPublicationRetentionStore.now(jdbc);
         assertThat(collector(objects).runOnce()).isFalse();
         long after = ToolPublicationRetentionStore.now(jdbc);
@@ -326,7 +334,9 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     @Test
     void graceCandidatesYieldToAnEligiblePublicationAndWaitUntilTheirDeadline() {
         String heldSession = "held-session";
-        for (int index = 0; index < 150; index++) { addPublication("held-" + index, heldSession); }
+        for (int index = 0; index < 150; index++) {
+            addPublication("held-" + index, heldSession);
+        }
         addObject("one", "eligible/one", null);
         retire();
         Duration grace = Duration.ofHours(24);
@@ -348,7 +358,9 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         gc.runOnce();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND session_id = ?"
                 + " AND failure_code IS NOT NULL", Long.class, heldSession)).isBetween(2L, 32L);
-        for (int tick = 1; tick < 5 && !"COLLECTED".equals(state()); tick++) { gc.runOnce(); }
+        for (int tick = 1; tick < 5 && !"COLLECTED".equals(state()); tick++) {
+            gc.runOnce();
+        }
         assertThat(state()).isEqualTo("COLLECTED");
         assertThat(objects.deleted).containsExactly("eligible/one");
         assertThat(held()).isZero();
@@ -401,9 +413,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         }
         for (String resource : List.of("message-1", "checkpoint-1")) {
             String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind,"
-                            + " schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                            + " VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                     ManagedSchemaKeys.key(resourceScope, resource), resourceScope, tenant, session, resource,
                     resource.equals("message-1") ? "managed-message" : "managed-checkpoint", scope, new byte[] {2});
         }
@@ -453,7 +463,9 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                 + " AND scope_key = ? AND publication_id = ?", scope, "pub-2");
         var objects = new DeletingObjects() {
             @Override public void deleteIfPresent(String key) {
-                if ("failing".equals(key)) { throw new IllegalStateException("permission denied"); }
+                if ("failing".equals(key)) {
+                    throw new IllegalStateException("permission denied");
+                }
                 super.deleteIfPresent(key);
             }
         };
@@ -512,7 +524,10 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             private boolean first = true;
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
-                if (first) { first = false; throw new IllegalStateException("response lost after deletion"); }
+                if (first) {
+                    first = false;
+                    throw new IllegalStateException("response lost after deletion");
+                }
             }
         };
         addObject("one", "exact/one", null);
@@ -537,7 +552,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var objects = new DeletingObjects() {
             @Override public void deleteIfPresent(String key) {
                 assertThat(second.runOnce()).isFalse();
-                jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+                jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 assertThat(second.runOnce()).isTrue();
                 super.deleteIfPresent(key);
             }
@@ -551,10 +566,14 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
 
     @Test
     void partialPageCrashPreservesCursorAndAReplacementRetriesThePage() {
-        for (String slot : List.of("a", "b", "c")) { addObject(slot, "exact/" + slot, null); }
+        for (String slot : List.of("a", "b", "c")) {
+            addObject(slot, "exact/" + slot, null);
+        }
         var objects = new DeletingObjects() {
             @Override public void deleteIfPresent(String key) {
-                if ("exact/b".equals(key)) { throw new IllegalStateException("worker stopped"); }
+                if ("exact/b".equals(key)) {
+                    throw new IllegalStateException("worker stopped");
+                }
                 super.deleteIfPresent(key);
             }
         };
@@ -577,7 +596,8 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var fail = new AtomicBoolean(true);
         var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override public int update(String sql, Object... args) {
-                if (sql.startsWith("UPDATE ma_output_capture SET retention_state = 'COLLECTED'") && fail.getAndSet(false)) {
+                if (sql.startsWith("UPDATE ma_output_capture SET ")
+                        && sql.contains("retention_state = 'COLLECTED'") && fail.getAndSet(false)) {
                     throw new org.springframework.dao.DataAccessResourceFailureException("SQL confirm failed");
                 }
                 return super.update(sql, args);
@@ -602,7 +622,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
                 if (expire.getAndSet(false)) {
-                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+                    jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 }
             }
         };
@@ -633,7 +653,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
                 if (expire.getAndSet(false)) {
-                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
+                    jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 }
             }
         };
@@ -663,8 +683,11 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var objects = new DeletingObjects() {
             @Override public void deleteIfPresent(String key) {
                 entered.countDown();
-                try { assertThat(release.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue(); }
-                catch (InterruptedException error) { throw new IllegalStateException(error); }
+                try {
+                    assertThat(release.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException error) {
+                    throw new IllegalStateException(error);
+                }
                 super.deleteIfPresent(key);
             }
         };
@@ -672,7 +695,9 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         org.mockito.Mockito.when(state.findMaterializationTargets(org.mockito.ArgumentMatchers.anyInt()))
                 .thenReturn(List.of(new StoreModels.MaterializationTarget(tenant, "other-session")));
         org.mockito.Mockito.doAnswer(invocation -> {
-            if (entered.getCount() == 0) { advanced.countDown(); }
+            if (entered.getCount() == 0) {
+                advanced.countDown();
+            }
             return null;
         }).when(state).materializeNextBatch(org.mockito.ArgumentMatchers.eq(tenant),
                 org.mockito.ArgumentMatchers.eq("other-session"), org.mockito.ArgumentMatchers.anyInt());
@@ -692,7 +717,9 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                 context.refresh();
                 assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
                 assertThat(advanced.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-            } finally { release.countDown(); }
+            } finally {
+                release.countDown();
+            }
         }
     }
 

@@ -146,7 +146,7 @@ final class ManagedSchemaCatalog {
             throws SQLException {
         Map<String, Integer> actual = new HashMap<>();
         Map<String, Integer> types = new HashMap<>();
-        Map<String, Integer> precision = new HashMap<>();
+        Map<String, Boolean> unsigned = new HashMap<>();
         Map<String, String> names = new HashMap<>();
         Map<String, Boolean> required = new HashMap<>();
         try (var result =
@@ -160,25 +160,24 @@ final class ManagedSchemaCatalog {
             while (result.next()) {
                 actual.put(lower(result.getString("COLUMN_NAME")), result.getInt("COLUMN_SIZE"));
                 types.put(lower(result.getString("COLUMN_NAME")), result.getInt("DATA_TYPE"));
-                precision.put(
-                        lower(result.getString("COLUMN_NAME")), result.getInt("DECIMAL_DIGITS"));
                 names.put(lower(result.getString("COLUMN_NAME")), result.getString("TYPE_NAME"));
                 required.put(
                         lower(result.getString("COLUMN_NAME")),
                         result.getInt("NULLABLE") == DatabaseMetaData.columnNoNulls);
             }
         }
-        if ("MySQL".equals(connection.getMetaData().getDatabaseProductName())) {
+        boolean nativeDatabase = "MySQL".equals(connection.getMetaData().getDatabaseProductName())
+                || isMariaDb(connection);
+        if (nativeDatabase) {
             try (var statement =
                     connection.prepareStatement(
-                            "SELECT COLUMN_NAME,DATETIME_PRECISION FROM INFORMATION_SCHEMA.COLUMNS"
-                                    + " WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND"
-                                    + " DATETIME_PRECISION IS NOT NULL")) {
+                            "SELECT COLUMN_NAME,COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS"
+                                    + " WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?")) {
                 statement.setString(1, schema(connection));
                 statement.setString(2, name);
                 try (var result = statement.executeQuery()) {
                     while (result.next()) {
-                        precision.put(lower(result.getString(1)), result.getInt(2));
+                        unsigned.put(lower(result.getString(1)), lower(result.getString(2)).contains("unsigned"));
                     }
                 }
             }
@@ -201,11 +200,9 @@ final class ManagedSchemaCatalog {
             if (!compatibleType(column.group(2), types.get(key))) {
                 throw new SQLException("Managed schema column type differs: " + name + "." + key);
             }
-            if ("DATETIME".equals(column.group(2))
-                    && column.group(3) != null
-                    && precision.get(key) != Integer.parseInt(column.group(3))) {
-                throw new SQLException(
-                        "Managed schema time precision differs: " + name + "." + key);
+            if (nativeDatabase && "BIGINT".equals(column.group(2))
+                    && column.group(4).contains("UNSIGNED") != Boolean.TRUE.equals(unsigned.get(key))) {
+                throw new SQLException("Managed schema integer signedness differs: " + name + "." + key);
             }
             if (Set.of("LONGTEXT", "MEDIUMTEXT", "MEDIUMBLOB", "LONGBLOB").contains(column.group(2))
                     && actual.get(key) < 1_048_576) {
@@ -219,7 +216,7 @@ final class ManagedSchemaCatalog {
                         "Managed schema body storage type differs: " + name + "." + key);
             }
             boolean requiredByModel =
-                    column.group(4).stripLeading().startsWith("NOT NULL")
+                    column.group(4).stripLeading().replaceFirst("^UNSIGNED\\s+", "").startsWith("NOT NULL")
                             || column.group(4).contains("PRIMARY KEY")
                             || primaryColumns.contains(key);
             if (requiredByModel != required.get(key)) {
@@ -393,7 +390,7 @@ final class ManagedSchemaCatalog {
         };
     }
 
-    private static void validateGeneratedColumns(Connection connection, String name, String body)
+    static void validateGeneratedColumns(Connection connection, String name, String body)
             throws SQLException {
         Map<String, String> actual = new HashMap<>();
         try (var statement =
@@ -417,8 +414,9 @@ final class ManagedSchemaCatalog {
             String expression =
                     column.group(4).substring(generated + "GENERATED ALWAYS AS".length());
             String stored = actual.get(column.group(1));
-            List<String> expectedTokens = expressionTokens(expression);
-            List<String> actualTokens = stored == null ? List.of() : expressionTokens(stored);
+            List<String> expectedTokens = numericBooleans(expressionTokens(expression));
+            List<String> actualTokens =
+                    stored == null ? List.of() : numericBooleans(expressionTokens(stored));
             boolean same = expectedTokens.equals(actualTokens);
             if (!same && "projection_pending".equals(column.group(1))) {
                 int split = expectedTokens.indexOf("or");
@@ -485,11 +483,7 @@ final class ManagedSchemaCatalog {
     private static List<String> checkShape(String expression) {
         List<String> flat = expressionTokens(expression);
         if (flat.contains("case")) {
-            return flat.stream().map(token -> switch (token) {
-                case "false" -> "0";
-                case "true" -> "1";
-                default -> token;
-            }).toList();
+            return flat;
         }
         String portable = portableExpression(expression);
         var matcher =
@@ -582,9 +576,25 @@ final class ManagedSchemaCatalog {
         List<String> result = new ArrayList<>();
         while (tokens.find()) {
             String token = tokens.group();
-            result.add(token.startsWith("'") ? token : lower(token));
+            String normalized = token.startsWith("'") ? token : lower(token);
+            result.add(
+                    switch (normalized) {
+                        case "false" -> "0";
+                        case "true" -> "1";
+                        default -> normalized;
+                    });
         }
         return result;
+    }
+
+    // MariaDB stores a bare FALSE/TRUE in a generation expression as 0/1,
+    // while MySQL keeps the keyword, so boolean literals compare numerically.
+    private static List<String> numericBooleans(List<String> tokens) {
+        return tokens.stream().map(token -> switch (token) {
+            case "false" -> "0";
+            case "true" -> "1";
+            default -> token;
+        }).toList();
     }
 
     private static List<String> columns(String value) {

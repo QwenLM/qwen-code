@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -31,6 +28,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @Timeout(30)
 class ManagedAgentCsiMutationMySqlIT {
@@ -71,8 +71,7 @@ class ManagedAgentCsiMutationMySqlIT {
             String ordinary = "!ordinary-retired";
             String scope = ManagedSessionStore.sessionScopeKey("tenant", ordinary);
             jdbc.update(
-                    "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at,"
-                            + " updated_at) VALUES ('tenant', ?, 'qwen-code', 'DELETED', 1, 1)", ordinary);
+                    "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', 'DELETED', 1, 1)", ordinary);
             jdbc.update(
                     "UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?,"
                         + " retirement_operation_id = 'delete', retirement_generation = 1,"
@@ -84,11 +83,7 @@ class ManagedAgentCsiMutationMySqlIT {
             String operationId = "session-resources-" + scope;
             long now = ToolPublicationRetentionStore.now(jdbc);
             jdbc.update(
-                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key,"
-                        + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
-                        + " target_key, request_digest, request_json, phase, state, created_at,"
-                        + " updated_at) VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', 'tenant', ?,"
-                        + " 'SESSION', ?, ?, '{}', 'COLLECTING', 'PENDING', ?, ?)",
+                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', 'tenant', ?, 'SESSION', ?, ?, '{}', 'COLLECTING', 'PENDING', ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
                             .operationKey(
                                     com.alibaba.qwen.code.runtimebroker.managedschema
@@ -263,6 +258,84 @@ class ManagedAgentCsiMutationMySqlIT {
                     if (!originalLock.getAutoCommit()) {
                         originalLock.rollback();
                     }
+                }
+            }
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + schema);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ})
+    void writerAfterAWarmedSnapshotStillRefusesAnOriginalCommittedLater(int isolation) throws Exception {
+        String url = System.getProperty("mysql.url");
+        if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
+            throw new IllegalArgumentException("A MySQL test database URL is required");
+        }
+        String user = System.getProperty("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        var admin = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(url, user, password));
+        String schema = "csi_warmed_writer_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + schema + " CHARACTER SET utf8mb4");
+        try {
+            var data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
+            Flyway.configure().dataSource(data).locations("classpath:db/managed-schema").load().migrate();
+            var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(data);
+            var manager = new DataSourceTransactionManager(data);
+            var json = new ObjectMapper();
+            var properties = new ManagedAgentProperties();
+            properties.setAgentRevision("reviewed-agent/1");
+            var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
+                    "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
+            new WorkspaceCsiReservationStore(jdbc, manager, json).register(registration);
+            jdbc.update(
+                    "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                            + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
+                    + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
+                    CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
+            jdbc.update(
+                    "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+            var journal = new ManagedSessionStore(jdbc);
+            var transaction = new TransactionTemplate(manager);
+            transaction.setIsolationLevel(isolation);
+            transaction.setTimeout(15);
+            var warmed = new CountDownLatch(1);
+            var created = new CountDownLatch(1);
+            var session = new java.util.concurrent.atomic.AtomicReference<String>();
+            try (var pool = Executors.newSingleThreadExecutor()) {
+                // The writer's snapshot predates the original Session, so only
+                // a locking read of its root can see the pin.
+                var writer = pool.submit(() -> transaction.execute(status -> {
+                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isZero();
+                    warmed.countDown();
+                    try {
+                        assertThat(created.await(10, TimeUnit.SECONDS)).isTrue();
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(error);
+                    }
+                    return journal.acquireWriter("tenant", session.get(), "csi-original-writer-token-for-test",
+                            new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L));
+                }));
+                try {
+                    assertThat(warmed.await(5, TimeUnit.SECONDS)).isTrue();
+                    session.set(WorkspaceCsiSessionMain.create(jdbc, manager, json, properties,
+                            new WorkspaceCsiSessionMain.Request(registration, "actor", "original", null, null,
+                                    new WorkspaceSelection("workspace", "."))).sessionId());
+                    var before = allTables(jdbc, json);
+                    created.countDown();
+                    assertThatThrownBy(() -> writer.get(10, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
+                            .satisfies(error -> {
+                                assertThat(error.getCause()).isInstanceOf(
+                                        com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+                                assertThat(((com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException)
+                                                error.getCause()).getCode())
+                                        .isEqualTo("csi_original_binding_unavailable");
+                            });
+                    assertThat(allTables(jdbc, json)).isEqualTo(before);
+                } finally {
+                    created.countDown();
                 }
             }
         } finally {

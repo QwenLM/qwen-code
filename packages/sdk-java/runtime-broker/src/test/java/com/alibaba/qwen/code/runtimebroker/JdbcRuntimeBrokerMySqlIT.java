@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -27,23 +29,7 @@ import org.junit.jupiter.api.Test;
 class JdbcRuntimeBrokerMySqlIT {
     @Test
     void physicalAliasesReleaseOnlyTheirMatchingHolder() throws Exception {
-        String schema = "broker_physical_" + UUID.randomUUID().toString().replace("-", "");
-        String url = required("mysql.url");
-        int query = url.indexOf('?');
-        String location = query < 0 ? url : url.substring(0, query);
-        String options = query < 0 ? "" : url.substring(query);
-        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
-            statement.execute("CREATE DATABASE `" + schema + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin");
-        }
-        try {
-            JdbcPhysicalStorageReleaseTest.verify(new DriverManagerDataSource(
-                    location.substring(0, location.lastIndexOf('/') + 1) + schema + options,
-                    required("mysql.user"), System.getProperty("mysql.password", "")));
-        } finally {
-            try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
-                statement.execute("DROP DATABASE `" + schema + "`");
-            }
-        }
+        inIsolatedSchema("broker_physical_", JdbcPhysicalStorageReleaseTest::verify);
     }
 
     @Test
@@ -54,11 +40,15 @@ class JdbcRuntimeBrokerMySqlIT {
 
     @Test
     void managedRecoveryKeepsPinsUntilTheOriginalHolderCleanupCompletes() throws Exception {
-        DataSource source = dataSource();
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        RuntimeMaintenanceRecoveryTest.verifyBatches(new JdbcRuntimeBindingRepository(source,
-                new AesGcmSecretProtector("maintenance", new byte[32])), new JdbcRuntimeSessionRepository(source),
-                new JdbcToolExecutionRepository(source), "mysql-maintenance-" + java.util.UUID.randomUUID());
+        // Recovery candidates are scanned across every tenant, so bindings the
+        // other tests seal with their own credential keys would fail to
+        // decrypt here: the batch gets a schema of its own.
+        inIsolatedSchema("broker_recovery_", source -> {
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+            RuntimeMaintenanceRecoveryTest.verifyBatches(new JdbcRuntimeBindingRepository(source,
+                    new AesGcmSecretProtector("maintenance", new byte[32])), new JdbcRuntimeSessionRepository(source),
+                    new JdbcToolExecutionRepository(source), "mysql-maintenance-" + java.util.UUID.randomUUID());
+        });
     }
 
     @Test
@@ -110,7 +100,7 @@ class JdbcRuntimeBrokerMySqlIT {
                     assertThrows(TimeoutException.class, () -> pending.get(100, TimeUnit.MILLISECONDS));
                 }
                 try (var insert = lock.prepareStatement("INSERT INTO ma_session_head"
-                        + " (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))")) {
+                        + " (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")")) {
                     insert.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(prefix));
                     insert.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey("harness"));
                     insert.setString(3, prefix);
@@ -191,7 +181,7 @@ class JdbcRuntimeBrokerMySqlIT {
                 claim.withDrainRequested(true, Instant.now()).withState(RuntimeBindingRecord.State.DRAINING, claim.getLease(), Instant.now()));
         assertNotNull(draining);
         try (var connection = source.getConnection(); var update = connection.prepareStatement(
-                "UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMPADD(SECOND, -1, UTC_TIMESTAMP(6)) WHERE binding_id = ?")) {
+                "UPDATE ma_runtime_binding SET operation_lease_until = (" + ManagedSchemaTime.SQL_NOW + ") - 1000 WHERE binding_id = ?")) {
             update.setString(1, ready.getBindingId());
             assertEquals(1, update.executeUpdate());
         }
@@ -274,6 +264,30 @@ class JdbcRuntimeBrokerMySqlIT {
         return ToolExecutionRecord.prepared(key, key, binding.getBindingId(), binding.getGeneration(), "harness",
                 "original", "prompt", "call", "digest", Map.of("sessionId", "original", "promptId", "prompt",
                         "callId", "call", "argsDigest", "digest"));
+    }
+
+    private interface SchemaCheck {
+        void run(DataSource source) throws Exception;
+    }
+
+    private static void inIsolatedSchema(String prefix, SchemaCheck check) throws Exception {
+        String schema = prefix + UUID.randomUUID().toString().replace("-", "");
+        String url = required("mysql.url");
+        int query = url.indexOf('?');
+        String location = query < 0 ? url : url.substring(0, query);
+        String options = query < 0 ? "" : url.substring(query);
+        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE DATABASE `" + schema + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin");
+        }
+        try {
+            check.run(new DriverManagerDataSource(
+                    location.substring(0, location.lastIndexOf('/') + 1) + schema + options,
+                    required("mysql.user"), System.getProperty("mysql.password", "")));
+        } finally {
+            try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
+                statement.execute("DROP DATABASE `" + schema + "`");
+            }
+        }
     }
 
     private static DataSource dataSource() {

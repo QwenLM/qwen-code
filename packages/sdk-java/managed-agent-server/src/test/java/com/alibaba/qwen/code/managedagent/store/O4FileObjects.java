@@ -13,7 +13,9 @@ class O4FileObjects implements ToolPublicationObjectStore {
     O4FileObjects(Path root) { this.root = root.toAbsolutePath().normalize(); }
     protected Path path(String key) {
         Path result = root.resolve(key).normalize();
-        if (!result.startsWith(root) || result.equals(root)) { throw new IllegalArgumentException("Invalid test object key"); }
+        if (!result.startsWith(root) || result.equals(root)) {
+            throw new IllegalArgumentException("Invalid test object key");
+        }
         return result;
     }
     @Override public void putIfAbsent(String key, byte[] bytes) {
@@ -23,15 +25,23 @@ class O4FileObjects implements ToolPublicationObjectStore {
             Files.write(file, bytes, StandardOpenOption.CREATE_NEW);
         } catch (FileAlreadyExistsException expected) {
             // Same immutable-key semantics as the production adapter.
-        } catch (IOException error) { throw new IllegalStateException("Test PUT failed", error); }
+        } catch (IOException error) {
+            throw new IllegalStateException("Test PUT failed", error);
+        }
     }
     @Override public InputStream open(String key) {
-        try { return Files.newInputStream(path(key)); }
-        catch (IOException error) { throw new IllegalStateException("Test GET failed", error); }
+        try {
+            return Files.newInputStream(path(key));
+        } catch (IOException error) {
+            throw new IllegalStateException("Test GET failed", error);
+        }
     }
     @Override public void deleteIfPresent(String key) {
-        try { Files.deleteIfExists(path(key)); }
-        catch (IOException error) { throw new IllegalStateException("Test DELETE failed", error); }
+        try {
+            Files.deleteIfExists(path(key));
+        } catch (IOException error) {
+            throw new IllegalStateException("Test DELETE failed", error);
+        }
     }
     @Override public void requireUnversioned() {}
 }

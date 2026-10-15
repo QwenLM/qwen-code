@@ -1,22 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -29,6 +17,19 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * The public Turn read model: a Session's Turns newest first across pages,
@@ -130,7 +131,8 @@ class ManagedTurnQueryTest {
                 hasMore.add(page.get("has_more").asBoolean());
                 cursor = page.get("next_cursor").isNull() ? null
                         : page.get("next_cursor").asText();
-            } while (cursor != null);
+            }
+            while (cursor != null);
             assertThat(order).as("limit %d", limit).containsExactly(
                     "turn_c2", "turn_c1", "turn_b2", "turn_b1", "turn_a1",
                     "turn_z1");
@@ -216,7 +218,7 @@ class ManagedTurnQueryTest {
         String sessionId = emptySession(tenant);
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, created_at, updated_at, completed_at)"
+                        + " status, gmt_create, gmt_modified, completed_at)"
                         + " VALUES (?, ?, 'turn_input', ?, 'not json',"
                         + " 'digest', 'COMPLETED', 1000, 1000, 2000)",
                 tenant, sessionId, UUID.randomUUID().toString());
@@ -409,7 +411,7 @@ class ManagedTurnQueryTest {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
                         + " status, dispatch_owner, dispatch_lease_until,"
-                        + " error_code, created_at, updated_at, completed_at)"
+                        + " error_code, gmt_create, gmt_modified, completed_at)"
                         + " VALUES (?, ?, ?, ?, '[]', 'digest', ?,"
                         + " 'turn-query-test', ?, ?, ?, ?, ?)",
                 tenant, sessionId, turnId, UUID.randomUUID().toString(),

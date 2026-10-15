@@ -1,16 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
@@ -19,53 +8,66 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
-import java.time.Duration;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
-import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
-import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
+import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.nio.charset.StandardCharsets;
-import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.time.Instant;
-import java.util.HexFormat;
-import java.util.List;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import javax.sql.DataSource;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import com.fasterxml.jackson.databind.ObjectMapper;
+
+import javax.sql.DataSource;
+
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-execution;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
@@ -126,7 +128,7 @@ class WorkspaceRuntimeTest {
         var stopped = fixture.bindings().compareAndSet(fixture.binding(), fixture.binding().withDrainReceipt(receipt));
         var releasing = fixture.bindings().beginSessionRelease(fixture.sessions(), fixture.executions(), fixture.session());
         switch (fault) {
-            case "expired" -> jdbc.update("UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE binding_id = ?", stopped.getBindingId());
+            case "expired" -> jdbc.update("UPDATE ma_runtime_binding SET operation_lease_until = 946684800000 WHERE binding_id = ?", stopped.getBindingId());
             case "takeover" -> {
                 fixture.bindings().releaseOperation(stopped.getBindingId(), stopped.getOperationOwner(), stopped.getOperationGeneration());
                 assertThat(fixture.bindings().claimOperation(stopped.getBindingId(), "other", Duration.ofMinutes(5))).isNotNull();
@@ -155,12 +157,12 @@ class WorkspaceRuntimeTest {
         assertThatThrownBy(() -> new WorkspaceRuntimeProvisioner(local, null, authority).stopDrained(stopped)
                 .toCompletableFuture().join()).hasCauseInstanceOf(RuntimeBrokerException.class);
         verify(local, never()).stopDrained(any());
-        var before = jdbc.queryForList("SELECT * FROM ma_storage_owner WHERE holder_key IS NOT NULL");
+        var before = jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE holder_key IS NOT NULL");
         assertThatThrownBy(() -> fixture.bindings().completeStoppedSessionRelease(fixture.sessions(),
                 fixture.executions(), releasing, stopped)).isInstanceOf(RuntimeBrokerException.class);
         assertThat(fixture.sessions().findById(releasing.getSession().getScope(), releasing.getRuntimeSessionId()).getState())
                 .isEqualTo(RuntimeSessionRecord.State.RELEASING);
-        assertThat(jdbc.queryForList("SELECT * FROM ma_storage_owner WHERE holder_key IS NOT NULL")).isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE holder_key IS NOT NULL")).isEqualTo(before);
     }
 
     @Test
@@ -738,14 +740,14 @@ class WorkspaceRuntimeTest {
         verify(fixture.http(), never()).control(any(), any(), any());
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", session.tenantId());
         String storageKey = com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage.key(session.tenantId(), session.workspace().getStorageId());
-        var originalHolder = jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", storageKey);
+        var originalHolder = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ?", storageKey);
         when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
         for (String kind : List.of("mcp-status", "mcp-cancel", "mcp-release")) {
             Map<String, Object> operation = mcpControl(session, kind);
             transport.control(fixture.lease(), runtimeSession, operation).toCompletableFuture().join();
             verify(fixture.http()).control(fixture.lease(), runtimeSession, operation);
         }
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", storageKey)).isEqualTo(originalHolder);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ?", storageKey)).isEqualTo(originalHolder);
         jdbc.update("UPDATE ma_storage_owner SET holder_key = 'another-owner' WHERE storage_key = ?", storageKey);
         assertBusy(() -> transport.control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-status")));
     }
