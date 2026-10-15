@@ -359,12 +359,14 @@ export function registerWorkspaceAuthRoutes(
         });
         return;
       }
-      // The CLI, ACP and VS Code surfaces each run this same per-provider
-      // key guard before persisting. `validateApiKey` is a function on
-      // ProviderConfig, so it never reaches the wire — a client of this
-      // route cannot apply it and the daemon must. Without this check a
-      // key the provider's own entry rejects gets persisted silently, and
-      // the user only finds out at the first call.
+      // `validateApiKey` is a function on ProviderConfig, so it never reaches
+      // the wire — a client of this route cannot apply it and the daemon must.
+      // Without this check a key the provider's own entry rejects gets
+      // persisted silently, and the user only finds out at the first call.
+      // Not identical to the CLI/ACP/VS Code copies: those resolve the
+      // endpoint first and validate the resolved URL, while this route
+      // validates the client-supplied `baseUrl` (`''` when omitted). Every
+      // shipped validator keys on the prefix alone, so the two agree today.
       if (knownProvider.validateApiKey) {
         const apiKeyError = knownProvider.validateApiKey(
           installRequest.apiKey.trim(),

@@ -15,6 +15,9 @@ import { tokenPlanProvider } from '../../presets/alibaba-token-plan.js';
 import { ALL_PROVIDERS, QWENCLOUD_PROVIDERS } from '../../all-providers.js';
 import {
   buildInstallPlan,
+  buildProviderTemplate,
+  computeModelListVersion,
+  getDefaultModelIds,
   providerMatchesCredentials,
 } from '../../provider-config.js';
 
@@ -71,6 +74,30 @@ describe('qwencloudTokenPlanProvider', () => {
         QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL,
       ),
     ).toBe('QwenCloud Token Plan');
+  });
+
+  it('stamps providerState per platform route', () => {
+    const modelIds = getDefaultModelIds(qwencloudTokenPlanProvider);
+    const stamped = (url: string) =>
+      buildInstallPlan(qwencloudTokenPlanProvider, {
+        baseUrl: url,
+        apiKey: 'sk-sp-test',
+        modelIds,
+      }).providerState;
+
+    for (const url of [
+      QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL,
+      QWENCLOUD_TOKEN_PLAN_GLOBAL_BASE_URL,
+    ]) {
+      expect(stamped(url)).toEqual({
+        'providerMetadata.qwencloud-token-plan': {
+          baseUrl: url,
+          version: computeModelListVersion(
+            buildProviderTemplate(qwencloudTokenPlanProvider, url),
+          ),
+        },
+      });
+    }
   });
 
   it('keeps its credentials separate from ModelStudio Token Plan', () => {
@@ -139,6 +166,19 @@ describe('qwencloudTokenPlanProvider', () => {
         baseUrl: QWENCLOUD_TOKEN_PLAN_GLOBAL_BASE_URL,
       }),
     ).toBe(true);
+  });
+
+  it('rejects a model with matching envKey but a foreign baseUrl', () => {
+    // Every negative above differs in envKey, so the baseUrl conjunct was
+    // never the deciding factor. The pay-as-you-go endpoint shares the host
+    // family but not the subscription quota.
+    expect(
+      qwencloudTokenPlanProvider.ownsModel!({
+        id: 'qwen3.8-max',
+        envKey: 'QWENCLOUD_TOKEN_PLAN_API_KEY',
+        baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      }),
+    ).toBe(false);
   });
 
   it('is registered in the qwencloud access-method group', () => {
