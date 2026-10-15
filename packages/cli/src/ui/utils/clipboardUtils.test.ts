@@ -167,6 +167,38 @@ function createMockChild(
 }
 
 /**
+ * Create a mock child process that emits stdout data as separate byte chunks.
+ * A pipe delivers data at arbitrary byte offsets, so a payload split inside a
+ * multi-byte UTF-8 sequence is the case this exists for.
+ */
+function createChunkedMockChild(chunks: Buffer[], exitCode: number = 0) {
+  const stdout = new EventEmitter() as EventEmitter & {
+    pipe: (dest: EventEmitter) => EventEmitter;
+  };
+  stdout.pipe = (dest: EventEmitter) => dest;
+  const stderr = new EventEmitter();
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: typeof stdout;
+    stderr: typeof stderr;
+    kill: ReturnType<typeof vi.fn>;
+    killed: boolean;
+  };
+  child.stdout = stdout;
+  child.stderr = stderr;
+  child.kill = vi.fn();
+  child.killed = false;
+
+  process.nextTick(() => {
+    for (const chunk of chunks) {
+      stdout.emit('data', chunk);
+    }
+    child.emit('close', exitCode);
+  });
+
+  return child;
+}
+
+/**
  * Create a mock child process that fails to spawn.
  *
  * Emits `close` after `error`, because that is what Node does: a child that
@@ -469,7 +501,9 @@ describe('clipboardUtils', () => {
         name: 'reads a uri-list, in its CRLF form, when there is no plain text',
         tool: 'wl-paste',
         types: ['text/uri-list'],
-        payloads: { 'text/uri-list': 'https://a.example\r\nhttps://b.example' },
+        payloads: {
+          'text/uri-list': 'https://a.example\r\nhttps://b.example\r\n',
+        },
         expected: 'https://a.example\nhttps://b.example',
         reads: ['text/uri-list'],
       },
@@ -539,6 +573,51 @@ describe('clipboardUtils', () => {
 
       await expect(readClipboardText()).resolves.toBe(testCase.expected);
       expect(requestedTypes()).toEqual(testCase.reads);
+    });
+
+    it('decodes stdout as one byte stream when a chunk splits a character', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      // The split lands inside the three-byte 中: decoding each chunk on
+      // arrival would splice U+FFFD into the payload at the boundary.
+      const payload = `${'a'.repeat(100)}中文😀${'b'.repeat(100)}`;
+      const bytes = Buffer.from(payload, 'utf8');
+      const splitAt = 101;
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild('text/plain\n', 0);
+        }
+        return createChunkedMockChild([
+          bytes.subarray(0, splitAt),
+          bytes.subarray(splitAt),
+        ]);
+      });
+
+      const result = await readClipboardText();
+
+      expect(result).toBe(payload);
+      expect(result).not.toContain(String.fromCharCode(0xfffd));
+    });
+
+    it('discards a read that grows past the size cap', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      // One byte past the 16 MiB cap readStdout enforces: the read resolves
+      // to nothing and the child is killed rather than accumulated whole.
+      // The child is created at spawn time — an eagerly created mock emits
+      // before readStdout's handlers are attached and the test would pass
+      // through the timeout path without ever witnessing the cap.
+      let bigChild: ReturnType<typeof createChunkedMockChild> | undefined;
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild('text/plain\n', 0);
+        }
+        bigChild = createChunkedMockChild([
+          Buffer.from('x'.repeat(16 * 1024 * 1024 + 1)),
+        ]);
+        return bigChild;
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(bigChild?.kill).toHaveBeenCalled();
     });
 
     it('stays quiet when no clipboard tool is reachable', async () => {
@@ -948,6 +1027,15 @@ describe('clipboardUtils', () => {
           ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
           { stdio: ['ignore', 'pipe', 'pipe'] },
         );
+      });
+
+      it('should detect the BMP flavour the shared image-type set defines', async () => {
+        mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+        // TARGETS reporting image/bmp (what WSL2 exposes) must count as an
+        // image on X11 exactly as it does on Wayland — one set decides both.
+        mockSpawn.mockReturnValue(createMockChild('TARGETS\nimage/bmp\n', 0));
+
+        await expect(clipboardHasImage()).resolves.toBe(true);
       });
 
       it('should return false when xclip reports no image types', async () => {

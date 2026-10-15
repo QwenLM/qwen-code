@@ -17,6 +17,14 @@ const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 const PROCESS_TIMEOUT_MS = 5000;
 
 /**
+ * Upper bound for one clipboard-tool read. The paste-placeholder mechanism is
+ * what carries large pastes, so this sits far above its thresholds; the bound
+ * exists so a multi-hundred-MB selection cannot accumulate in memory until the
+ * process dies on the platform string-length limit.
+ */
+const MAX_CLIPBOARD_TEXT_BYTES = 16 * 1024 * 1024;
+
+/**
  * Write text to clipboard via OSC 52 escape sequence (works over SSH).
  * @param text - Text to copy to clipboard
  * @returns true if sequence was written, false if no TTY available or text too large
@@ -279,6 +287,13 @@ function isEmptyClipboardError(stderr: string): boolean {
 }
 
 /**
+ * Image types the save path writes. Case-sensitive and exact, matching what
+ * the enumeration has always accepted: `image/bmp` is there because WSL2
+ * exposes the Windows clipboard as BMP.
+ */
+const CLIPBOARD_IMAGE_TYPES = new Set(['image/png', 'image/bmp']);
+
+/**
  * Check if the clipboard contains an image using the specified tool.
  * Merged function replacing checkWlPasteForImage and checkXclipForImage.
  * For wl-paste, caches the result for reuse by saveClipboardImage.
@@ -371,9 +386,8 @@ async function checkClipboardForImage(
         resolve(
           stdout
             .split('\n')
-            // WSL2 Wayland: Windows clipboard exposes images as BMP (image/bmp),
-            // which we convert to PNG via python3 PIL. Both formats must be detected.
-            .some((line) => line === 'image/png' || line === 'image/bmp'),
+            .map((line) => line.trim())
+            .some((line) => CLIPBOARD_IMAGE_TYPES.has(line)),
         );
       });
       child.on('error', (err) => {
@@ -508,13 +522,6 @@ function classifyClipboardType(name: string): ClipboardTextTier | null {
   return base.startsWith('text/') ? 'other' : null;
 }
 
-/**
- * Image types the save path writes. Case-sensitive and exact, matching what
- * the enumeration has always accepted: `image/bmp` is there because WSL2
- * exposes the Windows clipboard as BMP.
- */
-const CLIPBOARD_IMAGE_TYPES = new Set(['image/png', 'image/bmp']);
-
 /** Ask the tool for one specific type it already said it has. */
 function clipboardReadArgs(tool: 'wl-paste' | 'xclip', type: string): string[] {
   return tool === 'wl-paste'
@@ -524,11 +531,16 @@ function clipboardReadArgs(tool: 'wl-paste' | 'xclip', type: string): string[] {
 
 /**
  * Capture stdout from a clipboard tool. Anything that is not a successful read
- * — empty clipboard, unreachable tool, spawn failure, timeout — resolves to an
- * empty string, so callers do not have to distinguish them. Whether a
- * successful read is actually worth pasting is left to the caller to judge.
+ * — empty clipboard, unreachable tool, spawn failure, timeout, a payload over
+ * the size cap — resolves to an empty string, so callers do not have to
+ * distinguish them. Whether a successful read is actually worth pasting is
+ * left to the caller to judge.
  */
-async function readStdout(command: string, args: string[]): Promise<string> {
+async function readStdout(
+  command: string,
+  args: string[],
+  maxBytes: number = MAX_CLIPBOARD_TEXT_BYTES,
+): Promise<string> {
   return new Promise((resolve) => {
     let child;
     try {
@@ -539,7 +551,11 @@ async function readStdout(command: string, args: string[]): Promise<string> {
       return;
     }
 
-    let stdout = '';
+    // Bytes are accumulated and decoded once: a pipe chunk can end inside a
+    // multi-byte UTF-8 sequence, and decoding each chunk on arrival splices
+    // U+FFFD into the clipboard text at every boundary.
+    const chunks: Buffer[] = [];
+    let received = 0;
     // `close` follows a spawn `error` and a timeout `kill()` as well, so
     // without this latch a single failed query would resolve twice and the
     // caller's loop would see a stale value.
@@ -566,7 +582,20 @@ async function readStdout(command: string, args: string[]): Promise<string> {
     };
 
     child.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString();
+      received += data.length;
+      if (received > maxBytes) {
+        try {
+          child.kill();
+        } catch {
+          /* ignore */
+        }
+        debugLogger.debug(
+          `${command} ${args.join(' ')} exceeded ${maxBytes} bytes; discarding the read`,
+        );
+        done('');
+        return;
+      }
+      chunks.push(data);
     });
     child.on('error', (err) => {
       debugLogger.debug(`Failed to spawn ${command} ${args.join(' ')}:`, err);
@@ -574,7 +603,7 @@ async function readStdout(command: string, args: string[]): Promise<string> {
     });
     child.on('close', (code) => {
       if (code === 0) {
-        done(stdout);
+        done(Buffer.concat(chunks).toString('utf8'));
       } else {
         debugLogger.debug(
           `${command} ${args.join(' ')} exited with code ${code}`,
@@ -747,7 +776,9 @@ async function listClipboardTypes(
  * Line endings come back as LF regardless of what the selection carried: a
  * Windows clipboard reached through WSL2 is CRLF throughout, and so is the
  * `text/uri-list` format by definition, neither of which belongs in the editor
- * buffer.
+ * buffer. The trailing line terminator a selection habitually carries is
+ * dropped for the same reason — it would otherwise add a stray empty line and
+ * inflate the line count the collapse decision reads.
  */
 export async function readClipboardText(): Promise<string | null> {
   if (process.platform !== 'linux') {
@@ -763,7 +794,10 @@ export async function readClipboardText(): Promise<string | null> {
     for (const type of offers.filter((offer) => offer.tier === tier)) {
       const text = await readStdout(tool, clipboardReadArgs(tool, type.raw));
       if (text.trim()) {
-        return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        return text
+          .replace(/\r\n/g, '\n')
+          .replace(/\r/g, '\n')
+          .replace(/\n+$/, '');
       }
     }
   }
