@@ -11,14 +11,15 @@ import com.alibaba.qwen.code.managedagent.service.SessionEventHub.Subscription;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @Service
 public class ManagedEventStreamService {

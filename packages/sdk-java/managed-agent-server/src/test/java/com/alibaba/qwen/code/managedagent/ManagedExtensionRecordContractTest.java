@@ -1,9 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
@@ -13,6 +9,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion.VersionFlag;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -23,7 +21,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Replays the language-neutral managed-extension-record/1 fixtures (H0b)
