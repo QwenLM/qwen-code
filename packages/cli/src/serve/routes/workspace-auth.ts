@@ -359,6 +359,25 @@ export function registerWorkspaceAuthRoutes(
         });
         return;
       }
+      // The CLI, ACP and VS Code surfaces each run this same per-provider
+      // key guard before persisting. `validateApiKey` is a function on
+      // ProviderConfig, so it never reaches the wire — a client of this
+      // route cannot apply it and the daemon must. Without this check a
+      // key the provider's own entry rejects gets persisted silently, and
+      // the user only finds out at the first call.
+      if (knownProvider.validateApiKey) {
+        const apiKeyError = knownProvider.validateApiKey(
+          installRequest.apiKey.trim(),
+          installRequest.baseUrl ?? '',
+        );
+        if (apiKeyError) {
+          res.status(400).json({
+            error: apiKeyError,
+            code: 'invalid_api_key',
+          });
+          return;
+        }
+      }
       try {
         const assertGenerationOpen = captureGenerationAssertion?.();
         assertGenerationOpen?.();
