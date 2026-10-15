@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -18,7 +20,21 @@ public final class StoreModels {
             long harnessLastEventId, long lastSequence,
             long replayFloorSequence, long createdAt, long updatedAt,
             Long deletedAt, long version, ContextBinding workspace,
-            String approvalMode, String toolProfile) {
+            String approvalMode, String toolProfile,
+            String agentDefinitionDigest) {
+        public SessionRecord(String tenantId, String sessionId,
+                String agentId, String agentRevision, String title,
+                String status, String harnessBootId, String harnessEventEpoch,
+                long harnessLastEventId, long lastSequence,
+                long replayFloorSequence, long createdAt, long updatedAt,
+                Long deletedAt, long version, ContextBinding workspace,
+                String approvalMode, String toolProfile) {
+            this(tenantId, sessionId, agentId, agentRevision, title, status,
+                    harnessBootId, harnessEventEpoch, harnessLastEventId,
+                    lastSequence, replayFloorSequence, createdAt, updatedAt,
+                    deletedAt, version, workspace, approvalMode, toolProfile,
+                    null);
+        }
         public SessionRecord(String tenantId, String sessionId,
                 String agentId, String title, String status,
                 String harnessBootId, String harnessEventEpoch,
@@ -27,7 +43,16 @@ public final class StoreModels {
             this(tenantId, sessionId, agentId, null, title, status,
                     harnessBootId, harnessEventEpoch, harnessLastEventId,
                     lastSequence, 0, createdAt, updatedAt, deletedAt, version,
-                    null, "yolo", null);
+                    null, "yolo", null, null);
+        }
+
+        public SessionRecord withStatus(String value) {
+            return new SessionRecord(tenantId, sessionId, agentId,
+                    agentRevision, title, value, harnessBootId,
+                    harnessEventEpoch, harnessLastEventId, lastSequence,
+                    replayFloorSequence, createdAt, updatedAt, deletedAt,
+                    version, workspace, approvalMode, toolProfile,
+                    agentDefinitionDigest);
         }
     }
 
@@ -72,7 +97,31 @@ public final class StoreModels {
     public record CommandRecord(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String status, String sessionStatusBefore,
-            long createdAt, long updatedAt) {
+            byte[] actorKey, long createdAt, long updatedAt) {
+        /**
+         * The recorder half of every command replay gate. A receipt this
+         * build writes names its recorder or carries
+         * {@code ManagedReceipts.UNATTRIBUTED}, which no actor key equals;
+         * only a receipt recorded before the stamp existed reads back NULL.
+         * Its recorder was never stored, so it keeps the role-gated replay
+         * it was recorded under rather than answering only the creator. A
+         * caller without an actor id never passes, so it stays on the
+         * creator gate.
+         */
+        public boolean admitsReplayBy(String actorId) {
+            if (actorId == null) {
+                return false;
+            }
+            if (actorKey == null) {
+                return true;
+            }
+            try {
+                return Arrays.equals(actorKey,
+                        ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+            } catch (IllegalArgumentException error) {
+                return false;
+            }
+        }
     }
 
     /**
@@ -89,7 +138,17 @@ public final class StoreModels {
     }
 
     public record SessionMutationCommand(String sessionId, String status,
-            boolean replayed) {
+            boolean replayed, long renameRevision) {
+        public SessionMutationCommand(String sessionId, String status, boolean replayed) {
+            this(sessionId, status, replayed, 0);
+        }
+    }
+
+    public record RenameDelivery(String tenantId, String sessionId,
+            String idempotencyKey, String title, long revision, int attemptCount, long claimGeneration) {
+        public RenameDelivery(String tenantId, String sessionId, String idempotencyKey, String title, long revision, int attemptCount) {
+            this(tenantId, sessionId, idempotencyKey, title, revision, attemptCount, 0);
+        }
     }
 
     public record SessionMutation(SessionRecord session, boolean replayed) {
@@ -100,13 +159,14 @@ public final class StoreModels {
         ARCHIVE,
         DELETE,
         ACTION_RESPONSE,
-        CWD_CHANGE
+        CWD_CHANGE,
+        TASK_CANCEL
     }
 
     /**
      * A durable lifecycle operation. {@code sessionStatusBefore} is the
      * Session status when it was admitted; only an operation admitted on an
-     * active Session closes the Harness. The cwd fields and
+     * active Session closes the Harness. The cwd fields, {@code taskId} and
      * {@code failureCode} are set only for the kinds that populate them.
      */
     public record OperationRecord(String tenantId, String sessionId,
@@ -116,7 +176,18 @@ public final class StoreModels {
             long claimGeneration, int attemptCount, String targetCwdRelative,
             Long expectedContextRevision, Long resultContextRevision,
             String failureCode, int lifecycleProtocolVersion,
-            byte[] actorKey) {
+            byte[] actorKey, String taskId) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState,
+                String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration,
+                int attemptCount, String targetCwdRelative, Long expectedContextRevision,
+                Long resultContextRevision, String failureCode, int lifecycleProtocolVersion, byte[] actorKey) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
+                    expectedContextRevision, resultContextRevision, failureCode, lifecycleProtocolVersion, actorKey,
+                    null);
+        }
+
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
                 String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
                 String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String targetCwdRelative,
@@ -188,6 +259,8 @@ public final class StoreModels {
             long firstSequence, long lastSequence, long createdAt,
             long updatedAt, long revision, List<ItemPartRecord> content) {
     }
+
+    public record SnapshotPage(List<ItemRecord> items, boolean hasMore, String nextCursor, long coveredSequence) {}
 
     public record SnapshotRecord(String tenantId, String sessionId,
             long version, long coveredSequence, List<ItemRecord> items,

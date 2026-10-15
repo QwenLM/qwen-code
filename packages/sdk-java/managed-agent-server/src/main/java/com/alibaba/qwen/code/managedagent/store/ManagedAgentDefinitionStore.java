@@ -1,13 +1,22 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
-import java.util.List;
-import java.util.Optional;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * Tenant-scoped AgentDefinition revisions (D8a). Revisions are append-only:
@@ -18,10 +27,13 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Repository
 public class ManagedAgentDefinitionStore {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
+    private final RequestDigests digests;
 
-    public ManagedAgentDefinitionStore(JdbcTemplate jdbc) {
+    public ManagedAgentDefinitionStore(JdbcTemplate jdbc, RequestDigests digests) {
         this.jdbc = jdbc;
+        this.digests = digests;
     }
 
     public record DefinitionRevision(String agentId, long revision,
@@ -98,19 +110,55 @@ public class ManagedAgentDefinitionStore {
         return record(tenantId, idempotencyKey, requestDigest, result, now);
     }
 
+    public Map<String, Object> pinnedContent(SessionRecord session) {
+        DefinitionRevision revision = find(session.tenantId(),
+                session.agentId(), Long.parseLong(session.agentRevision()))
+                .orElseThrow(ManagedAgentDefinitionStore::notFound);
+        Map<String, Object> content;
+        try {
+            content = JSON.readValue(revision.definitionJson(),
+                    new TypeReference<Map<String, Object>>() { });
+        } catch (Exception error) {
+            throw new IllegalStateException("Invalid pinned definition", error);
+        }
+        if (!revision.digest().equals(session.agentDefinitionDigest())
+                || !digests.digest(content)
+                        .equals("sha256:" + session.agentDefinitionDigest())) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "hosted_agent_definition_conflict",
+                    "The pinned agent definition digest does not match.");
+        }
+        return content;
+    }
+
     public Optional<DefinitionRevision> latest(String tenantId,
             String agentId) {
         return first(jdbc.query("SELECT agent_id, revision, digest,"
-                + " definition_json, created_at FROM managed_agent_definition"
+                + " definition_json, created_at FROM ma_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ?"
                 + " ORDER BY revision DESC LIMIT 1",
+                ManagedAgentDefinitionStore::row, tenantId, agentId));
+    }
+
+    /**
+     * The latest revision read inside the caller's transaction with the
+     * agent's rows write-locked (D8b): a Session pinned to "latest" cannot
+     * interleave with a concurrent update writing that same next revision.
+     * FOR UPDATE stands for both engines: H2 has no FOR SHARE.
+     */
+    public Optional<DefinitionRevision> latestForUpdate(String tenantId,
+            String agentId) {
+        return first(jdbc.query("SELECT agent_id, revision, digest,"
+                + " definition_json, created_at FROM ma_agent_definition"
+                + " WHERE tenant_id = ? AND agent_id = ?"
+                + " ORDER BY revision DESC LIMIT 1 FOR UPDATE",
                 ManagedAgentDefinitionStore::row, tenantId, agentId));
     }
 
     public Optional<DefinitionRevision> find(String tenantId, String agentId,
             long revision) {
         return first(jdbc.query("SELECT agent_id, revision, digest,"
-                + " definition_json, created_at FROM managed_agent_definition"
+                + " definition_json, created_at FROM ma_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ? AND revision = ?",
                 ManagedAgentDefinitionStore::row, tenantId, agentId,
                 revision));
@@ -128,11 +176,11 @@ public class ManagedAgentDefinitionStore {
     private Optional<Admission> replay(String tenantId,
             String idempotencyKey, String requestDigest) {
         List<String[]> commands = jdbc.query("SELECT request_digest,"
-                + " agent_id, revision FROM managed_agent_definition_command"
-                + " WHERE tenant_id = ? AND idempotency_key = ?",
+                + " agent_id, agent_revision AS revision FROM ma_request_receipt"
+                + " WHERE receipt_key = ? AND namespace = 'AGENT_DEFINITION' AND tenant_id = ? AND idempotency_key = ?",
                 (row, index) -> new String[] {row.getString(1),
                         row.getString(2), Long.toString(row.getLong(3))},
-                tenantId, idempotencyKey);
+                receiptKey(tenantId, idempotencyKey), tenantId, idempotencyKey);
         if (commands.isEmpty()) {
             return Optional.empty();
         }
@@ -152,11 +200,13 @@ public class ManagedAgentDefinitionStore {
     private Admission record(String tenantId, String idempotencyKey,
             String requestDigest, DefinitionRevision revision, long now) {
         try {
-            jdbc.update("INSERT INTO managed_agent_definition_command"
-                    + " (tenant_id, idempotency_key, request_digest, agent_id,"
-                    + " revision, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    tenantId, idempotencyKey, requestDigest,
-                    revision.agentId(), revision.revision(), now);
+            jdbc.update("INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
+                            + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, request_digest,"
+                            + " state, agent_id, agent_revision, created_at, updated_at)"
+                            + " VALUES (?, 'AGENT_DEFINITION', ?, ?, 'TENANT', ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?)",
+                    receiptKey(tenantId, idempotencyKey), ManagedSchemaKeys.key(tenantId), tenantId,
+                    ManagedSchemaKeys.key("TENANT", tenantId), tenantId, idempotencyKey,
+                    ManagedSchemaKeys.key(idempotencyKey), requestDigest, revision.agentId(), revision.revision(), now, now);
         } catch (DuplicateKeyException error) {
             // A concurrent request recorded this key first.
             throw new ConcurrentWriteException("idempotency_conflict",
@@ -165,8 +215,13 @@ public class ManagedAgentDefinitionStore {
         return new Admission(revision, false);
     }
 
+    private static String receiptKey(String tenantId, String idempotencyKey) {
+        return ManagedSchemaKeys.receiptKey(ReceiptNamespace.AGENT_DEFINITION, tenantId,
+                ReceiptScope.TENANT, tenantId, idempotencyKey);
+    }
+
     private void insertRevision(String tenantId, DefinitionRevision revision) {
-        jdbc.update("INSERT INTO managed_agent_definition (tenant_id,"
+        jdbc.update("INSERT INTO ma_agent_definition (tenant_id,"
                 + " agent_id, revision, digest, definition_json, created_at)"
                 + " VALUES (?, ?, ?, ?, ?, ?)", tenantId, revision.agentId(),
                 revision.revision(), revision.digest(),

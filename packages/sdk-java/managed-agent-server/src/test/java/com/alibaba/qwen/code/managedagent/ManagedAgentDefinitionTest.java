@@ -1,18 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -22,6 +14,16 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
+
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * AgentDefinition revisions (D8a): creation and replay, append-only
@@ -56,6 +58,12 @@ class ManagedAgentDefinitionTest {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @Autowired
+    private com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore definitions;
+
+    @Autowired
+    private org.springframework.transaction.PlatformTransactionManager transactionManager;
 
     @Test
     void createsAndReplaysTheFirstRevision() throws Exception {
@@ -147,7 +155,7 @@ class ManagedAgentDefinitionTest {
         assertThat(absent.has("metadata")).isFalse();
         assertThat(explicit.has("metadata")).isFalse();
         assertThat(objectMapper.readTree(jdbc.queryForObject(
-                "SELECT definition_json FROM managed_agent_definition"
+                "SELECT definition_json FROM ma_agent_definition"
                         + " WHERE tenant_id = ? AND agent_id = ?",
                 String.class, tenant, explicit.path("id").asText())))
                 .isEqualTo(minimum);
@@ -164,7 +172,7 @@ class ManagedAgentDefinitionTest {
                 .andExpect(status().isAccepted()));
         String agentId = first.path("id").asText();
         assertThat(objectMapper.readTree(jdbc.queryForObject(
-                "SELECT definition_json FROM managed_agent_definition"
+                "SELECT definition_json FROM ma_agent_definition"
                         + " WHERE tenant_id = ? AND agent_id = ? AND revision = 1",
                 String.class, tenant, agentId))).isEqualTo(content);
 
@@ -174,7 +182,7 @@ class ManagedAgentDefinitionTest {
         assertThat(second.path("revision").asText()).isEqualTo("2");
         assertThat(second.get("digest")).isNotEqualTo(first.get("digest"));
         assertThat(objectMapper.readTree(jdbc.queryForObject(
-                "SELECT definition_json FROM managed_agent_definition"
+                "SELECT definition_json FROM ma_agent_definition"
                         + " WHERE tenant_id = ? AND agent_id = ? AND revision = 2",
                 String.class, tenant, agentId))).isEqualTo(content);
     }
@@ -233,15 +241,15 @@ class ManagedAgentDefinitionTest {
         String path = "/v1/agents;jsessionid=abc";
         String key = "matrix-" + UUID.randomUUID();
         Integer before = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM managed_agent_definition", Integer.class);
+                "SELECT COUNT(*) FROM ma_agent_definition", Integer.class);
         mvc.perform(post(path).header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON).content(DEFINITION))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_tenant"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_definition_command WHERE idempotency_key = ?",
+                + " ma_request_receipt WHERE namespace = 'AGENT_DEFINITION' AND idempotency_key = ?",
                 Integer.class, key)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_definition",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_agent_definition",
                 Integer.class)).isEqualTo(before);
         mvc.perform(post(path).header(TENANT, tenant)
                         .header("Idempotency-Key", key)
@@ -278,6 +286,72 @@ class ManagedAgentDefinitionTest {
         assertThat(rows(tenant)).isZero();
     }
 
+    @Test
+    void latestForUpdateBlocksAConcurrentLockingReadUntilCommit() throws Exception {
+        // Design §8: "no partially updated read under a concurrent update".
+        // A plain latest() takes no lock, so a concurrent transaction could
+        // interleave; latestForUpdate must hold the row lock until commit.
+        // Both threads drive the production store read through a
+        // transaction-bound JdbcTemplate over the shared DataSource bean, so
+        // dropping FOR UPDATE from the production query turns this red: the
+        // contender would read immediately instead of blocking.
+        String tenant = tenant();
+        String agentId = json(create(tenant, "for-update", DEFINITION)
+                .andExpect(status().isAccepted())).path("id").asText();
+        com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore store =
+                new com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore(
+                        new org.springframework.jdbc.core.JdbcTemplate(
+                                jdbc.getDataSource()), new RequestDigests());
+        org.springframework.transaction.support.TransactionTemplate template =
+                new org.springframework.transaction.support.TransactionTemplate(
+                        transactionManager);
+        java.util.concurrent.atomic.AtomicReference<Throwable> contenderFailure =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicLong contenderReadMillis =
+                new java.util.concurrent.atomic.AtomicLong(-1);
+        java.util.concurrent.CountDownLatch holderLocked =
+                new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch contenderEntered =
+                new java.util.concurrent.CountDownLatch(1);
+        Thread contender = new Thread(() -> {
+            try {
+                assertThat(holderLocked.await(5,
+                        java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                contenderEntered.countDown();
+                template.executeWithoutResult(ignored -> {
+                    long started = System.nanoTime();
+                    store.latestForUpdate(tenant, agentId);
+                    contenderReadMillis.set(
+                            (System.nanoTime() - started) / 1_000_000);
+                });
+            } catch (Throwable error) {
+                contenderFailure.set(error);
+            }
+        });
+        contender.start();
+        template.executeWithoutResult(ignored -> {
+            store.latestForUpdate(tenant, agentId);
+            holderLocked.countDown();
+            try {
+                // The contender enters its transaction right after the
+                // latch; give it time to reach the blocked locking read.
+                assertThat(contenderEntered.await(5,
+                        java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                Thread.sleep(300);
+            } catch (InterruptedException error) {
+                throw new RuntimeException(error);
+            }
+        });
+        contender.join(5000);
+        assertThat(contenderFailure.get()).as(
+                "the contender's locking read failed for another reason")
+                .isNull();
+        assertThat(contender.isAlive()).isFalse();
+        // The contender's locking read must block on the holder's row lock
+        // for most of the holder's remaining hold, not return immediately.
+        assertThat(contenderReadMillis.get()).isGreaterThanOrEqualTo(150);
+    }
+
     private ResultActions create(String tenant, String key, String body)
             throws Exception {
         return mvc.perform(post("/v1/agents").header(TENANT, tenant)
@@ -302,7 +376,7 @@ class ManagedAgentDefinitionTest {
     }
 
     private int rows(String tenant) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_definition"
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_agent_definition"
                 + " WHERE tenant_id = ?", Integer.class, tenant);
     }
 

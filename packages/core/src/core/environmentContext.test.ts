@@ -25,6 +25,7 @@ import {
   isSystemReminderContent,
   stripSystemReminderBlocks,
   stripStartupContext,
+  wrapSystemReminder,
   formatDateForContext,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
@@ -367,6 +368,47 @@ describe('getInitialChatHistory', () => {
       "I'm currently working in the directory",
     );
     expect(firstText(history)).not.toContain('"cron_list"');
+  });
+
+  it('announces the git snapshot after the startup context and before deferred tools', async () => {
+    mockToolRegistry.getDeferredToolSummary.mockReturnValue([
+      { name: 'cron_list', description: 'List scheduled jobs.' },
+    ]);
+
+    const [history] = await getInitialChatHistory(
+      mockConfig as Config,
+      undefined,
+      { gitStatus: 'Git snapshot at conversation start.' },
+    );
+
+    const texts = (history[0]?.parts ?? []).map((part) => part.text);
+    expect(texts).toHaveLength(3);
+    expect(texts[0]).toContain("I'm currently working in the directory");
+    expect(texts[1]).toBe(
+      wrapSystemReminder('Git snapshot at conversation start.'),
+    );
+    expect(texts[2]).toContain('"cron_list"');
+  });
+
+  it('keeps the git snapshot when skipStartupContext is true', async () => {
+    skipStartupContext();
+
+    const [history] = await getInitialChatHistory(
+      mockConfig as Config,
+      undefined,
+      { gitStatus: 'Git snapshot at conversation start.' },
+    );
+
+    expect(history).toHaveLength(1);
+    expect(history[0]?.parts?.map((part) => part.text)).toEqual([
+      wrapSystemReminder('Git snapshot at conversation start.'),
+    ]);
+  });
+
+  it('omits the git snapshot when none is given', async () => {
+    const [history] = await getInitialChatHistory(mockConfig as Config);
+
+    expect(JSON.stringify(history)).not.toContain('Git snapshot');
   });
 
   it('returns empty history when skipping startup context without extras', async () => {

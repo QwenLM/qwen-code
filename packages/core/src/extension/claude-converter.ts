@@ -53,6 +53,7 @@ export interface ClaudePluginConfig {
   repository?: string;
   license?: string;
   keywords?: string[];
+  dependencies?: unknown;
   commands?: string | string[];
   agents?: string | string[];
   skills?: string | string[];
@@ -610,6 +611,8 @@ export async function buildQwenExtensionFromPlugin(
   pluginSource: string,
   mergedConfig: ClaudePluginConfig,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+  // Mod discovery needs the effective paths before classic config is resolved.
+  const claudeManifest = JSON.stringify(mergedConfig, null, 2);
   // Resolve MCP servers from a JSON file path if needed.
   if (mergedConfig.mcpServers && typeof mergedConfig.mcpServers === 'string') {
     const mcpServersPath = resolvePluginRelativeFile(
@@ -636,6 +639,14 @@ export async function buildQwenExtensionFromPlugin(
 
   try {
     await copyDirectory(pluginSource, tmpDir);
+
+    const manifestDir = path.join(tmpDir, '.claude-plugin');
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(manifestDir, 'plugin.json'),
+      claudeManifest,
+      'utf-8',
+    );
 
     // A standalone plugin's source is a full git clone; drop VCS metadata so
     // it isn't shipped into the installed extension.
@@ -1059,6 +1070,8 @@ export function mergeClaudeConfigs(
     merged.repository = marketplacePlugin.repository;
   if (marketplacePlugin.license) merged.license = marketplacePlugin.license;
   if (marketplacePlugin.keywords) merged.keywords = marketplacePlugin.keywords;
+  if (marketplacePlugin.dependencies !== undefined)
+    merged.dependencies = marketplacePlugin.dependencies;
   if (marketplacePlugin.commands) merged.commands = marketplacePlugin.commands;
   if (marketplacePlugin.agents) merged.agents = marketplacePlugin.agents;
   if (marketplacePlugin.skills) merged.skills = marketplacePlugin.skills;

@@ -1,20 +1,22 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedChildRunRecordContractTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -107,6 +109,25 @@ class ManagedChildRunRecordContractTest {
                             merge(base, fixture.get("before")), merge(base, fixture.get("after"))),
                     fixture.get("id").textValue());
         }
+    }
+
+    @Test
+    void classifiesEachChildSessionKindByName() throws IOException {
+        JsonNode templates = fixtures().get("templates");
+        assertTrue(ManagedExtensionRecords.isChildSessionRun(
+                templates.get("child_agent")));
+        assertTrue(ManagedExtensionRecords.isChildSessionRun(
+                templates.get("workflow")));
+        assertFalse(ManagedExtensionRecords.isChildSessionRun(
+                templates.get("child_run")));
+        // The validator refuses any other kind before these run; past it, an
+        // unlisted kind still joins no child Session rule and projects no
+        // task kind by default.
+        ObjectNode unlisted = templates.get("child_agent").deepCopy();
+        unlisted.put("kind", "unregistered");
+        assertFalse(ManagedExtensionRecords.isChildSessionRun(unlisted));
+        assertThrows(InvalidRecordException.class,
+                () -> ManagedExtensionRecords.childRunTaskKind(unlisted));
     }
 
     static JsonNode fixtures() throws IOException {

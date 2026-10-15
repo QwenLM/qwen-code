@@ -85,6 +85,10 @@ public enum SurfaceRegistry {
             "/v1/agents/sessions/{sessionId}/tasks/{taskId}/events",
             Surface.PUBLIC, RuleClass.READER,
             EnumSet.of(Capability.TASK_EVENT_LIST)),
+    PUBLIC_TASK_CANCEL(Method.POST,
+            "/v1/agents/sessions/{sessionId}/tasks/{taskId}/cancel",
+            Surface.PUBLIC, RuleClass.TASK_OPERATOR,
+            EnumSet.of(Capability.TASK_CANCEL)),
     // ManagedActionController: Action read and respond routes.
     PUBLIC_ACTION_LIST(Method.GET,
             "/v1/agents/sessions/{sessionId}/actions",
@@ -155,6 +159,35 @@ public enum SurfaceRegistry {
     PUBLIC_AGENT_DEFINITION_UPDATE(Method.POST, "/v1/agents/{agentId}",
             Surface.PUBLIC, RuleClass.TENANT_SCOPED,
             EnumSet.of(Capability.AGENT_DEFINITION_UPDATE)),
+    // ManagedAutomationController (H6b): definitions and occurrences of the
+    // Workspace-bound Session their creator owns. Reads follow the Workspace
+    // read grant (an unreadable definition answers 404 automation_not_found);
+    // mutations are the creator's, with the owner family's refusal.
+    PUBLIC_AUTOMATION_CREATE(Method.POST, "/v1/agent-automations",
+            Surface.PUBLIC, RuleClass.OWNER,
+            EnumSet.of(Capability.AUTOMATION_CREATE)),
+    PUBLIC_AUTOMATION_LIST(Method.GET, "/v1/agent-automations",
+            Surface.PUBLIC, RuleClass.READER,
+            EnumSet.of(Capability.AUTOMATION_LIST)),
+    PUBLIC_AUTOMATION_GET(Method.GET, "/v1/agent-automations/{automationId}",
+            Surface.PUBLIC, RuleClass.READER,
+            EnumSet.of(Capability.AUTOMATION_GET)),
+    PUBLIC_AUTOMATION_UPDATE(Method.POST,
+            "/v1/agent-automations/{automationId}",
+            Surface.PUBLIC, RuleClass.OWNER,
+            EnumSet.of(Capability.AUTOMATION_UPDATE)),
+    PUBLIC_AUTOMATION_RETIRE(Method.DELETE,
+            "/v1/agent-automations/{automationId}",
+            Surface.PUBLIC, RuleClass.OWNER,
+            EnumSet.of(Capability.AUTOMATION_RETIRE)),
+    PUBLIC_AUTOMATION_RUN(Method.POST,
+            "/v1/agent-automations/{automationId}/runs",
+            Surface.PUBLIC, RuleClass.OWNER,
+            EnumSet.of(Capability.AUTOMATION_RUN)),
+    PUBLIC_AUTOMATION_RUN_LIST(Method.GET,
+            "/v1/agent-automations/{automationId}/runs",
+            Surface.PUBLIC, RuleClass.READER,
+            EnumSet.of(Capability.AUTOMATION_RUN_LIST)),
     // WebShellAgentController: WebShell Session surfaces.
     WEBSHELL_TASK_LIST(Method.POST, "/api/agent/web-shell/v1/tasks/query",
             Surface.WEBSHELL, RuleClass.READER,
@@ -166,6 +199,9 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/tasks/events/query",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.TASK_EVENT_LIST)),
+    WEBSHELL_TASK_CANCEL(Method.POST, "/api/agent/web-shell/v1/tasks/cancel",
+            Surface.WEBSHELL, RuleClass.TASK_OPERATOR,
+            EnumSet.of(Capability.TASK_CANCEL)),
     WEBSHELL_SESSION_LIST(Method.POST, "/api/agent/web-shell/v1/sessions/query",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.SESSION_LIST)),
@@ -275,6 +311,11 @@ public enum SurfaceRegistry {
     INTERNAL_TRANSACTION_COMMIT(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/transactions:commit",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_TRANSACTION_COMMIT)),
+    INTERNAL_TRANSACTION_COMMIT_V2(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/transactions:commit-v2",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_TRANSACTION_COMMIT)),
     INTERNAL_RESTORE(Method.GET,
@@ -465,6 +506,7 @@ public enum SurfaceRegistry {
         TASK_LIST,
         TASK_GET,
         TASK_EVENT_LIST,
+        TASK_CANCEL,
         TRANSCRIPT_QUERY,
         ACTION_LIST,
         ACTION_GET,
@@ -483,6 +525,13 @@ public enum SurfaceRegistry {
         AGENT_DEFINITION_CREATE,
         AGENT_DEFINITION_GET,
         AGENT_DEFINITION_UPDATE,
+        AUTOMATION_CREATE,
+        AUTOMATION_LIST,
+        AUTOMATION_GET,
+        AUTOMATION_UPDATE,
+        AUTOMATION_RETIRE,
+        AUTOMATION_RUN,
+        AUTOMATION_RUN_LIST,
         STORE_EXECUTION_AUTHORIZE,
         STORE_LIFECYCLE_AUTHORIZE,
         STORE_WRITER_ACQUIRE,
@@ -581,6 +630,19 @@ public enum SurfaceRegistry {
          * and cwd has no legacy arm ({@code 400 unsupported_feature}).
          */
         OPERATOR,
+        /**
+         * Task cancel (H4f): the read grant ({@code 404 session_not_found}
+         * below it), the task itself ({@code 404 task_not_found}), then
+         * OPERATOR or above on the bound Workspace ({@code 403
+         * task_forbidden} below it). No shape gate and no creator-keyed
+         * facts: the delivery records a stop request on the parent's own
+         * journal and runs no new work, so an admitted caller meets the
+         * route's own new-request checks ({@code 409
+         * session_not_active}, {@code task_action_unavailable} or {@code
+         * session_operation_active}). The legacy arm admits every caller
+         * that can read the Session.
+         */
+        TASK_OPERATOR,
         /**
          * The lifecycle family (close, archive, unarchive and delete —
          * D4's OWNER): the Session's recorded owner ({@code

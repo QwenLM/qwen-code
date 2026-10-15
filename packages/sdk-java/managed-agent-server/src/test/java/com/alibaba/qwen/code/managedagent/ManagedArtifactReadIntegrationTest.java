@@ -1,5 +1,20 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.api.*;
+import com.alibaba.qwen.code.managedagent.service.*;
+import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Base64;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -11,22 +26,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
-import com.alibaba.qwen.code.managedagent.api.*;
-import com.alibaba.qwen.code.managedagent.service.*;
-import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
-import org.junit.jupiter.api.Test;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
-
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.Base64;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 class ManagedArtifactReadIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -46,15 +45,20 @@ class ManagedArtifactReadIntegrationTest {
                 return (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(
                         getClass().getClassLoader(), new Class<?>[] {java.sql.Connection.class},
                         (proxy, method, arguments) -> {
-                            if (method.getName().equals("createStatement")) { statements.incrementAndGet(); }
+                            if (method.getName().equals("createStatement")) {
+                                statements.incrementAndGet();
+                            }
                             if (method.getName().equals("prepareStatement")) {
                                 statements.incrementAndGet();
-                                if (((String) arguments[0]).startsWith("INSERT INTO qwen_output_read_lease")) {
+                                if (((String) arguments[0]).startsWith("INSERT INTO ma_read_lease")) {
                                     admissions.incrementAndGet();
                                 }
                             }
-                            try { return method.invoke(connection, arguments); }
-                            catch (java.lang.reflect.InvocationTargetException error) { throw error.getCause(); }
+                            try {
+                                return method.invoke(connection, arguments);
+                            } catch (java.lang.reflect.InvocationTargetException error) {
+                                throw error.getCause();
+                            }
                         });
             }
         };
@@ -74,7 +78,7 @@ class ManagedArtifactReadIntegrationTest {
         assertThat(statements.get()).isLessThanOrEqualTo(350 * 8);
         assertThat(admissions.get()).isEqualTo(1);
         assertThat(response.getContentAsByteArray()).isEqualTo("A".repeat(size).getBytes(StandardCharsets.UTF_8));
-        assertThat(source.fixture.jdbc().queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Long.class)).isZero();
+        assertThat(source.fixture.jdbc().queryForObject("SELECT COUNT(*) FROM ma_read_lease", Long.class)).isZero();
     }
 
     @Test
@@ -238,7 +242,7 @@ class ManagedArtifactReadIntegrationTest {
             if (deleteSession) {
                 fixture.jdbc()
                         .update(
-                                "UPDATE managed_agent_session SET status ="
+                                "UPDATE ma_session SET status ="
                                     + " 'DELETING'");
             } else {
                 permission.set(false);
@@ -270,8 +274,8 @@ class ManagedArtifactReadIntegrationTest {
         // The flipping stub really fired its state change.
         if (deleteSession) {
             assertThat(fixture.jdbc().queryForObject(
-                    "SELECT status FROM managed_agent_session"
-                            + " WHERE session_id = 'session-1'",
+                    "SELECT status FROM ma_session"
+                            + " WHERE session_id = X'73657373696f6e2d31'",
                     String.class)).isEqualTo("DELETING");
         } else {
             assertThat(permission).isFalse();
@@ -289,7 +293,7 @@ class ManagedArtifactReadIntegrationTest {
         var policy = readingPolicy(fixture, () -> true);
         var reader = oneBytePerReadReader(fixture, 0);
         var response = flippingResponse(() -> fixture.jdbc()
-                .update("UPDATE managed_agent_session SET status ="
+                .update("UPDATE ma_session SET status ="
                         + " 'DELETING'"));
         // A 60s window: the DELETING lifecycle gate is evaluated by the
         // throttled access check, so a stage-1 deletion lands only when the
@@ -317,8 +321,8 @@ class ManagedArtifactReadIntegrationTest {
         // The deferral is real: the stage-1 transition really happened
         // mid-stream, and the window is what let the stream complete.
         assertThat(fixture.jdbc().queryForObject(
-                "SELECT status FROM managed_agent_session"
-                        + " WHERE session_id = 'session-1'",
+                "SELECT status FROM ma_session"
+                        + " WHERE session_id = X'73657373696f6e2d31'",
                 String.class)).isEqualTo("DELETING");
     }
 

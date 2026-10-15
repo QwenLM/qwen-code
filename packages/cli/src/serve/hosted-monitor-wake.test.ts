@@ -31,6 +31,7 @@ import {
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 
 // monitor_run is enabled by the H3 enablement slice; the close-side settle
 // rig commits a notification input ahead of it, like the funnel suite does.
@@ -533,6 +534,7 @@ describe('createMonitorWakeRunTurn', () => {
     ['tool', () => new HostedToolRecoveryRequiredError(new Error('parked'))],
     ['mcp', () => new HostedMcpRecoveryRequiredError()],
     ['hook', () => new HostedHookRecoveryRequiredError()],
+    ['model preparation', () => new LlmRequestPreparationError('store lost')],
   ])(
     'leaves a %s recovery-required input unsettled rather than consuming it',
     async (_kind, makeCause) => {
@@ -555,7 +557,7 @@ describe('createMonitorWakeRunTurn', () => {
           needsRecovery,
           writeStderr: () => undefined,
         });
-        expect(await runTurn({ turnId: 'm:1', text: 'wake' })).toBe('settled');
+        expect(await runTurn({ turnId: 'm:1', text: 'wake' })).toBe('recovery');
         // A recovery-required turn parks like a parked prompt: blocked, its
         // input unconsumed, and no error turn_result minted on top of it.
         expect(access.blocked).toBe(true);
@@ -860,6 +862,100 @@ describe('settlePendingMonitorInputs', () => {
       await fs.rm(directory, { recursive: true, force: true });
     }
     temporaryDirectories.clear();
+  });
+
+  it('projects nothing when no notification of the named sources awaits', async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-hosted-wake-settle-'),
+    );
+    temporaryDirectories.add(root);
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const transcriptPath = path.join(root, 'chats', `${sessionId}.jsonl`);
+    await fs.mkdir(runtimeBaseDir, { recursive: true });
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+    });
+    try {
+      const resourceStore = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir,
+        sessionKey,
+      });
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId,
+        transcriptPath,
+        sessionKey,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'worker-test',
+        activationLeaseDurationMs: 60_000,
+        lease,
+        resourceStore,
+        create: {
+          definitionRef: await resourceStore.publish(
+            'managed-definition',
+            Buffer.from('{}', 'utf8'),
+          ),
+          rootSnapshotRef: await resourceStore.publish(
+            'managed-root',
+            Buffer.from('{}', 'utf8'),
+          ),
+          createdBy: 'test',
+        },
+      });
+      const authority = session.authority;
+      const store = session.resources;
+      await authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'prompt-1',
+          sessionKey,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          inputId: 'prompt-1',
+          turnId: 'prompt-1',
+          source: 'hosted-harness',
+          contentRef: await store.publish(
+            'managed-input',
+            Buffer.from('[{"type":"text","text":"hi"}]', 'utf8'),
+          ),
+          admissionRef: await store.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          deadline: null,
+          wakeReason: 'input',
+        },
+      );
+      const projected = vi.spyOn(session.sink, 'project');
+      // Nothing under the named sources: the close pays no projection.
+      expect(
+        await settlePendingMonitorInputs({
+          authority,
+          sink: session.sink,
+          sessionId,
+          cwd: '/workspace',
+        }),
+      ).toBe(0);
+      expect(projected).not.toHaveBeenCalled();
+      // Name the prompt's own source and the settle does read and settle it.
+      expect(
+        await settlePendingMonitorInputs({
+          authority,
+          sink: session.sink,
+          sessionId,
+          cwd: '/workspace',
+          sources: ['hosted-harness'],
+        }),
+      ).toBe(1);
+      expect(projected).toHaveBeenCalled();
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
   });
 
   it('settles pending monitor notifications cancelled and leaves other inputs pending', async () => {
@@ -1259,6 +1355,63 @@ describe('settlePendingMonitorInputs', () => {
           authority.eventsInSequenceRange(1, authority.committedSequence),
         ).map((input) => input.turnId),
       ).toEqual(['run-1:accept:notify']);
+      const settled = await settlePendingMonitorInputs({
+        authority,
+        sink: session.sink,
+        sessionId,
+        cwd: '/workspace',
+      });
+      expect(settled).toBe(1);
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
+      expect(settledEvents).toHaveLength(1);
+      expect(settledEvents[0].payload).toMatchObject({
+        turnId: 'run-1:accept:notify',
+        outcome: 'cancelled',
+        stopReason: 'session_closing',
+      });
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  // #13803 (K2): a workflow child's acceptance notification reads as a
+  // monitor-family source through the default sources list — the close drain
+  // never has to name it.
+  it('pins the fallback: a workflow child notification also settles through the default sources list (production never takes it, the close drain names its own capability list)', async () => {
+    const { session, lease } = await openRootedSession();
+    try {
+      const authority = session.authority;
+      const store = session.resources;
+      await authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'run-1:accept:notify',
+          sessionKey,
+          contentDigest: 'b'.repeat(64),
+        },
+        {
+          inputId: 'run-1:accept:notify',
+          turnId: 'run-1:accept:notify',
+          source: 'workflow',
+          contentRef: await store.publish(
+            'managed-input',
+            Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+          ),
+          deadline: null,
+          admissionRef: await store.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          wakeReason: 'input',
+        },
+      );
       const settled = await settlePendingMonitorInputs({
         authority,
         sink: session.sink,

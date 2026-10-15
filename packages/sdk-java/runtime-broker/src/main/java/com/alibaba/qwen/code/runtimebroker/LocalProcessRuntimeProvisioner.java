@@ -34,7 +34,7 @@ import java.util.regex.Pattern;
  */
 public final class LocalProcessRuntimeProvisioner
         implements RuntimeProvisioner {
-    static final String KIND = "local-process";
+    public static final String KIND = "local-process";
     public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration GRACE_BEFORE_FORCE = Duration.ofSeconds(5);
     private static final int READY_RECORD_LIMIT = 32 * 1024;
@@ -148,6 +148,7 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public RuntimeProvisionRequest createRequest(RuntimeScope scope,
             String isolationKey) {
+        requireLegacyProfile(scope);
         return storageResolver == null
                 ? RuntimeProvisioner.super.createRequest(scope, isolationKey)
                 : new RuntimeProvisionRequest(scope, isolationKey, kind(),
@@ -180,6 +181,9 @@ public final class LocalProcessRuntimeProvisioner
     public CompletionStage<RuntimeResourceHandle> ensureResource(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle knownHandle) {
+        if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())) {
+            return CompletableFuture.failedFuture(privateProfileRefusal());
+        }
         if (store != null) {
             return CompletableFuture.supplyAsync(() -> store.locked(request, seed, knownHandle, true,
                     (resource, registration) -> registration.handle()), executor);
@@ -208,6 +212,9 @@ public final class LocalProcessRuntimeProvisioner
 
     /** Local operator attestation requires the exact registered worker to be gone. */
     public RuntimeObservation attestOperatorStop(RuntimeBindingRecord binding, String recoveryId) {
+        if (binding != null) {
+            requireLegacyProfile(binding.getRequest().getScope());
+        }
         if (store == null || binding == null || !binding.getRequest().isManagedContext()
                 || !LocalRuntimeStore.supported(binding.getResourceHandle())
                 || binding.getProvisionSeed() == null || binding.getLease() == null
@@ -242,6 +249,9 @@ public final class LocalProcessRuntimeProvisioner
 
     /** Read-only preflight of the original durable registration. */
     public void verifyOperatorRegistration(RuntimeBindingRecord binding) {
+        if (binding != null) {
+            requireLegacyProfile(binding.getRequest().getScope());
+        }
         if (store == null || binding == null || !binding.getRequest().isManagedContext()
                 || !LocalRuntimeStore.supported(binding.getResourceHandle())
                 || binding.getProvisionSeed() == null || binding.getLease() == null) {
@@ -281,6 +291,9 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public CompletionStage<Void> release(RuntimeProvisionRequest request,
             RuntimeLease lease) {
+        if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())) {
+            return CompletableFuture.failedFuture(privateProfileRefusal());
+        }
         if (store == null) {
             stop(lease);
         }
@@ -295,7 +308,7 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
         if (store == null || !binding.isDrainRequested() || !binding.getRequest().isManagedContext()
-                || !"session".equals(binding.getRequest().getScope().getIsolationClass())
+                || !WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                 || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(binding.getRequest().getScope().getCapabilityDigest())
                 || binding.getProvisionSeed() == null) {
             return RuntimeProvisioner.super.stopDrained(binding);
@@ -452,6 +465,7 @@ public final class LocalProcessRuntimeProvisioner
 
     private RuntimeLease start(RuntimeProvisionRequest request,
             RuntimeProvisionSeed provided) {
+        requireLegacyProfile(request.getScope());
         if (store != null) {
             RuntimeProvisionSeed seed = provided == null ? newSeed() : provided;
             if (provided == null) {
@@ -770,6 +784,7 @@ public final class LocalProcessRuntimeProvisioner
     private RuntimeObservation observe(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
             RuntimeLease lastLease) {
+        requireLegacyProfile(request.getScope());
         if (store != null) {
             return observeDurable(request, seed, handle, lastLease);
         }
@@ -829,6 +844,7 @@ public final class LocalProcessRuntimeProvisioner
 
     private void attestOwned(RuntimeProvisionRequest request,
             RuntimeLease lease) {
+        requireLegacyProfile(request.getScope());
         OwnedProcess process = owned.get(ownershipKey(lease));
         if (process == null || !process.alive()) {
             throw failed("Managed Runtime process is not alive.");
@@ -928,6 +944,17 @@ public final class LocalProcessRuntimeProvisioner
 
     private static RuntimeBrokerException failed(String message) {
         return failed(message, null);
+    }
+
+    private static void requireLegacyProfile(RuntimeScope scope) {
+        if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
+            throw privateProfileRefusal();
+        }
+    }
+
+    private static RuntimeBrokerException privateProfileRefusal() {
+        return new RuntimeBrokerException(409, "runtime_provision_failed",
+                "Private CSI file profile requires its dedicated Kubernetes worker.", false);
     }
 
     private static RuntimeBrokerException failed(String message,

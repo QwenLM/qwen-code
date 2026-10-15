@@ -1,24 +1,15 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Capability;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.RuleClass;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Surface;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
@@ -30,16 +21,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Stream;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -58,6 +39,28 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.sql.DataSource;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * The D6 acceptance probes: the test walks {@link SurfaceRegistry} and fires
@@ -126,6 +129,12 @@ class SurfaceAdmissionAcceptanceTest {
     private static final String ARTIFACT_TENANT = "tenant-1";
     private static final String ARTIFACT_WORKSPACE = "workspace-1";
     private static final String ARTIFACT_SESSION = "session-1";
+    private static final Set<String> ADMISSION_REFUSALS = Set.of(
+            "actor_required", "actor_scope_mismatch", "session_not_found",
+            "workspace_not_found", "workspace_forbidden",
+            "workspace_unavailable", "session_operation_forbidden",
+            "action_forbidden", "artifact_content_forbidden",
+            "automation_not_found", "task_forbidden");
 
     @Autowired
     private MockMvc mvc;
@@ -158,6 +167,8 @@ class SurfaceAdmissionAcceptanceTest {
     private String pendingActionLegacy;
     private String artifactId;
     private String artifactItemId;
+    private String automation;
+    private String settledTask;
 
     @BeforeAll
     void graph() throws Exception {
@@ -167,13 +178,13 @@ class SurfaceAdmissionAcceptanceTest {
         // sessions write their events. Afterwards the test adds the
         // registry and grant rows the read paths join on.
         var fixture = ToolPublicationStoreTest.apiFixture(dataSource);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"
                 + " (?, ?, 1, 'storage-1', 'Artifacts', 'config', 'policy',"
                 + " 'ACTIVE')", ARTIFACT_TENANT, ARTIFACT_WORKSPACE);
         for (String actor : List.of(READER, OWNER)) {
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                     + " workspace_id, actor_id, role)"
                     + " VALUES (?, ?, ?, 'READER')", ARTIFACT_TENANT,
                     ARTIFACT_WORKSPACE, actor.getBytes(StandardCharsets.UTF_8));
@@ -186,7 +197,7 @@ class SurfaceAdmissionAcceptanceTest {
         artifactItemId = fixture.sessions()
                 .findSnapshot(ARTIFACT_TENANT, ARTIFACT_SESSION).orElseThrow()
                 .items().getFirst().itemId();
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"
                 + " (?, 'ws', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
@@ -194,7 +205,7 @@ class SurfaceAdmissionAcceptanceTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         // A registered Workspace nobody may read: the discovery get must
         // hide it through the grant filter, not through absence.
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"
                 + " (?, 'ws-hidden', 1, 'storage-h', 'Hidden', ?, ?,"
@@ -203,7 +214,7 @@ class SurfaceAdmissionAcceptanceTest {
         grant(tenant, OWNER, true);
         grant(tenant, READER, false);
         grant(tenant, OPERATOR, true);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                 + " workspace_id, actor_id, role) VALUES (?, 'ws', ?,"
                 + " 'OWNER')", tenant, OWNER_RANK.getBytes(
                 StandardCharsets.UTF_8));
@@ -218,6 +229,82 @@ class SurfaceAdmissionAcceptanceTest {
         pendingActionPublicRank = insertAction(tenant, bound);
         pendingActionWebRank = insertAction(tenant, bound);
         pendingActionLegacy = insertAction(tenant, legacy);
+        automation = insertAutomation(tenant, bound);
+        settledTask = insertSettledTask(tenant, bound);
+    }
+
+    // A6: a retained key replays only while current access holds — a
+    // caller who lost the role or the Session gets 403 or 404, never the
+    // replay of their own admitted cancel.
+    @Test
+    void aRetainedCancelKeyNeverBypassesCurrentAccess() throws Exception {
+        String session = createSession(tenant, OWNER, true);
+        String recordKey = "e".repeat(64);
+        jdbc.update("INSERT INTO ma_session_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, delivery_target,"
+                        + " delivery_state, created_at)"
+                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " 'run-retained', ?, 1, 'resource-retained',"
+                        + " 'child_agent', 'running', 'session', 'planned', 1)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, session),
+                recordKey, tenant, session, "f".repeat(64));
+        String key = nextKey();
+        java.util.function.Supplier<MockHttpServletRequestBuilder> cancel =
+                () -> post("/v1/agents/sessions/{session}/tasks/{task}/cancel",
+                        session, "task_" + recordKey)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", key)
+                        .principal(actor(tenant, OPERATOR));
+        String admitted = JSON.readTree(mvc.perform(cancel.get())
+                .andExpect(status().isAccepted()).andReturn().getResponse()
+                .getContentAsString()).path("id").asText();
+        assertThat(JSON.readTree(mvc.perform(cancel.get())
+                .andExpect(status().isAccepted()).andReturn().getResponse()
+                .getContentAsString()).path("id").asText())
+                .isEqualTo(admitted);
+        byte[] operator = OPERATOR.getBytes(StandardCharsets.UTF_8);
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
+                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " AND actor_id = ?", tenant, operator);
+        try {
+            assertThat(mvc.perform(cancel.get())
+                    .andExpect(status().isForbidden()).andReturn()
+                    .getResponse().getContentAsString())
+                    .contains("task_forbidden");
+        } finally {
+            jdbc.update("UPDATE ma_workspace_access SET role ="
+                    + " 'OPERATOR' WHERE tenant_id = ? AND workspace_id ="
+                    + " X'7773' AND actor_id = ?", tenant, operator);
+        }
+        jdbc.update("UPDATE ma_session SET status = 'DELETED'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        assertThat(mvc.perform(cancel.get())
+                .andExpect(status().isNotFound()).andReturn().getResponse()
+                .getContentAsString()).contains("session_not_found");
+    }
+
+    /** A settled child-agent task of the bound Session: the cancel probes
+     * pass every admission rule and stop at the task's own state. */
+    private String insertSettledTask(String tenant, String session) {
+        String recordKey = "a".repeat(64);
+        jdbc.update("INSERT INTO ma_session_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, delivery_target,"
+                        + " delivery_state, created_at, settled_at)"
+                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " 'run-settled', ?, 1, 'resource-settled',"
+                        + " 'child_agent', 'completed', 'session',"
+                        + " 'consumed', 1, 2)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, session),
+                recordKey, tenant, session, "b".repeat(64));
+        return "task_" + recordKey;
     }
 
     static Stream<SurfaceRegistry> everyRoute() {
@@ -254,19 +341,28 @@ class SurfaceAdmissionAcceptanceTest {
                 expect(entry, READER, 403, "workspace_forbidden");
             }
             case READER -> {
-                // The Session lists are tenant-scoped sets with the bound
-                // rows filtered out; every other reader family entry hides
-                // a bound Session below the grant.
-                int status = entry.capabilities().contains(
-                        Capability.SESSION_LIST) ? 200 : 404;
-                String code = status == 404 ? "session_not_found" : null;
-                MvcResult strangers = expect(entry, STRANGER, status, code);
-                MvcResult anonymous = expect(entry, null, status, code);
-                if (status == 200) {
+                if (entry.capabilities().contains(
+                        Capability.AUTOMATION_LIST)) {
+                    // The definition list is a tenant-scoped set filtered
+                    // below the Workspace read grant, like the Session
+                    // lists: the reader's page holds the bound Session's
+                    // definition, a stranger's or anonymous page does not.
+                    expectAutomationListed(entry, STRANGER, false);
+                    expectAutomationListed(entry, null, false);
+                    expectAutomationListed(entry, READER, true);
+                } else if (automationEntry(entry)) {
+                    // A definition below the grant is invisible under its
+                    // own family's code; the reader is admitted.
+                    expect(entry, STRANGER, 404, "automation_not_found");
+                    expect(entry, null, 404, "automation_not_found");
+                    expectAdmitted(entry, READER);
+                } else if (entry.capabilities().contains(Capability.SESSION_LIST)) {
                     // The 200 pins filtering, not just the status: the
                     // bound row must stay invisible while the legacy rows
                     // the tenant owns still list — an empty page would
                     // satisfy the negative half with the filter removed.
+                    MvcResult strangers = expect(entry, STRANGER, 200, null);
+                    MvcResult anonymous = expect(entry, null, 200, null);
                     assertThat(strangers.getResponse().getContentAsString())
                             .as("%s leaks the bound Session to a stranger",
                                     entry.routeKey())
@@ -281,6 +377,16 @@ class SurfaceAdmissionAcceptanceTest {
                             .as("%s drops the legacy rows anonymously",
                                     entry.routeKey())
                             .contains(legacy);
+                } else {
+                    // Every other reader family entry hides a bound
+                    // Session below the grant and admits the reader. The
+                    // stream would stay open; its public twin carries the
+                    // admitted arm.
+                    expect(entry, STRANGER, 404, "session_not_found");
+                    expect(entry, null, 404, "session_not_found");
+                    if (entry != SurfaceRegistry.WEBSHELL_EVENT_STREAM) {
+                        expectAdmitted(entry, READER);
+                    }
                 }
             }
             case READER_ACTOR -> {
@@ -320,11 +426,30 @@ class SurfaceAdmissionAcceptanceTest {
                                 Capability.SESSION_CWD_CHANGE)
                                 ? "actor_required" : "session_not_found");
             }
-            case OWNER -> {
+            case TASK_OPERATOR -> {
+                // The seeded task has settled, so an admitted caller meets
+                // the new-request check of the route itself, never a role.
                 expect(entry, STRANGER, 404, "session_not_found");
+                expect(entry, null, 404, "session_not_found");
+                expect(entry, READER, 403, "task_forbidden");
+                expect(entry, OPERATOR, 409, "task_action_unavailable");
+                expect(entry, OWNER_RANK, 409, "task_action_unavailable");
+            }
+            case OWNER -> {
+                // A stranger sees neither the Session nor, for the routes
+                // addressed by a definition, the definition.
+                expect(entry, STRANGER, 404, automationEntry(entry)
+                        && !entry.capabilities().contains(
+                                Capability.AUTOMATION_CREATE)
+                        ? "automation_not_found" : "session_not_found");
                 expect(entry, READER, 403, "session_operation_forbidden");
                 expect(entry, OPERATOR, 403, "session_operation_forbidden");
-                expect(entry, null, 404, "session_not_found");
+                // An anonymous mutation needs an actor: the automation
+                // mutations name it up front (401), while the lifecycle
+                // family stays invisible (404).
+                expect(entry, null, automationEntry(entry) ? 401 : 404,
+                        automationEntry(entry) ? "actor_required"
+                                : "session_not_found");
             }
             case WORKSPACE_DISCOVERY ->
                 expect(entry, null, 401, "actor_required");
@@ -363,8 +488,8 @@ class SurfaceAdmissionAcceptanceTest {
         assertThat(session).isNotBlank();
         // The state gate fires after the grants: a non-ACTIVE Workspace is
         // a domain refusal on the same family.
-        jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
-                + " WHERE tenant_id = ? AND workspace_id = 'ws'", tenant);
+        jdbc.update("UPDATE ma_workspace SET state = 'DRAINING'"
+                + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
@@ -374,8 +499,8 @@ class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("workspace_unavailable"));
-        jdbc.update("UPDATE managed_workspace_registry SET state = 'ACTIVE'"
-                + " WHERE tenant_id = ? AND workspace_id = 'ws'", tenant);
+        jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE'"
+                + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
         // The legacy arm: no Workspace selection, no actor, admitted.
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -488,8 +613,8 @@ class SurfaceAdmissionAcceptanceTest {
         // role: an owner holding only READER on the Workspace still
         // reaches the files gate's domain 409 rather than the role
         // family's 403.
-        jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
+                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
         mvc.perform(post("/v1/agents/sessions/" + bound + "/close")
@@ -499,8 +624,8 @@ class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("workspace_unavailable"));
-        jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+        jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
+                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
         mvc.perform(post("/api/agent/web-shell/v1/sessions/cwd/change")
@@ -623,8 +748,8 @@ class SurfaceAdmissionAcceptanceTest {
                 + "\"policy_revision\":\"policy\",\"option_id\":\"allow\"}";
         for (String caller : List.of(OPERATOR, OWNER)) {
             String action = insertAction(tenant, bound);
-            jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
-                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+            jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
+                    + " WHERE tenant_id = ? AND workspace_id = X'7773'"
                     + " AND actor_id = ?", tenant,
                     OWNER.getBytes(StandardCharsets.UTF_8));
             mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -637,9 +762,9 @@ class SurfaceAdmissionAcceptanceTest {
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code")
                             .value("workspace_unavailable"));
-            jdbc.update("UPDATE managed_workspace_access"
+            jdbc.update("UPDATE ma_workspace_access"
                     + " SET role = 'OPERATOR'"
-                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+                    + " WHERE tenant_id = ? AND workspace_id = X'7773'"
                     + " AND actor_id = ?", tenant,
                     OWNER.getBytes(StandardCharsets.UTF_8));
             mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -673,8 +798,8 @@ class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isAccepted()).andReturn();
         String operationId = JSON.readTree(first.getResponse()
                 .getContentAsString()).path("id").asText();
-        jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
+                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
                 + " AND actor_id = ?", tenant,
                 OPERATOR.getBytes(StandardCharsets.UTF_8));
         mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -696,8 +821,8 @@ class SurfaceAdmissionAcceptanceTest {
                         .content(body))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code").value("action_forbidden"));
-        jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+        jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
+                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
                 + " AND actor_id = ?", tenant,
                 OPERATOR.getBytes(StandardCharsets.UTF_8));
     }
@@ -852,7 +977,7 @@ class SurfaceAdmissionAcceptanceTest {
     @Test
     void theOwnerColumnTakesPrecedenceOverTheCreator() throws Exception {
         String scratch = createSession(tenant, OWNER, true);
-        jdbc.update("UPDATE managed_agent_session SET owner_actor_key = ?"
+        jdbc.update("UPDATE ma_session SET owner_actor_key = ?"
                 + " WHERE tenant_id = ? AND session_id = ?",
                 new com.alibaba.qwen.code.runtimebroker.managedworkspace
                         .WorkspaceActor(tenant, OWNER_RANK).getActorId()
@@ -877,17 +1002,15 @@ class SurfaceAdmissionAcceptanceTest {
                         .value("session_operation_forbidden"));
     }
 
-    // The narrowed tenant-owned fall-through is unbound-only: a bound
-    // Session with no owner record answers through the create-command
-    // actor recorded for it, or through the Workspace role arm with the
-    // creator-keyed facts — and with no create command at all it is
-    // inoperable, whichever arm admitted the caller.
+    // Execution uses the Session's recorded creator. A missing owner alone
+    // retains that authority; a missing creator is a corrupt binding and
+    // historical request receipts cannot replace its execution identity.
     @Test
-    void aBoundSessionWithNoOwnerRecordAnswersThroughItsRecordedArms()
+    void aBoundSessionKeepsItsCreatorAuthorityAndRefusesAMissingCreator()
             throws Exception {
         String withCommand = createSession(tenant, OWNER, true);
-        jdbc.update("UPDATE managed_agent_session SET owner_actor_key ="
-                + " NULL, creator_actor_key = NULL WHERE tenant_id = ? AND"
+        jdbc.update("UPDATE ma_session SET owner_actor_key ="
+                + " NULL WHERE tenant_id = ? AND"
                 + " session_id = ?", tenant, withCommand);
         mvc.perform(post("/v1/agents/sessions/" + withCommand + "/actions/"
                         + insertAction(tenant, withCommand) + "/responses")
@@ -908,13 +1031,24 @@ class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.type").value("action_response"));
 
+        jdbc.update("UPDATE ma_session SET creator_actor_key = NULL WHERE tenant_id = ? AND session_id = ?",
+                tenant, withCommand);
+        mvc.perform(post("/v1/agents/sessions/" + withCommand + "/actions/"
+                        + insertAction(tenant, withCommand) + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON).content(RESPOND_BODY))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+
         String noCommand = createSession(tenant, OWNER, true);
         String action = insertAction(tenant, noCommand);
-        jdbc.update("UPDATE managed_agent_session SET owner_actor_key ="
+        jdbc.update("UPDATE ma_session SET owner_actor_key ="
                 + " NULL, creator_actor_key = NULL WHERE tenant_id = ? AND"
                 + " session_id = ?", tenant, noCommand);
-        jdbc.update("DELETE FROM managed_workspace_create_command"
-                + " WHERE tenant_id = ? AND session_id = ?", tenant, noCommand);
+        jdbc.update("DELETE FROM ma_request_receipt"
+                + " WHERE namespace = 'SESSION_CREATE_ACTOR' AND tenant_id = ? AND session_id = ?", tenant, noCommand);
         mvc.perform(post("/v1/agents/sessions/" + noCommand + "/actions/"
                         + action + "/responses")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -1053,9 +1187,8 @@ class SurfaceAdmissionAcceptanceTest {
         // An OPEN clone of pub-1's row so only the grant-token comparison
         // can fail this call — the fenced original's state term absorbs
         // every token.
-        var row = jdbc.queryForMap("SELECT * FROM qwen_tool_publication"
-                + " WHERE publication_id = 'pub-1' AND session_id = '"
-                + ARTIFACT_SESSION + "'");
+        var row = jdbc.queryForMap("SELECT * FROM ma_output_capture"
+                + " WHERE publication_id = ? AND session_id = ?", "pub-1", ARTIFACT_SESSION);
         List<String> publicationColumns = new ArrayList<>(row.keySet());
         Object[] values = publicationColumns.stream().map(col ->
                         "publication_id".equals(col) ? "pub-open"
@@ -1065,7 +1198,7 @@ class SurfaceAdmissionAcceptanceTest {
                                 : "capture_id".equals(col) ? "pub-open-cap"
                                                         : row.get(col))
                 .toArray();
-        jdbc.update("INSERT INTO qwen_tool_publication ("
+        jdbc.update("INSERT INTO ma_output_capture ("
                         + String.join(", ", publicationColumns) + ") VALUES ("
                         + String.join(", ", java.util.Collections.nCopies(
                                 publicationColumns.size(), "?")) + ")",
@@ -1128,6 +1261,71 @@ class SurfaceAdmissionAcceptanceTest {
                 .isEqualTo(status);
     }
 
+    /**
+     * The caller the route's class names as enough gets an answer outside
+     * the admission refusals: success or a domain refusal of its own. This
+     * is what makes demoting a whole capability family to a weaker class
+     * fail, since the probes of the stronger class are no longer fired.
+     */
+    private void expectAdmitted(SurfaceRegistry entry, String actor)
+            throws Exception {
+        String caller = actor == null ? "anonymous" : actor;
+        MvcResult result = mvc.perform(requestFor(entry, actor, tenant))
+                .andReturn();
+        int status = result.getResponse().getStatus();
+        String body = result.getResponse().getContentAsString();
+        String code = body.isEmpty() ? ""
+                : JSON.readTree(body).path("error").path("code").asText();
+        assertThat(status).as("%s answered %d (%s): %s", entry.routeKey(),
+                status, caller, body).isNotIn(401, 403).isLessThan(500);
+        assertThat(code).as("%s refused %s", entry.routeKey(), caller)
+                .isNotIn(ADMISSION_REFUSALS);
+    }
+
+    private static boolean automationEntry(SurfaceRegistry entry) {
+        return entry.capabilities().stream()
+                .anyMatch(capability -> capability.name()
+                        .startsWith("AUTOMATION_"));
+    }
+
+    /** The definition list probe: the seeded definition is listed exactly
+     * for a holder of the bound Session's Workspace read grant. */
+    private void expectAutomationListed(SurfaceRegistry entry, String actor,
+            boolean listed) throws Exception {
+        String caller = actor == null ? "anonymous" : actor;
+        MvcResult result = mvc.perform(requestFor(entry, actor, tenant))
+                .andReturn();
+        assertThat(result.getResponse().getStatus())
+                .as("%s answered %d (%s)", entry.routeKey(),
+                        result.getResponse().getStatus(), caller)
+                .isEqualTo(200);
+        List<String> ids = new ArrayList<>();
+        JSON.readTree(result.getResponse().getContentAsString())
+                .path("data").forEach(each -> ids.add(each.path("id").asText()));
+        assertThat(ids.contains(automation))
+                .as("%s lists the bound definition for %s", entry.routeKey(),
+                        caller)
+                .isEqualTo(listed);
+    }
+
+    /** One live automation definition of a Session, as the control plane
+     * mirrors it after the Harness committed revision 1. */
+    private String insertAutomation(String tenant, String sessionId) {
+        String id = "asch_" + UUID.randomUUID().toString().replace("-", "");
+        long now = System.currentTimeMillis();
+        jdbc.update("INSERT INTO ma_schedule (tenant_id,"
+                + " schedule_id, session_id, workspace_id, actor_id,"
+                + " record_revision, definition_revision, definition_digest,"
+                + " goal, cron, timezone, session_mode, overlap, catch_up,"
+                + " catch_up_limit, enabled, state, blocked_reason, armed_at,"
+                + " watermark_slot, lease_owner, lease_until, fence,"
+                + " created_at, updated_at) VALUES (?, ?, ?, 'ws', ?, 1, 1, ?,"
+                + " 'probe', '0 2 * * *', 'UTC', 'persistent', 'skip', 'none',"
+                + " NULL, TRUE, 'live', NULL, ?, NULL, NULL, NULL, 0, ?, ?)",
+                tenant, id, sessionId, OWNER, "0".repeat(64), now, now, now);
+        return id;
+    }
+
     private MvcResult expect(SurfaceRegistry entry, String actor,
             int status, String code) throws Exception {
         String headerTenant = entry.ruleClass() == RuleClass.READER_ACTOR
@@ -1167,7 +1365,9 @@ class SurfaceAdmissionAcceptanceTest {
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
         variables.put("operationId", "op_0000000000000000");
-        variables.put("taskId", "task_0000000000000000");
+        variables.put("taskId", entry.capabilities().contains(
+                Capability.TASK_CANCEL) ? settledTask
+                : "task_0000000000000000");
         variables.put("turnId", "turn_0000000000000000");
         // An accepted respond consumes its Action: each surface's admitted
         // probe runs on its own, the OPERATOR and OWNER-rank arms on their
@@ -1183,6 +1383,7 @@ class SurfaceAdmissionAcceptanceTest {
                 : pendingAction);
         variables.put("workspaceId", "ws");
         variables.put("agentId", "agent-missing");
+        variables.put("automationId", automation);
         variables.put("channelId", "channel-missing");
         variables.put("deliveryId", "delivery-missing");
         variables.put("itemId", artifactItemId);
@@ -1288,6 +1489,10 @@ class SurfaceAdmissionAcceptanceTest {
                     + "\",\"taskId\":\"task_0000000000000000\"}";
             case TASK_EVENT_LIST -> "{\"sessionId\":\"" + session
                     + "\",\"taskId\":\"task_0000000000000000\"}";
+            case TASK_CANCEL -> publicSurface ? "{}"
+                    : "{\"sessionId\":\"" + session + "\",\"taskId\":\""
+                            + settledTask + "\",\"idempotencyKey\":\""
+                            + nextKey() + "\"}";
             case TURN_CANCEL -> "{\"idempotencyKey\":\"" + nextKey()
                     + "\",\"sessionId\":\"" + session
                     + "\",\"turnId\":\"turn_0000000000000000\"}";
@@ -1320,6 +1525,10 @@ class SurfaceAdmissionAcceptanceTest {
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_LIST -> "{}";
             case WORKSPACE_GET -> "{\"workspaceId\":\"ws\"}";
+            case AUTOMATION_CREATE -> "{\"session_id\":\"" + session
+                    + "\",\"goal\":\"probe\",\"cron\":\"0 2 * * *\","
+                    + "\"timezone\":\"UTC\",\"prompt\":\"probe\"}";
+            case AUTOMATION_UPDATE -> "{\"goal\":\"probe\"}";
             case AGENT_DEFINITION_CREATE, AGENT_DEFINITION_UPDATE ->
                 "{\"model\":{\"id\":\"qwen3-coder-plus\"},\"instructions\":"
                         + "\"Review code.\",\"tools\":[],"
@@ -1402,7 +1611,7 @@ class SurfaceAdmissionAcceptanceTest {
     }
 
     private void grant(String tenant, String actor, boolean canCreate) {
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                 + " workspace_id, actor_id, role) VALUES"
                 + " (?, 'ws', ?, ?)", tenant,
                 actor.getBytes(StandardCharsets.UTF_8),
@@ -1413,10 +1622,12 @@ class SurfaceAdmissionAcceptanceTest {
             throws Exception {
         String action = "tool_approval_"
                 + UUID.randomUUID().toString().replace("-", "");
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id,"
-                + " session_id, action_id, state, options_json, created_at)"
-                + " VALUES (?, ?, ?, 'requested', ?, 0)", tenant, session,
-                action, JSON.writeValueAsString(Map.of("expiresAt",
+        jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, domain, record_id, revision, tenant_id,"
+                + " session_id, action_id, action_version, state, options_json, created_at)"
+                + " VALUES ('ACTION', ?, ?, 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(tenant, session),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant, session, "action", action),
+                action, tenant, session, action, JSON.writeValueAsString(Map.of("expiresAt",
                         System.currentTimeMillis() + 3_600_000L,
                         "inputRevision", 1, "policyRevision", "policy",
                         "createdAt", 0L,
