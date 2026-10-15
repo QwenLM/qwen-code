@@ -139,11 +139,15 @@ describe('no-AK integration CI wiring', () => {
       'if [ "$WORKSPACE_RC" -ne 0 ]; then',
       '::warning::The Windows workspace suite has known baseline failures',
       'npm run test:scripts',
-      'SCRIPT_RC=$?',
+      'SCRIPTS_RC=$?',
+      'if [ "$SCRIPTS_RC" -ne 0 ]; then',
+      '::warning::The complete Windows script suite has known baseline failures',
+      'npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts',
+      'INSTALLER_RC=$?',
       'set -e',
       'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
       'kill "$SAMPLER_PID" 2>/dev/null || true',
-      'exit "$SCRIPT_RC"',
+      'exit "$INSTALLER_RC"',
     ]) {
       const index = windowsStep.indexOf(command);
       expect(index, `test_windows: ${command}`).toBeGreaterThan(previous);
