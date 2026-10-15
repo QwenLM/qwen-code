@@ -217,6 +217,34 @@ describe('contextLengthError', () => {
       expect(info.limitTokens).toBe(32768);
       expect(info.limitKind).toBe('total');
     });
+
+    it('reads the limit from the total-token wording when no count follows', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          "Requested token count exceeds the model's maximum context length of 32768 tokens.",
+        ),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBeUndefined();
+      expect(info.limitTokens).toBe(32768);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('scans a long run of digits quickly', () => {
+      const digits = '1'.repeat(60_000);
+      const messages = [
+        `maximum context length of 32768 tokens. You requested a total of 1 tokens: ${digits}`,
+        `maximum context length of ${digits}`,
+      ];
+
+      const start = performance.now();
+      for (const message of messages) {
+        getContextLengthExceededInfo(new Error(message));
+      }
+
+      expect(performance.now() - start).toBeLessThan(1000);
+    });
   });
 
   it('extracts nested JSON error messages from strings', () => {
