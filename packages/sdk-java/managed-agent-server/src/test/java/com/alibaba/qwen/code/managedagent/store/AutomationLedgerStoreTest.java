@@ -1,20 +1,21 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SimpleDriverDataSource;
+
+import javax.sql.DataSource;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
-import javax.sql.DataSource;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.SimpleDriverDataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The row budget of the ledger's cross-table reads: the run state of an
@@ -32,7 +33,7 @@ class AutomationLedgerStoreTest {
     private Connection counting(Connection target) {
         return (Connection) Proxy.newProxyInstance(
                 AutomationLedgerStoreTest.class.getClassLoader(),
-                new Class<?>[] { Connection.class },
+                new Class<?>[] {Connection.class },
                 (proxy, method, args) -> {
                     if ("prepareStatement".equals(method.getName())
                             && args != null && args.length > 0
@@ -42,7 +43,7 @@ class AutomationLedgerStoreTest {
                         return (PreparedStatement) Proxy.newProxyInstance(
                                 AutomationLedgerStoreTest.class
                                         .getClassLoader(),
-                                new Class<?>[] { PreparedStatement.class },
+                                new Class<?>[] {PreparedStatement.class },
                                 (stProxy, stMethod, stArgs) -> {
                                     if ("executeQuery".equals(stMethod
                                             .getName())) {
@@ -63,11 +64,11 @@ class AutomationLedgerStoreTest {
         if (!sql.contains("ma_session_record")) {
             return rs;
         }
-        long[] count = { 0 };
-        boolean[] finalized = { false };
+        long[] count = {0 };
+        boolean[] finalized = {false };
         return (ResultSet) Proxy.newProxyInstance(
                 AutomationLedgerStoreTest.class.getClassLoader(),
-                new Class<?>[] { ResultSet.class }, (proxy, method, args) -> {
+                new Class<?>[] {ResultSet.class }, (proxy, method, args) -> {
                     if ("next".equals(method.getName())) {
                         boolean more = (Boolean) invoke(method, rs, args);
                         if (!more && !finalized[0]) {
@@ -115,7 +116,7 @@ class AutomationLedgerStoreTest {
         SimpleDriverDataSource raw = raw();
         this.jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate((DataSource) Proxy.newProxyInstance(
                 AutomationLedgerStoreTest.class.getClassLoader(),
-                new Class<?>[] { DataSource.class }, (proxy, method, args) -> {
+                new Class<?>[] {DataSource.class }, (proxy, method, args) -> {
                     Object result = invoke(method, raw, args);
                     if (result instanceof Connection connection) {
                         return counting(connection);

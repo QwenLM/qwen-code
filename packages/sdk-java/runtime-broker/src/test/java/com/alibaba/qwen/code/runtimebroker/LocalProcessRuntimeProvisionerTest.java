@@ -724,6 +724,8 @@ class LocalProcessRuntimeProvisionerTest {
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
                 .toAbsolutePath();
         assumeTrue(Files.isRegularFile(script));
+        Path probe = Files.createTempDirectory("runtime-ready-probe");
+        Path hits = probe.resolve("hits");
         RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
                 "/runtime/workspace", DIGEST, "workspace");
         RuntimeProvisionRequest request = new RuntimeProvisionRequest(
@@ -733,7 +735,7 @@ class LocalProcessRuntimeProvisionerTest {
         Set<Long> before = childPids();
         try (LocalProcessRuntimeProvisioner provisioner =
                 new LocalProcessRuntimeProvisioner(
-                        List.of("node", script.toString()),
+                        List.of("node", script.toString(), "--probe=" + hits),
                         Path.of("").toAbsolutePath(),
                         new HttpRuntimeTransport())) {
             RuntimeResourceHandle handle = provisioner
@@ -741,6 +743,9 @@ class LocalProcessRuntimeProvisionerTest {
                     .toCompletableFuture().get(2, TimeUnit.SECONDS);
             RuntimeLease lease = provisioner.provision(request, seed)
                     .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            // The probe logs one line per HTTP request; provision already
+            // attested, so count only what reconcile adds.
+            long attested = Files.readAllLines(hits).size();
             RuntimeObservation observed = provisioner
                     .reconcile(request, seed, handle, lease)
                     .toCompletableFuture().get(10, TimeUnit.SECONDS);
@@ -749,11 +754,21 @@ class LocalProcessRuntimeProvisionerTest {
             assertEquals(lease.getEndpoint(), observed.getEndpoint());
             assertEquals(seed.getLeaseId(), observed.getLeaseId());
             assertEquals(seed.getEpoch(), observed.getEpoch());
+            // READY rests on a fresh attestation, not on the process alone.
+            assertEquals(attested + 1, Files.readAllLines(hits).size());
         } finally {
             ProcessHandle.current().children()
                     .filter(process -> !before.contains(process.pid()))
                     .forEach(ProcessHandle::destroyForcibly);
             assertNoNewChildren(before);
+            Files.walk(probe).sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (Exception ignored) {
+                            // Best-effort cleanup of the probe directory.
+                        }
+                    });
         }
     }
 
@@ -904,64 +919,42 @@ class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    void tombstoneRetainsNoLeaseMaterialAcrossTheWholeIdentity()
-            throws Exception {
-        requireNode();
-        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
-                .toAbsolutePath();
-        assumeTrue(Files.isRegularFile(script));
-        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
-                "/runtime/workspace", DIGEST, "workspace");
-        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
-                scope, null, LocalProcessRuntimeProvisioner.KIND);
+    void tombstoneRetainsNoLeaseMaterialAcrossTheWholeIdentity() {
         RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
                 "binding-1", 1);
-        Set<Long> before = childPids();
-        try (LocalProcessRuntimeProvisioner provisioner =
-                new LocalProcessRuntimeProvisioner(
-                        List.of("node", script.toString()),
-                        Path.of("").toAbsolutePath(),
-                        new HttpRuntimeTransport())) {
-            RuntimeLease lease = provisioner.provision(request, seed)
-                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
-            // Recreate the fence identity deterministically; the digest must
-            // carry no bearer material, yet stay a function of every
-            // ownership-key component (otherwise distinct leases would
-            // collapse onto one tombstone).
-            java.util.List<Object> key = java.util.List.of(
-                    lease.getRuntimeInstanceId(), lease.getEndpoint(),
-                    lease.getLeaseId(), lease.getEpoch(), lease.getToken());
-            String first = LocalProcessRuntimeProvisioner.tombstone(key);
-            String second = LocalProcessRuntimeProvisioner.tombstone(key);
-            assertEquals(first, second);
-            assertTrue(first.matches("[0-9a-f]{64}"),
-                    "tombstone must be a SHA-256 digest: " + first);
-            assertFalse(first.contains(lease.getToken()));
-            assertFalse(first.contains(lease.getEndpoint().toString()));
-            // ownershipKey order: runtimeInstanceId, endpoint, leaseId,
-            // epoch, token — each one must feed the digest.
-            Object[] mutatedComponents = {
-                lease.getRuntimeInstanceId() + "-x",
-                java.net.URI.create("http://127.0.0.1:"
-                        + (lease.getEndpoint().getPort() + 1)),
-                lease.getLeaseId() + "-x",
-                lease.getEpoch() + 1,
-                lease.getToken() + "-x",
-            };
-            for (int i = 0; i < mutatedComponents.length; i++) {
-                java.util.List<Object> mutated =
-                        new java.util.ArrayList<>(key);
-                mutated.set(i, mutatedComponents[i]);
-                assertFalse(
-                        first.equals(LocalProcessRuntimeProvisioner
-                                .tombstone(mutated)),
-                        "component " + i + " must feed the digest");
-            }
-        } finally {
-            ProcessHandle.current().children()
-                    .filter(process -> !before.contains(process.pid()))
-                    .forEach(ProcessHandle::destroyForcibly);
-            assertNoNewChildren(before);
+        RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
+                java.net.URI.create("http://127.0.0.1:43123/"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        // Recreate the fence identity deterministically; the digest must
+        // carry no bearer material, yet stay a function of every
+        // ownership-key component (otherwise distinct leases would
+        // collapse onto one tombstone).
+        java.util.List<Object> key = java.util.List.of(
+                lease.getRuntimeInstanceId(), lease.getEndpoint(),
+                lease.getLeaseId(), lease.getEpoch(), lease.getToken());
+        String first = LocalProcessRuntimeProvisioner.tombstone(key);
+        String second = LocalProcessRuntimeProvisioner.tombstone(key);
+        assertEquals(first, second);
+        assertTrue(first.matches("[0-9a-f]{64}"),
+                "tombstone must be a SHA-256 digest: " + first);
+        // ownershipKey order: runtimeInstanceId, endpoint, leaseId,
+        // epoch, token — each one must feed the digest.
+        Object[] mutatedComponents = {
+            lease.getRuntimeInstanceId() + "-x",
+            java.net.URI.create("http://127.0.0.1:"
+                    + (lease.getEndpoint().getPort() + 1)),
+            lease.getLeaseId() + "-x",
+            lease.getEpoch() + 1,
+            lease.getToken() + "-x",
+        };
+        for (int i = 0; i < mutatedComponents.length; i++) {
+            java.util.List<Object> mutated =
+                    new java.util.ArrayList<>(key);
+            mutated.set(i, mutatedComponents[i]);
+            assertFalse(
+                    first.equals(LocalProcessRuntimeProvisioner
+                            .tombstone(mutated)),
+                    "component " + i + " must feed the digest");
         }
     }
 

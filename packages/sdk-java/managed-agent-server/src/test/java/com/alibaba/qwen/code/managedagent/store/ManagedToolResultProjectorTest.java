@@ -1,11 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedToolResultProjectorTest {
     @Test

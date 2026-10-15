@@ -300,7 +300,10 @@ describe('owned Runtime activation', () => {
         Path: '/bin',
         systemroot: 'C:\\Windows',
         lc_all: 'en_US.UTF-8',
+        http_proxy: 'http://proxy:8080',
+        Https_Proxy: 'http://proxy:8443',
         qwen_home: 'config',
+        qwen_code_trusted_folders_path: 'trust',
         openai_api_key: 'secret',
         qwen_server_token: 'secret',
         node_options: '--import evil',
@@ -309,7 +312,10 @@ describe('owned Runtime activation', () => {
       Path: '/bin',
       systemroot: 'C:\\Windows',
       lc_all: 'en_US.UTF-8',
+      http_proxy: 'http://proxy:8080',
+      Https_Proxy: 'http://proxy:8443',
       qwen_home: path.resolve('config'),
+      qwen_code_trusted_folders_path: path.resolve('trust'),
     });
   });
 

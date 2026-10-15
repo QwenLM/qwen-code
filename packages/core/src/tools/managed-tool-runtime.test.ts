@@ -821,6 +821,8 @@ describe('ManagedToolRuntime', () => {
   it('preserves the stop directive when the postHook payload cannot be cloned', async () => {
     hooks.post.mockResolvedValue({
       shouldStop: true,
+      stopReason: 'policy: no writes outside the workspace',
+      additionalContext: 'ctx-for-model',
       nonCloneable: () => {},
     } as unknown as Awaited<ReturnType<typeof hooks.post>>);
     const ref = await prepare();
@@ -831,7 +833,34 @@ describe('ManagedToolRuntime', () => {
     expect(result.postHook?.hookError).toContain(
       'Cannot serialize managed tool hooks',
     );
+    // The string fields are clone-safe, so the fallback keeps them.
+    expect(result.postHook?.stopReason).toBe(
+      'policy: no writes outside the workspace',
+    );
+    expect(result.postHook?.additionalContext).toBe('ctx-for-model');
+    expect(runtime.status(ref).result?.postHook).toMatchObject({
+      shouldStop: true,
+      stopReason: 'policy: no writes outside the workspace',
+      additionalContext: 'ctx-for-model',
+    });
     expect(result.failureHook).toBeUndefined();
+  });
+
+  it('drops a hook text field that is not a string when the payload cannot be cloned', async () => {
+    hooks.post.mockResolvedValue({
+      shouldStop: true,
+      stopReason: () => {},
+      additionalContext: 'ctx-for-model',
+    } as unknown as Awaited<ReturnType<typeof hooks.post>>);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const result = await runtime.execute(ref);
+    expect(result.executionStatus).toBe('success');
+    expect(result.postHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
+    expect(result.postHook).not.toHaveProperty('stopReason');
+    expect(result.postHook?.additionalContext).toBe('ctx-for-model');
   });
 
   it('records only the failure hook when the failure payload cannot be cloned', async () => {
@@ -839,6 +868,7 @@ describe('ManagedToolRuntime', () => {
       invocation.execute.mockRejectedValue(new Error('boom'));
     };
     hooks.failure.mockResolvedValue({
+      additionalContext: 'failure-ctx-for-model',
       nonCloneable: () => {},
     } as unknown as Awaited<ReturnType<typeof hooks.failure>>);
     const ref = await prepare();
@@ -847,6 +877,10 @@ describe('ManagedToolRuntime', () => {
     expect(result.executionStatus).toBe('error');
     expect(result.failureHook?.hookError).toContain(
       'Cannot serialize managed tool hooks',
+    );
+    expect(result.failureHook?.additionalContext).toBe('failure-ctx-for-model');
+    expect(runtime.status(ref).result?.failureHook?.additionalContext).toBe(
+      'failure-ctx-for-model',
     );
     expect(result.postHook).toBeUndefined();
   });

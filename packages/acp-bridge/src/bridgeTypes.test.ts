@@ -173,9 +173,32 @@ describe('parseBridgeManagedSessionStore', () => {
         allowInsecureHttp: 'yes',
       }),
     ).toThrow(/allowInsecureHttp is invalid/);
+    // On a plaintext non-loopback URL the flag is the only thing the
+    // transport gate reads, so a mistyped opt-in must be diagnosed as
+    // invalid rather than answered with the HTTPS remedy.
+    for (const allowInsecureHttp of ['yes', 'true', 1, null]) {
+      expect(() =>
+        parseBridgeManagedSessionStore({
+          ...valid,
+          baseUrl: 'http://10.0.0.1:8080',
+          allowInsecureHttp,
+        }),
+      ).toThrow(/allowInsecureHttp is invalid/);
+    }
     expect(() =>
       parseBridgeManagedSessionStore({ ...valid, extraField: 1 }),
     ).toThrow(/unsupported field/);
+  });
+
+  it('reports the HTTPS remedy when the plaintext opt-in is absent or false', () => {
+    for (const input of [
+      { ...valid, baseUrl: 'http://10.0.0.1:8080' },
+      { ...valid, baseUrl: 'http://10.0.0.1:8080', allowInsecureHttp: false },
+    ]) {
+      expect(() => parseBridgeManagedSessionStore(input)).toThrow(
+        'must use HTTPS outside the loopback interface',
+      );
+    }
   });
 
   it('bounds writerToken length at the shared fixture limits', () => {

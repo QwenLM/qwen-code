@@ -216,10 +216,19 @@ export function parseBridgeManagedSessionStore(
       'managedSessionStore.baseUrl must be an HTTP(S) URL without credentials, query, or fragment',
     );
   }
+  // Type-check the opt-in before the transport gate reads it, so a mistyped
+  // flag is reported as invalid rather than as a missing opt-in.
+  const allowInsecureHttp = record['allowInsecureHttp'];
+  if (
+    allowInsecureHttp !== undefined &&
+    typeof allowInsecureHttp !== 'boolean'
+  ) {
+    throw new TypeError('managedSessionStore.allowInsecureHttp is invalid');
+  }
   if (
     parsedBaseUrl.protocol === 'http:' &&
     !isManagedSessionStoreLoopback(parsedBaseUrl.hostname) &&
-    record['allowInsecureHttp'] !== true
+    allowInsecureHttp !== true
   ) {
     throw new TypeError(
       'managedSessionStore.baseUrl must use HTTPS outside the loopback interface; pass allowInsecureHttp: true to opt in',
@@ -243,13 +252,6 @@ export function parseBridgeManagedSessionStore(
       !/^[A-Za-z0-9_-]{32,512}$/u.test(writerToken))
   ) {
     throw new TypeError('managedSessionStore.writerToken is invalid');
-  }
-  const allowInsecureHttp = record['allowInsecureHttp'];
-  if (
-    allowInsecureHttp !== undefined &&
-    typeof allowInsecureHttp !== 'boolean'
-  ) {
-    throw new TypeError('managedSessionStore.allowInsecureHttp is invalid');
   }
   return Object.freeze({
     baseUrl: parsedBaseUrl.toString().replace(/\/$/u, ''),

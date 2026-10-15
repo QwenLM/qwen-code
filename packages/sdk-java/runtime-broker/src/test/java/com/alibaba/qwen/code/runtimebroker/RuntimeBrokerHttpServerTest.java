@@ -21,6 +21,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -852,7 +853,11 @@ class RuntimeBrokerHttpServerTest {
                         intercepted.add(method.getName());
                         throw outage.get();
                     }
-                    return method.invoke(inner, args);
+                    try {
+                        return method.invoke(inner, args);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
                 });
         String digest = "sha256:" + "b".repeat(64);
         Map<String, Object> body = Map.of(
@@ -922,6 +927,29 @@ class RuntimeBrokerHttpServerTest {
             var acknowledgeError = JSON.parseObject(acknowledged.body());
             assertEquals("runtime_broker_store_unavailable", acknowledgeError.getString("code"));
             assertTrue(acknowledgeError.getBooleanValue("retryable"));
+            // A failed write maps the same way and leaves nothing behind:
+            // neither the reservation a fresh prepare would create nor a
+            // cancel request on the landed execution.
+            failingMethod.set("findOrCreate");
+            Map<String, Object> writeBody = new HashMap<>(body);
+            writeBody.put("requestId", "write");
+            writeBody.put("idempotencyKey", "write-key");
+            HttpResponse<String> unwritten = fixture.post("/executions:prepare", writeBody);
+            assertEquals(503, unwritten.statusCode(), unwritten.body());
+            var writeError = JSON.parseObject(unwritten.body());
+            assertEquals("runtime_broker_store_unavailable", writeError.getString("code"));
+            assertTrue(writeError.getBooleanValue("retryable"));
+            assertNull(inner.findByIdempotencyKey("write-key"));
+            failingMethod.set("requestCancel");
+            HttpResponse<String> uncancelled = fixture.post(
+                    "/executions/" + executionCallId + ":cancel", Map.of(
+                            "protocolVersion", 1, "requestId", "cancel-write",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
+            assertEquals(503, uncancelled.statusCode(), uncancelled.body());
+            var cancelWriteError = JSON.parseObject(uncancelled.body());
+            assertEquals("runtime_broker_store_unavailable", cancelWriteError.getString("code"));
+            assertTrue(cancelWriteError.getBooleanValue("retryable"));
+            assertSame(landed, inner.findByExecutionCallId(executionCallId));
             // A permanent invariant violation is not a store outage: it keeps
             // the non-retryable 500 the HTTP layer gives any other failure.
             outage.set(new IllegalStateException("Tool idempotency hash is invalid"));
@@ -939,7 +967,7 @@ class RuntimeBrokerHttpServerTest {
             assertSame(landed, inner.findByExecutionCallId(executionCallId));
             assertEquals(List.of("findByIdempotencyKey", "findByExecutionCallId",
                     "findByExecutionCallId", "findByExecutionCallId", "findByExecutionCallId",
-                    "findByExecutionCallId", "findByIdempotencyKey"),
+                    "findByExecutionCallId", "findOrCreate", "requestCancel", "findByIdempotencyKey"),
                     intercepted);
         }
 
@@ -1076,6 +1104,117 @@ class RuntimeBrokerHttpServerTest {
             } finally {
                 csiServer.close();
             }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void answersAPrivateCsiStoreFailureAsRetryableServiceUnavailable() throws Exception {
+        String session = "550e8400-e29b-41d4-a716-446655440313";
+        RuntimeProvisionRequest request = CsiFilesRetirementProfile.request(
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                        "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
+                "/workspace", session);
+        InMemoryRuntimeBindingRepository registry = new InMemoryRuntimeBindingRepository();
+        RuntimeBindingRecord binding = registry.claimOperation(registry.findOrCreate(request).getBindingId(),
+                "setup", Duration.ofMinutes(1));
+        var seed = binding.getProvisionSeed();
+        RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        binding = registry.compareAndSet(binding, binding.withAttestation(lease,
+                new RuntimeResourceHandle(request.getProvisionerKind(), 1, Map.of("fixture", true)),
+                Instant.now(), Instant.now()));
+        RuntimeSession runtime = new RuntimeSession(session, session, "bootstrap", request.getScope());
+        InMemoryRuntimeSessionRepository sessions = new InMemoryRuntimeSessionRepository();
+        RuntimeSessionRecord saved = sessions.findOrCreate(new RuntimeSessionRecord(runtime, binding.getBindingId(),
+                binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        saved = sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        // The private CSI routes need the JDBC binding store, and every route
+        // that checks the ready Session (the publisher install too) reads it
+        // first. Its database is unreachable, so every connection attempt
+        // fails with a real SQLException that JdbcRepositorySupport reports
+        // as a store failure.
+        AtomicInteger connections = new AtomicInteger();
+        AtomicReference<Exception> outage = new AtomicReference<>();
+        javax.sql.DataSource unreachable = (javax.sql.DataSource) Proxy.newProxyInstance(
+                RuntimeBrokerHttpServerTest.class.getClassLoader(),
+                new Class<?>[] { javax.sql.DataSource.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getConnection" -> {
+                        connections.incrementAndGet();
+                        throw outage.get();
+                    }
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "unreachable";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        FailingTransport transport = new FailingTransport();
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                id -> CompletableFuture.completedFuture(request.getScope()),
+                new StaticRuntimeProvisioner(lease), transport,
+                new JdbcRuntimeBindingRepository(unreachable, new AesGcmSecretProtector("test", new byte[32])),
+                sessions, new InMemoryToolExecutionRepository(Clock.systemUTC()),
+                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+        // Install the ready Runtime Session the way a completed acquire leaves it.
+        var contextClass = Class.forName(RuntimeBrokerService.class.getName() + "$SessionContext");
+        var constructor = contextClass.getDeclaredConstructor(RuntimeSession.class, RuntimeBindingRecord.class,
+                RuntimeLease.class);
+        constructor.setAccessible(true);
+        var field = RuntimeBrokerService.class.getDeclaredField("sessions");
+        field.setAccessible(true);
+        ((Map<String, CompletableFuture<?>>) field.get(service)).put(session,
+                CompletableFuture.completedFuture(constructor.newInstance(runtime, binding, lease)));
+        try (RuntimeBrokerHttpServer server = new RuntimeBrokerHttpServer(
+                new InetSocketAddress("127.0.0.1", 0), "secret", service);
+                HttpClient client = HttpClient.newHttpClient()) {
+            server.start();
+            String digest = "sha256:" + "b".repeat(64);
+            Map<String, Object> prepare = new HashMap<>(Map.of(
+                    "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
+                    "harnessSessionId", session, "runtimeSessionId", session, "turnId", "turn",
+                    "toolCallId", "call", "requestDigest", digest,
+                    "reference", Map.of("sessionId", session, "promptId", "turn",
+                            "callId", "call", "argsDigest", digest)));
+            prepare.put("inputBytesBase64", java.util.Base64.getEncoder().encodeToString(
+                    "{}".getBytes(StandardCharsets.UTF_8)));
+            prepare.put("toolDefinitionBytesBase64", java.util.Base64.getEncoder().encodeToString(
+                    "{\"name\":\"write_file\"}".getBytes(StandardCharsets.UTF_8)));
+            Map<String, Object> readBatch = Map.of("protocolVersion", 1, "requestId", "read-batch",
+                    "harnessSessionId", session, "runtimeSessionId", session,
+                    "promptId", "turn", "batchId", "batch");
+            Map<String, Object> publisher = Map.of("protocolVersion", 1, "requestId", "publisher",
+                    "harnessSessionId", session, "runtimeSessionId", session,
+                    "publisher", Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
+                            "token", "a".repeat(43)));
+            int attempts = 0;
+            // A permanent invariant violation is not a store outage: it keeps
+            // the non-retryable 500 on these routes too.
+            for (Exception failure : List.<Exception>of(new java.sql.SQLException("simulated outage"),
+                    new IllegalStateException("Runtime binding identifier collision"))) {
+                outage.set(failure);
+                boolean storeOutage = failure instanceof java.sql.SQLException;
+                for (Map.Entry<String, Map<String, Object>> route : List.of(
+                        Map.entry("/executions:prepare", prepare),
+                        Map.entry("/executions:read-batch", readBatch),
+                        Map.entry("/tool-sessions/" + session + ":publisher", publisher))) {
+                    HttpResponse<String> response = client.send(HttpRequest.newBuilder(server.getBaseUri()
+                                    .resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX + route.getKey()))
+                            .header("Authorization", "Bearer secret")
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(route.getValue())))
+                            .build(), HttpResponse.BodyHandlers.ofString());
+                    assertEquals(storeOutage ? 503 : 500, response.statusCode(), route.getKey() + " " + response.body());
+                    var error = JSON.parseObject(response.body());
+                    assertEquals(storeOutage ? "runtime_broker_store_unavailable" : "runtime_broker_internal_error",
+                            error.getString("code"), route.getKey());
+                    assertEquals(storeOutage, error.getBooleanValue("retryable"), route.getKey());
+                    // The failure came from the store, not an earlier refusal.
+                    assertEquals(++attempts, connections.get(), route.getKey());
+                }
+            }
+            assertSame(saved, sessions.findById(request.getScope(), session));
+            assertEquals(0, transport.executions.get());
         }
     }
 

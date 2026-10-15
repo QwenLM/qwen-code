@@ -29,6 +29,9 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 
+// The real logger writes only when the debug log file is enabled (debug
+// mode; test-setup turns it off), so the provider's log calls are observed
+// through this spy rather than through any default-on output.
 const debugSpy = vi.hoisted(() => ({
   error: vi.fn(),
   warn: vi.fn(),
@@ -1215,11 +1218,34 @@ describe('Managed Runtime providers', () => {
       new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 1000)),
     ]);
     expect(outcome).toBe('rejected:Managed Runtime Session cleanup failed.');
+    // The abort landed after the wait had detached its abort listener, so the
+    // failure reached the caller above and the after-abort log stays silent.
     expect(
       debugSpy.error.mock.calls
         .flat()
         .some((argument: unknown) => argument === sentinel),
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  it('delivers a restore-path cleanup failure without an abort and does not log it', async () => {
+    const runtime = fakeRuntime();
+    vi.mocked(runtime.bridge.resumeSession).mockResolvedValueOnce({
+      sessionId: prepareRequest.sessionId,
+      workspaceCwd,
+      attached: false,
+      clientId: 'runtime-client-p8',
+      hasActivePrompt: true,
+      sourceType: 'managed-gateway',
+      sourceId: prepareRequest.sessionId,
+    } as Awaited<ReturnType<AcpSessionBridge['resumeSession']>>);
+    runtime.close.mockRejectedValueOnce(new Error('bridge exploded'));
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    debugSpy.error.mockClear();
+    await expect(
+      local.release(prepareRequest.sessionId, prepareRequest),
+    ).rejects.toThrow('Managed Runtime Session cleanup failed.');
+    expect(debugSpy.error).not.toHaveBeenCalled();
+    local.dispose();
   });
 
   it('re-prepares a remote Session after a failed v2 cold start instead of closing permanently', async () => {
@@ -1266,6 +1292,33 @@ describe('Managed Runtime providers', () => {
       await expect(
         remote.release(prepareRequest.sessionId, prepareRequest),
       ).resolves.toBe(true);
+    } finally {
+      remote.dispose();
+    }
+  });
+
+  it('re-prepares a remote Session after a failed v2 cold start without an intervening release', async () => {
+    let prepares = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
+      new URL(String(input)).pathname.endsWith('/v1/prepare') &&
+      ++prepares === 1
+        ? new Response('', { status: 500 })
+        : Response.json({ protocolVersion: 1, ready: true }),
+    );
+    const remote = new RemoteManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:4181',
+      token,
+      lease: { leaseId: 'lease', epoch: 1 },
+      fetch: fetchImpl,
+    });
+    try {
+      await expect(remote.getToolV2Client(prepareRequest)).rejects.toThrow(
+        'HTTP 500',
+      );
+      // No release evicts the failed entry here, so only the cold start's own
+      // eviction keeps the next prepare from replaying its rejected `ready`.
+      await remote.prepare(prepareRequest).ready;
+      expect(prepares).toBe(2);
     } finally {
       remote.dispose();
     }
@@ -1500,8 +1553,8 @@ describe('Managed Runtime providers', () => {
     const local = new LocalManagedRuntimeProvider(runtime.registry);
     const released = local.release(prepareRequest.sessionId, prepareRequest);
     // The dispose aborts the restore wait with a plain Error, settling the
-    // release before the cleanup outcome exists: the log is then the only
-    // surviving trace of the cleanup failure.
+    // release before the cleanup outcome exists: the failure can no longer
+    // reach the caller and is left to the (debug-mode-only) debug log.
     local.dispose();
     await expect(released).rejects.toThrow(
       'Managed Runtime provider disposed.',
