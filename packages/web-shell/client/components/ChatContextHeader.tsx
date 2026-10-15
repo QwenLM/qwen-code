@@ -23,15 +23,15 @@ interface ChatContextHeaderProps {
   /**
    * Workspace shown as the header's leading icon. Omitting it means the shell
    * has no workspace: the icon stays the same folder and only its tooltip says
-   * so, because the icon is the one place that always answers "which workspace
-   * is this session in?".
+   * so. In a session this icon always reports the workspace; the empty-state
+   * header can defer to a visible composer workspace selector.
    */
   workspaceName?: string;
   /** Full workspace path, shown as the leading icon's hover tooltip. */
   workspacePath?: string;
   /**
-   * Hides the leading workspace icon. The empty new-task page uses this: its
-   * composer already names the workspace, so the icon would repeat it.
+   * Hides the leading workspace icon when the new-task composer's workspace
+   * selector is visible and already names the workspace.
    */
   hideWorkspaceIcon?: boolean;
   environmentOpen: boolean;

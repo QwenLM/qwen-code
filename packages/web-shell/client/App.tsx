@@ -2546,6 +2546,15 @@ function findReviewChangesByToolCallIds(
   );
 }
 
+function getEvictedArtifactPanelStateKeys(keys: Iterable<string>): string[] {
+  const entries = [...keys];
+  return [false, true].flatMap((draft) =>
+    entries
+      .filter((key) => key.startsWith(DRAFT_PANEL_KEY_PREFIX) === draft)
+      .slice(0, -MAX_ARTIFACT_PANEL_SESSION_STATES),
+  );
+}
+
 function readStoredArtifactPanelStates(
   key: string,
 ): Record<string, ArtifactPanelPersistedState> {
@@ -2561,9 +2570,7 @@ function readStoredArtifactPanelStates(
     if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
     delete storedStates['v'];
     const result: Record<string, ArtifactPanelPersistedState> = {};
-    for (const [sessionKey, value] of Object.entries(storedStates).slice(
-      -MAX_ARTIFACT_PANEL_SESSION_STATES,
-    )) {
+    for (const [sessionKey, value] of Object.entries(storedStates)) {
       if (!value || typeof value !== 'object') continue;
       const state = value as Record<string, unknown>;
       if (typeof state['open'] !== 'boolean') continue;
@@ -2580,6 +2587,11 @@ function readStoredArtifactPanelStates(
           : [],
       };
     }
+    for (const evictedKey of getEvictedArtifactPanelStateKeys(
+      Object.keys(result),
+    )) {
+      delete result[evictedKey];
+    }
     return result;
   } catch {
     // localStorage can be unavailable in private or embedded contexts.
@@ -2593,10 +2605,10 @@ function writeStoredArtifactPanelStates(
 ): void {
   if (typeof window === 'undefined') return;
   try {
-    while (Object.keys(states).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
-      const oldestSessionKey = Object.keys(states)[0];
-      if (!oldestSessionKey) break;
-      delete states[oldestSessionKey];
+    for (const evictedKey of getEvictedArtifactPanelStateKeys(
+      Object.keys(states),
+    )) {
+      delete states[evictedKey];
     }
     window.localStorage.setItem(key, JSON.stringify({ v: 1, ...states }));
   } catch (error) {
@@ -4470,6 +4482,9 @@ export function App({
   // The artifact panel keys its state per session; the empty new-task page
   // gets a per-workspace draft key so its files/terminal/web-preview tabs
   // persist and restore like a session's.
+  const panelWorkspaceCwd = connection.sessionId
+    ? connection.workspaceCwd
+    : activeWorkspaceCwd;
   const panelStateKey =
     logicalSessionKey ??
     (workspaceContextActive && activeWorkspaceCwd
@@ -5261,10 +5276,7 @@ export function App({
     workspaceContextActive &&
     rightPanelItems.includes('files') &&
     Boolean(
-      resolveArtifactWorkspaceOwner(
-        workspace.capabilities,
-        connection.workspaceCwd,
-      ),
+      resolveArtifactWorkspaceOwner(workspace.capabilities, panelWorkspaceCwd),
     );
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
@@ -5381,13 +5393,13 @@ export function App({
       id,
       kind: 'terminal',
       title: count === 0 ? base : `${base} (${count + 1})`,
-      workspaceCwd: connection.workspaceCwd,
+      workspaceCwd: panelWorkspaceCwd,
       initialized: true,
     };
     setArtifactPanelTabs((tabs) => [...tabs, tab]);
     setActiveArtifactPanelTabId(tab.id);
     setArtifactPanelOpen(true);
-  }, [connection.workspaceCwd, t]);
+  }, [panelWorkspaceCwd, t]);
   const sideTaskCreationPromisesRef = useRef(
     new Map<string, Promise<{ sessionId: string; displayName?: string }>>(),
   );
@@ -6582,6 +6594,10 @@ export function App({
   useLayoutEffect(() => {
     const previousSessionId = artifactPanelSessionIdRef.current;
     const nextSessionId = panelStateKey;
+    const materializedSessionId = draftMaterializedSessionIdRef.current;
+    if (previousSessionId !== nextSessionId) {
+      draftMaterializedSessionIdRef.current = undefined;
+    }
     setArtifactPanelRestoring(false);
     if (
       previousSessionId &&
@@ -6597,27 +6613,28 @@ export function App({
           pendingRestore:
             artifactPanelRestoredSessionKeyRef.current !== previousSessionId,
         });
-        if (
-          artifactPanelStateBySessionRef.current.size >
-          MAX_ARTIFACT_PANEL_SESSION_STATES
-        ) {
-          const oldestSessionId = Array.from(
-            artifactPanelStateBySessionRef.current.keys(),
-          ).find((sessionId) => sessionId !== nextSessionId);
-          if (oldestSessionId) {
-            const oldestState =
-              artifactPanelStateBySessionRef.current.get(oldestSessionId);
-            for (const tab of oldestState?.tabs ?? []) {
-              if (tab.kind === 'terminal') {
-                releaseDetachedWebTerminal(
-                  workspace.baseUrl,
-                  tab.id,
-                  tab.workspaceCwd,
-                );
-              }
+        const nextState = nextSessionId
+          ? artifactPanelStateBySessionRef.current.get(nextSessionId)
+          : undefined;
+        if (nextSessionId && nextState) {
+          artifactPanelStateBySessionRef.current.delete(nextSessionId);
+          artifactPanelStateBySessionRef.current.set(nextSessionId, nextState);
+        }
+        for (const evictedKey of getEvictedArtifactPanelStateKeys(
+          artifactPanelStateBySessionRef.current.keys(),
+        )) {
+          const evictedState =
+            artifactPanelStateBySessionRef.current.get(evictedKey);
+          for (const tab of evictedState?.tabs ?? []) {
+            if (tab.kind === 'terminal') {
+              releaseDetachedWebTerminal(
+                workspace.baseUrl,
+                tab.id,
+                tab.workspaceCwd,
+              );
             }
-            artifactPanelStateBySessionRef.current.delete(oldestSessionId);
           }
+          artifactPanelStateBySessionRef.current.delete(evictedKey);
         }
       }
     }
@@ -6654,14 +6671,15 @@ export function App({
     if (
       previousSessionId !== undefined &&
       previousSessionId.startsWith(DRAFT_PANEL_KEY_PREFIX) &&
-      draftMaterializedSessionIdRef.current !== undefined &&
-      draftMaterializedSessionIdRef.current === connection.sessionId
+      materializedSessionId !== undefined &&
+      materializedSessionId === connection.sessionId
     ) {
       // The first prompt consumed the draft: the panel carries into the new
       // session, and the workspace's draft resets to empty for the next
       // new-task visit.
-      draftMaterializedSessionIdRef.current = undefined;
       artifactPanelStateBySessionRef.current.delete(previousSessionId);
+      const previousDraftPersisted =
+        artifactPanelPersistedStatesRef.current[previousSessionId];
       delete artifactPanelPersistedStatesRef.current[previousSessionId];
       // Deferred tabs belong to the draft too: move them under the session
       // key so a capability flip can still restore them later.
@@ -6670,9 +6688,11 @@ export function App({
         [];
       artifactPanelDeferredPersistedTabsRef.current.delete(previousSessionId);
       if (deferredDraftTabs.length > 0) {
-        artifactPanelDeferredPersistedTabsRef.current.set(
+        setBoundedMapEntry(
+          artifactPanelDeferredPersistedTabsRef.current,
           nextSessionId,
           deferredDraftTabs,
+          MAX_ARTIFACT_PANEL_SESSION_STATES * 2,
         );
       }
       // Persist the carried-over state under the session key immediately: the
@@ -6681,13 +6701,15 @@ export function App({
       // next panel change.
       const carriedState = artifactPanelSessionStateRef.current;
       if (carriedState) {
+        setArtifactPanelWidth(carriedState.width);
+        setArtifactPanelFullscreen(artifactPanelFullscreenRef.current);
         artifactPanelPersistedStatesRef.current[nextSessionId] = {
           open: carriedState.open,
           activeTabId: carriedState.activeTabId,
           tabs: mergePersistedArtifactPanelTabs(
             serializeArtifactPanelTabs(carriedState.tabs),
             deferredDraftTabs,
-            undefined,
+            previousDraftPersisted?.tabs,
           ),
         };
       }
@@ -6717,7 +6739,10 @@ export function App({
     ) {
       return;
     }
-    if (artifactPanelAdoptedSessionRef.current === nextSessionId) {
+    if (
+      artifactPanelAdoptedSessionRef.current === nextSessionId &&
+      !newlyAvailableDeferredTab
+    ) {
       // An adopted new-task panel stays untouched through the session's
       // first load (transcript/artifact flips included).
       return;
@@ -6841,7 +6866,7 @@ export function App({
         artifactPanelDeferredPersistedTabsRef.current,
         nextSessionId,
         deferredPersistedTabs,
-        MAX_ARTIFACT_PANEL_SESSION_STATES,
+        MAX_ARTIFACT_PANEL_SESSION_STATES * 2,
       );
     } else {
       artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
@@ -7230,7 +7255,7 @@ export function App({
   const openFilesPanel = useCallback(() => {
     const owner = resolveArtifactWorkspaceOwner(
       workspace.capabilities,
-      connection.workspaceCwd,
+      panelWorkspaceCwd,
     );
     if (!filesAvailable || !owner) return;
     rememberArtifactPanelTrigger();
@@ -7250,7 +7275,7 @@ export function App({
     );
     setArtifactPanelOpen(true);
   }, [
-    connection.workspaceCwd,
+    panelWorkspaceCwd,
     filesAvailable,
     getMaxArtifactPanelWidth,
     rememberArtifactPanelTrigger,
@@ -19630,18 +19655,16 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
-  // The empty new-task page shows a reduced built-in header: daemon and
-  // workspace scoped entries only, and only when at least one of them is
-  // actually available (the composer already names the workspace, so the
-  // header's workspace icon is hidden there). Custom renderChatHeader hosts
-  // keep the headerless empty state — their renderer expects a live session.
+  // Custom header renderers require a session. The built-in empty-state
+  // header exposes only configured workspace actions with a resolved owner.
   const emptyStateChatHeader =
     isChatEmptyState &&
     Boolean(header) &&
     !renderChatHeader &&
     workspaceContextActive &&
+    Boolean(activeWorkspaceCwd) &&
     mainView === 'chat' &&
-    (emptyStateRightPanelItems.length > 0 ||
+    ((rightPanelHeaderItemVisible && emptyStateRightPanelItems.length > 0) ||
       showMobileAccess ||
       workspaceHostsEnabled);
   const handleAgentCollaborationError = useCallback(
@@ -19842,6 +19865,14 @@ export function App({
     effectiveSessionContext?.kind,
     isChatEmptyState,
   ]);
+  const composerNamesWorkspace =
+    composerWorkspaceSelectEnabled &&
+    visibleComposerToolbarActions.includes('workspace') &&
+    composerWorkspaces !== undefined &&
+    (composerWorkspaces.length > 1 ||
+      scratchWorkspaceRegistrationSupported ||
+      dynamicWorkspaceRegistrationSupported ||
+      (standaloneSessionsSupported && !lockedWorkspaceCwd));
   const useMobileWelcomeMiddleLayout =
     isChatEmptyState && mobileWelcomeFooterMiddle;
   const showMobileWelcomeFooterMiddle =
@@ -20371,7 +20402,7 @@ export function App({
     activeTabId: activeArtifactPanelTabId,
     reviewChanges,
     selectedReviewPath,
-    workspaceCwd: connection.workspaceCwd || '',
+    workspaceCwd: panelWorkspaceCwd || '',
     loading: artifactsLoading,
     restoring: artifactPanelRestoring,
     error: artifactsError,
@@ -21352,7 +21383,7 @@ export function App({
                       location={
                         workspaceHostsEnabled && mainView === 'chat' ? (
                           <WorkspaceLocation
-                            cwd={connection.workspaceCwd}
+                            cwd={panelWorkspaceCwd}
                             hostOrigin={focusedHostOrigin}
                           />
                         ) : undefined
@@ -21364,7 +21395,7 @@ export function App({
                       }
                       workspaceName={headerWorkspaceName}
                       workspacePath={activeWorkspaceCwd}
-                      hideWorkspaceIcon={isChatEmptyState}
+                      hideWorkspaceIcon={isChatEmptyState && composerNamesWorkspace}
                       environmentOpen={environmentPanelVisible}
                       environmentAvailable={
                         !isChatEmptyState &&
@@ -21378,7 +21409,8 @@ export function App({
                         rightPanelHeaderItemVisible &&
                         !artifactPanelOpen &&
                         (!isChatEmptyState ||
-                          emptyStateRightPanelItems.length > 0)
+                          (Boolean(activeWorkspaceCwd) &&
+                            emptyStateRightPanelItems.length > 0))
                       }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
