@@ -615,12 +615,10 @@ export class HostedWorkspaceBroker {
   }
 
   /**
-   * Read-only never-started proof for one background dispatch: the Broker
-   * admits the `<executionCallId>:process` ledger row only at the
-   * execute-admission of an `is_background` dispatch, so this probe's
-   * definitive not-found is the absence read that proves the dispatch
-   * never began. The ledger-key suffix lives here, with every other
-   * Broker identity, so a key change cannot drift a caller's proof open.
+   * Read-only never-started proof component for one background dispatch. A
+   * definitive not-found is terminal evidence only after the caller has
+   * established that no pending start can still admit the process row, such
+   * as a reload boundary or a successful Broker cancellation barrier.
    */
   async backgroundProcessStatus(
     executionCallId: string,
