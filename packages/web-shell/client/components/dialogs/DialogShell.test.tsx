@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -161,5 +163,130 @@ describe('DialogShell', () => {
       ),
     );
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('sizes the auto dialog to its content instead of a fixed step', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Auto" size="auto" onClose={vi.fn()}>
+              <button type="button">body</button>
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const panel = document.querySelector<HTMLElement>(
+      '[data-web-shell-dialog]',
+    )!;
+    // tailwind-merge has to drop DialogContent's base `w-full`, or the panel
+    // stays full-width and never tracks the content.
+    expect(panel.className).toContain('w-max');
+    expect(panel.className).not.toContain('w-full');
+    // The floor has to subtract the same gutter the surviving base ceiling
+    // (`max-w-[calc(100%-2rem)]`) reserves. twMerge keeps both classes, and
+    // below `sm:` a bare `min(100%,560px)` floor outranks that ceiling, so the
+    // panel would render flush to both screen edges on a phone.
+    expect(panel.className).toContain('min-w-[min(calc(100%-2rem),560px)]');
+    expect(panel.className).not.toContain('min-w-[min(100%,560px)]');
+    expect(panel.className).toContain('max-w-[calc(100%-2rem)]');
+    expect(panel.className).toContain(
+      'sm:max-w-[min(calc(100vw-2rem),1120px)]',
+    );
+    expect(panel.className).not.toContain('sm:max-w-sm');
+  });
+
+  it('keeps fixed sizes full-width up to their cap', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Large" size="lg" onClose={vi.fn()}>
+              <button type="button">body</button>
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const panel = document.querySelector<HTMLElement>(
+      '[data-web-shell-dialog]',
+    )!;
+    expect(panel.className).toContain('w-full');
+    expect(panel.className).toContain('sm:max-w-[720px]');
+    expect(panel.className).not.toContain('w-max');
+  });
+
+  it('uses expand and shrink icons for fullscreen', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Fullscreen" allowFullscreen onClose={vi.fn()}>
+              body
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Fullscreen"]',
+    )!;
+    const panel = document.querySelector<HTMLElement>(
+      '[data-web-shell-dialog]',
+    )!;
+    expect(toggle.querySelector('.lucide-expand')).not.toBeNull();
+    expect(panel.hasAttribute('data-fullscreen')).toBe(false);
+
+    act(() => toggle.click());
+
+    expect(
+      document
+        .querySelector('button[aria-label="Exit fullscreen"]')
+        ?.querySelector('.lucide-shrink'),
+    ).not.toBeNull();
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLElement>('[data-web-shell-dialog]'),
+      ).some((candidate) => candidate.hasAttribute('data-fullscreen')),
+    ).toBe(true);
+
+    act(() =>
+      document
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Exit fullscreen"]',
+        )!
+        .click(),
+    );
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLElement>('[data-web-shell-dialog]'),
+      ).every((candidate) => !candidate.hasAttribute('data-fullscreen')),
+    ).toBe(true);
+  });
+
+  it('keeps the fullscreen panel height on the dynamic viewport', () => {
+    const css = readFileSync(
+      resolve(__dirname, 'DialogShell.module.css'),
+      'utf8',
+    );
+    expect(css).toMatch(
+      /@supports \(height: 100dvh\)[\s\S]*\.viewportPanel\[data-fullscreen\][\s\S]*height: calc\(100dvh - 32px\);[\s\S]*max-height: calc\(100dvh - 32px\);/,
+    );
   });
 });

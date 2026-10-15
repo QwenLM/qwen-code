@@ -5,8 +5,17 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Mock } from 'vitest';
 import { LlmContentGenerator } from './llm-content-generator.js';
 import { GoogleGenAI } from '@google/genai';
+import type { GenerateContentConfig, Part } from '@google/genai';
+import type { Config } from '../../config/config.js';
+import type { AuthType, ContentGeneratorConfig } from '../contentGenerator.js';
+import {
+  content,
+  streamOf,
+  userText,
+} from '../../test-utils/model-fixtures.js';
 
 const mockReportLlmRequest = vi.hoisted(() => vi.fn());
 const mockReportLlmResponse = vi.hoisted(() => vi.fn());
@@ -33,6 +42,58 @@ vi.mock('../../telemetry/gen-ai-request.js', () => ({
   reportLlmChunk: mockReportLlmChunk,
 }));
 
+const ROUTIFY = 'https://routify-pub.alibaba-inc.com/protocol/vertex';
+const GOOGLE_API = 'https://generativelanguage.googleapis.com';
+const DEFAULT_SENT_CONFIG = {
+  temperature: 1,
+  topP: 0.95,
+  thinkingConfig: {
+    includeThoughts: true,
+    thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
+  },
+};
+
+const flashReq = (config?: GenerateContentConfig) => ({
+  model: 'gemini-1.5-flash',
+  contents: [],
+  ...(config && { config }),
+});
+const userReq = (...parts: Part[]) => ({
+  model: 'gemini-1.5-flash',
+  contents: [content('user', ...parts)],
+});
+const session1 = () =>
+  ({ getSessionId: vi.fn().mockReturnValue('session-1') }) as unknown as Config;
+const withCg = (cg: object) =>
+  new LlmContentGenerator({ apiKey: 'test' }, cg as ContentGeneratorConfig);
+
+// Builds a generator on a fresh SDK instance and returns that instance's models.
+function build(sdk: object, cg?: ContentGeneratorConfig, cli?: Config) {
+  const gen = new LlmContentGenerator(
+    { apiKey: 'test-api-key', ...sdk },
+    cg,
+    cli,
+  );
+  return {
+    gen,
+    models: vi.mocked(GoogleGenAI).mock.results.at(-1)?.value.models,
+  };
+}
+
+// Sends one flash request through a fresh generator whose SDK resolves to {}
+// and returns the httpOptions the SDK received.
+async function sentHttpOptions(
+  sdk: object,
+  cg: ContentGeneratorConfig | undefined,
+  cli: Config,
+  requestConfig?: GenerateContentConfig,
+) {
+  const { gen, models } = build(sdk, cg, cli);
+  models.generateContent.mockResolvedValue({});
+  await gen.generateContent(flashReq(requestConfig), 'prompt-1');
+  return models.generateContent.mock.calls[0][0].config.httpOptions;
+}
+
 describe('LlmContentGenerator', () => {
   let generator: LlmContentGenerator;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -46,27 +107,66 @@ describe('LlmContentGenerator', () => {
     mockGoogleGenAI = vi.mocked(GoogleGenAI).mock.results[0].value;
   });
 
+  const sent = () => mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+  const expectSentConfig = (config: object) =>
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({ config: expect.objectContaining(config) }),
+    );
+  // The SDK method got the request plus default sampling/thinking config, and
+  // that exact payload was reported as the telemetry request.
+  function expectDefaultsSent(method: Mock, request: object) {
+    expect(method).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...request,
+        config: expect.objectContaining(DEFAULT_SENT_CONFIG),
+      }),
+    );
+    expect(mockReportLlmRequest).toHaveBeenCalledWith(method.mock.calls[0][0]);
+  }
+
+  it.each([false, true])(
+    'uses the declared Gemini default while respecting request opt-out=%s',
+    async (off) => {
+      const config = {
+        getResolvedModelConfig: vi.fn().mockReturnValue({
+          capabilities: {
+            reasoning: {
+              profile: 'gemini',
+              efforts: ['low', 'medium', 'high'],
+              defaultEffort: 'medium',
+            },
+          },
+        }),
+      } as unknown as Config;
+      const configured = new LlmContentGenerator(
+        { apiKey: 'dummy' },
+        { model: 'company-alias', authType: 'gemini' as AuthType },
+        config,
+      );
+      const optOut = () => ({ includeThoughts: false, thinkingBudget: 0 });
+      await configured.generateContent(
+        {
+          model: 'company-alias',
+          contents: [],
+          ...(off ? { config: { thinkingConfig: optOut() } } : {}),
+        },
+        'prompt',
+      );
+      expectSentConfig({
+        thinkingConfig: off
+          ? optOut()
+          : { includeThoughts: true, thinkingLevel: 'MEDIUM' },
+      });
+    },
+  );
+
   it('should merge customHeaders into existing httpOptions.headers', async () => {
     vi.mocked(GoogleGenAI).mockClear();
-
-    void new LlmContentGenerator(
-      {
-        apiKey: 'test-api-key',
-        httpOptions: {
-          headers: {
-            'X-Base': 'base',
-            'X-Override': 'base',
-          },
-        },
-      },
-      {
-        customHeaders: {
-          'X-Custom': 'custom',
-          'X-Override': 'custom',
-        },
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any,
-    );
+    const headers = { 'X-Base': 'base', 'X-Override': 'base' };
+    const customHeaders = { 'X-Custom': 'custom', 'X-Override': 'custom' };
+    build({ httpOptions: { headers } }, {
+      customHeaders,
+    } as unknown as ContentGeneratorConfig);
 
     expect(vi.mocked(GoogleGenAI)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(GoogleGenAI)).toHaveBeenCalledWith({
@@ -82,7 +182,7 @@ describe('LlmContentGenerator', () => {
   });
 
   it('should call generateContent on the underlying model', async () => {
-    const request = { model: 'gemini-1.5-flash', contents: [] };
+    const request = flashReq();
     const expectedResponse = { responseId: 'test-id' };
     mockGoogleGenAI.models.generateContent.mockResolvedValue(expectedResponse);
     const telemetryAttempt = {};
@@ -90,22 +190,7 @@ describe('LlmContentGenerator', () => {
 
     const response = await generator.generateContent(request, 'prompt-id');
 
-    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ...request,
-        config: expect.objectContaining({
-          temperature: 1,
-          topP: 0.95,
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
-          },
-        }),
-      }),
-    );
-    expect(mockReportLlmRequest).toHaveBeenCalledWith(
-      mockGoogleGenAI.models.generateContent.mock.calls[0][0],
-    );
+    expectDefaultsSent(mockGoogleGenAI.models.generateContent, request);
     expect(mockReportLlmResponse).toHaveBeenCalledWith(
       telemetryAttempt,
       expectedResponse,
@@ -113,19 +198,136 @@ describe('LlmContentGenerator', () => {
     expect(response).toBe(expectedResponse);
   });
 
-  it('passes ordered multi-part startup reminder content through unchanged', async () => {
-    const request = {
-      model: 'gemini-1.5-flash',
-      contents: [
+  it('adds the current session ID to Routify Gemini requests', async () => {
+    const getSessionId = vi.fn().mockReturnValue('session-1');
+    const { gen, models } = build(
+      { httpOptions: { baseUrl: ROUTIFY } },
+      {
+        model: 'gemini-1.5-flash',
+        baseUrl: ROUTIFY,
+        customHeaders: { session_id: 'custom-${session_id}' },
+      },
+      {
+        getSessionId,
+        getOutboundAllowDynamicHeaderValues: () => true,
+      } as unknown as Config,
+    );
+    models.generateContent.mockResolvedValue({});
+
+    await gen.generateContent(flashReq(), 'prompt-1');
+    getSessionId.mockReturnValue('session-2');
+    await gen.generateContent(flashReq(), 'prompt-2');
+
+    const headers = (i: number) =>
+      models.generateContent.mock.calls[i][0].config.httpOptions.headers;
+    expect(headers(0)).toEqual({ session_id: 'session-1' });
+    expect(headers(1)).toEqual({ session_id: 'session-2' });
+  });
+
+  it('warns when Gemini dynamic headers are disabled', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      build(
+        {},
         {
-          role: 'user',
-          parts: [
-            { text: '<system-reminder>\ndeferred tools' },
-            { text: '<system-reminder>\nstartup context' },
-          ],
+          model: 'gemini-1.5-flash',
+          customHeaders: { 'X-Gemini-Session': '${session_id}' },
         },
-      ],
-    };
+        {
+          getOutboundAllowDynamicHeaderValues: () => false,
+        } as unknown as Config,
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('X-Gemini-Session'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('expands Gemini dynamic headers without a base URL', async () => {
+    const httpOptions = await sentHttpOptions(
+      {},
+      {
+        model: 'gemini-1.5-flash',
+        customHeaders: { 'X-Gemini-Session': '${session_id}' },
+      },
+      {
+        getSessionId: () => 'session-1',
+        getOutboundAllowDynamicHeaderValues: () => true,
+      } as unknown as Config,
+    );
+    expect(httpOptions.headers).toEqual({ 'X-Gemini-Session': 'session-1' });
+  });
+
+  it('uses the constructor base URL for Gemini session ID injection', async () => {
+    const httpOptions = await sentHttpOptions(
+      { httpOptions: { baseUrl: ROUTIFY } },
+      undefined,
+      session1(),
+    );
+    expect(httpOptions.headers).toEqual({ session_id: 'session-1' });
+  });
+
+  it('does not use a fallback base URL over the constructor destination', async () => {
+    const httpOptions = await sentHttpOptions(
+      { httpOptions: { baseUrl: GOOGLE_API } },
+      { model: 'gemini-1.5-flash', baseUrl: ROUTIFY },
+      session1(),
+    );
+    expect(httpOptions).toBeUndefined();
+  });
+
+  it('uses a non-Routify request destination over a Routify constructor destination', async () => {
+    const httpOptions = await sentHttpOptions(
+      { httpOptions: { baseUrl: ROUTIFY } },
+      undefined,
+      session1(),
+      {
+        httpOptions: {
+          baseUrl: GOOGLE_API,
+          headers: { 'X-Request': 'request-value' },
+        },
+      },
+    );
+    expect(httpOptions).toEqual({
+      baseUrl: GOOGLE_API,
+      headers: { 'X-Request': 'request-value' },
+    });
+  });
+
+  it('injects alongside request headers for a request-level Routify destination', async () => {
+    const httpOptions = await sentHttpOptions(
+      { httpOptions: { baseUrl: GOOGLE_API } },
+      undefined,
+      session1(),
+      {
+        httpOptions: {
+          baseUrl: ROUTIFY,
+          headers: { 'X-Request': 'request-value' },
+        },
+      },
+    );
+    expect(httpOptions).toEqual({
+      baseUrl: ROUTIFY,
+      headers: { 'X-Request': 'request-value', session_id: 'session-1' },
+    });
+  });
+
+  it('does not infer the SDK destination from content generator config', async () => {
+    const httpOptions = await sentHttpOptions(
+      {},
+      { model: 'gemini-1.5-flash', baseUrl: ROUTIFY },
+      session1(),
+    );
+    expect(httpOptions).toBeUndefined();
+  });
+
+  it('passes ordered multi-part startup reminder content through unchanged', async () => {
+    const request = userReq(
+      { text: '<system-reminder>\ndeferred tools' },
+      { text: '<system-reminder>\nstartup context' },
+    );
     mockGoogleGenAI.models.generateContent.mockResolvedValue({
       responseId: 'test-id',
     });
@@ -133,39 +335,20 @@ describe('LlmContentGenerator', () => {
     await generator.generateContent(request, 'prompt-id');
 
     expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        contents: request.contents,
-      }),
+      expect.objectContaining({ contents: request.contents }),
     );
   });
 
   it('should call generateContentStream on the underlying model', async () => {
-    const request = { model: 'gemini-1.5-flash', contents: [] };
-    const mockStream = (async function* () {
-      yield { responseId: '1' };
-    })();
+    const request = flashReq();
+    const mockStream = streamOf({ responseId: '1' });
     mockGoogleGenAI.models.generateContentStream.mockResolvedValue(mockStream);
     const telemetryAttempt = {};
     mockReportLlmRequest.mockReturnValueOnce(telemetryAttempt);
 
     const stream = await generator.generateContentStream(request, 'prompt-id');
 
-    expect(mockGoogleGenAI.models.generateContentStream).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ...request,
-        config: expect.objectContaining({
-          temperature: 1,
-          topP: 0.95,
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
-          },
-        }),
-      }),
-    );
-    expect(mockReportLlmRequest).toHaveBeenCalledWith(
-      mockGoogleGenAI.models.generateContentStream.mock.calls[0][0],
-    );
+    expectDefaultsSent(mockGoogleGenAI.models.generateContentStream, request);
     expect(await stream.next()).toEqual({
       done: false,
       value: { responseId: '1' },
@@ -178,13 +361,12 @@ describe('LlmContentGenerator', () => {
   it('forwards stream return without pre-consuming the SDK stream', async () => {
     const next = vi.fn();
     const close = vi.fn().mockResolvedValue({ done: true, value: undefined });
-    const sdkStream = {
+    mockGoogleGenAI.models.generateContentStream.mockResolvedValue({
       [Symbol.asyncIterator]: () => ({ next, return: close }),
-    };
-    mockGoogleGenAI.models.generateContentStream.mockResolvedValue(sdkStream);
+    });
 
     const stream = await generator.generateContentStream(
-      { model: 'gemini-1.5-flash', contents: [] },
+      flashReq(),
       'prompt-id',
     );
     await stream.return(undefined);
@@ -201,7 +383,7 @@ describe('LlmContentGenerator', () => {
     });
 
     const stream = await generator.generateContentStream(
-      { model: 'gemini-1.5-flash', contents: [] },
+      flashReq(),
       'prompt-id',
     );
 
@@ -220,238 +402,185 @@ describe('LlmContentGenerator', () => {
     expect(response).toBe(expectedResponse);
   });
 
+  it('adds the current session ID to Routify embedding requests', async () => {
+    const { gen, models } = build(
+      { httpOptions: { baseUrl: ROUTIFY } },
+      { model: 'embedding-model', baseUrl: ROUTIFY },
+      session1(),
+    );
+    models.embedContent.mockResolvedValue({ embeddings: [] });
+
+    await gen.embedContent({ model: 'embedding-model', contents: [] });
+
+    expect(
+      models.embedContent.mock.calls[0][0].config.httpOptions.headers,
+    ).toEqual({ session_id: 'session-1' });
+  });
+
   it('should prioritize contentGeneratorConfig samplingParams over request config', async () => {
-    const generatorWithParams = new LlmContentGenerator({ apiKey: 'test' }, {
+    await withCg({
       model: 'gemini-1.5-flash',
-      samplingParams: {
-        temperature: 0.1,
-        top_p: 0.2,
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+      samplingParams: { temperature: 0.1, top_p: 0.2 },
+    }).generateContent(flashReq({ temperature: 0.9, topP: 0.9 }), 'prompt-id');
 
-    const request = {
-      model: 'gemini-1.5-flash',
-      contents: [],
-      config: {
-        temperature: 0.9,
-        topP: 0.9,
-      },
-    };
-
-    await generatorWithParams.generateContent(request, 'prompt-id');
-
-    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        config: expect.objectContaining({
-          temperature: 0.1,
-          topP: 0.2,
-        }),
-      }),
-    );
+    expectSentConfig({ temperature: 0.1, topP: 0.2 });
   });
 
-  it('should map reasoning effort to thinkingConfig', async () => {
-    const generatorWithReasoning = new LlmContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
-      reasoning: {
-        effort: 'high',
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+  it.each([
+    [1000000, 4096, 4096],
+    [2048, 4096, 2048],
+    [undefined, 4096, 4096],
+    [2048, undefined, 2048],
+  ])(
+    'respects both configured and request output ceilings (%s, %s)',
+    async (configured, requested, expected) => {
+      await withCg({
+        model: 'gemini-test',
+        samplingParams: { max_tokens: configured },
+      }).generateContent(
+        {
+          model: 'gemini-test',
+          contents: [],
+          config: { maxOutputTokens: requested },
+        },
+        'prompt-id',
+      );
+      expectSentConfig({ maxOutputTokens: expected });
+    },
+  );
 
-    const request = {
-      model: 'gemini-2.5-pro',
-      contents: [],
-    };
-
-    await generatorWithReasoning.generateContent(request, 'prompt-id');
-
-    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        config: expect.objectContaining({
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'HIGH',
-          },
-        }),
-      }),
-    );
-  });
-
-  it("maps reasoning effort 'max' to HIGH (Gemini has no higher tier)", async () => {
+  it.each([
+    ['should map reasoning effort to thinkingConfig', 'high', 'HIGH'],
     // 'max' is a DeepSeek-specific extension. Gemini caps at HIGH, so the
     // converter must clamp instead of falling through to UNSPECIFIED.
-    const generatorWithMax = new LlmContentGenerator({ apiKey: 'test' }, {
+    [
+      "maps reasoning effort 'max' to HIGH (Gemini has no higher tier)",
+      'max',
+      'HIGH',
+    ],
+    ["maps reasoning effort 'medium' to MEDIUM", 'medium', 'MEDIUM'],
+    [
+      "clamps reasoning effort 'xhigh' to HIGH (Gemini has no xhigh tier)",
+      'xhigh',
+      'HIGH',
+    ],
+  ])('%s', async (_title, effort, thinkingLevel) => {
+    await withCg({
       model: 'gemini-2.5-pro',
-      reasoning: { effort: 'max' },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+      reasoning: { effort },
+    }).generateContent({ model: 'gemini-2.5-pro', contents: [] }, 'prompt-id');
 
-    await generatorWithMax.generateContent(
-      { model: 'gemini-2.5-pro', contents: [] },
-      'prompt-id',
-    );
-
-    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        config: expect.objectContaining({
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'HIGH',
-          },
-        }),
-      }),
-    );
-  });
-
-  it("maps reasoning effort 'medium' to MEDIUM", async () => {
-    const generatorWithMedium = new LlmContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
-      reasoning: { effort: 'medium' },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
-
-    await generatorWithMedium.generateContent(
-      { model: 'gemini-2.5-pro', contents: [] },
-      'prompt-id',
-    );
-
-    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        config: expect.objectContaining({
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'MEDIUM',
-          },
-        }),
-      }),
-    );
-  });
-
-  it("clamps reasoning effort 'xhigh' to HIGH (Gemini has no xhigh tier)", async () => {
-    const generatorWithXhigh = new LlmContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
-      reasoning: { effort: 'xhigh' },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
-
-    await generatorWithXhigh.generateContent(
-      { model: 'gemini-2.5-pro', contents: [] },
-      'prompt-id',
-    );
-
-    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        config: expect.objectContaining({
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'HIGH',
-          },
-        }),
-      }),
-    );
+    expectSentConfig({
+      thinkingConfig: { includeThoughts: true, thinkingLevel },
+    });
   });
 
   it('should strip displayName from inlineData and fileData before sending to API', async () => {
-    const request = {
-      model: 'gemini-1.5-flash',
-      contents: [
+    await generator.generateContent(
+      userReq(
         {
-          role: 'user' as const,
-          parts: [
-            {
-              inlineData: {
-                mimeType: 'image/png',
-                data: 'base64data',
-                displayName: 'image.png',
-              },
-            },
-            {
-              inlineData: {
-                mimeType: 'application/pdf',
-                data: 'base64pdfdata',
-                displayName: 'document.pdf',
-              },
-            },
-            {
-              fileData: {
-                mimeType: 'application/pdf',
-                fileUri: 'gs://bucket/file.pdf',
-                displayName: 'document.pdf',
-              },
-            },
-          ],
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'base64data',
+            displayName: 'image.png',
+          },
         },
-      ],
-    };
+        {
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: 'base64pdfdata',
+            displayName: 'document.pdf',
+          },
+        },
+        {
+          fileData: {
+            mimeType: 'application/pdf',
+            fileUri: 'gs://bucket/file.pdf',
+            displayName: 'document.pdf',
+          },
+        },
+      ),
+      'prompt-id',
+    );
 
-    await generator.generateContent(request, 'prompt-id');
-
-    const calledWith = mockGoogleGenAI.models.generateContent.mock.calls[0][0];
-
-    // Verify displayName is stripped from inlineData
-    expect(calledWith.contents[0].parts[0].inlineData).toEqual({
+    // displayName is stripped from both inlineData parts and from fileData.
+    const parts = sent().contents[0].parts;
+    expect(parts[0].inlineData).toEqual({
       mimeType: 'image/png',
       data: 'base64data',
     });
-    expect(
-      calledWith.contents[0].parts[0].inlineData.displayName,
-    ).toBeUndefined();
-
-    expect(calledWith.contents[0].parts[1].inlineData).toEqual({
+    expect(parts[0].inlineData.displayName).toBeUndefined();
+    expect(parts[1].inlineData).toEqual({
       mimeType: 'application/pdf',
       data: 'base64pdfdata',
     });
-    expect(
-      calledWith.contents[0].parts[1].inlineData.displayName,
-    ).toBeUndefined();
-
-    // Verify displayName is stripped from fileData
-    expect(calledWith.contents[0].parts[2].fileData).toEqual({
+    expect(parts[1].inlineData.displayName).toBeUndefined();
+    expect(parts[2].fileData).toEqual({
       mimeType: 'application/pdf',
       fileUri: 'gs://bucket/file.pdf',
     });
-    expect(
-      calledWith.contents[0].parts[2].fileData.displayName,
-    ).toBeUndefined();
+    expect(parts[2].fileData.displayName).toBeUndefined();
   });
 
-  it('should strip displayName from functionResponse parts', async () => {
-    const request = {
-      model: 'gemini-1.5-flash',
-      contents: [
+  it('strips partMetadata from reattach parts before the Vertex request is built', async () => {
+    // `vertexai: true` shares the Gemini Developer API's `stripPartFields`
+    // path, but the Vertex request builder rejects `partMetadata`
+    // unconditionally; the reattach boundary (issue #11627) must not crash
+    // the Vertex route, so the marker is dropped before the SDK builds it.
+    const vertexGenerator = new LlmContentGenerator({
+      apiKey: 'test-api-key',
+      vertexai: true,
+    });
+    mockGoogleGenAI.models.generateContent.mockResolvedValue({});
+
+    await vertexGenerator.generateContent(
+      userReq(
         {
-          role: 'user' as const,
-          parts: [
-            {
-              functionResponse: {
-                id: 'call-1',
-                name: 'Read',
-                response: { output: 'content' },
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType: 'image/png',
-                      data: 'base64data',
-                      displayName: 'screenshot.png',
-                    },
-                  },
-                ],
-              },
-            },
-          ],
+          text: 'Recent images reattached',
+          partMetadata: { 'qwen-code:reattach-boundary': true },
         },
-      ],
-    };
+        { inlineData: { mimeType: 'image/png', data: 'base64data' } },
+      ),
+      'prompt-id',
+    );
 
-    await generator.generateContent(request, 'prompt-id');
+    const parts = sent().contents[0].parts;
+    expect(parts[0].partMetadata).toBeUndefined();
+    expect(parts[1].inlineData).toEqual({
+      mimeType: 'image/png',
+      data: 'base64data',
+    });
+  });
 
-    const calledWith = mockGoogleGenAI.models.generateContent.mock.calls[0][0];
-    const functionResponseParts =
-      calledWith.contents[0].parts[0].functionResponse.parts;
+  // Sends one user turn holding a Read functionResponse with these nested
+  // parts; returns the nested parts the SDK received.
+  async function sentFunctionResponseParts(parts: Part[]) {
+    await generator.generateContent(
+      userReq({
+        functionResponse: {
+          id: 'call-1',
+          name: 'Read',
+          response: { output: 'content' },
+          parts,
+        },
+      }),
+      'prompt-id',
+    );
+    return sent().contents[0].parts[0].functionResponse.parts;
+  }
 
-    // Verify displayName is stripped from nested inlineData
+  it('should strip displayName from functionResponse parts', async () => {
+    const functionResponseParts = await sentFunctionResponseParts([
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'base64data',
+          displayName: 'screenshot.png',
+        },
+      },
+    ]);
+
+    // displayName is stripped from nested inlineData
     expect(functionResponseParts[0].inlineData).toEqual({
       mimeType: 'image/png',
       data: 'base64data',
@@ -460,52 +589,19 @@ describe('LlmContentGenerator', () => {
   });
 
   it('should convert audio and video to text in functionResponse parts', async () => {
-    const request = {
-      model: 'gemini-1.5-flash',
-      contents: [
-        {
-          role: 'user' as const,
-          parts: [
-            {
-              functionResponse: {
-                id: 'call-1',
-                name: 'Read',
-                response: { output: 'content' },
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType: 'image/png',
-                      data: 'imagedata',
-                    },
-                  },
-                  {
-                    inlineData: {
-                      mimeType: 'audio/wav',
-                      data: 'audiodata',
-                      displayName: 'recording.wav',
-                    },
-                  },
-                  {
-                    inlineData: {
-                      mimeType: 'video/mp4',
-                      data: 'videodata',
-                    },
-                  },
-                ],
-              },
-            },
-          ],
+    const functionResponseParts = await sentFunctionResponseParts([
+      { inlineData: { mimeType: 'image/png', data: 'imagedata' } },
+      {
+        inlineData: {
+          mimeType: 'audio/wav',
+          data: 'audiodata',
+          displayName: 'recording.wav',
         },
-      ],
-    };
+      },
+      { inlineData: { mimeType: 'video/mp4', data: 'videodata' } },
+    ]);
 
-    await generator.generateContent(request, 'prompt-id');
-
-    const calledWith = mockGoogleGenAI.models.generateContent.mock.calls[0][0];
-    const functionResponseParts =
-      calledWith.contents[0].parts[0].functionResponse.parts;
-
-    // All parts should remain, but audio/video converted to text
+    // All parts remain, but audio/video are converted to text
     expect(functionResponseParts).toHaveLength(3);
     expect(functionResponseParts[0].inlineData.mimeType).toBe('image/png');
     expect(functionResponseParts[1].text).toBe(
@@ -514,5 +610,85 @@ describe('LlmContentGenerator', () => {
     expect(functionResponseParts[2].text).toBe(
       'Unsupported media type for Gemini: video/mp4.',
     );
+  });
+
+  // https://github.com/QwenLM/qwen-code/issues/9453
+  //
+  // The OpenAI Responses generator stashes an opaque reasoning-replay payload
+  // in the shared `Part.thoughtSignature` field. It only means something to
+  // the Responses API, so after a provider switch it must not travel on the
+  // Gemini wire as a Gemini-native signature, while the visible reasoning
+  // summary and `thought: true` marker are kept.
+  describe('cross-provider reasoning replay metadata', () => {
+    const responsesReplaySignature = JSON.stringify({
+      id: 'rs_68c6c0c9ff5c8191a29b2e78c1a40c83',
+      encrypted_content: 'gAAAAABvcmVhc29uaW5nLXJlcGxheS1wYXlsb2Fk',
+    });
+
+    // A Gemini-native thoughtSignature is an opaque token: it never starts
+    // with '{' and never parses as the Responses replay payload shape.
+    const geminiNativeSignature =
+      'Ck0BShsIxKq3wOa2tgUQ5LK0BhjOqrfA5ra2BRABGAIiQB9Z7xKq3wOa2tgU';
+
+    const buildRequest = (thoughtPart: Part) => ({
+      model: 'gemini-2.5-pro',
+      contents: [
+        userText('First'),
+        content('model', thoughtPart, { text: 'Visible answer' }),
+        userText('Second'),
+      ],
+    });
+    const thoughtPart = (thoughtSignature: string): Part => ({
+      text: 'Reasoning summary',
+      thought: true,
+      thoughtSignature,
+    });
+
+    // Sends a reasoning part carrying `signature`; checks the sent part has
+    // `expected` as its signature and kept its visible fields.
+    async function sendThought(signature: string, expected?: unknown) {
+      await generator.generateContent(
+        buildRequest(thoughtPart(signature)),
+        'prompt-id',
+      );
+      const calledWith = sent();
+      const sentPart = calledWith.contents[1].parts[0];
+      expect(sentPart.thoughtSignature).toBe(expected);
+      expect(sentPart.thought).toBe(true);
+      expect(sentPart.text).toBe('Reasoning summary');
+      return calledWith;
+    }
+
+    it('preserves a native Gemini thoughtSignature', async () => {
+      await sendThought(geminiNativeSignature, geminiNativeSignature);
+    });
+
+    it('strips a Responses replay payload but keeps the visible reasoning text', async () => {
+      const calledWith = await sendThought(responsesReplaySignature);
+      expect(calledWith.contents[1].parts[1].text).toBe('Visible answer');
+    });
+
+    it('does not mutate the caller-owned history part', async () => {
+      // Hold the part by identity rather than re-deriving it from the request,
+      // so this asserts the caller's own object was not touched.
+      const historyPart = thoughtPart(responsesReplaySignature);
+
+      await generator.generateContent(buildRequest(historyPart), 'prompt-id');
+
+      // The strip is wire-only: persisted history keeps the payload so a
+      // later switch back to the Responses API can still replay it.
+      expect(historyPart.thoughtSignature).toBe(responsesReplaySignature);
+    });
+
+    it('forwards a non-string thoughtSignature without throwing', async () => {
+      // The SDK types thoughtSignature as string, but the value crosses untyped
+      // boundaries (persisted-history restore does no Part shape validation),
+      // so a non-string is treated as a native opaque token, not a throw.
+      const nonStringSignature = 1 as unknown as string;
+
+      // The garbage is forwarded unchanged (base behavior): the recognizer
+      // only drops the Responses replay payload shape, never crashes.
+      await sendThought(nonStringSignature, nonStringSignature);
+    });
   });
 });

@@ -93,8 +93,19 @@ export interface ScriptLintReport {
    * capping — actionlint is installed on ~15% of PRs (every workflow change), and
    * capping all of them on a checker we choose not to run would make them
    * un-Approvable forever, which "install the tool" cannot fix.
+   *
+   * `reasonZh` is the same reason for the review body's Chinese half — the
+   * deferral is the one lint outcome rendered inside a translated sentence,
+   * and without it that sentence carried the English reason verbatim.
+   * Optional so a report written by an older CLI still renders (English both
+   * halves).
    */
-  deferred: Array<{ path: string; tool: LintTool; reason: string }>;
+  deferred: Array<{
+    path: string;
+    tool: LintTool;
+    reason: string;
+    reasonZh?: string;
+  }>;
   /**
    * True when every applicable linter ran cleanly **and** no finding on a changed
    * line is above `style` — `info`/`warning`/`error` all count against it (the
@@ -608,7 +619,7 @@ export function runScriptLint(
         skipped.push({
           path,
           tool: byName,
-          reason: 'path resolves outside the worktree — not linted',
+          reason: 'path resolves outside the worktree',
         });
       }
       continue;
@@ -623,11 +634,13 @@ export function runScriptLint(
       if (byName) {
         // Reason does NOT lead with the path — the gate prefixes `${path}:` when
         // it discloses, and leading with it here would print the path twice.
+        // Nor does it end with "not linted": the body renders every reason
+        // under a header that already says so ("Not reviewed:" / "Not
+        // linted:"), and a tail here posted the phrase twice in one sentence.
         skipped.push({
           path,
           tool: byName,
-          reason:
-            'not a regular file (symlink/fifo) or unreadable — not linted',
+          reason: 'not a regular file (symlink/fifo) or unreadable',
         });
       }
       continue;
@@ -647,8 +660,8 @@ export function runScriptLint(
       deferred.push({
         path,
         tool,
-        reason:
-          'actionlint embedded-shell source mapping is not yet supported — not linted',
+        reason: 'actionlint embedded-shell source mapping is not yet supported',
+        reasonZh: 'actionlint 对 workflow 内嵌 shell 的源映射尚未支持',
       });
       continue;
     }

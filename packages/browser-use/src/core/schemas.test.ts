@@ -1,0 +1,404 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { spawnSync } from 'node:child_process';
+import { describe, expect, it } from 'vitest';
+
+import { commandSchemas, locatorStepsSchema } from './schemas.js';
+import { MAX_SCREENSHOT_PIXELS } from './screenshot-budget.js';
+
+describe('recursive locator plans', () => {
+  it.each(['and', 'or', 'has', 'hasNot'])(
+    'bounds %s nesting while preserving 32 levels and flat breadth',
+    (kind) => {
+      const nested = (levels: number): unknown[] => {
+        let steps: unknown[] = [{ kind: 'locator', selector: 'button' }];
+        for (let level = 1; level < levels; level++) {
+          steps = [
+            { kind: 'locator', selector: 'button' },
+            kind === 'has' || kind === 'hasNot'
+              ? { kind: 'filter', [kind]: steps }
+              : { kind, steps },
+          ];
+        }
+        return steps;
+      };
+      expect(locatorStepsSchema.safeParse(nested(32)).success).toBe(true);
+      expect(locatorStepsSchema.safeParse(nested(33)).success).toBe(false);
+      expect(locatorStepsSchema.safeParse(nested(1_000)).success).toBe(false);
+      expect(
+        locatorStepsSchema.safeParse(Array(32).fill({ kind: 'first' })).success,
+      ).toBe(true);
+      expect(
+        locatorStepsSchema.safeParse(Array(33).fill({ kind: 'first' })).success,
+      ).toBe(false);
+    },
+  );
+
+  it('rejects deeply nested invalid plans within a bounded process', () => {
+    const probe = spawnSync(
+      process.execPath,
+      [
+        // The cap bounds the probe's own allocations; it must also clear the
+        // tsx loader's startup footprint, which alone exceeds 512MB on some
+        // hosts.
+        '--max-old-space-size=1024',
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '-e',
+        `
+          import assert from 'node:assert/strict';
+          import { locatorStepsSchema } from ${JSON.stringify(new URL('./schemas.ts', import.meta.url).href)};
+          for (const kind of ['and', 'or']) {
+            let node = { kind: 'locator' };
+            for (let depth = 0; depth < 16; depth++) {
+              node = { kind, steps: [node] };
+            }
+            assert.equal(locatorStepsSchema.safeParse([node]).success, false);
+          }
+          console.log('rejected');
+        `,
+      ],
+      { encoding: 'utf8', timeout: 15_000 },
+    );
+    expect(probe.error).toBeUndefined();
+    expect(probe.status).toBe(0);
+    expect(probe.stdout.trim()).toBe('rejected');
+  }, 20_000);
+
+  it('preserves nested combinations and strict leaf validation', () => {
+    const steps = [
+      { kind: 'locator', selector: 'button' },
+      {
+        kind: 'and',
+        steps: [
+          { kind: 'getByRole', role: 'button' },
+          { kind: 'or', steps: [{ kind: 'getByText', text: 'Save' }] },
+        ],
+      },
+      {
+        kind: 'filter',
+        has: [{ kind: 'locator', selector: 'span' }],
+        hasNot: [{ kind: 'getByText', text: 'Disabled' }],
+      },
+    ];
+    expect(locatorStepsSchema.parse(steps)).toEqual(steps);
+    expect(
+      locatorStepsSchema.safeParse([
+        {
+          kind: 'or',
+          steps: [{ kind: 'locator', selector: 'button', extra: true }],
+        },
+      ]).success,
+    ).toBe(false);
+  });
+});
+
+describe('locator matcher text', () => {
+  it('rejects empty matcher text and empty regex sources', () => {
+    for (const text of ['', { regex: '' }]) {
+      expect(
+        locatorStepsSchema.safeParse([{ kind: 'getByText', text }]).success,
+      ).toBe(false);
+    }
+    expect(
+      locatorStepsSchema.safeParse([{ kind: 'getByText', text: 'Save' }])
+        .success,
+    ).toBe(true);
+    expect(
+      locatorStepsSchema.safeParse([
+        { kind: 'getByText', text: { regex: 'Save|Cancel' } },
+      ]).success,
+    ).toBe(true);
+  });
+
+  it('rejects exact matching against a regex matcher', () => {
+    expect(
+      locatorStepsSchema.safeParse([
+        { kind: 'getByText', text: { regex: 'save' }, exact: true },
+      ]).success,
+    ).toBe(false);
+    expect(
+      locatorStepsSchema.safeParse([
+        {
+          kind: 'getByRole',
+          role: 'button',
+          name: { regex: 'save' },
+          exact: true,
+        },
+      ]).success,
+    ).toBe(false);
+    expect(
+      locatorStepsSchema.safeParse([
+        { kind: 'getByText', text: 'Save', exact: true },
+      ]).success,
+    ).toBe(true);
+  });
+});
+
+describe('locator matcher flags', () => {
+  it('accepts stateless flags and rejects stateful g/y flags', () => {
+    expect(
+      locatorStepsSchema.safeParse([
+        { kind: 'getByText', text: { regex: 'Save|Cancel', flags: 'ims' } },
+      ]).success,
+    ).toBe(true);
+    for (const flags of ['g', 'y', 'gi', 'iy']) {
+      expect(
+        locatorStepsSchema.safeParse([
+          { kind: 'getByText', text: { regex: 'Save', flags } },
+        ]).success,
+      ).toBe(false);
+    }
+  });
+});
+
+describe('browser command schemas', () => {
+  it.each([
+    ['locator.click', { steps: [{ kind: 'locator', selector: 'button' }] }],
+    [
+      'locator.waitFor',
+      { steps: [{ kind: 'locator', selector: 'button' }], state: 'visible' },
+    ],
+    ['playwright.evaluate', { script: 'return 1;' }],
+    ['playwright.waitForURL', { url: 'https://example.com/' }],
+    ['playwright.waitForEvent', { event: 'filechooser' }],
+  ] as const)(
+    'requires a positive operation timeout for %s',
+    (method, args) => {
+      for (const timeoutMs of [0, -1, 120_001]) {
+        expect(
+          commandSchemas[method].safeParse({
+            tabId: 'tab-1',
+            ...args,
+            timeoutMs,
+          }).success,
+        ).toBe(false);
+      }
+      for (const timeoutMs of [undefined, 1, 1_000, 120_000]) {
+        expect(
+          commandSchemas[method].safeParse({
+            tabId: 'tab-1',
+            ...args,
+            timeoutMs,
+          }).success,
+        ).toBe(true);
+      }
+    },
+  );
+
+  it('preserves a zero delay without allowing negative or excessive delays', () => {
+    for (const timeoutMs of [0, 1, 120_000]) {
+      expect(
+        commandSchemas['playwright.waitForTimeout'].safeParse({
+          tabId: 'tab-1',
+          timeoutMs,
+        }).success,
+      ).toBe(true);
+    }
+    for (const timeoutMs of [-1, 120_001]) {
+      expect(
+        commandSchemas['playwright.waitForTimeout'].safeParse({
+          tabId: 'tab-1',
+          timeoutMs,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('accepts the five coordinate CUA mouse buttons from Codex', () => {
+    const base = { tabId: 'tab-1', x: 1, y: 1 };
+
+    for (const button of [1, 2, 3, 4, 5]) {
+      expect(
+        commandSchemas['cua.click'].safeParse({ ...base, button }).success,
+      ).toBe(true);
+    }
+    expect(
+      commandSchemas['cua.click'].safeParse({ ...base, button: 6 }).success,
+    ).toBe(false);
+    expect(
+      commandSchemas['locator.click'].safeParse({
+        tabId: 'tab-1',
+        steps: [{ kind: 'locator', selector: 'button' }],
+        button: 'back',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('caps locator.type at the length its per-character budget can deliver', () => {
+    const steps = [{ kind: 'locator', selector: '#field' }];
+    expect(
+      commandSchemas['locator.type'].safeParse({
+        tabId: 'tab-1',
+        steps,
+        value: 'a'.repeat(60_000),
+      }).success,
+    ).toBe(true);
+    expect(
+      commandSchemas['locator.type'].safeParse({
+        tabId: 'tab-1',
+        steps,
+        value: 'a'.repeat(60_001),
+      }).success,
+    ).toBe(false);
+    // fill sets the value atomically and keeps the larger budget.
+    expect(
+      commandSchemas['locator.fill'].safeParse({
+        tabId: 'tab-1',
+        steps,
+        value: 'a'.repeat(100_000),
+      }).success,
+    ).toBe(true);
+  });
+
+  it('accepts Playwright AI snapshot refs only', () => {
+    for (const nodeId of ['e12', 'f1e3']) {
+      expect(
+        commandSchemas['dom_cua.click'].safeParse({
+          tabId: 'tab-1',
+          node_id: nodeId,
+        }).success,
+      ).toBe(true);
+    }
+    for (const nodeId of ['n12', 'n7/n3', 'e1/e2']) {
+      expect(
+        commandSchemas['dom_cua.click'].safeParse({
+          tabId: 'tab-1',
+          node_id: nodeId,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('keeps DOM CUA typing focus-based and scrolling optionally targeted', () => {
+    expect(
+      commandSchemas['dom_cua.type'].safeParse({
+        tabId: 'tab-1',
+        text: 'hello',
+      }).success,
+    ).toBe(true);
+    expect(
+      commandSchemas['dom_cua.type'].safeParse({
+        tabId: 'tab-1',
+        node_id: 'e1',
+        text: 'hello',
+      }).success,
+    ).toBe(false);
+    for (const node_id of [undefined, 'e1']) {
+      expect(
+        commandSchemas['dom_cua.scroll'].safeParse({
+          tabId: 'tab-1',
+          ...(node_id === undefined ? {} : { node_id }),
+          x: 0,
+          y: 100,
+        }).success,
+      ).toBe(true);
+    }
+  });
+
+  it('keeps runtime-only controls out of the model command contract', () => {
+    expect(
+      commandSchemas['playwright.domSnapshot'].safeParse({
+        tabId: 'tab-1',
+        maxChars: 1_000,
+      }).success,
+    ).toBe(false);
+    expect(
+      commandSchemas['dom_cua.click'].safeParse({
+        tabId: 'tab-1',
+        node_id: 'e1',
+        force: true,
+      }).success,
+    ).toBe(false);
+    expect(
+      commandSchemas['tab.screenshot'].safeParse({
+        tabId: 'tab-1',
+        scale: 2,
+      }).success,
+    ).toBe(false);
+    expect(
+      commandSchemas['dev.logs'].safeParse({
+        tabId: 'tab-1',
+        clear: true,
+      }).success,
+    ).toBe(false);
+    expect('dom_cua.screenshot' in commandSchemas).toBe(false);
+    expect('locator.setInputFiles' in commandSchemas).toBe(false);
+    expect('dev.network' in commandSchemas).toBe(false);
+    expect('download.path' in commandSchemas).toBe(false);
+    expect(
+      commandSchemas['locator.downloadMedia'].safeParse({
+        tabId: 'tab-1',
+        steps: [{ kind: 'locator', selector: 'img' }],
+        timeoutMs: 1_000,
+      }).success,
+    ).toBe(true);
+  });
+
+  it('enforces every refine predicate without over-rejecting legal shapes', () => {
+    const screenshot = commandSchemas['tab.screenshot'];
+    const width = 2_048;
+    const height = MAX_SCREENSHOT_PIXELS / width;
+    const clip = { x: 0, y: 0, width, height };
+    expect(
+      screenshot.safeParse({ tabId: 'tab-1', clip, fullPage: true }).success,
+    ).toBe(false);
+    expect(
+      screenshot.safeParse({
+        tabId: 'tab-1',
+        clip: { ...clip, height: height + 1 },
+      }).success,
+    ).toBe(false);
+    expect(screenshot.safeParse({ tabId: 'tab-1', clip }).success).toBe(true);
+    expect(
+      screenshot.safeParse({ tabId: 'tab-1', clip, fullPage: false }).success,
+    ).toBe(true);
+    expect(
+      screenshot.safeParse({ tabId: 'tab-1', fullPage: true }).success,
+    ).toBe(true);
+
+    const selectOption = commandSchemas['locator.selectOption'];
+    const steps = [{ kind: 'locator', selector: 'select' }];
+    for (const value of [{}, [{}]]) {
+      expect(
+        selectOption.safeParse({ tabId: 'tab-1', steps, value }).success,
+      ).toBe(false);
+    }
+    expect(
+      selectOption.safeParse({
+        tabId: 'tab-1',
+        steps,
+        value: [{ index: 0 }, 'b'],
+      }).success,
+    ).toBe(true);
+
+    const history = commandSchemas['browser.user.history'];
+    expect(
+      history.safeParse({ browserId: 'b-1', options: { queries: [' '] } })
+        .success,
+    ).toBe(false);
+    for (const bound of ['from', 'to']) {
+      expect(
+        history.safeParse({
+          browserId: 'b-1',
+          options: { [bound]: 'not-a-date' },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      history.safeParse({
+        browserId: 'b-1',
+        options: {
+          queries: ['qwen'],
+          from: '2026-01-01T00:00:00Z',
+          to: new Date('2026-02-01T00:00:00Z'),
+        },
+      }).success,
+    ).toBe(true);
+  });
+});

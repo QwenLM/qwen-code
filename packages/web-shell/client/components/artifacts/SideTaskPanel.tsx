@@ -14,6 +14,12 @@ import {
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import {
+  isModelSetupCommand,
+  isModelCommandSnapshotReady,
+  resolveModelManagement,
+  type WebShellModelManagementOptions,
+} from '../../modelManagement';
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
@@ -45,7 +51,10 @@ interface SideTaskPanelProps {
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  modelManagement?: WebShellModelManagementOptions;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  /** Policy refused the stored initial prompt; the parent drops it from the tab. */
+  onInitialPromptRefused?: (tabId: string) => void;
 }
 
 const FIRST_PROMPT_RENAME_ATTEMPTS = 3;
@@ -65,7 +74,9 @@ export function SideTaskPanel({
   onArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  modelManagement,
   onImageIngestionNotice,
+  onInitialPromptRefused,
 }: SideTaskPanelProps) {
   if (!sessionId) {
     return (
@@ -103,7 +114,9 @@ export function SideTaskPanel({
         onArtifactsChange={onArtifactsChange}
         onError={onError}
         sessionWorkflowEnabled={sessionWorkflowEnabled}
+        modelManagement={modelManagement}
         onImageIngestionNotice={onImageIngestionNotice}
+        onInitialPromptRefused={onInitialPromptRefused}
       />
     </DaemonSessionProvider>
   );
@@ -130,7 +143,15 @@ function SideTaskCreation({
   const { t } = useI18n();
   const creatingRef = useRef(false);
   const didAttemptCreateRef = useRef(false);
+  const mountedRef = useRef(true);
   const [creationError, setCreationError] = useState<unknown>();
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const create = useCallback(async () => {
     if (creatingRef.current) return;
@@ -139,8 +160,11 @@ function SideTaskCreation({
     try {
       const created = await createSession(tabId, parentSessionId, title);
       onCreated(tabId, created.sessionId);
-      if (created.displayName) onTitleChange(tabId, created.displayName);
+      if (mountedRef.current && created.displayName) {
+        onTitleChange(tabId, created.displayName);
+      }
     } catch (error) {
+      if (!mountedRef.current) return;
       setCreationError(error);
       onError?.(error, t('sideTask.createFailed'));
     } finally {
@@ -196,7 +220,9 @@ function SideTaskSession({
   onArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  modelManagement,
   onImageIngestionNotice,
+  onInitialPromptRefused,
 }: Omit<
   SideTaskPanelProps,
   'sessionId' | 'parentSessionId' | 'createSession' | 'onCreated'
@@ -284,11 +310,45 @@ function SideTaskSession({
     ],
   );
   const initialPromptSentRef = useRef(false);
+  const waitingForCommandSnapshot = Boolean(
+    initialPrompt?.trim() &&
+      restoredEmptySession &&
+      !initialPromptSentRef.current &&
+      !resolveModelManagement(modelManagement).allowAdd &&
+      !isModelCommandSnapshotReady(connection.commands) &&
+      isModelSetupCommand(initialPrompt),
+  );
+  const commandWaitNoticeRef = useRef(onImageIngestionNotice);
+  commandWaitNoticeRef.current = onImageIngestionNotice;
+  useEffect(() => {
+    if (!waitingForCommandSnapshot) return;
+    const timer = setTimeout(() => {
+      commandWaitNoticeRef.current?.(
+        'warning',
+        t('sideTask.commandsLoadingTimedOut'),
+      );
+    }, 5_000);
+    return () => clearTimeout(timer);
+  }, [waitingForCommandSnapshot, initialPrompt, connection.sessionId, t]);
+
   useEffect(() => {
     const prompt = initialPrompt?.trim();
-    if (!prompt || !restoredEmptySession || initialPromptSentRef.current)
+    if (
+      !prompt ||
+      !restoredEmptySession ||
+      initialPromptSentRef.current ||
+      waitingForCommandSnapshot
+    )
       return;
     initialPromptSentRef.current = true;
+    if (
+      !resolveModelManagement(modelManagement).allowAdd &&
+      isModelSetupCommand(prompt, connection.commands)
+    ) {
+      onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
+      onInitialPromptRefused?.(tabId);
+      return;
+    }
     actions
       .sendPrompt(prompt, {
         onAdmitted: () => {
@@ -308,13 +368,19 @@ function SideTaskSession({
   }, [
     actions,
     catalogOwnerCwd,
+    connection.commands,
     connection.sessionId,
     initialPrompt,
+    modelManagement,
+    onImageIngestionNotice,
+    onInitialPromptRefused,
     nameFromFirstPrompt,
     onError,
     restoredEmptySession,
+    waitingForCommandSnapshot,
     sessionCatalogController,
     t,
+    tabId,
   ]);
 
   if (!connection.sessionId) {
@@ -337,6 +403,7 @@ function SideTaskSession({
       onRightPanelOpen={onRightPanelOpen}
       onPaneArtifactsChange={onArtifactsChange}
       sessionWorkflowEnabled={sessionWorkflowEnabled}
+      modelManagement={modelManagement}
     />
   );
 }

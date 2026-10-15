@@ -10,6 +10,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { normalizeOpenAiWireBaseUrl } from '../core/openaiContentGenerator/constants.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import {
@@ -18,7 +19,10 @@ import {
 } from '../utils/runtimeModelPrefix.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
-import { ModelRegistry } from './modelRegistry.js';
+import {
+  ModelRegistry,
+  resolveModelSelectionAuthType,
+} from './modelRegistry.js';
 import {
   type ModelProvidersConfig,
   type ProviderProtocolConfig,
@@ -174,8 +178,18 @@ export class ModelsConfig {
     this.authTypeWasExplicitlyProvided = options.initialAuthType !== undefined;
 
     // Initialize selection state
-    this.currentAuthType = options.initialAuthType;
     const initialModelId = this._generationConfig.model;
+    this.currentAuthType = options.initialAuthType
+      ? resolveModelSelectionAuthType(
+          options.initialAuthType,
+          this.generationConfigSources['model']?.kind === 'default'
+            ? undefined
+            : initialModelId,
+          options.modelProvidersConfig,
+          options.providerProtocolConfig,
+          options.initialRegistryBaseUrl,
+        )
+      : undefined;
     if (this.currentAuthType && initialModelId) {
       const initialModel = this.modelRegistry.getModel(
         this.currentAuthType,
@@ -342,7 +356,7 @@ export class ModelsConfig {
   getResolvedModel(
     authType: AuthType,
     modelId: string,
-    baseUrl?: string,
+    baseUrl?: string | null,
   ): ResolvedModelConfig | undefined {
     return this.modelRegistry.getModel(authType, modelId, baseUrl);
   }
@@ -406,6 +420,21 @@ export class ModelsConfig {
       this.modelRegistry.hasModel(this.currentAuthType, newModel)
     ) {
       await this.switchModel(this.currentAuthType, newModel);
+      return;
+    }
+
+    // The registry buckets each model under the wire its `wireApi` derives, which
+    // may be the sibling OpenAI wire of the session's currentAuthType — probe
+    // it before falling back to a raw override that would bind the model id to
+    // the current wire's credentials and defaults.
+    const siblingWire =
+      this.currentAuthType === AuthType.USE_OPENAI
+        ? AuthType.USE_OPENAI_RESPONSES
+        : this.currentAuthType === AuthType.USE_OPENAI_RESPONSES
+          ? AuthType.USE_OPENAI
+          : undefined;
+    if (siblingWire && this.modelRegistry.hasModel(siblingWire, newModel)) {
+      await this.switchModel(siblingWire, newModel);
       return;
     }
 
@@ -510,28 +539,45 @@ export class ModelsConfig {
           `Model '${modelId}' not found for authType '${authType}'`,
         );
       }
-      if (model.imageOnly) {
+      if (model.imageOnly || model.voiceOnly || model.realtimeOnly) {
         throw new Error(
-          `Image-only model '${modelId}' cannot be used as the primary model`,
+          `${model.imageOnly ? 'Image' : model.voiceOnly ? 'Voice' : 'Realtime'}-only model '${modelId}' cannot be used as the primary model`,
         );
       }
 
       const previousModelId = rollbackSnapshot.generationConfig.model || '';
+      const previousAuthType = rollbackSnapshot.currentAuthType;
       const previousModel =
-        !isAuthTypeChange && previousModelId
+        previousAuthType && previousModelId
           ? (this.modelRegistry.getModel(
-              authType,
+              previousAuthType,
               previousModelId,
               rollbackSnapshot.currentRegistryBaseUrl,
-            ) ?? this.modelRegistry.getModel(authType, previousModelId))
+            ) ?? this.modelRegistry.getModel(previousAuthType, previousModelId))
           : undefined;
+      const sharesOpenAICredentials =
+        (authType === AuthType.USE_OPENAI ||
+          authType === AuthType.USE_OPENAI_RESPONSES) &&
+        (previousAuthType === AuthType.USE_OPENAI ||
+          previousAuthType === AuthType.USE_OPENAI_RESPONSES);
+      const sameEndpoint = (a: string | undefined, b: string | undefined) =>
+        a === b ||
+        (isAuthTypeChange &&
+          sharesOpenAICredentials &&
+          normalizeOpenAiWireBaseUrl(a) === normalizeOpenAiWireBaseUrl(b));
       const canReusePreviousApiKey =
         authType !== AuthType.QWEN_OAUTH &&
-        !isAuthTypeChange &&
+        (!isAuthTypeChange ||
+          (sharesOpenAICredentials &&
+            sameEndpoint(
+              rollbackSnapshot.generationConfig.baseUrl,
+              model.baseUrl,
+            ))) &&
         !!rollbackSnapshot.generationConfig.apiKey &&
         !!model.envKey &&
-        previousModel?.envKey === model.envKey &&
-        previousModel.baseUrl === model.baseUrl;
+        previousModel !== undefined &&
+        previousModel.envKey === model.envKey &&
+        sameEndpoint(previousModel.baseUrl, model.baseUrl);
       const previousApiKey = canReusePreviousApiKey
         ? rollbackSnapshot.generationConfig.apiKey
         : undefined;
@@ -1037,13 +1083,24 @@ export class ModelsConfig {
         : this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
           ? this._generationConfig.baseUrl
           : undefined);
+    const wasRegistered =
+      (authType === AuthType.USE_OPENAI ||
+        authType === AuthType.USE_OPENAI_RESPONSES) &&
+      previousAuthType === authType &&
+      this.currentRegistryBaseUrl !== undefined &&
+      modelId === this._generationConfig.model;
     const resolved = modelId
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))
       : undefined;
-    if (resolved?.imageOnly) {
+    if (wasRegistered && !resolved) {
       throw new Error(
-        `Image-only model '${modelId}' cannot be used as the primary model`,
+        `Model '${modelId}' is no longer configured for authType '${authType}'. Select an available model.`,
+      );
+    }
+    if (resolved?.imageOnly || resolved?.voiceOnly || resolved?.realtimeOnly) {
+      throw new Error(
+        `${resolved.imageOnly ? 'Image' : resolved.voiceOnly ? 'Voice' : 'Realtime'}-only model '${modelId}' cannot be used as the primary model`,
       );
     }
 
@@ -1453,5 +1510,14 @@ export class ModelsConfig {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+  }
+
+  /** The raw providers config the registry was last built from. */
+  getModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return this.modelRegistry.getModelProvidersConfig();
+  }
+
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.modelRegistry.getProviderProtocolConfig();
   }
 }

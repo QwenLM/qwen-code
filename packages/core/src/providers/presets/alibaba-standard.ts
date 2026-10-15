@@ -44,19 +44,180 @@ export const alibabaStandardProvider: ProviderConfig = {
   ],
   envKey: 'DASHSCOPE_API_KEY',
   models: [
-    { id: 'qwen3.6-plus', contextWindowSize: 1000000, enableThinking: true },
-    { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
-    { id: 'qwen3.7-max', contextWindowSize: 1000000, enableThinking: true },
-    { id: 'glm-5.1', contextWindowSize: 202752, enableThinking: true },
     {
-      id: 'deepseek-v4-pro',
+      id: 'qwen3.6-plus',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+      },
       contextWindowSize: 1000000,
       enableThinking: true,
     },
-    { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
+    {
+      id: 'qwen3.7-plus',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+      },
+      contextWindowSize: 1000000,
+      enableThinking: true,
+    },
+    {
+      id: 'qwen3.7-max',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+      },
+      contextWindowSize: 1000000,
+      enableThinking: true,
+    },
+    { id: 'glm-5.1', contextWindowSize: 202752, enableThinking: true },
+    {
+      id: 'deepseek-v4-pro',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'enable_thinking',
+        },
+      },
+      contextWindowSize: 1000000,
+    },
+    {
+      id: 'deepseek-v4-flash',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'enable_thinking',
+        },
+      },
+      contextWindowSize: 1000000,
+    },
+    {
+      id: 'qwen3.8-max',
+      contextWindowSize: 1000000,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+          disableField: 'reasoning_effort',
+        },
+      },
+      modalities: { image: true, video: true },
+    },
+    {
+      id: 'qwen3.8-max-0902',
+      contextWindowSize: 1000000,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+          disableField: 'reasoning_effort',
+        },
+      },
+      modalities: { image: true, video: true },
+    },
+    {
+      id: 'qwen3.8-flash',
+      contextWindowSize: 1000000,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+          disableField: 'reasoning_effort',
+        },
+      },
+      modalities: { image: true, video: true },
+    },
+    {
+      id: 'deepseek-v4-pro-0813',
+      contextWindowSize: 1000000,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'enable_thinking',
+        },
+      },
+    },
+    {
+      id: 'deepseek-v4-flash-0731',
+      contextWindowSize: 1000000,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'enable_thinking',
+        },
+      },
+    },
+    {
+      id: 'kimi-k3',
+      thinkingMandatory: true,
+      contextWindowSize: 1000000,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'high', 'max'],
+          defaultEffort: 'max',
+          canDisable: false,
+          disableField: 'reasoning_effort',
+        },
+      },
+      modalities: { image: true },
+    },
+    {
+      id: 'kimi-k2.7-code',
+      thinkingMandatory: true,
+      enableThinking: true,
+      contextWindowSize: 262144,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          canDisable: false,
+          disableField: 'enable_thinking',
+        },
+      },
+      modalities: { image: true, video: true },
+    },
+    {
+      id: 'kimi-k2.6',
+      enableThinking: true,
+      contextWindowSize: 262144,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+      },
+      modalities: { image: true, video: true },
+    },
   ],
   modelsEditable: true,
   modelNamePrefix: 'ModelStudio Standard',
+  // The Responses API on these endpoints serves the server-side `web_search`
+  // / `web_extractor` tools with the same key, so the built-in tool needs no
+  // extra configuration.
+  webSearch: { backend: 'dashscope' },
   uiGroup: 'alibaba',
   uiLabels: { flowTitle: 'Alibaba ModelStudio', baseUrlStepTitle: 'Region' },
 };

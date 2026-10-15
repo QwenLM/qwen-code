@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { FIXED_RULING_MARKER } from './lib/review-footer.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +19,7 @@ const {
   ensureAuthenticatedMock,
   setGhHostMock,
   writeFileSyncMock,
+  renameSyncMock,
   rmSyncMock,
   mkdirSyncMock,
   getPlatformReaderMock,
@@ -30,6 +32,7 @@ const {
   ensureAuthenticatedMock: vi.fn(),
   setGhHostMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  renameSyncMock: vi.fn(),
   rmSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
   getPlatformReaderMock: vi.fn(),
@@ -87,13 +90,14 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdirSync: mkdirSyncMock,
     writeFileSync: writeFileSyncMock,
+    renameSync: renameSyncMock,
     rmSync: rmSyncMock,
   };
   return { ...mock, default: mock };
 });
 import {
   prContextCommand,
-  anyRootCarriesCriticalMarker,
+  anyCommentCarriesCriticalMarker,
   isLegacySuggestionSummary,
   isReviewWorthShowing,
   SUMMARY_MARKER,
@@ -634,6 +638,78 @@ describe('buildMarkdown — a markerless maintainer blocker must not render as a
     expect(section).toBeGreaterThanOrEqual(0);
     expect(section).toBeLessThan(md.indexOf('## Description'));
     expect(blocker).toBeLessThan(25_000);
+  });
+
+  it('renders the round-1 root AND the re-post that carries the standing claim (#9940 review, round 30)', () => {
+    // The root is the reviewed claim and the only place it appears in the
+    // file; the re-post is what to rule on and the only one naming where
+    // the finding sits now. Both, never one instead of the other.
+    const md = buildMarkdown(
+      '9940',
+      'QwenLM/qwen-code',
+      meta,
+      [
+        {
+          id: 201,
+          user: { login: 'qwen-bot' },
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: '**[Suggestion]** R1-4: consider hardening the trust check here',
+        },
+        {
+          id: 202,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 201,
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: '**[Critical]** R1-4: still stands at HEAD — an untrusted workspace reaches the file-read tool with full permissions (packages/cli/src/config/settingsSchema.ts:88)',
+        },
+      ],
+      [],
+      [],
+      null,
+      'qwen-bot',
+    );
+    const section = md.indexOf('## Blockers to re-check');
+    expect(section).toBeGreaterThanOrEqual(0);
+    expect(md).toContain('consider hardening the trust check here');
+    expect(md).toContain('still stands at HEAD');
+    expect(md).toContain('`packages/cli/src/config/settingsSchema.ts:88`');
+    expect(md).toContain('(comment 201)');
+    expect(md).toContain('Re-asserted by @qwen-bot (comment 202)');
+    // Quoted once each: the lead is not repeated as a reply snippet.
+    expect(md.split('still stands at HEAD').length - 1).toBe(1);
+
+    // A long re-post degrades to a snippet rather than spending the
+    // section budget that later blockers need for their own roots.
+    const long = buildMarkdown(
+      '9940',
+      'QwenLM/qwen-code',
+      meta,
+      [
+        {
+          id: 301,
+          user: { login: 'qwen-bot' },
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 302,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 301,
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: `**[Critical]** R1-4: still stands at HEAD ${'and here is why '.repeat(300)}`,
+        },
+      ],
+      [],
+      [],
+      null,
+      'qwen-bot',
+    );
+    expect(long).toContain('the guard drops a valid case');
+    expect(long).toContain('section budget spent');
   });
 
   it('does not promote the triage bot saying there are NO blockers', () => {
@@ -1220,6 +1296,230 @@ describe('classifyInlineThreads', () => {
     expect(t.repliesByRoot.get(1)!.map((c) => c.id)).toEqual([2]);
   });
 
+  it("promotes a thread whose blocker claim is a REPLY, and rules on the reply's body (#9940 review, round 30)", () => {
+    // The thread lifecycle re-posts a still-standing finding as a reply
+    // inside its original thread instead of a new root, and a later round
+    // may raise its severity. Reading the ROOT alone, a Critical carried
+    // into a Suggestion-rooted thread promoted nothing: the blocker left
+    // the mandatory section and settled under "Already discussed — do NOT
+    // re-report" as a snippet.
+    const inline: RawComment[] = [
+      {
+        id: 201,
+        user: { login: 'qwen-bot' },
+        path: 'packages/core/src/guard.ts',
+        line: 42,
+        body: '**[Suggestion]** R1-4: consider hardening the trust check here',
+      },
+      {
+        id: 202,
+        user: { login: 'qwen-bot' },
+        in_reply_to_id: 201,
+        path: 'packages/core/src/guard.ts',
+        line: 42,
+        body: '**[Critical]** R1-4: still stands at HEAD — an untrusted workspace reaches the file-read tool with full permissions (packages/cli/src/config/settingsSchema.ts:88)',
+      },
+    ];
+    const t = classifyInlineThreads(inline, 'qwen-bot');
+    expect(t.repliedBlockerRoots.map((c) => c.id)).toEqual([201]);
+    expect(t.repliedRoots).toEqual([]);
+    // The claim to rule on is the newest blocker-shaped comment.
+    expect(t.blockerLeads.get(201)!.id).toBe(202);
+    // A thread with no blocker anywhere in it stays out.
+    const quiet = classifyInlineThreads(
+      [
+        { id: 301, user: { login: 'qwen-bot' }, body: '**[Suggestion]** nit' },
+        {
+          id: 302,
+          user: { login: 'a' },
+          in_reply_to_id: 301,
+          body: 'done, thanks',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quiet.repliedBlockerRoots).toEqual([]);
+    expect(quiet.blockerLeads.size).toBe(0);
+    // The steady state: a blocker root re-asserted every round. The NEWEST
+    // assertion is the standing claim — it names where the finding sits
+    // now, while the root's text is rounds old.
+    const restated = classifyInlineThreads(
+      [
+        {
+          id: 401,
+          user: { login: 'qwen-bot' },
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 402,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 401,
+          body: '**[Critical]** R1-4: still stands at HEAD — now at src/guard.ts:88',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(restated.blockerLeads.get(401)!.id).toBe(402);
+    // A THIRD PARTY's blocker-shaped reply promotes the thread (widening
+    // promotion can only add one) but is never the standing claim: the
+    // "Quote reply" button quotes the root's `**[Critical]**` marker
+    // verbatim, and rendering that as the claim evicted the reviewer's
+    // own Critical from the file.
+    const quoted = classifyInlineThreads(
+      [
+        {
+          id: 501,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-4: consider hardening the trust check',
+        },
+        {
+          id: 502,
+          user: { login: 'author-person' },
+          in_reply_to_id: 501,
+          body: '> **[Critical]** R1-4: …\n\nI do not think so.',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quoted.repliedBlockerRoots.map((c) => c.id)).toEqual([501]);
+    expect(quoted.blockerLeads.size).toBe(0);
+    // The account match is case-insensitive, and an unknown account has
+    // no own re-post to prefer.
+    const cased = [
+      {
+        id: 601,
+        user: { login: 'Qwen-Bot' },
+        body: '**[Critical]** R1-4: the guard drops a valid case',
+      },
+      {
+        id: 602,
+        user: { login: 'QWEN-bot' },
+        in_reply_to_id: 601,
+        body: '**[Critical]** R1-4: still stands at HEAD',
+      },
+    ];
+    expect(
+      classifyInlineThreads(cased, 'qwen-bot').blockerLeads.get(601)!.id,
+    ).toBe(602);
+    expect(classifyInlineThreads(cased, '').blockerLeads.size).toBe(0);
+    // The lifecycle's own `fixed` ruling note is neither: its `by` clause
+    // routinely carries blocker prose, and read as a claim it promoted
+    // retired threads and displaced the real re-post.
+    const ruled = classifyInlineThreads(
+      [
+        {
+          id: 701,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-2: consider a guard here',
+        },
+        {
+          id: 702,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 701,
+          body: `R1-2 fixed by removing the blocking wait ${FIXED_RULING_MARKER}`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(ruled.repliedBlockerRoots).toEqual([]);
+    expect(ruled.blockerLeads.size).toBe(0);
+    // …matched by the note's posted SHAPE over the WHOLE body: the
+    // marker string is public, and a review of the file that defines it
+    // quotes it verbatim — read as a substring, that Critical demoted
+    // itself out of the mandatory section (#9940 review, round 30).
+    const quotingMarker = classifyInlineThreads(
+      [
+        {
+          id: 711,
+          user: { login: 'qwen-bot' },
+          body: `**[Critical]** R3-1: the filter \`${FIXED_RULING_MARKER}\` is substring-anywhere`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotingMarker.openBlockerRoots.map((c) => c.id)).toEqual([711]);
+    // …and a comment that quotes a WHOLE ruling line and then states its
+    // own finding underneath is a finding: anchoring the note's line
+    // alone demoted it out of the mandatory section (#9940 review,
+    // round 31).
+    const quotesThenFinds = classifyInlineThreads(
+      [
+        {
+          id: 741,
+          user: { login: 'qwen-bot' },
+          body: `R1-2 fixed by x ${FIXED_RULING_MARKER}\n\n**[Critical]** R3-4: the auth check is still missing`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotesThenFinds.openBlockerRoots.map((c) => c.id)).toEqual([741]);
+    // A reply that quotes a whole ruling line and carries on is a claim,
+    // not a note: the shape ends at the marker.
+    const quotesWholeLine = classifyInlineThreads(
+      [
+        {
+          id: 731,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-2: consider a guard here',
+        },
+        {
+          id: 732,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 731,
+          body: `**[Critical]** R1-2: \`R1-2 fixed by x ${FIXED_RULING_MARKER}\` is what the census matches, and it must not demote this finding`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotesWholeLine.repliedBlockerRoots.map((c) => c.id)).toEqual([731]);
+    expect(quotesWholeLine.blockerLeads.get(731)!.id).toBe(732);
+    // The root is never its own lead — it is already rendered as the
+    // root, and a lead is the thing quoted BESIDE it.
+    const rootOnly = classifyInlineThreads(
+      [
+        {
+          id: 801,
+          user: { login: 'qwen-bot' },
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 802,
+          user: { login: 'author-person' },
+          in_reply_to_id: 801,
+          body: 'thanks, looking now',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(rootOnly.repliedBlockerRoots.map((c) => c.id)).toEqual([801]);
+    expect(rootOnly.blockerLeads.size).toBe(0);
+    // Among several own re-posts the NEWEST is the standing claim: it is
+    // the one that names where the finding sits now.
+    const twice = classifyInlineThreads(
+      [
+        {
+          id: 901,
+          user: { login: 'qwen-bot' },
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 902,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 901,
+          body: '**[Critical]** R1-4: still stands — round 2',
+        },
+        {
+          id: 903,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 901,
+          body: '**[Critical]** R1-4: still stands — round 3, now at src/guard.ts:88',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(twice.blockerLeads.get(901)!.id).toBe(903);
+  });
+
   it('promotes an attribution-off Critical through its invisible severity marker', () => {
     // The posted shape with attribution off: no prefix, the severity rides
     // the comment marker — and a Critical must still land in the re-check
@@ -1396,34 +1696,37 @@ describe('classifyInlineThreads', () => {
   });
 });
 
-describe('anyRootCarriesCriticalMarker', () => {
-  it('fires only on a critical marker carried by a ROOT comment', () => {
+describe('anyCommentCarriesCriticalMarker', () => {
+  it('fires on a critical marker carried by a root OR a reply (#9940 review, round 30)', () => {
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { body: 'x\n\n<!-- qwen-review critical -->' },
       ]),
     ).toBe(true);
     // A suggestion marker decides nothing: only critical promotes.
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { body: 'x\n\n<!-- qwen-review suggestion -->' },
       ]),
     ).toBe(false);
-    // A reply's marker is never read: promotion reads root bodies only, so
-    // a planted reply must not turn a tolerable identity blip into a
-    // repeating hard refusal.
+    // A reply's marker IS read: since the thread lifecycle (#9906) a
+    // still-standing Critical re-asserts itself as a reply, and the
+    // identity gates whether that marker promotes — so an unknown
+    // identity must fail closed on it exactly as it does on a root's.
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { in_reply_to_id: 1, body: 'x\n\n<!-- qwen-review critical -->' },
       ]),
-    ).toBe(false);
-    expect(anyRootCarriesCriticalMarker([{ body: 'plain prose' }])).toBe(false);
+    ).toBe(true);
+    expect(anyCommentCarriesCriticalMarker([{ body: 'plain prose' }])).toBe(
+      false,
+    );
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { body: '<!-- qwen-review critical --> mid-body' },
       ]),
     ).toBe(false);
-    expect(anyRootCarriesCriticalMarker([])).toBe(false);
+    expect(anyCommentCarriesCriticalMarker([])).toBe(false);
   });
 });
 
@@ -3426,6 +3729,92 @@ describe('buildMarkdown host baking', () => {
   });
 });
 
+describe('runPrContext stale context-file removal (handler level)', () => {
+  // The same-repo context-unavailable flow (SKILL.md) launches Agent 0 and
+  // 6d against "a context file that is not on disk". An interrupted earlier
+  // round breaks that premise: it WROTE the file, and nothing else removes
+  // the path between rounds (fetch-pr's stale-clean sweeps the worktree and
+  // branch only). A failed re-run must therefore leave NO file behind — the
+  // documented missing-file returns are the only shape the launched agents
+  // can meet. The `-prev-ledger.json` side file is the deliberate exception:
+  // compose-review reads it for the round counter, and
+  // persistRecoveredLedger owns its deletion licensing — a run that failed
+  // before recovery never re-vouched it and must not reset it.
+  const sideFile = '/tmp/qwen-review-pr-6711-prev-ledger.json';
+
+  const run = () =>
+    (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    process.exitCode = undefined;
+  });
+
+  it('removes a prior context file when the fetch fails', async () => {
+    // The R4-1 shape on #9717: round 1 wrote the context file and was
+    // interrupted before cleanup; round 2's pr-context fails on a rate
+    // limit. Without the removal the stale file survives the failure and
+    // the launched agents read the context the run just lost, against the
+    // paragraph's own closing invariant.
+    ghMock.mockImplementation(() => {
+      throw new Error('HTTP 403: rate limited');
+    });
+    await expect(run()).rejects.toThrow(/rate limited/);
+    expect(rmSyncMock).toHaveBeenCalledWith('/tmp/ctx.md', { force: true });
+    expect(rmSyncMock.mock.calls.some((c) => String(c[0]) === sideFile)).toBe(
+      false,
+    );
+  });
+
+  it('removes the prior file BEFORE authenticating — an auth failure is still a failed run', async () => {
+    ensureAuthenticatedMock.mockImplementation(() => {
+      throw new Error('not logged in');
+    });
+    await expect(run()).rejects.toThrow(/not logged in/);
+    expect(rmSyncMock).toHaveBeenCalledWith('/tmp/ctx.md', { force: true });
+  });
+
+  it('removes nothing over an invalid invocation', async () => {
+    // Usage errors precede every side effect: a pr_number this predicate
+    // rejects must not delete a file the run was never committed to write.
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: '0',
+        owner_repo: 'o/r',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/positive integer/);
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('removes nothing over a malformed owner_repo either', async () => {
+    // The owner_repo shield sits above the removal too: a malformed invocation
+    // must not delete the previous round's context file before rejecting, or the
+    // corrected re-run fetches against nothing and the round proceeds down the
+    // context-unavailable path over a typo. Moving the `indexOf('/')` check below
+    // `rmSync` must fail here.
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: '6711',
+        owner_repo: 'malformed',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/must look like/);
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('runPrContext identity failure (handler level)', () => {
   const metaJson = JSON.stringify({
     title: 't',
@@ -3478,7 +3867,14 @@ describe('runPrContext identity failure (handler level)', () => {
       owner_repo: 'o/r',
       out: '/tmp/ctx.md',
     });
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   it('never deletes the side file over an EMPTY login — exit 0 is not identity', async () => {
@@ -3496,7 +3892,14 @@ describe('runPrContext identity failure (handler level)', () => {
       owner_repo: 'o/r',
       out: '/tmp/ctx.md',
     });
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   const run = async () =>
@@ -3509,8 +3912,90 @@ describe('runPrContext identity failure (handler level)', () => {
     });
   const contextWrite = () =>
     (writeFileSyncMock.mock.calls.find(
-      (c) => c[0] === '/tmp/ctx.md',
+      // The context is written temp-then-renamed to --out.
+      (c) => String(c[0]).startsWith('/tmp/ctx.md'),
     )?.[1] as string) ?? '';
+
+  it('writes the context temp-then-rename — the rename is the commit point', async () => {
+    // The up-front removal of a STALE file already ran by the time the final
+    // write starts, so a direct writeFileSync that threw mid-write (ENOSPC
+    // creates the file then throws) would leave a truncated-but-readable
+    // context at --out — the one shape the missing-context branches the
+    // launch flow keys on cannot see. This pins the SHAPE — a tmp write, a
+    // rename onto --out, never a direct write; a reverted direct write
+    // leaves no tmp path and never calls rename. The failure itself is the
+    // next test's.
+    currentUserMock.mockReturnValue('someone');
+    await run();
+    const tmpWrite = writeFileSyncMock.mock.calls.find(
+      (c) =>
+        String(c[0]).startsWith('/tmp/ctx.md.') &&
+        String(c[0]).endsWith('.tmp'),
+    );
+    expect(tmpWrite).toBeDefined();
+    // The temp name embeds this process's pid, so two concurrent runs at
+    // the same --out cannot rename each other's half-written file.
+    expect(String(tmpWrite?.[0])).toBe(`/tmp/ctx.md.${process.pid}.tmp`);
+    expect(renameSyncMock).toHaveBeenCalledWith(tmpWrite?.[0], '/tmp/ctx.md');
+    expect(
+      writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+    ).toBe(false);
+  });
+
+  it('a failed rename removes the tmp debris and re-throws', async () => {
+    // The other half of the same catch: the temp write succeeded and the
+    // commit point failed (EXDEV, EACCES on --out's directory). The debris
+    // is removed and the failure propagates; --out was never written.
+    currentUserMock.mockReturnValue('someone');
+    renameSyncMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
+    });
+    await expect(run()).rejects.toThrow('EACCES');
+    expect(rmSyncMock).toHaveBeenCalledWith(`/tmp/ctx.md.${process.pid}.tmp`, {
+      force: true,
+    });
+    expect(
+      writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+    ).toBe(false);
+  });
+
+  it('a mid-write failure leaves nothing at --out, and takes its tmp debris with it', async () => {
+    // ENOSPC creates the file then throws. With the temp write inside the
+    // same try, the catch removes the tmp path and re-throws: nothing was
+    // ever written at --out and the rename never ran, so the launch flow's
+    // missing-context branches see exactly a missing context. Deleting the
+    // catch ships green without this test — the throw still propagates, but
+    // the `.tmp` stays beside the missing context.
+    currentUserMock.mockReturnValue('someone');
+    const enospc = Object.assign(new Error('ENOSPC: no space left on device'), {
+      code: 'ENOSPC',
+    });
+    writeFileSyncMock.mockImplementation((target: unknown) => {
+      const path = String(target);
+      if (path.startsWith('/tmp/ctx.md.') && path.endsWith('.tmp')) {
+        throw enospc;
+      }
+    });
+    try {
+      await expect(run()).rejects.toThrow('ENOSPC');
+      const tmp = writeFileSyncMock.mock.calls.find(
+        (c) =>
+          String(c[0]).startsWith('/tmp/ctx.md.') &&
+          String(c[0]).endsWith('.tmp'),
+      )?.[0];
+      expect(tmp).toBeDefined();
+      expect(rmSyncMock).toHaveBeenCalledWith(tmp, { force: true });
+      expect(renameSyncMock).not.toHaveBeenCalled();
+      expect(
+        writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+      ).toBe(false);
+    } finally {
+      // `beforeEach` clears calls, not implementations.
+      writeFileSyncMock.mockReset();
+    }
+  });
 
   it('recovery SURVIVES the identity throw — isolation, not just non-deletion', async () => {
     // The marker-less fixture above cannot tell the two arms apart: with the
@@ -3555,7 +4040,14 @@ describe('runPrContext identity failure (handler level)', () => {
     // licence — deletion fires:
     currentUserMock.mockReturnValue('bot');
     await run();
-    expect(rmSyncMock).toHaveBeenCalled();
+    // Narrowed to the side file: the up-front --out removal fires on
+    // every committed run, so "rmSync was called" no longer discriminates
+    // the licensed side-file deletion this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(true);
   });
 
   it('a marker-less OWN review is a persistent state, not proven absence', async () => {
@@ -3565,7 +4057,14 @@ describe('runPrContext identity failure (handler level)', () => {
     // exists to prevent.
     currentUserMock.mockReturnValue('someone');
     await run();
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   it('wires the foreign marker through to the rendered context and the side file', async () => {
@@ -4012,9 +4511,10 @@ describe('prContextCommand handler — Aone routing', () => {
       ...extra,
     });
     // The ledger side file is written BEFORE the context file — find the
-    // context by path, not by call order.
+    // context by path, not by call order. The context itself lands at a
+    // `.<pid>.tmp` path first, renamed to --out.
     const call = writeFileSyncMock.mock.calls.find((c) =>
-      String(c[0]).endsWith('ctx-aone.md'),
+      String(c[0]).startsWith('/tmp/ctx-aone.md'),
     );
     return call?.[1] as string;
   }

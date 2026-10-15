@@ -202,6 +202,82 @@ describe('extractRecentFilePaths', () => {
     expect(paths).toContain('/ws/ok.ts');
     expect(paths).not.toContain('/ws/.env');
   });
+
+  it.each(['read_file', 'write_file', 'edit', 'replace', 'Read_File'])(
+    'restores a successful bridged %s path using the outer call id',
+    (name) => {
+      const history: Content[] = [
+        fileReadCall('/older.ts'),
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'outer-call',
+                name: ToolNames.TOOL_CALL,
+                args: { name, arguments: { file_path: '/bridged.ts' } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'outer-call',
+                name: ToolNames.TOOL_CALL,
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      ];
+      expect(extractRecentFilePaths(history, 5)).toEqual([
+        '/bridged.ts',
+        '/older.ts',
+      ]);
+      expect(extractRecentFilePaths(history, 1)).toEqual(['/bridged.ts']);
+    },
+  );
+
+  it.each(['Permission denied', 'Cancelled', 'Execution failed', undefined])(
+    'does not restore an unsuccessful or unfinished bridge (%s)',
+    (error) => {
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'outer-call',
+                name: ToolNames.TOOL_CALL,
+                args: {
+                  name: 'read_file',
+                  arguments: { file_path: '/private.ts' },
+                },
+              },
+            },
+          ],
+        },
+      ];
+      if (error !== undefined) {
+        history.push({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'outer-call',
+                name: ToolNames.TOOL_CALL,
+                response: { error },
+              },
+            },
+          ],
+        });
+      }
+      expect(extractRecentFilePaths(history, 5)).toEqual([]);
+    },
+  );
 });
 
 import {

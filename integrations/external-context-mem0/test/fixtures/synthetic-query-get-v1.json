@@ -1,7 +1,7 @@
 {
   "instance": {
-    "schemaVersion": 1,
-    "preset": "synthetic-query-get-v1",
+    "schemaVersion": 2,
+    "dialectPath": "/administrator/synthetic-query-get-v1.dialect.json",
     "endpoint": {
       "origin": "http://memory.internal:8080",
       "allowInsecureHttp": true

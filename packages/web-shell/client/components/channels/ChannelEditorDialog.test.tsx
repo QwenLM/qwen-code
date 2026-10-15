@@ -64,12 +64,13 @@ const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   fields: [
     ...DINGTALK.fields,
     {
-      key: 'senderPolicy',
-      label: 'Sender Policy',
+      key: 'privatePolicy',
+      label: 'Private Policy',
       kind: 'enum',
       required: true,
       default: 'allowlist',
       options: [
+        { value: 'disabled', label: 'Disabled' },
         { value: 'pairing', label: 'Pairing' },
         { value: 'allowlist', label: 'Allowlist' },
         { value: 'open', label: 'Open' },
@@ -156,12 +157,37 @@ const EXCLUSIVE_MINIMUM: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// The shared `instructions` control the channel registry injects into every
+// manageable channel (channel-registry.ts), plus a plain string sibling. The
+// descriptor label and description for `instructions` intentionally differ from
+// the i18n values so a missing i18n key surfaces the untranslated fallback
+// instead of passing the assertions below.
+const MULTILINE_INSTRUCTIONS: DaemonChannelTypeDescriptor = {
+  type: 'example',
+  displayName: 'Example',
+  manageable: true,
+  fields: [
+    {
+      key: 'instructions',
+      label: 'Session instructions (descriptor)',
+      description: 'DESCRIPTOR FALLBACK COPY',
+      kind: 'string',
+      multiline: true,
+    },
+    {
+      key: 'apiEndpoint',
+      label: 'API endpoint (descriptor)',
+      kind: 'string',
+    },
+  ],
+};
+
 const INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'release-bot',
   config: {
     type: 'dingtalk',
     clientId: 'stored-id',
-    senderPolicy: 'open',
+    privatePolicy: 'open',
   },
   secrets: {
     clientSecret: { present: true, source: 'environment' },
@@ -174,7 +200,7 @@ const PAIRING_INSTANCE: DaemonChannelInstanceSnapshot = {
   ...INSTANCE,
   config: {
     ...INSTANCE.config,
-    senderPolicy: 'pairing',
+    privatePolicy: 'pairing',
     allowedUsers: ['configured-user'],
   },
 };
@@ -202,12 +228,15 @@ const { I18nProvider } = await import('../../i18n');
 let container: HTMLDivElement;
 let root: Root;
 
-async function renderDialog(
-  props: Partial<React.ComponentProps<typeof ChannelEditorDialog>> = {},
-) {
+async function renderDialog({
+  language = 'en',
+  ...props
+}: Partial<React.ComponentProps<typeof ChannelEditorDialog>> & {
+  language?: 'en' | 'zh-CN';
+} = {}) {
   await act(async () => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ChannelEditorDialog
           open
           descriptor={DINGTALK}
@@ -278,6 +307,28 @@ function setInputValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
+  Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    'value',
+  )?.set?.call(textarea, value);
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function sectionHeadingOf(element: HTMLElement | null): string | null {
+  const heading = element
+    ?.closest('section')
+    ?.querySelector('h3')
+    ?.textContent?.trim();
+  return heading ?? null;
+}
+
+// FieldShell renders the field description as the first <p> inside the field
+// wrapper that also holds the control, after the label header.
+function descriptionOf(element: HTMLElement | null): string {
+  return element?.parentElement?.querySelector('p')?.textContent?.trim() ?? '';
+}
+
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -291,6 +342,102 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('shows the default output mode for an existing unconfigured channel and saves a changed mode', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'outputMode',
+          label: 'Output Mode',
+          kind: 'enum',
+          default: 'per_turn',
+          options: [
+            { value: 'per_task', label: 'Per task' },
+            { value: 'per_response', label: 'Per response' },
+            { value: 'per_turn', label: 'Per turn (default)' },
+          ],
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance: INSTANCE, onSave });
+
+    expect(fieldByLabel('Output Mode')?.textContent).toBe('Per turn (default)');
+    expect(sectionHeadingOf(fieldByLabel('Output Mode'))).toBe(
+      'Conversation management',
+    );
+    await selectOption('Output Mode', 'Per task');
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({ outputMode: 'per_task' }),
+      }),
+    );
+    await renderDialog({
+      descriptor,
+      instance: { ...INSTANCE },
+      language: 'zh-CN',
+    });
+    expect(fieldByLabel('输出模式')?.textContent).toBe('按轮（默认）');
+    expect(sectionHeadingOf(fieldByLabel('输出模式'))).toBe('会话管理');
+    expect(document.body.textContent).toContain('默认按轮输出：主回复独立结束');
+    await selectOption('输出模式', '按任务');
+    expect(fieldByLabel('输出模式')?.textContent).toBe('按任务');
+    await selectOption('输出模式', '按回复');
+    expect(fieldByLabel('输出模式')?.textContent).toBe('按回复');
+    await selectOption('输出模式', '按轮（默认）');
+    expect(fieldByLabel('输出模式')?.textContent).toBe('按轮（默认）');
+  });
+
+  it('edits private access with four policies while preserving deprecated keys', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK_WITH_ACCESS,
+      fields: DINGTALK_WITH_ACCESS.fields.filter((field) =>
+        ['privatePolicy', 'groupPolicy', 'allowedUsers'].includes(field.key),
+      ),
+      type: 'dws',
+      displayName: 'DingTalk Workspace',
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      name: 'dws-bot',
+      config: {
+        type: 'dws',
+        senderPolicy: 'open',
+        dmPolicy: 'disabled',
+        groupPolicy: 'open',
+      },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance, onSave });
+    expect(fieldByLabel('Direct message policy')?.textContent).toContain(
+      'Disabled',
+    );
+    expect(fieldByLabel('Direct message access')).toBeNull();
+    await selectOption('Direct message policy', 'Pairing');
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save!.click());
+    expect(onSave).toHaveBeenCalledWith(
+      'dws-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          senderPolicy: 'open',
+          dmPolicy: 'disabled',
+          privatePolicy: 'pairing',
+          groupPolicy: 'open',
+        }),
+      }),
+    );
+  });
+
   it('defaults to the primary workspace and allows a registered workspace', async () => {
     const onWorkspaceChange = vi.fn();
     await renderDialog({ onWorkspaceChange });
@@ -475,6 +622,135 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain('By user');
   });
 
+  it('renders a multiline string field as a textarea and leaves a plain one as an input', async () => {
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+
+    const instructions = fieldByLabel('Instructions');
+    const endpoint = fieldByLabel('API endpoint (descriptor)');
+
+    expect(instructions?.tagName).toBe('TEXTAREA');
+    expect(endpoint?.tagName).toBe('INPUT');
+  });
+
+  it('groups the shared instructions control with conversation management', async () => {
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+
+    // `instructions` is not a credential: it is stored in clear text and
+    // injected into the session context, so it belongs with the other shared
+    // session controls rather than in the catch-all credentials panel.
+    expect(sectionHeadingOf(fieldByLabel('Instructions'))).toBe(
+      'Conversation management',
+    );
+    expect(sectionHeadingOf(fieldByLabel('API endpoint (descriptor)'))).toBe(
+      'Credentials',
+    );
+  });
+
+  it('renders the localized instructions copy above the textarea instead of the descriptor literal', async () => {
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+
+    // `instructions` is the only multiline field in the fixture, so the single
+    // textarea anchors the field. fieldDescription resolves
+    // `${labelKey}.description` and returns the i18n value whenever the key
+    // translates, so this — not the registry literal the catalog serves — is
+    // what an operator reads. It is also the only place the replace-not-append
+    // behaviour is documented: an additive promise would have a DingTalk
+    // operator save over the default identity block that DingtalkAdapter.ts
+    // installs only when config.instructions is falsy.
+    const description = descriptionOf(document.querySelector('textarea'));
+    expect(description).toContain('replace their own default guidance');
+    expect(description).not.toContain('DESCRIPTOR FALLBACK COPY');
+  });
+
+  it('localizes the instructions copy for zh-CN operators', async () => {
+    await renderDialog({
+      descriptor: MULTILINE_INSTRUCTIONS,
+      language: 'zh-CN',
+    });
+
+    // getTranslator resolves `messages[key] ?? EN[key] ?? key`, so an assertion
+    // phrased only as "not the raw key", or as an English substring, still
+    // passes on the EN fallback once the ZH entry is deleted. `替换` occurs only
+    // in the ZH value, so this goes red on that mutation.
+    const description = descriptionOf(document.querySelector('textarea'));
+    expect(description).toContain('替换');
+    expect(description).not.toContain('DESCRIPTOR FALLBACK COPY');
+  });
+
+  it('saves a multi-line instructions value with the newline intact', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS, onSave });
+
+    const instructions = fieldByLabel('Instructions');
+    expect(instructions).toBeInstanceOf(HTMLTextAreaElement);
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setTextareaValue(
+        instructions as HTMLTextAreaElement,
+        '  line one\nline two  ',
+      );
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    // assignField trims the outer whitespace but must not flatten the
+    // embedded newline, or the control cannot carry multi-line guidance.
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          instructions: 'line one\nline two',
+        }),
+      }),
+    );
+  });
+
+  it('loads a stored multi-line instructions value into the textarea and saves it unchanged', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    // Edit mode: createChannelEditorDraft loads a stored string untrimmed
+    // (channel-editor-state.ts:110) while assignField trims on save
+    // (channel-editor-state.ts:249), so the fixture carries no outer
+    // whitespace and the round trip must be exact. Without the draft value
+    // threaded into the Textarea, an operator editing a configured channel
+    // sees an empty box and their first keystroke replaces the whole block.
+    await renderDialog({
+      descriptor: MULTILINE_INSTRUCTIONS,
+      instance: {
+        ...INSTANCE,
+        config: { ...INSTANCE.config, instructions: 'line one\nline two' },
+      },
+      onSave,
+    });
+
+    const instructions = fieldByLabel('Instructions');
+    expect(instructions).toBeInstanceOf(HTMLTextAreaElement);
+    expect((instructions as HTMLTextAreaElement).value).toBe(
+      'line one\nline two',
+    );
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          instructions: 'line one\nline two',
+        }),
+      }),
+    );
+  });
+
   it('submits a new instance with typed fields and the current revision', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ onSave });
@@ -505,7 +781,7 @@ describe('ChannelEditorDialog', () => {
         type: 'dingtalk',
         clientId: 'ding-client-id',
         sessionScope: 'user',
-        senderPolicy: 'pairing',
+        privatePolicy: 'pairing',
       },
       secrets: {
         clientSecret: {
@@ -605,7 +881,7 @@ describe('ChannelEditorDialog', () => {
     const allowedUsers = inputByLabel('Allowed user IDs');
     expect(allowedUsers).not.toBeNull();
     await selectOption('Direct message policy', 'Pairing');
-    expect(inputByLabel('Allowed user IDs')).toBeNull();
+    expect(inputByLabel('Allowed user IDs')).not.toBeNull();
     await selectOption('Direct message policy', 'Allowlist');
     await act(async () => {
       setInputValue(inputByLabel('Allowed user IDs')!, 'staff-a, staff-b');
@@ -643,7 +919,7 @@ describe('ChannelEditorDialog', () => {
       config: {
         type: 'dingtalk',
         clientId: 'ding-client-id',
-        senderPolicy: 'allowlist',
+        privatePolicy: 'allowlist',
         allowedUsers: ['staff-a', 'staff-b'],
         groupPolicy: 'allowlist',
         sessionScope: 'chat_thread',
@@ -656,6 +932,59 @@ describe('ChannelEditorDialog', () => {
         },
       },
     });
+  });
+
+  it('edits who can talk in groups and the session operators', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK_WITH_ACCESS,
+      fields: [
+        ...DINGTALK_WITH_ACCESS.fields,
+        { key: 'operators', label: 'Session Operators', kind: 'string-list' },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, onSave });
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
+      setInputValue(inputByLabel('Client Secret')!, 'ding-client-secret');
+    });
+
+    expect(fieldByLabel('Who can talk in groups')).toBeNull();
+    await selectOption('Group policy', 'Pairing');
+    expect(fieldByLabel('Who can talk in groups')?.textContent).toContain(
+      'Any group member',
+    );
+    await selectOption('Group policy', 'Open');
+    expect(fieldByLabel('Who can talk in groups')?.textContent).toContain(
+      'Any group member',
+    );
+    expect(inputByLabel('Allowed group member IDs')).toBeNull();
+
+    await selectOption('Who can talk in groups', 'Listed members only');
+    await act(async () => {
+      setInputValue(inputByLabel('Allowed group member IDs')!, 'alice, bob');
+      setInputValue(inputByLabel('Session operators')!, 'admin');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          groupPolicy: 'open',
+          operators: ['admin'],
+          groups: {
+            '*': { senders: 'allowlist', allowedUsers: ['alice', 'bob'] },
+          },
+        }),
+      }),
+    );
   });
 
   it('explains that pairing requests appear after a new Channel is saved', async () => {
@@ -750,7 +1079,7 @@ describe('ChannelEditorDialog', () => {
       config: {
         type: 'github',
         useLocalGh: true,
-        senderPolicy: 'pairing',
+        privatePolicy: 'pairing',
       },
       secrets: { token: { operation: 'clear' } },
     });
@@ -759,7 +1088,7 @@ describe('ChannelEditorDialog', () => {
   it('does not show the allowlist alert when no users are configured', async () => {
     const pairingNoAllowlist: DaemonChannelInstanceSnapshot = {
       ...INSTANCE,
-      config: { ...INSTANCE.config, senderPolicy: 'pairing' },
+      config: { ...INSTANCE.config, privatePolicy: 'pairing' },
     };
     await renderDialog({ instance: pairingNoAllowlist });
 
@@ -790,7 +1119,7 @@ describe('ChannelEditorDialog', () => {
       config: {
         type: 'dingtalk',
         clientId: 'stored-id',
-        senderPolicy: 'open',
+        privatePolicy: 'open',
         sessionScope: 'user',
         interactiveCards: { enabled: true, statusCard: { enabled: true } },
       },
@@ -827,7 +1156,7 @@ describe('ChannelEditorDialog', () => {
       ...INSTANCE,
       config: {
         ...INSTANCE.config,
-        senderPolicy: 'open',
+        privatePolicy: 'open',
         groupPolicy: 'open',
       },
     };
@@ -859,7 +1188,7 @@ describe('ChannelEditorDialog', () => {
       ...INSTANCE,
       config: {
         ...INSTANCE.config,
-        senderPolicy: 'open',
+        privatePolicy: 'open',
         groupPolicy: 'pairing',
       },
     };

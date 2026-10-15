@@ -13,6 +13,11 @@
   max-height: 200px;
 }
 
+:global([data-transcript-render-mode='document']) .message {
+  max-height: none;
+  overflow: visible;
+}
+
 .header {
   display: flex;
   align-items: center;

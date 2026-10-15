@@ -104,7 +104,7 @@ These are surfaced through the preflight cell's `errorKind` so client UIs render
 | Status | Body                                         | When                                                                                                                                      |
 | ------ | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `401`  | `{ error: 'Unauthorized' }`                  | Missing / wrong / no-scheme bearer token. Uniform across `missing header` / `wrong scheme` / `wrong token` so probing cannot distinguish. |
-| `401`  | `{ error: '...', code: 'token_required' }`   | Mutation-gate strict route on a no-token loopback daemon. SDKs render "configure --token / --require-auth" hint.                          |
+| `401`  | `{ error: '...', code: 'token_required' }`   | Strict route on a non-trusted token-less embed. Trusted-loopback primary requests pass. SDKs render a token-configuration hint.           |
 | `403`  | `{ error: 'Request denied by CORS policy' }` | `allowOriginCors` (runtime) / `denyBrowserOriginCors` (bootstrap) rejected an `Origin`-bearing request.                                   |
 | `403`  | `{ error: 'Invalid Host header' }`           | `hostAllowlist` rejected the `Host` header (DNS rebinding defense).                                                                       |
 
@@ -139,7 +139,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     A["401 received"] --> B{"body.code == 'token_required'?"}
-    B -->|yes| C["mutation-gate strict — guide user to --token / --require-auth"]
+    B -->|yes| C["strict gate denied this deployment — guide user to configure bearer auth"]
     B -->|no| D["plain Unauthorized — generic 'check token' UI"]
 ```
 

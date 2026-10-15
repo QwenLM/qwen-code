@@ -14,6 +14,7 @@ import {
 } from '../../../core/permission-helpers.js';
 import { PermissionManager } from '../../../permissions/permission-manager.js';
 import { applySkillAllowedTools } from '../../../tools/skill-utils.js';
+import { PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS } from '../../../goals/goal-tools.js';
 import { parseSkillContent } from '../../skill-load.js';
 
 function loadGoalDraftSkill() {
@@ -46,6 +47,9 @@ describe('bundled goal-draft skill', () => {
     expect(config.allowedTools).not.toContain('write_file');
     expect(config.allowedTools).not.toContain('edit');
     expect(config.allowedTools).not.toContain('update_goal');
+    // propose_goal shows its approval dialog through the tool's own 'ask'
+    // default; a grant here would only mislead (see ask_user_question).
+    expect(config.allowedTools).not.toContain('propose_goal');
     // ask_user_question must stay ungranted: a session-wide allow rule
     // overrides its 'ask' default and the scheduler then runs it without
     // showing the dialog, fabricating a declined-answer result (see the
@@ -93,7 +97,7 @@ describe('bundled goal-draft skill', () => {
   it('explains the verifier rules the objective format is derived from', () => {
     const { body } = loadGoalDraftSkill();
 
-    // These mirror goal-verifier.ts / goalJudge.ts: transcript-only
+    // These mirror goal-verifier.ts: transcript-only
     // evidence, delivered_output cannot prove external state, and user
     // actions need user_input evidence.
     expect(body).toContain('sees ONLY transcript evidence');
@@ -117,6 +121,8 @@ describe('bundled goal-draft skill', () => {
     expect(positions.every((index) => index >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
     expect(body).toContain('Call `get_goal`');
+    expect(body).toContain("preserve the user's explicit choice to edit it");
+    expect(body).toContain("do not choose on the user's behalf");
     expect(body).toContain('Never draft a second concurrent goal.');
     expect(body).toContain(
       'A goal that cannot be checked is a prompt, not a goal.',
@@ -133,6 +139,90 @@ describe('bundled goal-draft skill', () => {
     expect(body).toContain('you MUST ask, offering 2–3 candidate checks');
     expect(body).toContain('mark it `[ASSUMPTION]` in Context');
     expect(body).toContain('Never invent paths, IDs, or commands');
+  });
+
+  it('bounds drafting reads and avoids invented audit quotas', () => {
+    const { body } = loadGoalDraftSkill();
+
+    expect(body).toContain('Stop exploring once those are grounded');
+    expect(body).toContain(
+      'do not audit the implementation, reproduce failures, run builds or tests, install dependencies, or start services',
+    );
+    expect(body).toContain('Usually 3–5 Done-when checks suffice');
+    expect(body).toContain('Do not add checks just to reach a count');
+    expect(body).toContain('preserve explicit user requirements');
+    expect(body).toContain('Zero defects is a valid result');
+    expect(body).toContain('never require a positive defect count');
+    expect(body).toContain(
+      'Do not invent minimum scenario counts, evidence-file counts, or exploration-round quotas',
+    );
+  });
+
+  it('withholds an actionable hand-off while essential information is missing', () => {
+    const { body } = loadGoalDraftSkill();
+    const gate = body.indexOf('**If an essential item remains unresolved');
+    const readyHandoff = body.indexOf('Then hand off, and nothing else:');
+
+    // "Needs clarification" also appears in the gate line, so pin the
+    // intro's deliverable sentence above Step 0 where only it can match.
+    expect(body.slice(0, body.indexOf('## Step 0'))).toContain(
+      'deliver only a draft marked "Needs clarification"',
+    );
+
+    expect(body).toContain(
+      'use a recommended default only for nonessential choices',
+    );
+    expect(body).toContain(
+      'unresolved edit-versus-replace choice stays `<TODO: …>`',
+    );
+    expect(gate).toBeGreaterThan(body.indexOf('## Step 5'));
+    expect(gate).toBeLessThan(readyHandoff);
+    expect(body.slice(gate, readyHandoff)).toContain('Needs clarification');
+    expect(body.slice(gate, readyHandoff)).toContain('success criterion');
+    expect(body.slice(gate, readyHandoff)).toContain(
+      'Do not call `propose_goal` or print a runnable `/goal set` or `/goal edit` line',
+    );
+    expect(body.slice(gate, readyHandoff)).toContain('Stop here');
+  });
+
+  it('names the propose_goal objective limit the tool enforces', () => {
+    const { body } = loadGoalDraftSkill();
+    const handoff = body.slice(
+      body.indexOf('**If the `propose_goal` tool is available'),
+      body.indexOf('**Otherwise**'),
+    );
+
+    // The number is prose in a markdown file, so pin it to the constant the
+    // tool validates against: raising one without the other sends the model
+    // a limit the tool does not have.
+    expect(handoff).toContain(
+      `refuses an objective over ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS.toLocaleString('en-US')} characters`,
+    );
+    expect(handoff).toContain('tighten a longer draft before calling it');
+  });
+
+  it('describes the prose budget as an agreement rather than a runtime limit', () => {
+    const { body } = loadGoalDraftSkill();
+
+    expect(body).toContain('not a runtime-enforced turn or wall-clock limit');
+    expect(body).toContain(
+      'Do not claim that writing it configures a timer or changes the Goal token budget',
+    );
+    // Naming the settings without their timing sends a reader to bound a Goal
+    // that is already running, which neither setting can do.
+    expect(body).toContain(
+      'takes effect after a restart and only for Goals created afterwards',
+    );
+    expect(body).toContain('Preserve a user-specified budget');
+    expect(body).toContain('mark the default `[ASSUMPTION]` in Context');
+    // The self-check must enforce the marking, and the strong exemplar must
+    // model it — a bare default Budget contradicts both.
+    expect(body.slice(body.indexOf('## Step 5'))).toContain(
+      'an unrequested default Budget is marked `[ASSUMPTION]` in Context',
+    );
+    expect(body).toContain(
+      "Context: [ASSUMPTION] the 20-turn budget is the drafter's default",
+    );
   });
 
   it('fixes the objective contract labels and keeps the hand-off on one line', () => {
@@ -160,6 +250,29 @@ describe('bundled goal-draft skill', () => {
       expect(position).toBeGreaterThan(previous);
       previous = position;
     }
+    expect(template).toContain("<user's advisory stopping agreement");
+    expect(template).toContain('stop as blocked after 20 turns');
+    // The ceiling settings are operator configuration, not objective text:
+    // the template and the exemplar keep them out of the Budget slot, and the
+    // rules of thumb name them instead. One placement, pinned both ways, so
+    // the two cannot drift apart again.
+    expect(template).not.toContain('model.goalMax');
+    // Every literal Budget exemplar, not just the first: a drafting model
+    // copies whichever example it imitates, so one unmarked row is enough to
+    // put an unenforced turn count into an objective.
+    const weakToStrong = body.slice(body.indexOf('### Weak'));
+    const exemplars = weakToStrong
+      .split('\n')
+      .filter((line) => line.startsWith('| ') && line.includes('Budget:'));
+    expect(exemplars.length).toBeGreaterThanOrEqual(2);
+    for (const exemplar of exemplars) {
+      expect(exemplar).toContain('as model guidance');
+      expect(exemplar).not.toContain('model.goalMax');
+    }
+    expect(body).toContain('model.goalMaxTurns');
+    expect(body).toContain('model.goalMaxActiveMinutes');
+    expect(body).toContain('never write the setting into the objective');
+    expect(template).not.toContain('minutes');
     // parseGoalCommand joins whitespace-separated tokens with single
     // spaces, so a multi-line objective would be flattened anyway.
     expect(body).toContain(
@@ -171,6 +284,27 @@ describe('bundled goal-draft skill', () => {
     // escaped backticks, and copying it then pastes backslashes into the
     // objective — the line must go out as plain text.
     expect(body).toContain('Print it as plain text with no code markers');
+  });
+
+  it('hands off through propose_goal when it is available, and prints the /goal line otherwise', () => {
+    const { body } = loadGoalDraftSkill();
+
+    expect(body).toContain(
+      'If the `propose_goal` tool is available and no Goal is active',
+    );
+    expect(body).toContain('only their approval sets the Goal');
+    expect(body).toContain(
+      'do not propose the same or a reworded objective again',
+    );
+    expect(body).toContain('acknowledge it in one sentence and end the turn');
+    // The text hand-off survives for headless runs and disabled tools.
+    expect(body).toContain(
+      '**Otherwise** (a client without Goal proposal support, headless, the tool is disabled, or a Goal is active)',
+    );
+    expect(body).toContain('the draft has not been applied');
+    expect(body).toContain(
+      'Do not promise a dialog when the tool is unavailable',
+    );
   });
 
   it('ends with the self-check list and an explicit stop', () => {

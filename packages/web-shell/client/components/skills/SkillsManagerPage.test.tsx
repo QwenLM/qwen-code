@@ -13,14 +13,24 @@ import type { DaemonWorkspaceSkillStatus } from '@qwen-code/web-shell/daemon-rea
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const { skillsState, workspaceState } = vi.hoisted(() => ({
+const { connectionState, skillsState, workspaceState } = vi.hoisted(() => ({
+  connectionState: {
+    current: {
+      clientId: 'client-1',
+      sessionId: undefined as string | undefined,
+      workspaceCwd: '/workspace/demo' as string | undefined,
+    },
+  },
   skillsState: {
     current: {
       status: undefined,
       skills: [] as DaemonWorkspaceSkillStatus[],
+      configSkills: undefined as DaemonWorkspaceSkillStatus[] | undefined,
       loading: false,
       error: undefined,
+      ensureRuntime: vi.fn().mockResolvedValue(undefined),
       reload: vi.fn(),
+      reloadConfig: vi.fn(),
       setEnabled: vi.fn(),
       install: vi.fn(),
       remove: vi.fn(),
@@ -28,6 +38,8 @@ const { skillsState, workspaceState } = vi.hoisted(() => ({
   },
   workspaceState: {
     current: {
+      workspaceCwd: '/workspace/demo',
+      client: {},
       capabilities: {
         features: ['workspace_skill_settings_toggle'],
       },
@@ -36,7 +48,13 @@ const { skillsState, workspaceState } = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useSkills: () => skillsState.current,
+  useConnection: () => connectionState.current,
+  useSkills: () => ({
+    ...skillsState.current,
+    configStatus: {
+      skills: skillsState.current.configSkills ?? skillsState.current.skills,
+    },
+  }),
   useWorkspace: () => workspaceState.current,
 }));
 
@@ -46,13 +64,28 @@ const { I18nProvider } = await import('../../i18n');
 let container: HTMLDivElement;
 let root: Root;
 
-async function renderPage(): Promise<void> {
+async function renderPage(
+  workspaceCwd?: string,
+  onUseSkill = vi.fn(),
+): Promise<void> {
   await act(async () => {
     root.render(
       <I18nProvider language="en">
-        <SkillsManagerPage onClose={vi.fn()} onUseSkill={vi.fn()} />
+        <SkillsManagerPage
+          onClose={vi.fn()}
+          onUseSkill={onUseSkill}
+          workspaceCwd={workspaceCwd}
+        />
       </I18nProvider>,
     );
+  });
+}
+
+async function openSkill(name: string): Promise<void> {
+  const skill = container.querySelector<HTMLElement>(`[aria-label="${name}"]`);
+  expect(skill).not.toBeNull();
+  await act(async () => {
+    skill!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
 }
 
@@ -79,7 +112,7 @@ async function openDisabledSkill(name: string): Promise<void> {
   });
 }
 
-async function enableSelectedSkill(): Promise<void> {
+async function selectSkillAction(action = 'Enable'): Promise<void> {
   const actions = container.querySelector<HTMLElement>(
     '[data-testid="skill-actions"]',
   );
@@ -89,12 +122,12 @@ async function enableSelectedSkill(): Promise<void> {
       new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
     );
   });
-  const enable = Array.from(
+  const item = Array.from(
     document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-  ).find((item) => item.textContent?.trim() === 'Enable');
-  expect(enable).toBeDefined();
+  ).find((item) => item.textContent?.trim() === action);
+  expect(item).toBeDefined();
   await act(async () => {
-    enable!.click();
+    item!.click();
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -112,9 +145,12 @@ beforeEach(() => {
   root = createRoot(container);
   skillsState.current.status = undefined;
   skillsState.current.skills = [];
+  skillsState.current.configSkills = undefined;
   skillsState.current.loading = false;
   skillsState.current.error = undefined;
+  skillsState.current.ensureRuntime.mockClear();
   skillsState.current.reload.mockReset();
+  skillsState.current.reloadConfig.mockReset();
   skillsState.current.setEnabled.mockReset().mockResolvedValue({
     changed: true,
   });
@@ -123,6 +159,9 @@ beforeEach(() => {
   workspaceState.current.capabilities.features = [
     'workspace_skill_settings_toggle',
   ];
+  connectionState.current.sessionId = undefined;
+  connectionState.current.workspaceCwd = '/workspace/demo';
+  workspaceState.current.client = {};
 });
 
 afterEach(() => {
@@ -131,6 +170,148 @@ afterEach(() => {
 });
 
 describe('SkillsManagerPage', () => {
+  const disabledSkill: DaemonWorkspaceSkillStatus = {
+    kind: 'skill',
+    status: 'disabled',
+    name: 'review',
+    description: 'Review code',
+    level: 'user',
+    modelInvocable: true,
+    disabledReason: 'default',
+  };
+
+  it('keeps the setting notice in the list when the refreshed catalog omits the Skill', async () => {
+    skillsState.current.skills = [disabledSkill];
+    skillsState.current.reloadConfig.mockImplementation(async () => {
+      skillsState.current.skills = [];
+      await renderPage();
+      return { skills: [] };
+    });
+
+    await renderPage();
+    await openDisabledSkill('review');
+    await selectSkillAction();
+
+    expect(container.textContent).toContain('0 skills');
+    expect(container.textContent).toContain('Workspace setting updated.');
+    const dismiss = container.querySelector<HTMLButtonElement>(
+      '[data-slot="alert"] [aria-label="close"]',
+    );
+    expect(dismiss).not.toBeNull();
+    await act(async () => {
+      dismiss!.click();
+    });
+    expect(container.textContent).not.toContain('Workspace setting updated.');
+  });
+
+  it('shows a rejected write and releases the busy state without reporting success', async () => {
+    skillsState.current.skills = [disabledSkill];
+    skillsState.current.setEnabled.mockRejectedValueOnce(
+      new Error('Settings write denied'),
+    );
+
+    await renderPage();
+    await openDisabledSkill('review');
+    await selectSkillAction();
+
+    expect(container.textContent).toContain('Settings write denied');
+    expect(container.textContent).not.toContain('Skill enabled.');
+    expect(skillsState.current.reloadConfig).not.toHaveBeenCalled();
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="skill-actions"]',
+      )?.disabled,
+    ).toBe(false);
+    expect(runButton()?.disabled).toBe(true);
+  });
+
+  it.each(['system', 'user', 'systemDefaults'] as const)(
+    'can disable a workspace declaration while %s settings keep the Skill locked',
+    async (lockedScope) => {
+      const locked = {
+        ...disabledSkill,
+        disabledReason: 'hard' as const,
+        lockedScope,
+      };
+      skillsState.current.skills = [locked];
+      skillsState.current.reloadConfig.mockResolvedValue({ skills: [locked] });
+
+      await renderPage('/workspace/secondary');
+      await openDisabledSkill('review');
+      await selectSkillAction('Disable in this workspace');
+
+      expect(skillsState.current.setEnabled).toHaveBeenCalledExactlyOnceWith(
+        'review',
+        false,
+        { clientId: undefined },
+      );
+      expect(container.textContent).toContain(
+        'Workspace setting updated. Effective Skill availability did not change.',
+      );
+      expect(runButton()?.disabled).toBe(true);
+    },
+  );
+
+  describe.each(['workspace', 'client', 'unmount'] as const)(
+    'when the toggle scope changes via %s',
+    (change) => {
+      it.each(['write', 'refresh'])(
+        'discards a stale result during the %s',
+        async (phase) => {
+          let finish!: () => void;
+          const pending = new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          skillsState.current.skills = [disabledSkill];
+          if (phase === 'write') {
+            skillsState.current.setEnabled.mockImplementationOnce(async () => {
+              await pending;
+              return { changed: true };
+            });
+          } else {
+            skillsState.current.reloadConfig.mockImplementationOnce(
+              async () => {
+                await pending;
+                return { skills: [] };
+              },
+            );
+          }
+
+          await renderPage();
+          await openDisabledSkill('review');
+          await selectSkillAction();
+          if (change === 'workspace') {
+            await renderPage('/workspace/secondary');
+          } else if (change === 'client') {
+            workspaceState.current.client = {};
+            await renderPage();
+          } else {
+            await act(async () => root.render(null));
+          }
+          await act(async () => {
+            finish();
+            await pending;
+          });
+
+          expect(container.textContent).not.toContain(
+            'Workspace setting updated.',
+          );
+          expect(container.textContent).not.toContain('Skill enabled.');
+          expect(skillsState.current.reloadConfig).toHaveBeenCalledTimes(
+            phase === 'write' ? 0 : 1,
+          );
+          if (change !== 'unmount') {
+            expect(
+              container.querySelector<HTMLButtonElement>(
+                '[data-testid="skill-actions"]',
+              )?.disabled,
+            ).toBe(false);
+          }
+        },
+      );
+    },
+  );
+
   it('does not treat the retired Skill toggle capability as settings support', async () => {
     workspaceState.current.capabilities.features = ['workspace_skill_toggle'];
     skillsState.current.skills = [
@@ -181,7 +362,7 @@ describe('SkillsManagerPage', () => {
       disabledReason: undefined,
     };
     skillsState.current.skills = [disabledSkill];
-    skillsState.current.reload.mockResolvedValue({
+    skillsState.current.reloadConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/workspace/demo',
       initialized: true,
@@ -191,11 +372,163 @@ describe('SkillsManagerPage', () => {
 
     await renderPage();
     await openDisabledSkill(disabledSkill.name);
-    await enableSelectedSkill();
+    await selectSkillAction();
 
     expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
       disabledSkill.name,
       true,
+      { clientId: 'client-1' },
+    );
+  });
+
+  it('omits the active workspace client id for a selected workspace', async () => {
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'disabled',
+        name: 'review',
+        description: 'Review code',
+        level: 'user',
+        modelInvocable: true,
+        disabledReason: 'default',
+      },
+    ];
+
+    await renderPage('/workspace/secondary');
+    await openDisabledSkill('review');
+    await selectSkillAction();
+
+    expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
+      'review',
+      true,
+      { clientId: undefined },
+    );
+    connectionState.current.workspaceCwd = '/workspace/secondary';
+    await renderPage();
+    await selectSkillAction();
+    expect(skillsState.current.setEnabled).toHaveBeenLastCalledWith(
+      'review',
+      true,
+      { clientId: undefined },
+    );
+  });
+
+  it('keeps the client id for an explicitly selected active workspace', async () => {
+    connectionState.current.workspaceCwd = '/workspace/secondary';
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'disabled',
+        name: 'review',
+        description: 'Review code',
+        level: 'user',
+        modelInvocable: true,
+        disabledReason: 'default',
+      },
+    ];
+
+    await renderPage('/workspace/secondary');
+    await openDisabledSkill('review');
+    await selectSkillAction();
+
+    expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
+      'review',
+      true,
+      { clientId: 'client-1' },
+    );
+  });
+
+  it('keeps runtime-discovered installed Skills manageable', async () => {
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'disabled',
+        name: 'external',
+        description: 'Added outside the daemon',
+        level: 'project',
+        modelInvocable: true,
+        disabledReason: 'hard',
+      },
+    ];
+    skillsState.current.configSkills = [];
+
+    await renderPage();
+    await openDisabledSkill('external');
+    await selectSkillAction();
+
+    expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
+      'external',
+      true,
+      { clientId: 'client-1' },
+    );
+  });
+
+  it('does not run a Skill from a workspace other than the active session', async () => {
+    const onUseSkill = vi.fn();
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'ok',
+        name: 'deploy',
+        description: 'Deploy from the selected workspace',
+        level: 'project',
+        modelInvocable: true,
+      },
+    ];
+
+    connectionState.current.workspaceCwd = '/workspace/secondary';
+    await renderPage(undefined, onUseSkill);
+    await openSkill('deploy');
+
+    expect(runButton()?.disabled).toBe(true);
+    runButton()?.click();
+    expect(onUseSkill).not.toHaveBeenCalled();
+    await renderPage('/workspace/secondary', onUseSkill);
+    expect(runButton()?.disabled).toBe(false);
+  });
+
+  it('does not target the primary workspace from a live session', async () => {
+    const onUseSkill = vi.fn();
+    connectionState.current.sessionId = 'live-session';
+    connectionState.current.workspaceCwd = undefined;
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'ok',
+        name: 'deploy',
+        description: 'Deploy from the primary workspace',
+        level: 'project',
+        modelInvocable: true,
+      },
+    ];
+
+    await renderPage(undefined, onUseSkill);
+    await openSkill('deploy');
+
+    expect(runButton()?.disabled).toBe(true);
+    runButton()?.click();
+    expect(onUseSkill).not.toHaveBeenCalled();
+
+    const actions = container.querySelector<HTMLElement>(
+      '[data-testid="skill-actions"]',
+    );
+    await act(async () => {
+      actions!.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    const disable = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.trim() === 'Disable');
+    expect(disable).toBeDefined();
+    await act(async () => {
+      disable!.click();
+      await Promise.resolve();
+    });
+    expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
+      'deploy',
+      false,
+      { clientId: undefined },
     );
   });
 
@@ -215,7 +548,7 @@ describe('SkillsManagerPage', () => {
       disabledReason: undefined,
     };
     skillsState.current.skills = [disabledSkill];
-    skillsState.current.reload.mockResolvedValue({
+    skillsState.current.reloadConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/workspace/demo',
       initialized: true,
@@ -225,7 +558,7 @@ describe('SkillsManagerPage', () => {
 
     await renderPage();
     await openDisabledSkill(disabledSkill.name);
-    await enableSelectedSkill();
+    await selectSkillAction();
     skillsState.current.skills = [enabledSkill];
     await renderPage();
 
@@ -288,7 +621,7 @@ describe('SkillsManagerPage', () => {
     async ({ skill, changed, notice }) => {
       skillsState.current.skills = [skill];
       skillsState.current.setEnabled.mockResolvedValueOnce({ changed });
-      skillsState.current.reload.mockResolvedValue({
+      skillsState.current.reloadConfig.mockResolvedValue({
         v: 1,
         workspaceCwd: '/workspace/demo',
         initialized: true,
@@ -300,13 +633,14 @@ describe('SkillsManagerPage', () => {
       await openDisabledSkill(skill.name);
       expect(runButton()?.disabled).toBe(true);
 
-      await enableSelectedSkill();
+      await selectSkillAction();
 
       expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
         skill.name,
         true,
+        { clientId: 'client-1' },
       );
-      expect(skillsState.current.reload).toHaveBeenCalledTimes(1);
+      expect(skillsState.current.reloadConfig).toHaveBeenCalledTimes(1);
       skillsState.current.skills = [{ ...skill }];
       await renderPage();
       expect(container.textContent).toContain(notice);

@@ -6,6 +6,8 @@ status: 'implemented'
 
 # Session Shell Permission Policy
 
+> Amended by [Trusted Loopback Full API](./2026-08-28-trusted-loopback-full-api.md): the token-less loopback primary listener can now hold operator authority without being marked bearer-authenticated.
+
 ## Problem
 
 `POST /session/:id/shell` executes a shell command directly through the daemon,
@@ -21,7 +23,7 @@ the surface and the caller proves it is attached to the target session.
 
 - Disable direct session shell by default.
 - Require explicit operator opt-in with `qwen serve --enable-session-shell`.
-- Require bearer-token configuration before the opt-in becomes effective.
+- Require bearer-token configuration or trusted-loopback operator authority before the opt-in becomes effective.
 - Require a client id that is registered on the addressed session.
 - Apply the same policy at the REST route, ACP HTTP dispatcher, and bridge
   execution sink.
@@ -42,7 +44,8 @@ one effective boolean:
 
 ```ts
 sessionShellCommandEnabled =
-  opts.enableSessionShell === true && token !== undefined;
+  opts.enableSessionShell === true &&
+  (token !== undefined || trustedLoopbackMode);
 ```
 
 That value is threaded into the bridge, REST app, and ACP dispatcher. Embedded
@@ -50,9 +53,10 @@ callers that invoke `createServeApp` directly compute token presence using a
 non-empty string check so `token: ''` behaves like no token for both strict
 mutation gating and shell capability advertisement.
 
-The REST route uses `mutate({ strict: true })`. On a tokenless loopback daemon,
-the strict gate returns `401 token_required` before the handler runs. When a
-token is configured, the handler rejects disabled shell with
+The REST route uses `mutate({ strict: true })`. On the token-less trusted-loopback
+primary listener, the strict gate authorizes the request; a token-less
+non-trusted embed returns `401 token_required` before the handler runs. After
+that authority check, the handler rejects disabled shell with
 `session_shell_disabled`, then requires `X-Qwen-Client-Id`, then validates the
 command body, and finally delegates to the bridge.
 
@@ -72,7 +76,7 @@ execute the command, or write shell history.
 
 REST:
 
-- no token: `401`, `code: token_required`
+- token-less non-trusted embed: `401`, `code: token_required`
 - disabled: `403`, `code/errorKind: session_shell_disabled`
 - missing client id: `403`, `code/errorKind: client_id_required`
 - malformed or unbound client id: existing `400 invalid_client_id`
@@ -88,14 +92,15 @@ ACP:
 ## Compatibility
 
 `DaemonSessionClient.shellCommand()` continues to work when the daemon is
-explicitly enabled and authenticated because the session client carries the
-session-bound client id. Bare `DaemonClient.shellCommand(sessionId, command)`
-must pass `opts.clientId`, otherwise it receives `client_id_required`.
+explicitly enabled and has operator authority because the session client
+carries the session-bound client id. Bare
+`DaemonClient.shellCommand(sessionId, command)` must pass `opts.clientId`,
+otherwise it receives `client_id_required`.
 
 ## Test Coverage
 
 The implementation is covered by focused bridge, REST, ACP transport, serve
 boot, and command-parser tests. The highest-value checks are default-disabled
-behavior, tokenless strict gating, capability advertisement, ACP initialize
-method filtering, bridge sink enforcement, and propagation of the session-bound
-client id.
+behavior, trusted-loopback enablement, non-trusted token-less strict rejection,
+capability advertisement, ACP initialize method filtering, bridge sink
+enforcement, and propagation of the session-bound client id.

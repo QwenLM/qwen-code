@@ -11,12 +11,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WorkspaceRegistrationStore,
   WorkspaceRegistrationStoreError,
+  WorkspaceRegistrationStoreTooLargeError,
   WorkspaceDisplayNameValidationError,
   getWorkspaceRegistrationStorePath,
   normalizeWorkspaceDisplayName,
   workspaceRegistrationId,
   workspaceRegistrationScopeHash,
 } from './workspace-registration-store.js';
+
+// The ecs-qwen pool runs several jobs at once; under that contention these
+// tests pass alone in milliseconds but blow the 15s ceiling without any
+// real hang. Give that pool the raised budget its other suites already use.
+const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 60_000
+  : 15_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 const cleanup: string[] = [];
 
@@ -35,6 +44,134 @@ afterEach(async () => {
 });
 
 describe('WorkspaceRegistrationStore', () => {
+  it('reads 255 named records independently of admission and preserves them on rejected add', async () => {
+    const store = new WorkspaceRegistrationStore(
+      '/work/primary',
+      await tempHome(),
+    );
+    const workspaces = Array.from(
+      { length: 255 },
+      (_, index) => `/work/${index}`,
+    );
+    const displayNames = Object.fromEntries(
+      workspaces.map((cwd, index) => [
+        workspaceRegistrationId(cwd),
+        `Workspace ${index}`,
+      ]),
+    );
+    await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+    const bytes = JSON.stringify({
+      schemaVersion: 1,
+      primaryWorkspace: '/work/primary',
+      workspaces,
+      displayNames,
+    });
+    await fs.writeFile(store.filePath, bytes);
+    expect((await store.read()).workspaces).toHaveLength(255);
+    await expect(store.add('/work/overflow')).rejects.toThrow(/limit of 255/);
+    await expect(store.add('/work/overflow', undefined, 2)).rejects.toThrow(
+      /limit of 1/,
+    );
+    expect(await fs.readFile(store.filePath, 'utf8')).toBe(bytes);
+    await store.setDisplayNameByIds(
+      [workspaceRegistrationId(workspaces[0]!)],
+      'Renamed',
+    );
+    await store.removeById(workspaceRegistrationId(workspaces[0]!));
+    await store.add('/work/replacement', 'Replacement');
+    expect((await store.read()).workspaces).toHaveLength(255);
+  });
+
+  it('round-trips maximum-length escaped paths and names within the structural byte budget', async () => {
+    const prefix = path.parse(path.resolve('/')).root;
+    const primary = prefix + '\ud800'.repeat(4096 - prefix.length);
+    const store = new WorkspaceRegistrationStore(primary, await tempHome());
+    const workspaces = Array.from(
+      { length: 255 },
+      (_, index) =>
+        prefix +
+        index.toString().padStart(3, '0') +
+        '\ud800'.repeat(4096 - prefix.length - 3),
+    );
+    const displayNames = Object.fromEntries(
+      workspaces.map((cwd) => [
+        workspaceRegistrationId(cwd),
+        '\ud800'.repeat(256),
+      ]),
+    );
+    await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+    const snapshot = {
+      schemaVersion: 1 as const,
+      primaryWorkspace: primary,
+      workspaces,
+      displayNames,
+    };
+    const bytes = JSON.stringify(snapshot, null, 2) + '\n';
+    expect(Buffer.byteLength(bytes)).toBeGreaterThan(6 * 1024 * 1024);
+    expect(Buffer.byteLength(bytes)).toBeLessThan(8 * 1024 * 1024);
+    await fs.writeFile(store.filePath, bytes);
+    expect(await store.read()).toEqual(snapshot);
+    const id = workspaceRegistrationId(workspaces[0]!);
+    await store.setDisplayNameByIds([id], 'Updated');
+    expect((await store.read()).displayNames?.[id]).toBe('Updated');
+  });
+
+  it('rejects more than 255 structural records without permitting a mutation', async () => {
+    const store = new WorkspaceRegistrationStore(
+      '/work/primary',
+      await tempHome(),
+    );
+    await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+    const bytes = JSON.stringify({
+      schemaVersion: 1,
+      primaryWorkspace: '/work/primary',
+      workspaces: Array.from({ length: 256 }, (_, index) => `/work/${index}`),
+    });
+    await fs.writeFile(store.filePath, bytes);
+    await expect(store.read()).rejects.toThrow(/exceeds 255 entries/);
+    await expect(
+      store.removeById(workspaceRegistrationId('/work/0')),
+    ).rejects.toThrow(/exceeds 255 entries/);
+    expect(await fs.readFile(store.filePath, 'utf8')).toBe(bytes);
+  });
+
+  it('admits only one concurrent writer into the final configured slot', async () => {
+    const store = new WorkspaceRegistrationStore(
+      '/work/primary',
+      await tempHome(),
+    );
+    const other = new WorkspaceRegistrationStore(
+      '/work/primary',
+      path.dirname(path.dirname(path.dirname(store.filePath))),
+    );
+    const results = await Promise.allSettled([
+      store.add('/work/a', undefined, 2),
+      other.add('/work/b', undefined, 2),
+    ]);
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect((await store.read()).workspaces).toHaveLength(1);
+  });
+
+  it('rejects an oversized serialized update before replacing the file', async () => {
+    const store = new WorkspaceRegistrationStore(
+      '/work/primary',
+      await tempHome(),
+    );
+    await store.add('/work/existing');
+    const before = await fs.readFile(store.filePath);
+    const original = await store.read();
+    vi.spyOn(store, 'read').mockResolvedValue({
+      ...original,
+      displayNames: { large: 'x'.repeat(8 * 1024 * 1024) },
+    });
+    await expect(store.add('/work/new')).rejects.toBeInstanceOf(
+      WorkspaceRegistrationStoreTooLargeError,
+    );
+    expect(await fs.readFile(store.filePath)).toEqual(before);
+  });
+
   it('uses a full stable scope hash and returns an empty missing store', async () => {
     const home = await tempHome();
     const hash = workspaceRegistrationScopeHash('/work/primary');
@@ -358,7 +495,7 @@ describe('WorkspaceRegistrationStore', () => {
     },
   );
 
-  it('rejects additions after reaching the secondary workspace limit', async () => {
+  it('rejects additions after reaching an explicitly lowered secondary workspace limit', async () => {
     const home = await tempHome();
     const store = new WorkspaceRegistrationStore('/work/primary', home);
     await fs.mkdir(path.dirname(store.filePath), { recursive: true });
@@ -375,7 +512,7 @@ describe('WorkspaceRegistrationStore', () => {
       }),
     );
 
-    await expect(store.add('/work/overflow')).rejects.toThrow(
+    await expect(store.add('/work/overflow', undefined, 25)).rejects.toThrow(
       /limit of 24 reached/,
     );
     await expect(store.read()).resolves.toMatchObject({ workspaces });
@@ -391,12 +528,63 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(store.read()).rejects.toThrow(/regular file/);
   });
 
+  it('reports an unverifiable store identity as a store error', async () => {
+    const home = await tempHome();
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const modifiedPromises = {
+        ...actual.promises,
+        lstat: vi.fn(
+          async (...args: Parameters<typeof actual.promises.lstat>) => {
+            const stats = await actual.promises.lstat(...args);
+            return new Proxy(stats, {
+              get: (target, property, receiver) =>
+                property === 'ino'
+                  ? 0
+                  : Reflect.get(target, property, receiver),
+            });
+          },
+        ),
+      };
+      const modified = {
+        ...actual,
+        constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        promises: modifiedPromises,
+      };
+      return { ...modified, default: modified };
+    });
+    try {
+      const storeModule = await import('./workspace-registration-store.js');
+      const store = new storeModule.WorkspaceRegistrationStore(
+        '/work/primary',
+        home,
+      );
+      await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+      await fs.writeFile(
+        store.filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          primaryWorkspace: '/work/primary',
+          workspaces: [],
+        }),
+      );
+
+      await expect(store.read()).rejects.toThrow(
+        /identity could not be verified/,
+      );
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
   it('rejects an oversized store', async () => {
     const home = await tempHome();
     const store = new WorkspaceRegistrationStore('/work/primary', home);
     await fs.mkdir(path.dirname(store.filePath), { recursive: true });
-    await fs.writeFile(store.filePath, Buffer.alloc(256 * 1024 + 1));
-    await expect(store.read()).rejects.toThrow(/exceeds 262144 bytes/);
+    await fs.writeFile(store.filePath, Buffer.alloc(8 * 1024 * 1024 + 1));
+    await expect(store.read()).rejects.toThrow(/exceeds 8388608 bytes/);
   });
 
   it('recovers an orphaned stale lock', async () => {
@@ -472,9 +660,16 @@ describe('WorkspaceRegistrationStore', () => {
         }),
       },
     }));
-    vi.doMock('@qwen-code/qwen-code-core', () => ({
-      atomicWriteFile: vi.fn().mockRejectedValue(writeError),
-    }));
+    // The read path uses the leaf noFollowOpen export, so this barrel mock
+    // remains limited to the deferred write helper under test.
+    vi.doMock('@qwen-code/qwen-code-core', async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+      return {
+        ...actual,
+        atomicWriteFile: vi.fn().mockRejectedValue(writeError),
+      };
+    });
     try {
       const storeModule = await import('./workspace-registration-store.js');
       const store = new storeModule.WorkspaceRegistrationStore(

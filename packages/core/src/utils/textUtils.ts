@@ -93,3 +93,23 @@ export function normalizeContent(content: string): string {
 
   return normalized;
 }
+
+/**
+ * Removes HTML comments from text that is about to be injected into a prompt.
+ *
+ * The strip is iterative so adjacent or malformed-looking sequences (e.g.
+ * `<!-- A --><!-- B -->`) fully clear. Any residual unclosed `<!--` marker is
+ * removed too: not a security issue in a system-prompt context (the output is
+ * never rendered as HTML), but leaving it would waste tokens and trip static
+ * analyzers (CodeQL flags "incomplete multi-character sanitization" without
+ * this step).
+ */
+export function stripHtmlComments(content: string): string {
+  let result = content;
+  let prev: string;
+  do {
+    prev = result;
+    result = prev.replace(/<!--[\s\S]*?-->/g, '');
+  } while (result !== prev);
+  return result.replace(/<!--/g, '');
+}
