@@ -177,6 +177,10 @@ async function createDeterministicArchive(output, rootName, stage, archive) {
     await utimes(file, timestamp, timestamp);
   }
 
+  const tarVersion = execFileSync('tar', ['--version'], { encoding: 'utf8' });
+  const ownershipArguments = tarVersion.toLowerCase().includes('bsdtar')
+    ? ['--uid', '0', '--gid', '0', '--uname', 'root', '--gname', 'root']
+    : ['--owner=0', '--group=0'];
   const tarFile = `${archive}.tmp`;
   try {
     execFileSync(
@@ -184,14 +188,7 @@ async function createDeterministicArchive(output, rootName, stage, archive) {
       [
         '-c',
         '--format=ustar',
-        '--uid',
-        '0',
-        '--gid',
-        '0',
-        '--uname',
-        'root',
-        '--gname',
-        'root',
+        ...ownershipArguments,
         '-f',
         tarFile,
         '-C',
