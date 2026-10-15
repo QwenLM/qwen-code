@@ -1,12 +1,13 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.Scheduled;
+
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Scheduled;
 
 /** Database-backed verification uses a separate, bounded pool from retention. */
 public final class ToolPublicationVerifier implements AutoCloseable {
