@@ -20,6 +20,8 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jdk.jfr.Recording;
+import jdk.jfr.consumer.RecordingFile;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
@@ -41,6 +43,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -102,6 +106,7 @@ class EventTransportBrokerGate {
     private static final String WORKSPACE = "workspace-broker-gate";
     private static final String WRITER = "gate-writer";
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
     private static final Duration DELIVERY = Duration.ofSeconds(60);
     // Long enough for a broker to deliver a message it is going to deliver.
     private static final Duration QUIET = Duration.ofSeconds(8);
@@ -417,6 +422,25 @@ class EventTransportBrokerGate {
      */
     @Test
     void thePostCommitPathDoesNotRegress() throws Exception {
+        Throwable gateFailure = null;
+        try {
+            verifyPostCommitPath();
+        } catch (Exception | AssertionError failure) {
+            gateFailure = failure;
+            throw failure;
+        } finally {
+            try {
+                capturePostCommitDiagnostics();
+            } catch (Exception | AssertionError failure) {
+                if (gateFailure == null) {
+                    throw failure;
+                }
+                gateFailure.addSuppressed(failure);
+            }
+        }
+    }
+
+    private void verifyPostCommitPath() throws Exception {
         String session = session("ACTIVE");
         SessionEventHub flagOffHub = new SessionEventHub();
         CompositeCommittedEventPublisher flagOff =
@@ -468,6 +492,107 @@ class EventTransportBrokerGate {
                 .isLessThanOrEqualTo(offDeliveryP95 + budget);
         assertThat(journalP95).as("journal hand-off p95 (ns)")
                 .isLessThanOrEqualTo(Duration.ofMillis(20).toNanos());
+    }
+
+    private void capturePostCommitDiagnostics() throws Exception {
+        String session = session("ACTIVE");
+        SessionEventHub flagOffHub = new SessionEventHub();
+        CompositeCommittedEventPublisher flagOff =
+                new CompositeCommittedEventPublisher(flagOffHub, List.of());
+        int rounds = 300;
+        List<Long> onPublish = new ArrayList<>();
+        List<Long> offPublish = new ArrayList<>();
+        List<Long> onDelivery = new ArrayList<>();
+        List<Long> offDelivery = new ArrayList<>();
+        List<Long> journalHandOff = new ArrayList<>();
+        List<Map<String, Object>> samples = new ArrayList<>();
+        Files.createDirectories(Path.of("target"));
+        Recording recording = new Recording();
+        recording.enable("com.qwen.ManagedEventPublish").withThreshold(Duration.ZERO);
+        recording.enable("jdk.ExecutionSample").withPeriod(Duration.ofMillis(1));
+        recording.enable("jdk.ThreadPark").withThreshold(Duration.ZERO).withStackTrace();
+        recording.enable("jdk.JavaMonitorEnter").withThreshold(Duration.ZERO).withStackTrace();
+        recording.enable("jdk.GCPhasePause").withThreshold(Duration.ZERO);
+        recording.start();
+        Throwable measurementFailure = null;
+        try (SessionEventHub.Subscription onHub = hub.subscribe(TENANT, session);
+                SessionEventHub.Subscription offHub =
+                        flagOffHub.subscribe(TENANT, session)) {
+            for (int round = 1; round <= rounds; round++) {
+                EventRecord event = publicEvent(session, round,
+                        "item.output_text.delta");
+                measureDiagnostics(publisher, onHub, event, onPublish, onDelivery, "on", samples);
+                measureDiagnostics(flagOff, offHub, event, offPublish, offDelivery, "off", samples);
+                JsonNode journal = journalEvent(session, round, "message.delta");
+                byte[] record = journalRecord(List.of(journal));
+                long cpuStarted = cpuTime();
+                long started = System.nanoTime();
+                journalTransport.publishCommitted(record);
+                long completed = System.nanoTime();
+                long cpuCompleted = cpuTime();
+                journalHandOff.add(completed - started);
+                samples.add(Map.of("path", "journal", "sequence", round,
+                        "threadId", Thread.currentThread().threadId(),
+                        "startedNanos", started, "publishNanos", completed - started,
+                        "publishCpuNanos", cpuStarted < 0 ? -1 : cpuCompleted - cpuStarted));
+            }
+        } catch (Exception | AssertionError failure) {
+            measurementFailure = failure;
+            throw failure;
+        } finally {
+            try {
+                recording.stop();
+                Path flightRecording = Path.of("target/event-transport-latency.jfr");
+                recording.dump(flightRecording);
+                Files.writeString(Path.of("target/event-transport-latency-samples.json"),
+                        JSON.writerWithDefaultPrettyPrinter().writeValueAsString(samples));
+                List<Map<String, Object>> stages = new ArrayList<>();
+                try (RecordingFile events = new RecordingFile(flightRecording)) {
+                    while (events.hasMoreEvents()) {
+                        var event = events.readEvent();
+                        if (event.getEventType().getName().equals("com.qwen.ManagedEventPublish")) {
+                            Map<String, Object> stage = new LinkedHashMap<>();
+                            stage.put("sessionId", event.getString("sessionId"));
+                            stage.put("sequence", event.getLong("sequence"));
+                            stage.put("threadId", event.getThread().getJavaThreadId());
+                            stage.put("startTime", event.getStartTime().toString());
+                            stage.put("durationNanos", event.getDuration().toNanos());
+                            stage.put("transportCount", event.getInt("transportCount"));
+                            stage.put("hubNanos", event.getLong("hubNanos"));
+                            stage.put("transportNanos", event.getLong("transportNanos"));
+                            stages.add(stage);
+                        }
+                    }
+                }
+                Files.writeString(Path.of("target/event-transport-latency-stages.json"),
+                        JSON.writerWithDefaultPrettyPrinter().writeValueAsString(stages));
+            } catch (Exception failure) {
+                if (measurementFailure == null) {
+                    throw failure;
+                }
+                measurementFailure.addSuppressed(failure);
+            } finally {
+                recording.close();
+            }
+        }
+        // Discard the warm-up quarter.
+        long onP95 = p95(onPublish.subList(rounds / 4, rounds));
+        long offP95 = p95(offPublish.subList(rounds / 4, rounds));
+        long onDeliveryP95 = p95(onDelivery.subList(rounds / 4, rounds));
+        long offDeliveryP95 = p95(offDelivery.subList(rounds / 4, rounds));
+        long journalP95 = p95(journalHandOff.subList(rounds / 4, rounds));
+        Map<String, Object> record = new LinkedHashMap<>();
+        record.put("rounds", rounds);
+        record.put("flightRecordingEnabled", true);
+        record.put("cpuTimeAvailable", cpuTime() >= 0);
+        record.put("publishP95Micros", Map.of("on", onP95 / 1000,
+                "off", offP95 / 1000));
+        record.put("hubDeliveryP95Micros", Map.of("on", onDeliveryP95 / 1000,
+                "off", offDeliveryP95 / 1000));
+        record.put("journalHandOffP95Micros", journalP95 / 1000);
+        Files.createDirectories(Path.of("target"));
+        Files.writeString(Path.of("target/event-transport-latency-diagnostics.json"),
+                JSON.writerWithDefaultPrettyPrinter().writeValueAsString(record));
     }
 
     /**
@@ -589,6 +714,46 @@ class EventTransportBrokerGate {
                 .contains(event.sequence());
         publish.add(published - started);
         delivery.add(received - started);
+    }
+
+    private static void measureDiagnostics(CommittedEventPublisher composite,
+            SessionEventHub.Subscription subscription, EventRecord event,
+            List<Long> publish, List<Long> delivery, String path,
+            List<Map<String, Object>> samples) throws Exception {
+        long cpuStarted = cpuTime();
+        long started = System.nanoTime();
+        composite.publish(List.of(event));
+        long published = System.nanoTime();
+        long cpuPublished = cpuTime();
+        long readStarted = System.nanoTime();
+        SessionEventHub.Delivery delivered;
+        try {
+            delivered = subscription.await(event.sequence() - 1, Duration.ofSeconds(5));
+        } finally {
+            long received = System.nanoTime();
+            long cpuReceived = cpuTime();
+            Map<String, Object> sample = new LinkedHashMap<>();
+            sample.put("path", path);
+            sample.put("sequence", event.sequence());
+            sample.put("threadId", Thread.currentThread().threadId());
+            sample.put("startedNanos", started);
+            sample.put("publishNanos", published - started);
+            sample.put("readStartedNanos", readStarted);
+            sample.put("hubReadNanos", received - readStarted);
+            sample.put("observedDeliveryNanos", received - started);
+            sample.put("publishCpuNanos", cpuStarted < 0 ? -1 : cpuPublished - cpuStarted);
+            sample.put("hubReadCpuNanos", cpuPublished < 0 ? -1 : cpuReceived - cpuPublished);
+            samples.add(sample);
+            publish.add(published - started);
+            delivery.add(received - started);
+        }
+        assertThat(delivered.events()).extracting(EventRecord::sequence)
+                .contains(event.sequence());
+    }
+
+    private static long cpuTime() {
+        return THREADS.isCurrentThreadCpuTimeSupported() && THREADS.isThreadCpuTimeEnabled()
+                ? THREADS.getCurrentThreadCpuTime() : -1;
     }
 
     private static long p95(List<Long> samples) {

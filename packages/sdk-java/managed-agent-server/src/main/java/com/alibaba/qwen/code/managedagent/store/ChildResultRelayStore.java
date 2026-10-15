@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
@@ -789,7 +790,7 @@ public class ChildResultRelayStore {
             body.put("childSessionId", child);
         }
         if (error != null) {
-            body.put("lastError", error.substring(0, Math.min(error.length(), 1024)));
+            body.put("lastError", StringUtils.truncate(error, 1024));
         }
         return body.toString();
     }
