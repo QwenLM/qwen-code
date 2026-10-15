@@ -8,7 +8,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CalendarIcon,
   CheckCircle2Icon,
-  CircleDotIcon,
   CircleIcon,
   ListTodoIcon,
   RefreshCwIcon,
@@ -65,16 +64,6 @@ function bucketOf(due: string | null, today: string): AgendaBucket {
   return 'later';
 }
 
-function statusIcon(status: DaemonTodoStatus) {
-  if (status === 'completed') {
-    return <CheckCircle2Icon size={14} className={styles.iconDone} />;
-  }
-  if (status === 'in_progress') {
-    return <CircleDotIcon size={14} className={styles.iconProgress} />;
-  }
-  return <CircleIcon size={14} className={styles.iconPending} />;
-}
-
 export function TodosDialog() {
   const actions = useWorkspaceActions();
   const { t } = useI18n();
@@ -85,6 +74,7 @@ export function TodosDialog() {
   const [error, setError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [dateKey, setDateKey] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const statusLabel = useMemo(
     () =>
@@ -142,6 +132,51 @@ export function TodosDialog() {
     [actions, load],
   );
 
+  const toggleSelect = useCallback((key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
+
+  const setColumnSelected = useCallback((keys: string[], on: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const key of keys) {
+        if (on) {
+          next.add(key);
+        } else {
+          next.delete(key);
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const bulk = useCallback(
+    async (patch: { status?: DaemonTodoStatus; dueDate?: string | null }) => {
+      setBusyKey('bulk');
+      try {
+        for (const key of selected) {
+          const [sessionId, todoId] = key.split(':');
+          await actions.updateTodo(sessionId, todoId, patch);
+        }
+        setSelected(new Set());
+        await load();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setBusyKey(null);
+      }
+    },
+    [actions, load, selected],
+  );
+
   const today = todayIso();
 
   const items: FlatTodo[] = useMemo(() => {
@@ -178,7 +213,21 @@ export function TodosDialog() {
     [snapshot],
   );
 
+  const selectToggle = (on: boolean, onClick: () => void, label: string) => (
+    <button
+      type="button"
+      className={on ? styles.selectOn : styles.selectOff}
+      onClick={onClick}
+      aria-pressed={on}
+      aria-label={label}
+      title={label}
+    >
+      {on ? <CheckCircle2Icon size={16} /> : <CircleIcon size={16} />}
+    </button>
+  );
+
   const card = (todo: FlatTodo) => {
+    const isSel = selected.has(todo.key);
     const overdue =
       todo.dueDate !== null &&
       todo.dueDate < today &&
@@ -187,12 +236,12 @@ export function TodosDialog() {
     return (
       <div
         key={todo.key}
-        className={styles.card}
+        className={`${styles.card} ${isSel ? styles.cardSelected : ''}`}
         draggable
         onDragStart={(e) => e.dataTransfer.setData('text/plain', todo.key)}
       >
         <div className={styles.cardTop}>
-          {statusIcon(todo.status)}
+          {selectToggle(isSel, () => toggleSelect(todo.key), todo.content)}
           <span
             className={
               todo.status === 'completed'
@@ -204,6 +253,11 @@ export function TodosDialog() {
           </span>
         </div>
         <div className={styles.cardMeta}>
+          {todo.status === 'in_progress' && (
+            <span className={styles.pillProgress}>
+              {t('todos.filter.inProgress')}
+            </span>
+          )}
           <span className={styles.cardProject}>{todo.project}</span>
           {todo.dueDate && (
             <span
@@ -289,6 +343,9 @@ export function TodosDialog() {
     <div className={styles.board}>
       {STATUSES.map((status) => {
         const column = boardItems.filter((i) => i.status === status);
+        const columnKeys = column.map((i) => i.key);
+        const allSelected =
+          columnKeys.length > 0 && columnKeys.every((key) => selected.has(key));
         return (
           <div
             key={status}
@@ -301,7 +358,11 @@ export function TodosDialog() {
             }}
           >
             <div className={styles.columnHeader}>
-              {statusIcon(status)}
+              {selectToggle(
+                allSelected,
+                () => setColumnSelected(columnKeys, !allSelected),
+                statusLabel[status],
+              )}
               <span>{statusLabel[status]}</span>
               <span className={styles.columnCount}>{column.length}</span>
             </div>
@@ -392,6 +453,38 @@ export function TodosDialog() {
           <RefreshCwIcon size={13} />
         </button>
       </div>
+
+      {selected.size > 0 && (
+        <div className={styles.bulkBar}>
+          <span className={styles.bulkCount}>
+            {selected.size} {t('todos.selected')}
+          </span>
+          <button
+            type="button"
+            className={styles.miniButton}
+            disabled={busyKey === 'bulk'}
+            onClick={() => void bulk({ status: 'completed' })}
+          >
+            ✓ {t('todos.markDone')}
+          </button>
+          <input
+            type="date"
+            className={styles.bulkDate}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (value) void bulk({ dueDate: value });
+            }}
+            title={t('todos.setDueDate')}
+          />
+          <button
+            type="button"
+            className={styles.miniButton}
+            onClick={() => setSelected(new Set())}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {snapshot && (
         <div className={styles.totals}>

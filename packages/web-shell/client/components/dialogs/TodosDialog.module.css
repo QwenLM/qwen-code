@@ -333,3 +333,70 @@
 :global(.theme-light) .iconDone {
   color: #065f46;
 }
+
+/* --- Selection --- */
+
+.cardSelected {
+  border-color: #6d44e8;
+}
+
+.selectOn,
+.selectOff {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  color: inherit;
+}
+
+.selectOn {
+  color: #6d44e8;
+}
+
+.selectOff {
+  opacity: 0.45;
+}
+
+.selectOff:hover {
+  opacity: 0.95;
+}
+
+.bulkBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px solid #6d44e8;
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
+}
+
+.bulkCount {
+  font-weight: 600;
+}
+
+.bulkDate {
+  border-radius: 7px;
+  border: 1px solid rgba(125, 125, 140, 0.35);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.pillProgress {
+  background: rgba(127, 177, 255, 0.15);
+  color: #7fb1ff;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  flex: none;
+}
+
+:global(.theme-light) .pillProgress {
+  color: #1e40af;
+}
