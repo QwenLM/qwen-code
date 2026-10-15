@@ -177,10 +177,12 @@ export type WebSearchGateResult =
  * DashScope-compatible endpoint check for the search side channel. Accepts
  * the official DashScope regional hosts (the Standard preset regions,
  * including `dashscope-us`), Bailian Token Plan / workspace MaaS endpoints,
- * and internal Alibaba gateways. This overlaps, but is neither a subset nor a
- * superset of, the content provider's DashScope detection: it rejects generic
- * Alibaba Cloud API Gateway and proxy endpoints, but accepts all concrete
- * `*.maas.aliyuncs.com` endpoints for the Responses search side channel.
+ * QwenCloud MaaS hosts (QWENCLOUD_MAAS_HOSTS), and internal Alibaba
+ * gateways. This overlaps, but is neither a subset nor a superset of, the
+ * content provider's DashScope detection: it rejects generic Alibaba Cloud
+ * API Gateway and proxy endpoints, but accepts all concrete
+ * `*.maas.aliyuncs.com` and QwenCloud MaaS endpoints for the Responses
+ * search side channel.
  * This only catches obvious misconfiguration; a host that does not serve the
  * Responses API fails loudly on first use.
  */

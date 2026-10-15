@@ -49,6 +49,37 @@ export OPENAI_BASE_URL="https://token-plan.maas.qianwenaiapi.com/compatible-mode
 export OPENAI_MODEL="qwen3.8-max"
 ```
 
+### Alternative: configure via `settings.json`
+
+If you prefer to skip the interactive `/auth` flow, add the following to `~/.qwen/settings.json`:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3.8-max",
+        "name": "qwen3.8-max (QwenCloud)",
+        "baseUrl": "https://maas.qwencloudapi.com/compatible-mode/v1",
+        "description": "qwen3.8-max from QwenCloud Standard API Key",
+        "envKey": "QWENCLOUD_API_KEY"
+      }
+    ]
+  },
+  "env": {
+    "QWENCLOUD_API_KEY": "sk-your-api-key"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "qwen3.8-max"
+  }
+}
+```
+
 As with the other provider-specific keys, `QWENCLOUD_API_KEY` and `QWENCLOUD_TOKEN_PLAN_API_KEY` take effect once a `settings.json` provider entry declares them as the `envKey`; to select OpenAI-compatible auth with environment variables alone, export `OPENAI_API_KEY` instead.
 
 > [!note]

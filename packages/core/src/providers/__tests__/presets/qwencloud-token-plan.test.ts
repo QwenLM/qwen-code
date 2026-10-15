@@ -92,6 +92,23 @@ describe('qwencloudTokenPlanProvider', () => {
         'QWENCLOUD_TOKEN_PLAN_API_KEY',
       ),
     ).toBe(false);
+    // The negatives above differ in both envKey and URL, so they short-circuit
+    // on envKey and never exercise the URL gate. These cases pass the correct
+    // envKey with a wrong URL, proving the URL check works independently.
+    expect(
+      providerMatchesCredentials(
+        qwencloudTokenPlanProvider,
+        'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        'QWENCLOUD_TOKEN_PLAN_API_KEY',
+      ),
+    ).toBe(false);
+    expect(
+      providerMatchesCredentials(
+        qwencloudTokenPlanProvider,
+        'https://maas.qianwenaiapi.com/compatible-mode/v1',
+        'QWENCLOUD_TOKEN_PLAN_API_KEY',
+      ),
+    ).toBe(false);
   });
 
   it('owns only models installed against its own endpoints', () => {

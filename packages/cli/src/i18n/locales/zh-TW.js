@@ -1951,6 +1951,10 @@ export default {
   'API key cannot be empty.': 'API Key 不能為空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '無效的 API Key，Coding Plan API Key 均以 "sk-sp-" 開頭，請檢查',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    '無效的 API Key。按量付費 Key 以 "sk-" 或 "sk-ws-" 開頭。Token Plan Key（"sk-sp-"）請使用 Token Plan 入口。',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    '無效的 API Key。Token Plan API Key 以 "sk-sp-" 開頭。請從 Token Plan 控制台產生，或使用 Standard API Key 入口綁定按量付費 Key。',
   'You can get your Coding Plan API key here':
     '您可以在這裏獲取 Coding Plan API Key',
   'You can get your Token Plan API key here':

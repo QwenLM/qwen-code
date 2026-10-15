@@ -2379,6 +2379,10 @@ export default {
   'API key cannot be empty.': 'API key cannot be empty.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.',
   'You can get your Coding Plan API key here':
     'You can get your Coding Plan API key here',
   'You can get your Token Plan API key here':

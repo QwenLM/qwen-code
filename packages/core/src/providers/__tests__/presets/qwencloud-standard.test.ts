@@ -21,6 +21,8 @@ import { codingPlanProvider } from '../../presets/alibaba-coding-plan.js';
 import { ALL_PROVIDERS, QWENCLOUD_PROVIDERS } from '../../all-providers.js';
 import {
   buildInstallPlan,
+  buildProviderTemplate,
+  computeModelListVersion,
   getDefaultModelIds,
   providerMatchesCredentials,
 } from '../../provider-config.js';
@@ -97,16 +99,28 @@ describe('qwencloudStandardProvider', () => {
   });
 
   it('stamps the model name prefix and keeps credentials distinct', () => {
+    const modelIds = getDefaultModelIds(qwencloudStandardProvider);
+    const template = buildProviderTemplate(
+      qwencloudStandardProvider,
+      QWENCLOUD_CHINA_BASE_URL,
+    );
+    const version = computeModelListVersion(template);
     const plan = buildInstallPlan(qwencloudStandardProvider, {
       baseUrl: QWENCLOUD_CHINA_BASE_URL,
       apiKey: 'sk-standard',
-      modelIds: ['qwen3.8-max'],
+      modelIds,
     });
     expect(plan.providerId).toBe('qwencloud-standard');
     expect(plan.env).toEqual({ QWENCLOUD_API_KEY: 'sk-standard' });
     expect(plan.modelProviders?.[0]?.models[0]).toMatchObject({
       id: 'qwen3.8-max',
       name: '[QwenCloud Standard] qwen3.8-max',
+    });
+    expect(plan.providerState).toEqual({
+      'providerMetadata.qwencloud-standard': {
+        baseUrl: QWENCLOUD_CHINA_BASE_URL,
+        version,
+      },
     });
   });
 
@@ -169,6 +183,28 @@ describe('qwencloudStandardProvider', () => {
     ).toBe(false);
   });
 
+  it('rejects a model with matching envKey but a foreign baseUrl', () => {
+    // The ownsModel gate is a conjunction of envKey AND baseUrl. Existing
+    // negatives all differ in envKey, so the baseUrl conjunct was never
+    // exercised independently. This case proves the baseUrl check works
+    // even when envKey matches.
+    const owns = qwencloudStandardProvider.ownsModel!;
+    expect(
+      owns({
+        id: 'qwen3.8-max',
+        envKey: 'QWENCLOUD_API_KEY',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    ).toBe(false);
+    expect(
+      owns({
+        id: 'qwen3.8-max',
+        envKey: 'QWENCLOUD_API_KEY',
+        baseUrl: QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL,
+      }),
+    ).toBe(false);
+  });
+
   it('matches credentials for both platforms but not ModelStudio endpoints', () => {
     for (const url of [QWENCLOUD_CHINA_BASE_URL, QWENCLOUD_GLOBAL_BASE_URL]) {
       expect(
@@ -191,6 +227,24 @@ describe('qwencloudStandardProvider', () => {
       providerMatchesCredentials(
         alibabaStandardProvider,
         QWENCLOUD_CHINA_BASE_URL,
+        'QWENCLOUD_API_KEY',
+      ),
+    ).toBe(false);
+    // The existing negatives above differ in both envKey and URL, so they
+    // short-circuit on envKey and never exercise the URL gate. These cases
+    // pass the correct envKey with a wrong URL, proving the URL check works
+    // independently.
+    expect(
+      providerMatchesCredentials(
+        qwencloudStandardProvider,
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        'QWENCLOUD_API_KEY',
+      ),
+    ).toBe(false);
+    expect(
+      providerMatchesCredentials(
+        qwencloudStandardProvider,
+        QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL,
         'QWENCLOUD_API_KEY',
       ),
     ).toBe(false);

@@ -264,6 +264,84 @@ describe('reasoning declarations', () => {
       ),
     ).toBeUndefined();
   });
+
+  it.each([
+    [
+      'maas.qianwenaiapi.com',
+      'https://maas.qianwenaiapi.com/compatible-mode/v1',
+    ],
+    [
+      'maas.qwencloudapi.com',
+      'https://maas.qwencloudapi.com/compatible-mode/v1',
+    ],
+  ])(
+    'inherits DashScope capabilities for QwenCloud host %s',
+    (_host, baseUrl) => {
+      // qwen3.8-max is registered in the QwenCloud standard provider with
+      // disableField: 'reasoning_effort', so the dashscope host match
+      // produces a dashscope-effort profile rather than toggle-only.
+      const resolved = resolveReasoningCapabilities(
+        { ...route, model: 'qwen3.8-max', baseUrl },
+        { canDisable: false },
+      );
+      expect(resolved).toBeDefined();
+      expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
+    },
+  );
+
+  it.each([
+    [
+      'token-plan.maas.qianwenaiapi.com',
+      'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+    ],
+    [
+      'token-plan.maas.qwencloudapi.com',
+      'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
+    ],
+  ])(
+    'inherits DashScope capabilities for QwenCloud Token Plan host %s',
+    (_host, baseUrl) => {
+      // Token Plan subdomains are not registered as separate providers, so
+      // no inherited capabilities exist. But the host still matches the
+      // dashscope regex, which is what we're testing. Use a model name
+      // that triggers the qwen + dashscope path without needing inherited.
+      const resolved = resolveReasoningCapabilities(
+        { ...route, model: 'qwen3.7-plus', baseUrl },
+        { thinking: true, toggleOnly: true, disableField: 'enable_thinking' },
+      );
+      expect(resolved).toBeDefined();
+      expect(resolved).toMatchObject({
+        disableField: 'enable_thinking',
+        toggleOnly: true,
+      });
+    },
+  );
+
+  it.each([
+    [
+      'maas.qianwenaiapi.com.evil.com',
+      'https://maas.qianwenaiapi.com.evil.com/compatible-mode/v1',
+    ],
+    [
+      'maas.qwencloudapi.com.evil.com',
+      'https://maas.qwencloudapi.com.evil.com/compatible-mode/v1',
+    ],
+    [
+      'notmaas.qianwenaiapi.com',
+      'https://notmaas.qianwenaiapi.com/compatible-mode/v1',
+    ],
+    [
+      'notmaas.qwencloudapi.com',
+      'https://notmaas.qwencloudapi.com/compatible-mode/v1',
+    ],
+  ])('rejects lookalike QwenCloud host %s', (_host, baseUrl) => {
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'qwen3.8-max', baseUrl },
+        { defaultEffort: 'medium' },
+      ),
+    ).toBeUndefined();
+  });
 });
 
 describe('prompt reasoning snapshots', () => {

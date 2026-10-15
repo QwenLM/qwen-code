@@ -18,6 +18,8 @@ If you configured nothing under `tools.webSearch`, the tool registers whenever t
 | Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                              |
 | Alibaba ModelStudio → **Token Plan**                                                                                       | on                                              |
 | Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint is not verified for this API |
+| QwenCloud → **Standard API Key**                                                                                           | on                                              |
+| QwenCloud → **Token Plan**                                                                                                 | on                                              |
 | An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key | on                                              |
 | Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                 | off                                             |
 
