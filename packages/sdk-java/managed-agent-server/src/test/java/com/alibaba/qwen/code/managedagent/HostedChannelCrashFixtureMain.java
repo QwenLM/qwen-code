@@ -75,16 +75,16 @@ public final class HostedChannelCrashFixtureMain {
                 "--qwen.managed-agent.internal-server.address=127.0.0.1",
                 "--qwen.managed-agent.internal-server.port=" + internalPort);
         JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_registry"
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace"
                 + " WHERE tenant_id = ? AND workspace_id = 'workspace-0'",
                 Integer.class, tenant) == 0) {
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                     + " workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES"
                     + " (?, 'workspace-0', 1, 'storage-0', 'Workspace', ?, ?,"
                     + " 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                     WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                     + " workspace_id, actor_id, role) VALUES (?, 'workspace-0',"
                     + " ?, 'OPERATOR')", tenant,
                     "actor".getBytes(StandardCharsets.UTF_8));
@@ -109,8 +109,8 @@ public final class HostedChannelCrashFixtureMain {
                     params.put(pair[0], pair.length > 1 ? pair[1] : "");
                 }
                 jdbc.update(
-                        "UPDATE qwen_managed_channel_claim SET claimed_at = 0"
-                                + " WHERE tenant_id = ? AND channel_id = ?",
+                        "UPDATE ma_delivery SET claimed_at = 0"
+                                + " WHERE delivery_kind = 'CHANNEL' AND claimed_at IS NOT NULL AND tenant_id = ? AND channel_id = ?",
                         params.get("tenant"), params.get("channel"));
                 exchange.sendResponseHeaders(204, -1);
             } catch (RuntimeException failure) {

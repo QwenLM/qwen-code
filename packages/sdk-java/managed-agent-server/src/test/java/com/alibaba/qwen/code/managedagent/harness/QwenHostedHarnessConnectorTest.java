@@ -9,6 +9,7 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -55,6 +56,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -245,9 +247,13 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2",
-            "hosted-workspace-shell/1", "hosted-workspace-shell/2", "hosted-workspace-team-lead/1"})
-    void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile) {
+    @CsvSource({"hosted-workspace-files/1,false", "hosted-workspace-files/1,true",
+            "hosted-workspace-files/2,false", "hosted-workspace-files/2,true",
+            "hosted-workspace-shell/1,false", "hosted-workspace-shell/1,true",
+            "hosted-workspace-shell/2,false", "hosted-workspace-shell/2,true",
+            "hosted-workspace-team-lead/1,false", "hosted-workspace-team-lead/1,true",
+            "hosted-workspace-mcp/1,false", "hosted-workspace-mcp/1,true"})
+    void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile, boolean publication) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
@@ -267,6 +273,8 @@ class QwenHostedHarnessConnectorTest {
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
         ManagedAgentProperties properties = properties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getToolPublication().setEnabled(publication);
+        properties.getToolPublication().setExecutionBytes(1048576L);
         var actions = mock(ManagedActionStore.class);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
         when(attached.getApprovalMode()).thenReturn(null, "yolo", "default");
@@ -289,6 +297,12 @@ class QwenHostedHarnessConnectorTest {
                     .doesNotContain("workspaceId=workspace-a");
         }
         Map<String, Object> created = ReflectionTestUtils.invokeMethod(create.getValue(), "toJson");
+        if (publication && (profile.startsWith("hosted-workspace-shell/")
+                || profile.equals("hosted-workspace-team-lead/1"))) {
+            assertThat(created).containsEntry("captureBytes", 1048576L);
+        } else {
+            assertThat(created).doesNotContainKey("captureBytes");
+        }
         assertThat(created)
                 .containsEntry("approvalMode", "default")
                 .containsEntry("approvalTimeoutMs", properties.getHarness().getApprovalTimeout().toMillis())
@@ -300,13 +314,15 @@ class QwenHostedHarnessConnectorTest {
             assertThat(created).doesNotContainKey("suppressChildAgents");
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
-                .doesNotContainKey("childWorkspaces");
+                .doesNotContainKeys("childWorkspaces", "captureBytes");
+        properties.getToolPublication().setExecutionBytes(2097152L);
         QwenHostedHarnessConnector restarted = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(restarted, "client", client);
         restarted.recoverManagedRuntime("tenant-a", SESSION_ID, false);
         verify(client, times(4)).loadSession(load.capture());
         Map<String, Object> recovered = ReflectionTestUtils.invokeMethod(load.getValue(), "toJson");
-        assertThat(recovered).containsEntry("toolProfile", profile);
+        assertThat(recovered).containsEntry("toolProfile", profile)
+                .doesNotContainKey("captureBytes");
         if (profile.startsWith("hosted-workspace-shell/")) {
             assertThat(recovered).containsEntry("suppressChildAgents", true);
         } else {
@@ -320,7 +336,7 @@ class QwenHostedHarnessConnectorTest {
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
                 .containsEntry("toolProfile", profile)
                 .containsEntry("passiveManagedRuntimeRecovery", true)
-                .doesNotContainKey("driveRuntimeRecovery");
+                .doesNotContainKeys("driveRuntimeRecovery", "captureBytes");
         clearInvocations(execution);
         RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
         doThrow(refusal).when(execution).authorize(session);
@@ -1018,6 +1034,64 @@ class QwenHostedHarnessConnectorTest {
                         "66666666-6666-4666-8666-666666666666",
                         "messageId", "msg_1", "kind", "receive")))
                 .hasMessage("Hosted Workspace files are disabled");
+    }
+
+    // MQ2c: a transport wake takes the relay verbs' new-work order — the
+    // Workspace admission, the takeover load for a Session another process
+    // attached — and loads nothing for a Session this node already holds.
+    @Test
+    void aTransportWakeLoadsThroughTheNewWorkAdmissionOnce() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        SessionRecord session = mock(SessionRecord.class);
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        when(execution.verifiedRecoveryEnabled()).thenReturn(true);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        when(session.tenantId()).thenReturn("tenant-a");
+        when(session.sessionId()).thenReturn(SESSION_ID);
+        when(session.harnessBootId()).thenReturn(BOOT_ID);
+        when(session.workspace()).thenReturn(new ContextBinding("tenant-a", "workspace", 1,
+                "storage", ".", "config", 1));
+        when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        assertThat(connector.writerIdentity()).isNull();
+        ReflectionTestUtils.setField(connector, "client", client);
+        assertThat(connector.writerIdentity()).isEqualTo(BOOT_ID);
+
+        // A Session a process this one never saw attached: the takeover load.
+        assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isTrue();
+        ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client, times(1)).loadSession(loads.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(
+                loads.getValue(), "toJson"))
+                .containsEntry("driveRuntimeRecovery", true);
+        verify(execution, atLeastOnce()).authorize(session);
+        assertThat(connector.attachedSessions()).containsExactly(
+                new HarnessConnector.AttachedSession("tenant-a", SESSION_ID));
+
+        // Held here now: a later wake loads nothing.
+        assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isFalse();
+        verify(client, times(1)).loadSession(any(LoadHarnessSession.class));
+
+        // The grant revoked: a fresh node's wake runs the admission and
+        // loads nothing.
+        QwenHostedHarnessConnector fresh = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(fresh, "client", client);
+        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorize(session);
+        assertThatThrownBy(() -> fresh.activateForWake("tenant-a", SESSION_ID))
+                .hasMessageContaining("Workspace execution authority is unavailable");
+        verify(client, times(1)).loadSession(any(LoadHarnessSession.class));
     }
 
     // H4f × H4d-b: a stopped run's message stop must never start the work

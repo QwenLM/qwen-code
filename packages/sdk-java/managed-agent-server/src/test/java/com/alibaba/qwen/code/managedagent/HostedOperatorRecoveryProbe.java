@@ -72,7 +72,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
 
     private Map<String, Object> check(Map<String, Object> session, String phase) throws Exception {
         String id = session.get("sessionId").toString();
-        var rows = jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?", id);
+        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", id);
         assertThat(rows).hasSize(1);
         var execution = rows.getFirst();
         String binding = execution.get("binding_id").toString();
@@ -125,9 +125,9 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         Files.setPosixFilePermissions(evidence, PosixFilePermissions.fromString("rw-------"));
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease WHERE binding_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?",
                 Integer.class, binding)).isZero();
-        assertThat(jdbc.queryForObject("SELECT binding_state FROM qwen_runtime_binding WHERE binding_id = ?",
+        assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                 String.class, binding)).isEqualTo("RELEASED");
         var next = broker.acquire(session.get("secondarySessionId").toString(), UUID.randomUUID().toString(), "bootstrap")
                 .toCompletableFuture().get(30, TimeUnit.SECONDS);
@@ -154,7 +154,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
     }
 
     private void assertHeld(String binding, String holder) {
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM managed_workspace_execution_lease WHERE binding_id = ?",
+        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner WHERE binding_id = ?",
                 String.class, binding)).isEqualTo(holder);
     }
 

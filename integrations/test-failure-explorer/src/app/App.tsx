@@ -13,6 +13,7 @@ import type {
   ReportQuery,
   ShowData,
 } from '../app-contract.js';
+import { analysisRequestText, type SendAnalysis } from './analysis-request.js';
 
 type Query = (query: ReportQuery, signal: AbortSignal) => Promise<QueryData>;
 type Collection = ListData['collection'];
@@ -44,10 +45,12 @@ export function ReportApp({
   report,
   query,
   connectionNotice,
+  sendAnalysis,
 }: {
   report: ShowData;
   query?: Query;
   connectionNotice?: string;
+  sendAnalysis?: SendAnalysis;
 }) {
   const { summary } = report;
   const [filters, setFilters] = useState<Filters>({
@@ -74,6 +77,14 @@ export function ReportApp({
   });
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [analysisStatus, setAnalysisStatus] = useState<{
+    state: 'idle' | 'pending' | 'accepted' | 'unconfirmed';
+    text: string;
+  }>({ state: 'idle', text: '' });
+  const analysisRequest = useRef<{
+    generation: number;
+    controller?: AbortController;
+  }>({ generation: 0 });
   const listRequest = useRef<{
     generation: number;
     controller?: AbortController;
@@ -90,11 +101,14 @@ export function ReportApp({
   useEffect(() => {
     const list = listRequest.current;
     const detail = detailRequest.current;
+    const analysis = analysisRequest.current;
     return () => {
       list.generation += 1;
       detail.generation += 1;
       list.controller?.abort();
       detail.controller?.abort();
+      analysis.generation += 1;
+      analysis.controller?.abort();
     };
   }, []);
 
@@ -115,6 +129,19 @@ export function ReportApp({
       setListError(undefined);
     }
   }, [query, report.firstPage]);
+
+  useEffect(() => {
+    const current = analysisRequest.current;
+    if (!sendAnalysis && current.controller) {
+      current.generation += 1;
+      current.controller.abort();
+      current.controller = undefined;
+      setAnalysisStatus({
+        state: 'unconfirmed',
+        text: 'Connection lost. Acceptance is unknown; check the host review and original conversation before sending again.',
+      });
+    }
+  }, [sendAnalysis]);
 
   useEffect(() => {
     if (detailOpen) detailHeading.current?.focus();
@@ -221,6 +248,55 @@ export function ReportApp({
     void loadList({ collection, text: filters.text }, 0, []);
   }
 
+  async function requestAnalysis() {
+    const current = analysisRequest.current;
+    if (!sendAnalysis || current.controller || selectedIds.length === 0) return;
+    const controller = new AbortController();
+    const generation = ++current.generation;
+    current.controller = controller;
+    setAnalysisStatus({
+      state: 'pending',
+      text: 'Review this request in the host. Analysis starts only after host approval and acceptance.',
+    });
+    try {
+      const result = await sendAnalysis([...selectedIds], controller.signal);
+      if (generation !== current.generation || controller.signal.aborted)
+        return;
+      setAnalysisStatus(
+        result.isError
+          ? {
+              state: 'unconfirmed',
+              text: 'The host did not confirm acceptance. Check the host review and original conversation before sending again.',
+            }
+          : {
+              state: 'accepted',
+              text: 'The daemon accepted the last request. Follow the original conversation for analysis; this does not confirm completion.',
+            },
+      );
+    } catch {
+      if (generation !== current.generation || controller.signal.aborted)
+        return;
+      setAnalysisStatus({
+        state: 'unconfirmed',
+        text: 'Acceptance is unknown. The request may have timed out or lost its connection; check the host review and original conversation before sending again.',
+      });
+    } finally {
+      if (generation === current.generation) current.controller = undefined;
+    }
+  }
+
+  function cancelAnalysis() {
+    const current = analysisRequest.current;
+    if (!current.controller) return;
+    current.generation += 1;
+    current.controller.abort();
+    current.controller = undefined;
+    setAnalysisStatus({
+      state: 'unconfirmed',
+      text: 'Cancellation requested. Acceptance is unknown; check the host review and original conversation before sending again.',
+    });
+  }
+
   const total =
     filters.collection === 'failures'
       ? summary.computed.failures
@@ -244,11 +320,10 @@ export function ReportApp({
         : filters.collection === 'failures'
           ? 'No failed entries were recorded in this report.'
           : `No ${filters.collection} entries were recorded in this report.`;
-  const selectionText = `Analyze these failures using test_report_query:\n${JSON.stringify(
-    { reportId: report.reportId, itemIds: selectedIds },
-    null,
-    2,
-  )}`;
+  const selectionText =
+    selectedIds.length > 0
+      ? analysisRequestText(report.reportId, selectedIds)
+      : '';
 
   return (
     <main className="explorer" aria-label="Test failure explorer">
@@ -467,6 +542,7 @@ export function ReportApp({
                       aria-label={`Select ${entry.itemId}`}
                       checked={selectedIds.includes(entry.itemId)}
                       disabled={
+                        analysisStatus.state === 'pending' ||
                         entry.status !== 'failed' ||
                         (selectedIds.length >= 20 &&
                           !selectedIds.includes(entry.itemId))
@@ -703,9 +779,27 @@ export function ReportApp({
           </span>
           {selectedIds.length > 0 && (
             <>
-              <button type="button" onClick={() => setSelectedIds([])}>
+              <button
+                type="button"
+                disabled={analysisStatus.state === 'pending'}
+                onClick={() => setSelectedIds([])}
+              >
                 Clear selection
               </button>
+              {sendAnalysis && (
+                <button
+                  type="button"
+                  disabled={analysisStatus.state === 'pending'}
+                  onClick={() => void requestAnalysis()}
+                >
+                  Review selected failures
+                </button>
+              )}
+              {analysisStatus.state === 'pending' && (
+                <button type="button" onClick={cancelAnalysis}>
+                  Cancel request
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {
@@ -718,6 +812,11 @@ export function ReportApp({
             </>
           )}
         </div>
+        {analysisStatus.text && (
+          <p className="analysis-status" role="status">
+            {analysisStatus.text}
+          </p>
+        )}
         {selectedIds.length > 0 && (
           <label className="copy-request">
             <span>Copy this request manually into the conversation.</span>

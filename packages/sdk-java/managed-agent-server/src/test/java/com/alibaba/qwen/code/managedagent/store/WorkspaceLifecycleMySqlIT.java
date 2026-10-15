@@ -66,7 +66,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         var fixture = fixture();
         String scope = ManagedSessionStore.sessionScopeKey("neighbor", "other-session");
         String record = ManagedExtensionProjection.recordKey("other-session", "hook_execution", "other-hook");
-        fixture.jdbc.update("INSERT INTO qwen_managed_session_extension_record (session_scope_key, record_key, tenant_id, workspace_id,"
+        fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
                 + " session_id, domain, record_id, operation_hash, revision, record_resource_id, created_at, first_sequence)"
                 + " VALUES (?, ?, 'neighbor', 'other-workspace', 'other-session', 'hook_execution', 'other-hook', ?, 1, 'other-resource', 1, 1)",
                 scope, record, "a".repeat(64));
@@ -91,7 +91,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             try {
                 assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
                 var neighbor = workers.submit(() -> new JdbcTemplate(source).update(
-                        "UPDATE qwen_managed_session_extension_record SET revision = revision + 1 WHERE session_scope_key = ? AND record_key = ?",
+                        "UPDATE ma_session_record SET revision = revision + 1 WHERE session_scope_key = ? AND record_key = ?",
                         scope, record));
                 assertThat(neighbor.get(2, TimeUnit.SECONDS)).isEqualTo(1);
             } finally {
@@ -99,7 +99,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             }
             held.get(10, TimeUnit.SECONDS);
         }
-        assertThat(fixture.jdbc.queryForObject("SELECT revision FROM qwen_managed_session_extension_record"
+        assertThat(fixture.jdbc.queryForObject("SELECT revision FROM ma_session_record"
                 + " WHERE session_scope_key = ? AND record_key = ?", Long.class, scope, record)).isEqualTo(2);
     }
 
@@ -134,7 +134,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary(
                     "tenant", fixture.session, "w".repeat(32), ordinary))).isInstanceOfSatisfying(ApiException.class,
                             error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
-            fixture.jdbc.update("UPDATE managed_agent_operation SET lease_until = UNIX_TIMESTAMP() * 1000 - 1000 WHERE operation_id = ?", id);
+            fixture.jdbc.update("UPDATE ma_operation SET claim_until = CURRENT_TIMESTAMP(6) - INTERVAL 1 SECOND WHERE operation_id = ?", id);
             assertThat(fixture.transactions.<Boolean>execute(ignored -> WorkspaceLifecycleStore.legacyClose(fixture.jdbc, "tenant", fixture.session)))
                     .isFalse();
             assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary(
@@ -183,7 +183,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             });
             assertThat(queued.get().get(5, TimeUnit.SECONDS)).isInstanceOf(ApiException.class);
         }
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_head", Integer.class)).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'", Integer.class)).isZero();
     }
 
     @Test
@@ -235,18 +235,18 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         var fixture = fixture();
         var operation = fixture.admit(OperationKind.DELETE);
         var effects = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
-        fixture.jdbc.execute("CREATE TRIGGER l3_delete_failure BEFORE UPDATE ON managed_agent_session FOR EACH ROW"
+        fixture.jdbc.execute("CREATE TRIGGER l3_delete_failure BEFORE UPDATE ON ma_session FOR EACH ROW"
                 + " BEGIN IF NEW.status = 'DELETED' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'l3 injected crash'; END IF; END");
         assertThatThrownBy(() -> fixture.transactions.execute(ignored -> fixture.store.completeOperation("tenant", fixture.session,
                 operation.operationId(), "worker", operation.claimGeneration(), true))).hasMessageContaining("l3 injected crash");
         assertThat(fixture.store.requireSession("tenant", fixture.session).status()).isEqualTo("DELETING");
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_session_retirement", Integer.class)).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retirement_operation_id IS NOT NULL", Integer.class)).isZero();
         assertThat(fixture.store.findOperation("tenant", fixture.session, operation.operationId()).orElseThrow().receiptId()).isNull();
         fixture.jdbc.execute("DROP TRIGGER l3_delete_failure");
         assertThat(fixture.transactions.<com.fasterxml.jackson.databind.JsonNode>execute(ignored -> fixture.lifecycle.recoverEffects(operation)))
                 .isEqualTo(effects);
         assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.completeOperation("tenant", fixture.session,
                 operation.operationId(), "worker", operation.claimGeneration(), true))).isTrue();
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_session_retirement", Integer.class)).isOne();
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retirement_operation_id IS NOT NULL", Integer.class)).isOne();
     }
 }

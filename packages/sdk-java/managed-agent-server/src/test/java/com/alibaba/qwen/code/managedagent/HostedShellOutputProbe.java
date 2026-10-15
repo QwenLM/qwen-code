@@ -69,14 +69,18 @@ final class HostedShellOutputProbe implements AutoCloseable {
     }
 
     private Map<String, Object> execution(String id) {
-        var rows = jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?", id);
+        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", id);
         assertThat(rows).hasSize(1);
         return rows.getFirst();
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
-        String key = sha256((tenant + "\u0000storage-" + sessions.indexOf(session)).getBytes(StandardCharsets.UTF_8));
-        return jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", key);
+        String storage = "storage-" + sessions.indexOf(session);
+        return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
+                + " AND s.storage_id = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                tenant, storage);
     }
 
     private List<?> owned() {
@@ -152,18 +156,18 @@ final class HostedShellOutputProbe implements AutoCloseable {
         }
         assertThat(original.get("holder_key")).isEqualTo(sha256((row.get("binding_id") + "\u0000"
                 + row.get("runtime_generation") + "\u0000" + row.get("runtime_session_id")).getBytes(StandardCharsets.UTF_8)));
-        assertThat(jdbc.queryForList("SELECT session_state FROM qwen_runtime_session WHERE harness_session_id = ?",
+        assertThat(jdbc.queryForList("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?",
                 String.class, id)).containsExactly("READY");
         return Map.of("state", row.get("execution_state"));
     }
 
     private List<Map<String, Object>> resources(String id, String kind) {
-        return jdbc.queryForList("SELECT * FROM qwen_managed_session_resource WHERE tenant_id = ? AND session_id = ? AND kind = ?",
+        return jdbc.queryForList("SELECT * FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND kind = ?",
                 tenant, id, kind);
     }
 
     private byte[] resource(String id, String resourceId, String digest, int length) throws Exception {
-        var row = jdbc.queryForMap("SELECT * FROM qwen_managed_session_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+        var row = jdbc.queryForMap("SELECT * FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 tenant, id, resourceId);
         byte[] bytes = (byte[]) row.get("inline_bytes");
         assertThat(bytes).hasSize(length);
@@ -232,7 +236,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
     private void assertJournal(Map<String, Object> session, JsonNode report) throws Exception {
         String id = session.get("sessionId").toString();
         boolean applied = session.get("fault").equals("receipt-reply");
-        var journal = jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
+        var journal = jdbc.queryForList("SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
         var events = new ArrayList<JsonNode>();
         var eventIds = new HashSet<String>();
         long revision = 0;
@@ -286,11 +290,11 @@ final class HostedShellOutputProbe implements AutoCloseable {
             resource(id, manifestRef.path("resourceId").asText(), manifestRef.path("digest").asText(),
                     manifestRef.path("byteLength").asInt());
         }
-        var head = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
+        var head = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
         assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
         assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
         assertThat(head.get("last_commit_digest")).isEqualTo(previous);
-        byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM qwen_managed_session_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+        byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 byte[].class, tenant, id, head.get("latest_checkpoint_resource_id"));
         assertThat(JSON.readTree(checkpoint).path("continuation").path("phase").asText()).isEqualTo("await_runtime");
         if (report == null) return;
@@ -335,7 +339,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
         assertThat(failure.get()).as("public Shell output probe").isNull();
         check(session, "finished");
         var row = execution(session.get("sessionId").toString());
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                 Integer.class, session.get("sessionId"))).isEqualTo(1);
         assertThat(((Number) row.get("dispatch_generation")).longValue()).isEqualTo(1);
         System.out.println("PUBLIC_FG6F_LEDGER " + session.get("fault") + " original=" + row.get("execution_call_id")
