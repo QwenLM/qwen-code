@@ -2,7 +2,7 @@
 
 [English](2026-10-11-never-started-dispatch-reconcile.md) | [简体中文](2026-10-11-never-started-dispatch-reconcile.zh-CN.md)
 
-Original design: 2026-10-11, author wenshao. Reload reconciliation merged in #13917; the in-turn follow-up is #13937.
+Status: reload reconciliation implemented in #13917; the in-turn background Shell proof (#13937) is implemented in this change. Original design 2026-10-11, author wenshao.
 Tracks: #12380 Stage H → #12827, finding **A3** of the #13532 acceptance run.
 
 Scope: the #13801 reload reconciliation and the separate #13937 in-turn background Shell proof. A1 execution enablement, cross-Session wedges and Monitor absence proof remain outside these paths.
@@ -38,8 +38,13 @@ reported as never-started.
 ## Key evidence chain (all verified at HEAD)
 
 1. **A missing `:process` row is a complete proof of never-started for an
-   `is_background` dispatch** — the row is admitted for that dispatch alone
-   (`RuntimeBrokerService.admitBackgroundProcess`). `RuntimeBrokerService`
+   `is_background` dispatch** — the row is admitted for that execution alone,
+   under whichever hold family the dispatch belongs to
+   (`ManagedHoldFamily.SHELL` for `is_background`, `ManagedHoldFamily.MONITOR`
+   for `is_monitor`; both go through
+   `RuntimeBrokerService.admitBackgroundProcess` and share the same key). The
+   absence read is family-blind, so it is only a never-started proof for the
+   family whose record is being settled. `RuntimeBrokerService`
    admits the `:process` ledger row (keyed `<executionCallId>:process`,
    durable JDBC) at execute-admission, _before_ `beginDispatch` runs, inside
    the same `.thenApply` block (`RuntimeBrokerService.java` execute path).

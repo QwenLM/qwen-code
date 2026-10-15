@@ -2,7 +2,7 @@
 
 [English](2026-10-11-never-started-dispatch-reconcile.md) | [简体中文](2026-10-11-never-started-dispatch-reconcile.zh-CN.md)
 
-原设计：2026-10-11，作者 wenshao。reload 对账已随 #13917 合入；回合内后续为 #13937。
+状态：reload 对账已随 #13917 合入；回合内后台 Shell 取证（#13937）随本次改动落地。原设计 2026-10-11，作者 wenshao。
 跟踪：#12380 阶段 H → #12827，#13532 验收运行的发现 **A3**。
 
 范围：#13801 的 reload 对账与独立的 #13937 回合内后台 Shell 取证。A1 执行启用、跨 Session 楔死与 Monitor 行缺失取证继续不在这两条路径内。
@@ -35,8 +35,12 @@ R3 —— 不放宽：含糊的结果必须保持阻塞，绝不被报为「从�
 ## 关键证据链（全部在当前 HEAD 核实）
 
 1. **对一次 `is_background` 派发，缺失 `:process` 行是「从未启动」
-   的完整证明** —— 该行也只为 `is_background` 派发入账
-   （`RuntimeBrokerService.admitBackgroundProcess`）。
+   的完整证明** —— 该行只为那一次执行入账，并按派发所属的 hold 家族
+   入账（`is_background` 为 `ManagedHoldFamily.SHELL`，`is_monitor` 为
+   `ManagedHoldFamily.MONITOR`；两者都经
+   `RuntimeBrokerService.admitBackgroundProcess`，共用同一个键）。
+   缺失读取不区分家族，因此它只是「正在被结算的那个家族」的
+   从未启动证明。
    `RuntimeBrokerService` 在 execute 准入时、_早于_ `beginDispatch`，
    于同一个 `.thenApply` 块内入账 `:process` 账本行（键为
    `<executionCallId>:process`，JDBC 持久化，

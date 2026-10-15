@@ -6226,7 +6226,7 @@ it.each(['present', 'unavailable'] as const)(
     ]);
     if (proof === 'unavailable')
       expect(stderr).toHaveBeenCalledWith(
-        'qwen serve: Background process absence could not be confirmed (status 503, code store_unavailable).',
+        'qwen serve: Background process absence could not be confirmed for shell-execution (status 503, code store_unavailable).',
       );
   },
 );

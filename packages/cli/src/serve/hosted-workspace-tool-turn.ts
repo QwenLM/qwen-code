@@ -4499,7 +4499,7 @@ export class HostedWorkspaceToolTurn {
               undefined;
           } catch (cause) {
             writeStderrLineSafe(
-              `qwen serve: Background process absence could not be confirmed (${rejectionDetail(cause)}).`,
+              `qwen serve: Background process absence could not be confirmed for ${executionCallId} (${rejectionDetail(cause)}).`,
             );
           }
         }
