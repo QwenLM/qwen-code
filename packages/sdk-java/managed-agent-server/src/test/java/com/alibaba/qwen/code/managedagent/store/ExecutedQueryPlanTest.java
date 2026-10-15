@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import org.junit.jupiter.api.Test;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
-import org.junit.jupiter.api.Test;
 
 class ExecutedQueryPlanTest {
     @Test
