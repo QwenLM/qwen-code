@@ -1,24 +1,32 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -29,17 +37,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorkspaceSessionRetentionMySqlIT {
     private static final String OWNER = "owner";
@@ -102,8 +103,14 @@ class WorkspaceSessionRetentionMySqlIT {
                 OWNER, ACTOR_DIGEST, "archive", "archive-digest", false));
         var start = new CountDownLatch(1);
         try (var pool = Executors.newFixedThreadPool(2)) {
-            var one = pool.submit(() -> { start.await(); return transaction(() -> first.unarchiveWorkspaceSession(tenant, session, OWNER, "key", "digest")); });
-            var two = pool.submit(() -> { start.await(); return transaction(() -> second.unarchiveWorkspaceSession(tenant, session, OWNER, "key", "digest")); });
+            var one = pool.submit(() -> {
+                start.await();
+                return transaction(() -> first.unarchiveWorkspaceSession(tenant, session, OWNER, "key", "digest"));
+            });
+            var two = pool.submit(() -> {
+                start.await();
+                return transaction(() -> second.unarchiveWorkspaceSession(tenant, session, OWNER, "key", "digest"));
+            });
             start.countDown();
             assertThat(List.of(one.get(5, TimeUnit.SECONDS).replayed(), two.get(5, TimeUnit.SECONDS).replayed()))
                     .containsExactlyInAnyOrder(false, true);
@@ -256,7 +263,9 @@ class WorkspaceSessionRetentionMySqlIT {
                     try {
                         return transaction(() -> new ManagedSessionStore(jdbc).acquireWriter(tenant, session, TOKEN,
                                 new AcquireWriterRequest("workspace", "late", 60_000L)));
-                    } catch (ApiException rejected) { return rejected; }
+                    } catch (ApiException rejected) {
+                        return rejected;
+                    }
                 });
                 var projected = pool.submit(() -> projection.complete(claim, result, "policy"));
                 assertThrows(TimeoutException.class, () -> writer.get(100, TimeUnit.MILLISECONDS));
@@ -267,7 +276,9 @@ class WorkspaceSessionRetentionMySqlIT {
                 assertThat(writer.get(5, TimeUnit.SECONDS)).isInstanceOfSatisfying(ApiException.class,
                         error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));
                 assertThat(projected.get(5, TimeUnit.SECONDS)).isFalse();
-            } finally { release.countDown(); }
+            } finally {
+                release.countDown();
+            }
         }
         assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", String.class)).isEqualTo("SUPPRESSED");
         assertThat(count("ma_public_event", "event_type = 'tool.result'")).isZero();
@@ -298,14 +309,18 @@ class WorkspaceSessionRetentionMySqlIT {
                 var completed = pool.submit(() -> {
                     try {
                         return transaction(() -> store.completeOperation(tenant, session, deletion.operationId(), "delete-worker", deletion.claimGeneration(), false));
-                    } catch (ApiException rejected) { return rejected; }
+                    } catch (ApiException rejected) {
+                        return rejected;
+                    }
                 });
                 assertThrows(TimeoutException.class, () -> completed.get(100, TimeUnit.MILLISECONDS));
                 release.countDown();
                 assertThat(renewal.get(5, TimeUnit.SECONDS)).isTrue();
                 assertThat(completed.get(5, TimeUnit.SECONDS)).isInstanceOfSatisfying(ApiException.class,
                         error -> assertThat(error.getCode()).isEqualTo("managed_session_writer_active"));
-            } finally { release.countDown(); }
+            } finally {
+                release.countDown();
+            }
         }
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("DELETING");
         assertThat(count("ma_session", "retirement_generation > 0")).isZero();
@@ -314,8 +329,12 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     private static void awaitLatch(CountDownLatch latch) {
-        try { assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue(); }
-        catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new AssertionError(error); }
+        try {
+            assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(error);
+        }
     }
 
     @Test
@@ -389,7 +408,9 @@ class WorkspaceSessionRetentionMySqlIT {
         var observedJdbc = new ManagedSchemaJdbcTemplate(source) {
             @Override
             public int update(String sql, Object... arguments) {
-                if (sql.startsWith("INSERT INTO ma_session")) reachedPublicLock.countDown();
+                if (sql.startsWith("INSERT INTO ma_session")) {
+                    reachedPublicLock.countDown();
+                }
                 return super.update(sql, arguments);
             }
         };
@@ -425,8 +446,11 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     private static byte[] sha256(String value) {
-        try { return java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)); }
-        catch (java.security.NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
+        try {
+            return java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new AssertionError(impossible);
+        }
     }
 
     private ManagedAgentStore store(Clock clock) {
@@ -459,7 +483,9 @@ class WorkspaceSessionRetentionMySqlIT {
 
     private static String required(String name) {
         String value = System.getProperty(name);
-        if (value == null || value.isBlank()) throw new IllegalStateException(name + " is required");
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(name + " is required");
+        }
         return value;
     }
 }

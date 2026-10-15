@@ -360,16 +360,23 @@ export class HostedChildChains {
   constructor(records: ReadonlyArray<{ readonly record: unknown }>) {
     // Records come in their first commit's order, so a successor list
     // ends with the continuation committed last.
-    for (const entry of records) {
-      const run = parseChildRun(entry.record);
-      if (!isChildSessionRun(run)) continue;
-      this.byId.set(run.childRunId, run);
-      if (run.predecessorChildRunId !== null) {
-        const list = this.successors.get(run.predecessorChildRunId) ?? [];
-        list.push(run);
-        this.successors.set(run.predecessorChildRunId, list);
-      }
+    for (const entry of records) this.add(entry.record);
+  }
+
+  /** Add a run committed during the call that owns this index. */
+  add(record: unknown): void {
+    const run = parseChildRun(record);
+    if (!isChildSessionRun(run)) return;
+    this.byId.set(run.childRunId, run);
+    if (run.predecessorChildRunId !== null) {
+      const list = this.successors.get(run.predecessorChildRunId) ?? [];
+      list.push(run);
+      this.successors.set(run.predecessorChildRunId, list);
     }
+  }
+
+  runs(): readonly ChildSessionRun[] {
+    return [...this.byId.values()];
   }
 
   run(childRunId: string): ChildSessionRun | undefined {
@@ -487,6 +494,8 @@ export function hostedMemberView(
   rootChildRunId: string,
 ): HostedMemberView {
   const head = chains.head(rootChildRunId);
+  // A rostered member always has a chain head. Treat a missing one as
+  // running so callers fail closed by blocking continuation and deletion.
   const state: HostedMemberView['state'] =
     head?.run.state === 'settled'
       ? 'completed'
@@ -572,6 +581,11 @@ export function messagesSentToIt(count: number): string {
   return `${count} message${count === 1 ? '' : 's'} sent to it`;
 }
 
+export function lostMessagesAction(count: number): string {
+  const them = count === 1 ? 'it' : 'them';
+  return `${messagesSentToIt(count)} also did not arrive; resend ${them} only if ${count === 1 ? 'its' : 'their'} own send_message ${count === 1 ? 'answer has' : 'answers have'} not already asked you to resend ${them}`;
+}
+
 /**
  * "never started (creation_failed), so the work it carried did not
  * arrive, nor did 1 message sent to it" — said of a continuation.
@@ -610,8 +624,10 @@ export interface HostedRouteDetails {
    */
   readonly deliveryFailed?: {
     readonly state: 'cancelled' | 'rejected';
-    readonly chain: 'open' | 'ended' | 'settling';
+    readonly chain: 'open' | 'ended' | 'settling' | 'stopping';
   };
+  /** The relay gave up without proving whether the message arrived. */
+  readonly deliveryUnconfirmed?: true;
 }
 
 export function hostedRouteDetails(
@@ -626,10 +642,10 @@ export function hostedRouteDetails(
   },
   /** The id a message route was committed under: its delivery is read. */
   messageId?: string,
-): HostedRouteDetails {
-  const chains = new HostedChildChains(
+  chains = new HostedChildChains(
     authority.extensionRecordsInDomain('child_run'),
-  );
+  ),
+): HostedRouteDetails {
   const messages = outboundChildMessages(
     authority.extensionRecordsInDomain('session_message'),
   );
@@ -682,12 +698,15 @@ export function hostedRouteDetails(
             state: delivery,
             chain: view.stoppingBeforeStart
               ? ('settling' as const)
-              : isEndedMember(view)
-                ? ('ended' as const)
-                : ('open' as const),
+              : view.stopping
+                ? ('stopping' as const)
+                : isEndedMember(view)
+                  ? ('ended' as const)
+                  : ('open' as const),
           },
         }
       : {}),
+    ...(delivery === 'unknown' ? { deliveryUnconfirmed: true as const } : {}),
   };
 }
 
@@ -762,18 +781,18 @@ export function hasCompletedRun(
 }
 
 /**
- * What to do about the work a never-started continuation carried, and the
- * messages it lost: send them again, or, after a user's cancel, only if
- * they are still wanted.
+ * What to do about the work a never-started continuation carried. Lost
+ * messages are resent only when their own answers have not already asked.
  */
 export function neverStartedAction(
   neverStarted: HostedNeverStarted,
   owner: string,
 ): string {
-  const lost = neverStarted.lostMessages > 0;
-  return neverStarted.cancelled
-    ? `If that work${lost ? ' and those messages are' : ' is'} still wanted, send ${lost ? 'them' : 'it'} again with send_message to "${owner}"`
-    : `Send that work${lost ? ' and those messages' : ''} again with send_message to "${owner}"`;
+  const work = neverStarted.cancelled
+    ? `If that work is still wanted, send it again with send_message to "${owner}"`
+    : `Send that work again with send_message to "${owner}"`;
+  if (neverStarted.lostMessages === 0) return work;
+  return `${work}; ${lostMessagesAction(neverStarted.lostMessages)}`;
 }
 
 /** A head that cannot take more work at all: it ended or is ending. */
