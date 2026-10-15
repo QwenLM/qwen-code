@@ -125,6 +125,7 @@ describe('runtime boundary: same fixture under node and bun', () => {
         clearTimeout(timer);
         child.off('error', onError);
         child.stdout!.off('error', onError);
+        child.stderr!.off('error', onError);
         child.stdout!.off('close', onClose);
         if (error) reject(error);
         else resolve(lines);
@@ -138,6 +139,7 @@ describe('runtime boundary: same fixture under node and bun', () => {
       );
       child.on('error', onError);
       child.stdout!.on('error', onError);
+      child.stderr!.on('error', onError);
       child.stdout!.once('close', onClose);
       child.stdout!.on('data', (chunk: string) => {
         const complete = (pending + chunk).split('\n');
