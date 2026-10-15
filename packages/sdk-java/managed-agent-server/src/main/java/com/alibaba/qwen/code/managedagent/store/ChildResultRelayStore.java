@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
@@ -352,9 +353,7 @@ public class ChildResultRelayStore {
                     + " WHERE r.session_scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
                     + " AND r.domain = 'session_message'"
                     + " AND r.delivery_state IN ('planned', 'accepting')"
-                    + " AND (l.delivery_id IS NULL OR (l.transport_state NOT IN"
-                    + " ('done', 'orphaned', 'unknown') AND l.attempt_count < "
-                    + SessionMessageRelayStore.MAX_ATTEMPTS + "))";
+                    + " AND " + SessionMessageRelayStore.LEDGER_OWES_WORK;
 
     /**
      * H4d-b: the messages on one parent–child edge. `undelivered` counts
@@ -791,7 +790,7 @@ public class ChildResultRelayStore {
             body.put("childSessionId", child);
         }
         if (error != null) {
-            body.put("lastError", error.substring(0, Math.min(error.length(), 1024)));
+            body.put("lastError", StringUtils.truncate(error, 1024));
         }
         return body.toString();
     }

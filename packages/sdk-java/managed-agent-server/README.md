@@ -269,14 +269,21 @@ Harness restarts, a live
 control plane adopts the new process generation: the connector renegotiates
 once instead of failing every bound Session, pending Turns re-attach through
 the takeover load as their retries come due, and the Session's bound boot ID
-moves to the new generation without a Java restart. A takeover load that can
-never continue (its parked state is not one a replacement can drive) ends the
-Turn as `managed_runtime_recovery_blocked` with a typed reason instead of
-retrying forever — in this slice that includes a Turn parked mid model round,
-whose safe reissue is the named Step 3 follow-up. The Session row and its
-generation binding survive that decline, but the declined Turn's input stays
-unsettled in the journal, so the Session cannot admit a further Turn until
-the Step 3 reissue lands — close it and start a new Session. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
+moves to the new generation without a Java restart. A Turn parked in a
+supported state continues on the replacement (G3 Step 3). In a Session
+without Hooks or MCP, an unfinished model round reissues its saved request
+and retracts the dead owner's published prefix, and a requested native-file
+approval keeps its Action and deadline; a committed terminal is projected
+once. Step 3 neither reissues a model round nor resumes an approval in a
+Session with Hooks or MCP, and no gate covers how such a parked Turn ends. A
+takeover load that can never continue (an in-flight Shell call, an unfinished
+prefix continuation, a saved request that is oversized or carries image
+payloads, or other evidence a replacement cannot drive) ends the Turn as `managed_runtime_recovery_blocked` with a typed reason
+instead of retrying forever. The Session row and its generation binding
+survive that decline, but the declined Turn's input stays unsettled in the
+journal, so the Session cannot admit a further Turn — close it and start a new
+Session. See "Hosted recovery scope" below for what the first release
+covers. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
 `session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
@@ -1251,6 +1258,87 @@ continuation mode kills the Harness after the first published text chunk and
 requires one tool execution, one further continuation, only the replacement's
 answer in the public transcript, and one terminal event. Both modes run in the
 Hosted MySQL CI job.
+
+The G3 arms replace owners without an operator choosing the next one. With
+`--harness-only`, the Spring control plane stays alive and only the Hosted
+Harness is killed, so the live control plane must adopt the next Harness
+generation:
+
+```bash
+npm run test:e2e:managed-harness-restart-failover
+npm run test:e2e:managed-harness-restart-inflight-failover
+npm run test:e2e:managed-harness-restart-continuation-failover
+npm run test:e2e:managed-harness-restart-model-round-failover
+```
+
+The model-round arm creates a Session with no Workspace, publishes a prefix
+from its first model round, and kills the Harness twice. Each replacement must
+reissue the same saved model request and retract the prefix before its own
+text appears. The arm then requires one terminal event, only the final answer
+in the public transcript, no tool execution, and a next Turn whose model
+history holds one copy of the prompt and answer and none of the prefixes.
+
+The Step 3 packaged gates take over a parked native-file approval or model
+continuation through a Harness-only replacement. Each keeps the original
+identities (the Action for the approval gates, the Runtime binding and the
+prepared or settled execution), confirms the original Runtime cleanup,
+completes a next Turn, and closes the Session:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-allow
+npm run test:e2e:managed-harness-restart-approval-deny
+npm run test:e2e:managed-harness-restart-approval-cancel
+npm run test:e2e:managed-harness-restart-approval-expiry
+npm run test:e2e:managed-harness-restart-continuation-closeout
+```
+
+They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
+`G3_VERIFY_REPORT_DIR` overrides the directory.
+
+Two arms keep a former owner alive while its replacement finishes the Turn
+and then wake it with `SIGCONT`:
+
+```bash
+npm run test:e2e:managed-continuation-frozen-owner-failover
+npm run test:e2e:managed-frozen-control-plane-failover
+```
+
+The first freezes the original Harness, so it covers the journal: the woken
+writer commits nothing. The second freezes the original Spring and Harness
+together during a no-tool model round. It starts a second Spring and Harness
+on the same MySQL, and the new Harness reissues the round to completion.
+After the wake, the MySQL general log must show the former Spring's claim
+`UPDATE`s carrying its stale owner id, and the former Harness must log the
+store's refusal of its stale writer grant. None of these attempts may change
+the Session binding, the Turn row, the public events or the journal, as far as
+the snapshot listed in D11 of the replaceable-Harness design can see. All of
+these arms are steps of the Hosted MySQL CI job, which runs daily or on demand.
+They come after `Verify Hosted Java, Spring and MySQL processes` and the
+earlier failover steps, and run only when every earlier step passes.
+
+### Hosted recovery scope
+
+The first Hosted release supports recovery for one Java control-plane instance
+on one trusted Linux host. That control plane replaces reachable Hosted Harness
+process generations one after another, and a Runtime Session stays exclusive
+to its Session. Recovery covers only the profiles and parked states that are
+explicitly supported and accepted on the released artifacts. The gates above
+accept the in-flight and continuation Runtime takeovers, the native-file
+approval waits and the first model round of a no-tool Session, all without
+Hooks or MCP. An in-flight Shell call and unknown external effects stay
+blocked rather than replayed, and Step 3 neither reissues a model round nor
+resumes an approval in a Session with Hooks or MCP. Journal writer fencing,
+durable engine ownership, capability and journal-contract checks and
+fail-closed recovery apply throughout. A refused recovery is never replayed
+through another Runtime or the Legacy engine.
+
+The frozen control-plane arm shows that a woken former control plane's stale
+claim is refused and changes nothing, and a store test pins the bind guards
+that claim never reaches. Neither makes two live control planes a supported
+deployment. Routing between them is out of scope: a new Turn could
+be claimed by either one. Cross-host takeover, physical-ownership handoff
+between hosts, real providers and mixed-version clusters still need their own
+acceptance before they are supported.
 
 The `--big-output` long-answer mode is also Workspace-bound:
 
