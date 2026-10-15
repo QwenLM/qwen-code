@@ -617,6 +617,37 @@ describe('Hosted Harness model boundary', () => {
     expect(model.requests[0]).toEqual([{ text: 'rewritten +10k' }]);
   });
 
+  it('carries the provider request id into the rejection and StopFailure error_details', async () => {
+    const requestId = 'a30a1854-1925-4da8-8803-73fee2865116';
+    config([
+      {
+        type: LlmEventType.Error,
+        value: {
+          error: {
+            message: '400 status code (no body)',
+            status: 400,
+            requestId,
+          },
+        },
+      },
+    ]);
+    const hooks = hostedHooks();
+    await expect(
+      runHostedHarnessTextTurn({ ...input, hooks: hooks.session }),
+    ).rejects.toThrow(
+      `[API Error: 400 status code (no body) (request_id: ${requestId})]`,
+    );
+    expect(hooks.fire).toHaveBeenCalledWith(
+      HookEventName.StopFailure,
+      `${input.promptId}:0:model-failure`,
+      expect.objectContaining({
+        error_details: `[API Error: 400 status code (no body) (request_id: ${requestId})]`,
+      }),
+      input.signal,
+      undefined,
+    );
+  });
+
   it('reports provider failure through StopFailure and leaves Hook recovery failures untouched', async () => {
     config([
       {
@@ -631,7 +662,9 @@ describe('Hosted Harness model boundary', () => {
     expect(hooks.fire).toHaveBeenCalledWith(
       HookEventName.StopFailure,
       `${input.promptId}:0:model-failure`,
-      expect.objectContaining({ error_details: 'provider failed' }),
+      expect.objectContaining({
+        error_details: '[API Error: provider failed]',
+      }),
       input.signal,
       undefined,
     );
@@ -1428,6 +1461,32 @@ it.each([
     expect(mocks.requests).toHaveLength(0);
   },
 );
+
+it('refuses an unauthenticated pinned model before inference', async () => {
+  // The matched model exists and is unambiguous, but switching to it fails
+  // (for example missing credentials): the Turn must fail with
+  // model_unavailable and zero inference requests, per design §5.6.
+  const mocks = config([]);
+  state.config['getAllConfiguredModels'] = () => [
+    { id: 'pinned', authType: 'openai' },
+  ];
+  state.config['switchModel'] = vi.fn(async () => {
+    throw new Error('no cached credentials');
+  });
+  await expect(
+    runHostedHarnessTextTurn({
+      ...input,
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        model: { id: 'pinned' },
+      },
+    }),
+  ).rejects.toThrow('model_unavailable');
+  expect(mocks.initialize).not.toHaveBeenCalled();
+  expect(mocks.requests).toHaveLength(0);
+});
 
 it('preserves model_unavailable when early config cleanup fails', async () => {
   const mocks = config([]);

@@ -5,6 +5,7 @@
  */
 
 import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import {
   LlmRequestPreparationError,
   type LlmPreparedRequest,
@@ -70,6 +71,46 @@ export interface HostedHarnessTextDeltas {
    * replaces them; a no-op when nothing is published (#13319).
    */
   retract(): Promise<void>;
+}
+
+/**
+ * Applies a Session's AgentDefinition model pin to a fresh per-turn config:
+ * exactly one configured, non-runtime model must match, and it is switched
+ * to with cached credentials. A pin that does not resolve fails the Turn
+ * (the config is shut down first) instead of falling back to the default.
+ * Every Turn lane a pinned Session runs — text and workflow alike — goes
+ * through here.
+ */
+export async function applyHostedModelPin(
+  config: Awaited<ReturnType<typeof loadCliConfig>>,
+  model: HostedAgentDefinition['model'] | undefined,
+): Promise<void> {
+  if (!model) return;
+  try {
+    const matches = config
+      .getAllConfiguredModels()
+      .filter((entry) => !entry.isRuntimeModel && entry.id === model.id);
+    if (matches.length !== 1) throw new HostedModelUnavailableError();
+    const selected = matches[0]!;
+    await config.switchModel(selected.authType, selected.id, {
+      requireCachedCredentials: true,
+      ...(selected.registryBaseUrl
+        ? { baseUrl: selected.registryBaseUrl }
+        : {}),
+    });
+  } catch (cause) {
+    try {
+      await config.shutdown({
+        shutdownTelemetry: false,
+        strictResourceCleanup: true,
+      });
+    } catch (cleanupCause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
+      );
+    }
+    throw new HostedModelUnavailableError(cause);
+  }
 }
 
 export async function runHostedHarnessTextTurn(input: {
@@ -142,33 +183,7 @@ export async function runHostedHarnessTextTurn(input: {
       .filter(Boolean)
       .join('\n\n');
   const model = input.agentDefinition?.model;
-  if (model) {
-    try {
-      const matches = config
-        .getAllConfiguredModels()
-        .filter((entry) => !entry.isRuntimeModel && entry.id === model.id);
-      if (matches.length !== 1) throw new HostedModelUnavailableError();
-      const selected = matches[0]!;
-      await config.switchModel(selected.authType, selected.id, {
-        requireCachedCredentials: true,
-        ...(selected.registryBaseUrl
-          ? { baseUrl: selected.registryBaseUrl }
-          : {}),
-      });
-    } catch (cause) {
-      try {
-        await config.shutdown({
-          shutdownTelemetry: false,
-          strictResourceCleanup: true,
-        });
-      } catch (cleanupCause) {
-        writeStderrLineSafe(
-          `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
-        );
-      }
-      throw new HostedModelUnavailableError(cause);
-    }
-  }
+  await applyHostedModelPin(config, model);
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
@@ -561,7 +576,11 @@ export async function runHostedHarnessTextTurn(input: {
             modelFailure = false;
             throw new Error('Hosted Harness no-tool turn refused a tool call.');
           } else if (event.type === LlmEventType.Error) {
-            throw new Error(event.value.error.message);
+            // Format rather than flatten: the formatter keeps a resolved provider
+            // request id on the message, so the daemon stderr line and the
+            // StopFailure hook's error_details keep an id the operator can
+            // quote to their provider.
+            throw new Error(parseAndFormatApiError(event.value.error));
           } else if (event.type === LlmEventType.UserCancelled) {
             modelFailure = false;
             throw new Error('Hosted Harness turn was cancelled.');

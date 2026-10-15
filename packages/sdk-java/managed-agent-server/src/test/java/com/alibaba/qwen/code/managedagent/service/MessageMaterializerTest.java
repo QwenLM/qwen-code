@@ -1,5 +1,14 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
+import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
+
+import java.util.ArrayList;
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -10,14 +19,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
-import java.util.ArrayList;
-import java.util.List;
-import org.junit.jupiter.api.Test;
-import org.springframework.dao.DataAccessResourceFailureException;
 
 class MessageMaterializerTest {
     private static final MaterializationTarget POISON =
@@ -268,5 +269,51 @@ class MessageMaterializerTest {
         // progress row ahead of the attempt.
         verify(store, times(4)).deferMaterializationTarget("tenant",
                 "poison");
+    }
+
+    @Test
+    void aNotifiedSessionRunsOneBatchThroughTheSameStoreCall() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        when(store.materializeNextBatch("tenant", "notified", 200))
+                .thenReturn(new MaterializationResult(true, 4L));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+
+        assertThat(materializer.materializeNotified("tenant", "notified"))
+                .isTrue();
+
+        verify(store, times(1)).materializeNextBatch("tenant", "notified",
+                200);
+        verify(store, never()).deferMaterializationTarget(anyString(),
+                anyString());
+    }
+
+    // A transport notice must never bypass the pass's backoff, or a poisoned
+    // Session would warn at the event rate.
+    @Test
+    void aNotifiedFailureHandsTheSessionToThePassBackoff() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        when(store.findMaterializationTargets(33))
+                .thenReturn(List.of(POISON));
+        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("gap"));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+
+        assertThat(materializer.materializeNotified("tenant", "poison"))
+                .isFalse();
+        // Backing off now: further notices defer without touching the store.
+        assertThat(materializer.materializeNotified("tenant", "poison"))
+                .isFalse();
+        verify(store, times(1)).materializeNextBatch("tenant", "poison",
+                200);
+
+        // The pass then owns the cadence from streak 1: due at once, and
+        // after its failure the notice still defers.
+        materializer.materialize();
+        verify(store, times(2)).materializeNextBatch("tenant", "poison",
+                200);
+        assertThat(materializer.materializeNotified("tenant", "poison"))
+                .isFalse();
+        verify(store, times(2)).materializeNextBatch("tenant", "poison",
+                200);
     }
 }

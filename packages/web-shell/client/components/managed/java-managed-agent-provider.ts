@@ -14,6 +14,7 @@ import { managedRequestId } from './managed-session-storage';
 import { browserArtifactSave } from './managed-artifact-download';
 import type { ManagedArtifactSave } from './managed-tool-result-types';
 import type {
+  ManagedAgentCommandOptions,
   ManagedAgentPendingAction,
   ManagedAgentProvider,
   ManagedAgentRuntimeState,
@@ -29,6 +30,7 @@ export interface JavaManagedAgentProviderOptions
   /** Include tenant and actor identity; replace this scope/provider when either changes. Token refresh alone can use getHeaders. */
   productScope?: string;
   enableWorkspaceBinding?: boolean;
+  modelPresets?: readonly { agentId: string; label: string }[];
   /** Acquire a streaming save target during the user gesture, then call openStream. */
   saveArtifact?: ManagedArtifactSave;
 }
@@ -93,6 +95,38 @@ export function createJavaManagedAgentProvider(
   const agentId = options.agentId ?? 'qwen-code';
   if (options.enableWorkspaceBinding && !options.productScope?.trim()) {
     throw new Error('Workspace binding requires an explicit productScope');
+  }
+  async function createWorkspaceSession(
+    request: {
+      agentId: string;
+      workspaceId: string;
+      cwdRelative: string;
+      text?: string;
+    },
+    command: ManagedAgentCommandOptions,
+  ) {
+    const result = await client.createSession(
+      {
+        requestId: managedRequestId(),
+        idempotencyKey: command.idempotencyKey,
+        agentId: request.agentId,
+        input:
+          request.text === undefined
+            ? []
+            : [{ type: 'input_text', text: request.text }],
+        metadata: { clientId: command.clientId },
+        workspace: {
+          workspaceId: request.workspaceId,
+          cwdRelative: request.cwdRelative,
+        },
+      },
+      command.signal,
+    );
+    if (!result.sessionId || (request.text !== undefined && !result.turnId))
+      throw new Error(
+        'Managed Agent create response is missing admission identity',
+      );
+    return { sessionId: result.sessionId };
   }
   return {
     kind: 'java',
@@ -258,6 +292,7 @@ export function createJavaManagedAgentProvider(
       ? {
           workspaceBinding: {
             agentId,
+            modelPresets: options.modelPresets,
             async list(request) {
               const page = await client.listWorkspaces(
                 { cursor: request.cursor, limit: request.limit },
@@ -273,28 +308,12 @@ export function createJavaManagedAgentProvider(
             async get(workspaceId, request) {
               return client.getWorkspace(workspaceId, request.signal);
             },
-            async createEmpty(request, command) {
-              const result = await client.createSession(
-                {
-                  requestId: managedRequestId(),
-                  idempotencyKey: command.idempotencyKey,
-                  agentId: request.agentId,
-                  input: [],
-                  metadata: { clientId: command.clientId },
-                  workspace: {
-                    workspaceId: request.workspaceId,
-                    cwdRelative: request.cwdRelative,
-                  },
-                },
-                command.signal,
-              );
-              if (!result.sessionId) {
-                throw new Error(
-                  'Managed Agent create response is missing sessionId',
-                );
-              }
-              return { sessionId: result.sessionId };
-            },
+            createEmpty: ({ agentId, workspaceId, cwdRelative }, command) =>
+              createWorkspaceSession(
+                { agentId, workspaceId, cwdRelative },
+                command,
+              ),
+            createSession: createWorkspaceSession,
           },
         }
       : {}),
@@ -427,6 +446,7 @@ function toSessionSummary(
     session.activeTurn?.errorCode ?? session.environment?.errorCode;
   return {
     sessionId: session.sessionId,
+    agentId: session.agentId,
     activeTurnId: session.activeTurn?.turnId,
     title: session.title || session.sessionId,
     workspace: session.workspace,
@@ -523,7 +543,14 @@ function toPhase(
 }
 
 function titleFor(text: string): string {
-  const title = text.trim().replace(/\s+/g, ' ');
+  // The server refuses C0 control characters and DEL in a title; pasted
+  // terminal output carries ANSI escapes verbatim, so fold them to spaces
+  // beside the whitespace collapse instead of failing the Session create.
+  const title = text
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
   return title.length <= 80 ? title : `${title.slice(0, 77)}...`;
 }
 

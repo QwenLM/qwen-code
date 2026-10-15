@@ -10,11 +10,6 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.util.Objects;
-import java.util.concurrent.Semaphore;
-import java.util.function.Supplier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -27,6 +22,12 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.util.Objects;
+import java.util.concurrent.Semaphore;
+import java.util.function.Supplier;
 
 @RestController
 @ConditionalOnProperty(prefix = "qwen.managed-agent.tool-publication",
@@ -204,8 +205,15 @@ public class ToolPublicationController {
             JsonNode body = ToolPublicationContract.readJson(read(request, 8 * 1024 * 1024));
             try {
                 CommitTransactionRequest commit = JSON.treeToValue(body, CommitTransactionRequest.class);
+                HttpHeaders headers = new HttpHeaders();
+                for (String header : java.util.List.of(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.OPERATION_HEADER,
+                        com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.GENERATION_HEADER)) {
+                    if (request.getHeader(header) != null) {
+                        headers.set(header, request.getHeader(header));
+                    }
+                }
                 return admissions.commitReceipt(scope(tenant, workspaceId, sessionId),
-                        publicationId, writerToken, commit);
+                        publicationId, writerToken, commit, ManagedSessionStoreController.lifecycleAuthority(headers));
             } catch (IOException error) {
                 throw new UncheckedIOException(error);
             }

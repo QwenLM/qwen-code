@@ -1,11 +1,12 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import java.util.List;
-import org.junit.jupiter.api.Test;
 
 /**
  * The D8c-1 compile: accepted shapes map to the approval mode and tool
@@ -156,7 +157,7 @@ class AgentDefinitionCompilerTest {
     void metadataNeverAffectsExecution() {
         String json = "{\"model\":{},\"instructions\":\"\",\"tools\":[],"
                 + "\"permission_policy\":{},"
-                + "\"metadata\":{\"team\":\"review\",\"mode\":\"yolo\"}}";
+                + "\"metadata\":{\"team\":\"review\",\"mode\":\"auto-edit\"}}";
         assertThat(AgentDefinitionCompiler.compile(json, false, "yolo",
                 FILES_ONLY).approvalMode()).isEqualTo("yolo");
     }
@@ -179,5 +180,4 @@ class AgentDefinitionCompilerTest {
                         assertThat(error.getDetails().get("field"))
                                 .isEqualTo("model"));
     }
-
 }

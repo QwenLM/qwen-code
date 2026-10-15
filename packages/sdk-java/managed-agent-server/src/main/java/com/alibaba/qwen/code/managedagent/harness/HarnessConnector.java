@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.List;
 import java.util.Map;
-import com.fasterxml.jackson.databind.JsonNode;
 
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
@@ -13,6 +14,18 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     default boolean supportsLifecycle() { return false; }
+
+    default boolean supportsLifecycle(String profile) {
+        return com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
+    }
+
+    default void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
+    }
+
+    default void settleLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
+    }
 
     default boolean supportsFencedTitles() { return false; }
 
@@ -115,10 +128,12 @@ public interface HarnessConnector extends AutoCloseable {
      * result relay's stop of a stopped run's message turns (stop). The
      * Hosted side settles it before answering. A receive or consume starts
      * work in the Session, so it takes the same Workspace admission as a
-     * submit.
+     * submit. H4e-b3's command operations ride the same route when the body
+     * names a command id, and a settled {@code execute} answers with the
+     * reply the relay copies back.
      */
-    default void runMessageOperation(String tenantId, String sessionId,
-            Map<String, Object> body) {
+    default Map<String, Object> runMessageOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
         throw new UnsupportedOperationException(
                 "Message operations are unavailable");
     }
@@ -148,8 +163,43 @@ public interface HarnessConnector extends AutoCloseable {
      */
     String closeSession(String tenantId, String sessionId);
 
+    /**
+     * The Sessions this control-plane node holds an attachment for. An
+     * attachment is a cache entry, not ownership: it outlives a lapsed lease
+     * or a takeover by another node, so the EventTransport owner-side
+     * subscription (design 2026-10-04-managed-agent-event-transport, §11)
+     * narrows it by SQL to the Sessions whose journal this node's Harness
+     * writes. A connector without attachments holds nothing.
+     */
+    default List<AttachedSession> attachedSessions() {
+        return List.of();
+    }
+
+    /**
+     * The writer id this node's Harness acquires Session journals under, or
+     * null while there is none (no client yet, or the connector is closed).
+     */
+    default String writerIdentity() {
+        return null;
+    }
+
+    /**
+     * Loads a Session whose committed wake nobody holds, so its wake pump runs
+     * the waiting input (EventTransport wake consumer, phase MQ2c). A wake
+     * drives new work, so this takes the new-work admission the relay verbs
+     * take. Returns false, loading nothing, when this node already holds an
+     * attachment for the Session.
+     */
+    default boolean activateForWake(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException(
+                "Hosted wake activation is unavailable");
+    }
+
     @Override
     default void close() {
+    }
+
+    record AttachedSession(String tenantId, String sessionId) {
     }
 
     record Attachment(String bootId, HarnessRuntimeRecovery runtimeRecovery,

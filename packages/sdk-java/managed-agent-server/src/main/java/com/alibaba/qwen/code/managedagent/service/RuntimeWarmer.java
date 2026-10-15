@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+
 import java.util.concurrent.CompletionStage;
 
 public interface RuntimeWarmer {
@@ -22,6 +23,18 @@ public interface RuntimeWarmer {
     default CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
         return java.util.concurrent.CompletableFuture.failedFuture(
                 new UnsupportedOperationException("Workspace close is unavailable"));
+    }
+
+    default CompletionStage<Void> drainWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("Workspace resource drain is unavailable"));
+    }
+
+    default CompletionStage<Void> recoverStoppedWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("Stopped Workspace recovery is unavailable"));
     }
 
     /**

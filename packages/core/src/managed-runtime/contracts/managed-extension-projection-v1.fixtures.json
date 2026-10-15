@@ -19,6 +19,7 @@
     "schedule": null,
     "automation_run": "automation_run",
     "session_message": null,
+    "session_command": null,
     "team_state": null,
     "team_task": null,
     "team_message": null,

@@ -48,6 +48,54 @@ class RuntimeBrokerServiceTest {
             "capability", "session");
 
     @Test
+    @SuppressWarnings("unchecked")
+    void refusesPrivateAuthorizedCancellationBeforeRepositoryOrTransportMutation() throws Exception {
+        var request = CsiFilesRetirementProfile.request(
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                        "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
+                "/workspace", PROVIDER_SESSION);
+        // Isolate service ordering; this manually installed context is not SQL admission evidence.
+        try (Fixture fixture = new Fixture(request.getScope())) {
+            var binding = fixture.bindingRepository.findOrCreate(request);
+            binding = fixture.bindingRepository.claimOperation(binding.getBindingId(), "owner", Duration.ofMinutes(1));
+            var seed = binding.getProvisionSeed();
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            binding = fixture.bindingRepository.compareAndSet(binding, binding.withAttestation(lease,
+                    new RuntimeResourceHandle(request.getProvisionerKind(), 1, Map.of("fixture", true)), START, START));
+            var runtime = new RuntimeSession(PROVIDER_SESSION, PROVIDER_SESSION, "bootstrap", request.getScope());
+            var saved = fixture.sessionRepository.findOrCreate(new RuntimeSessionRecord(runtime, binding.getBindingId(),
+                    binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, START));
+            fixture.sessionRepository.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, START));
+            var contextClass = Class.forName(RuntimeBrokerService.class.getName() + "$SessionContext");
+            var constructor = contextClass.getDeclaredConstructor(RuntimeSession.class, RuntimeBindingRecord.class, RuntimeLease.class);
+            constructor.setAccessible(true);
+            var field = RuntimeBrokerService.class.getDeclaredField("sessions");
+            field.setAccessible(true);
+            ((Map<String, CompletableFuture<?>>) field.get(fixture.service)).put(PROVIDER_SESSION,
+                    CompletableFuture.completedFuture(constructor.newInstance(runtime, binding, lease)));
+            var candidate = ToolExecutionRecord.prepared("execution", "idempotency", binding.getBindingId(),
+                    binding.getGeneration(), PROVIDER_SESSION, PROVIDER_SESSION, "prompt", "call", "sha256:" + "b".repeat(64),
+                    Map.of("dispatchMode", "deferred", "sessionId", PROVIDER_SESSION, "promptId", "prompt",
+                            "callId", "call", "argsDigest", "sha256:" + "b".repeat(64)));
+            fixture.executionRepository.findOrCreate(candidate);
+            var execution = fixture.executionRepository.claimDispatch("execution", "owner", Duration.ofMinutes(1));
+            execution = fixture.executionRepository.authorizeDispatch(execution, "owner", execution.getDispatchGeneration(), binding.getVersion());
+            assertEquals("csi_execution_cancel_unavailable", failure(fixture.service.cancelExecution(
+                    PROVIDER_SESSION, PROVIDER_SESSION, "execution")).getCode());
+            assertSame(execution, fixture.executionRepository.findByExecutionCallId("execution"));
+            assertFalse(execution.isCancelRequested());
+            assertEquals(0, fixture.transport.cancelCalls.get());
+            var completed = fixture.executionRepository.compareAndSet(execution,
+                    execution.withResult(Map.of("executionStatus", "success", "responseParts", List.of(Map.of("text", "complete"))),
+                            0, START), "owner", execution.getDispatchGeneration());
+            assertEquals("success", completed.getExecutionStatus());
+            assertFalse(completed.isCancelRequested());
+            assertSame(completed, join(fixture.service.cancelExecution(PROVIDER_SESSION, PROVIDER_SESSION, "execution")));
+        }
+    }
+
+    @Test
     void cleanupBeforeAcquireTombstonesTheOriginalOwnerWithoutAcquiringALease() {
         try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
             RuntimeBindingRecord binding = join(fixture.service.warm("harness-a"));
@@ -1344,6 +1392,49 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cancellationWhilePublicationInstallIsPendingBlocksLateBackgroundDispatch() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            CompletableFuture<Void> installed = new CompletableFuture<>();
+            fixture.transport.installPublicationResult = installed;
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+
+            CompletableFuture<ToolExecutionRecord> starting = fixture.service.startExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), payload, "pub-1", "token")
+                    .toCompletableFuture();
+            assertFalse(starting.isDone());
+            ToolExecutionRecord cancelled = join(fixture.service.cancelExecution(
+                    "harness", "runtime", prepared.getExecutionCallId()));
+            assertTrue(cancelled.isCancelRequested());
+            assertEquals("not_started", cancelled.getExecutionStatus());
+
+            installed.complete(null);
+            assertEquals("not_started", join(starting).getExecutionStatus());
+            assertNull(fixture.executionRepository.findByExecutionCallId(
+                    prepared.getExecutionCallId() + ":process"));
+            assertEquals(0, fixture.transport.executeV3Calls.get());
+        }
+    }
+
+    @Test
     void v3GateAdmitsTheNativeMonitorPayloadAndStillRefusesOthers() throws Exception {
         String payload = "{\"toolName\":\"monitor\",\"input\":{\"command\":\"du -sh .\"}}";
         String digest = "sha256:" + HexFormat.of().formatHex(
@@ -1865,6 +1956,269 @@ class RuntimeBrokerServiceTest {
             assertEquals("error", settled.getExecutionStatus());
             assertEquals(1, fixture.transport.releaseCalls.get());
         }
+    }
+
+    @Test
+    void harnessMonitorStopSettlesItsWatchAndReleasesTheHoldWithoutAClose() throws Exception {
+        // #13896: the Harness's own quota or idle stop rides the client
+        // control route; the worker's exit evidence settles the hold row
+        // there, so a routine release succeeds with no drain and no close.
+        try (Fixture fixture = monitorFixture()) {
+            ToolExecutionRecord invocation = startMonitorWatch(fixture);
+            String rowId = invocation.getExecutionCallId() + ":process";
+            Map<String, Object> key = Map.of("tenantId", "tenant",
+                    "workspaceId", "workspace", "sessionId", "harness");
+            Map<String, Object> status = Map.of("kind", "monitor-status",
+                    "sessionKey", key, "operationId", invocation.getExecutionCallId(),
+                    "targetOperationId", "call");
+            Map<String, Object> running = Map.of("operationId", "call",
+                    "state", "running", "unitName", "qwen-mon-call");
+            fixture.transport.controlResult = CompletableFuture.completedFuture(running);
+            assertEquals(running, join(fixture.service.control("harness", "runtime", status)));
+            assertEquals(status, fixture.transport.lastControl);
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    fixture.executionRepository.findByExecutionCallId(rowId).getState());
+
+            Map<String, Object> stop = Map.of("kind", "monitor-stop",
+                    "sessionKey", key, "operationId", invocation.getExecutionCallId(),
+                    "targetOperationId", "call");
+            // An unproven stop keeps the hold: the watch may still run.
+            Map<String, Object> unknown = Map.of("operationId", "call", "state", "unknown");
+            fixture.transport.controlResult = CompletableFuture.completedFuture(unknown);
+            assertEquals(unknown, join(fixture.service.control("harness", "runtime", stop)));
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    fixture.executionRepository.findByExecutionCallId(rowId).getState());
+
+            Map<String, Object> exited = Map.of("operationId", "call",
+                    "state", "exited", "unitName", "qwen-mon-call",
+                    "evidence", Map.of("exitSignal", "SIGTERM"));
+            fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
+            assertEquals(exited, join(fixture.service.control("harness", "runtime", stop)));
+            assertEquals(stop, fixture.transport.lastControl);
+            ToolExecutionRecord settled = fixture.executionRepository.findByExecutionCallId(rowId);
+            assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+            assertEquals("exited", settled.getResult().get("state"));
+            assertEquals(Map.of("exitSignal", "SIGTERM"), settled.getResult().get("evidence"));
+
+            fixture.transport.controls.clear();
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+            assertTrue(fixture.transport.controls.isEmpty());
+            assertEquals(1, fixture.transport.releaseCalls.get());
+        }
+    }
+
+    @Test
+    void harnessMonitorStopInFlightLeavesTheTurnReleaseHeldNotBusy() throws Exception {
+        // The watch's own turn finishes while its auto-stop still waits on
+        // the worker: a busy answer would block the whole Session, so the
+        // routine release must answer held, and succeed once the stop's
+        // evidence settles the row.
+        try (Fixture fixture = monitorFixture()) {
+            ToolExecutionRecord invocation = startMonitorWatch(fixture);
+            CompletableFuture<Object> answer = new CompletableFuture<>();
+            fixture.transport.controlHandler = operation -> "monitor-stop".equals(operation.get("kind"))
+                    ? answer
+                    : CompletableFuture.completedFuture(Map.of("operationId", "call",
+                            "state", "running", "unitName", "qwen-mon-call"));
+            CompletionStage<Object> stop = fixture.service.control("harness", "runtime",
+                    Map.of("kind", "monitor-stop", "sessionKey", Map.of("tenantId", "tenant",
+                            "workspaceId", "workspace", "sessionId", "harness"),
+                            "operationId", invocation.getExecutionCallId(), "targetOperationId", "call"));
+            assertEquals("runtime_session_held",
+                    failure(fixture.service.release("harness", "runtime")).getCode());
+            Map<String, Object> exited = Map.of("operationId", "call", "state", "exited",
+                    "unitName", "qwen-mon-call", "evidence", Map.of("exitSignal", "SIGTERM"));
+            answer.complete(exited);
+            assertEquals(exited, join(stop));
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+            assertEquals(1, fixture.transport.releaseCalls.get());
+        }
+    }
+
+    @Test
+    void harnessMonitorControlEndsNoControlFenceItNeverBegan() throws Exception {
+        // A Monitor control runs unfenced, so its completion ends no fence
+        // either: a stray end would hide the next fenced control from the
+        // release's busy check and release the Session under it (#13896).
+        try (Fixture fixture = monitorFixture()) {
+            ToolExecutionRecord invocation = startMonitorWatch(fixture);
+            Map<String, Object> exited = Map.of("operationId", "call", "state", "exited",
+                    "unitName", "qwen-mon-call", "evidence", Map.of("exitSignal", "SIGTERM"));
+            fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
+            assertEquals(exited, join(fixture.service.control("harness", "runtime",
+                    Map.of("kind", "monitor-stop", "sessionKey", Map.of("tenantId", "tenant",
+                            "workspaceId", "workspace", "sessionId", "harness"),
+                            "operationId", invocation.getExecutionCallId(), "targetOperationId", "call"))));
+            CompletableFuture<Object> control = new CompletableFuture<>();
+            fixture.transport.controlResult = control;
+            CompletionStage<Object> manifest = fixture.service.control("harness", "runtime",
+                    Map.of("kind", "manifest"));
+            assertEquals("runtime_session_busy",
+                    failure(fixture.service.release("harness", "runtime")).getCode());
+            control.complete("ready");
+            assertEquals("ready", join(manifest));
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+        }
+    }
+
+    @Test
+    void harnessMonitorStopStillReachesItsWatchAfterNewAdmissionCloses() throws Exception {
+        // Both Monitor kinds are recovery kinds: a stop the quota owes must
+        // reach the watch even once the Harness is draining, where ordinary
+        // controls are refused.
+        try (Fixture fixture = monitorFixture()) {
+            ToolExecutionRecord invocation = startMonitorWatch(fixture);
+            fixture.bindingRepository.requestHarnessDrain("tenant", "harness");
+            Map<String, Object> key = Map.of("tenantId", "tenant",
+                    "workspaceId", "workspace", "sessionId", "harness");
+            assertEquals("runtime_admission_closed", failure(fixture.service.control("harness", "runtime",
+                    Map.of("kind", "mcp-configure", "operationId", "ordinary", "sessionKey", key))).getCode());
+            Map<String, Object> stop = Map.of("kind", "monitor-stop", "sessionKey", key,
+                    "operationId", invocation.getExecutionCallId(), "targetOperationId", "call");
+            Map<String, Object> exited = Map.of("operationId", "call", "state", "exited",
+                    "unitName", "qwen-mon-call", "evidence", Map.of("exitCode", 0));
+            fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
+            assertEquals(exited, join(fixture.service.control("harness", "runtime", stop)));
+            assertEquals(ToolExecutionRecord.State.SETTLED, fixture.executionRepository
+                    .findByExecutionCallId(invocation.getExecutionCallId() + ":process").getState());
+        }
+    }
+
+    @Test
+    void harnessMonitorControlRefusesAWatchItsSessionDoesNotOwn() throws Exception {
+        try (Fixture fixture = monitorFixture()) {
+            ToolExecutionRecord invocation = startMonitorWatch(fixture);
+            String rowId = invocation.getExecutionCallId() + ":process";
+            // Another Harness Session's watch on the same binding, and a
+            // background Shell of this one: neither is this Session's watch.
+            fixture.executionRepository.findOrCreate(ToolExecutionRecord.prepared(
+                    "foreign:process", "foreign:process", invocation.getBindingId(),
+                    invocation.getRuntimeGeneration(), "other", "other-runtime", "prompt",
+                    "foreign-call", "digest", Map.of("dispatchMode", "background_v3_monitor",
+                            "processOf", "foreign", "sessionId", "other-runtime",
+                            "promptId", "prompt", "callId", "foreign-call", "argsDigest", "digest")));
+            fixture.executionRepository.findOrCreate(ToolExecutionRecord.prepared(
+                    "shell:process", "shell:process", invocation.getBindingId(),
+                    invocation.getRuntimeGeneration(), "harness", "runtime", "prompt",
+                    "shell-call", "digest", Map.of("dispatchMode", "background_v3_process",
+                            "processOf", "shell", "sessionId", "runtime",
+                            "promptId", "prompt", "callId", "shell-call", "argsDigest", "digest")));
+            // One Monitor watch per ownership field, each differing from
+            // this Session's watch in exactly that field.
+            Map<String, ToolExecutionRecord> strangers = Map.of(
+                    "other-harness", ToolExecutionRecord.prepared("other-harness:process",
+                            "other-harness:process", invocation.getBindingId(),
+                            invocation.getRuntimeGeneration(), "other", "runtime", "prompt",
+                            "other-harness-call", "digest", monitorRow("other-harness", "runtime")),
+                    "other-runtime", ToolExecutionRecord.prepared("other-runtime:process",
+                            "other-runtime:process", invocation.getBindingId(),
+                            invocation.getRuntimeGeneration(), "harness", "other-runtime", "prompt",
+                            "other-runtime-call", "digest", monitorRow("other-runtime", "other-runtime")),
+                    "other-binding", ToolExecutionRecord.prepared("other-binding:process",
+                            "other-binding:process", "other-binding",
+                            invocation.getRuntimeGeneration(), "harness", "runtime", "prompt",
+                            "other-binding-call", "digest", monitorRow("other-binding", "runtime")),
+                    "stale", ToolExecutionRecord.prepared("stale:process",
+                            "stale:process", invocation.getBindingId(),
+                            invocation.getRuntimeGeneration() + 1, "harness", "runtime", "prompt",
+                            "stale-call", "digest", monitorRow("stale", "runtime")));
+            strangers.values().forEach(fixture.executionRepository::findOrCreate);
+            Map<String, Object> key = Map.of("tenantId", "tenant",
+                    "workspaceId", "workspace", "sessionId", "harness");
+            for (String stranger : strangers.keySet()) {
+                RuntimeBrokerException error = failure(fixture.service.control("harness", "runtime",
+                        Map.of("kind", "monitor-stop", "sessionKey", key, "operationId", stranger,
+                                "targetOperationId", stranger + "-call")));
+                assertEquals("runtime_control_operation_invalid", error.getCode(), stranger);
+            }
+            List<Map<String, Object>> refused = List.of(
+                    Map.of("kind", "monitor-stop", "operationId", invocation.getExecutionCallId(),
+                            "targetOperationId", "call", "sessionKey", Map.of("tenantId", "tenant",
+                                    "workspaceId", "workspace", "sessionId", "other")),
+                    Map.of("kind", "monitor-stop", "sessionKey", key,
+                            "operationId", "foreign", "targetOperationId", "foreign-call"),
+                    Map.of("kind", "monitor-stop", "sessionKey", key,
+                            "operationId", "shell", "targetOperationId", "shell-call"),
+                    Map.of("kind", "monitor-stop", "sessionKey", key,
+                            "operationId", invocation.getExecutionCallId(),
+                            "targetOperationId", "foreign-call"),
+                    Map.of("kind", "monitor-status", "sessionKey", key,
+                            "operationId", "missing", "targetOperationId", "call"),
+                    // Ids no hold row can carry: the ledger's own id bounds
+                    // refused them on the way in.
+                    Map.of("kind", "monitor-stop", "sessionKey", key,
+                            "operationId", invocation.getExecutionCallId() + "\0",
+                            "targetOperationId", "call"),
+                    Map.of("kind", "monitor-stop", "sessionKey", key,
+                            "operationId", "w".repeat(510), "targetOperationId", "call"));
+            for (Map<String, Object> operation : refused) {
+                RuntimeBrokerException error = failure(fixture.service.control("harness", "runtime", operation));
+                assertEquals(400, error.getStatusCode());
+                assertEquals("runtime_control_operation_invalid", error.getCode());
+            }
+            Map<String, Object> own = Map.of("kind", "monitor-stop", "sessionKey", key,
+                    "operationId", invocation.getExecutionCallId(), "targetOperationId", "call");
+            assertEquals("runtime_session_not_found",
+                    failure(fixture.service.control("harness", "new-runtime", own)).getCode());
+            assertTrue(fixture.transport.controls.isEmpty());
+            for (String id : List.of(rowId, "foreign:process", "shell:process")) {
+                assertEquals(ToolExecutionRecord.State.PREPARED,
+                        fixture.executionRepository.findByExecutionCallId(id).getState());
+            }
+        }
+    }
+
+    private static Map<String, Object> monitorRow(String processOf, String runtimeSessionId) {
+        return Map.of("dispatchMode", "background_v3_monitor", "processOf", processOf,
+                "sessionId", runtimeSessionId, "promptId", "prompt",
+                "callId", processOf + "-call", "argsDigest", "digest");
+    }
+
+    private static Fixture monitorFixture() {
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        return new Fixture(WORKSPACE_SCOPE, verifier);
+    }
+
+    /** Starts one Monitor watch on "runtime"; its hold row is admitted live. */
+    private static ToolExecutionRecord startMonitorWatch(Fixture fixture) throws Exception {
+        String payload = "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f build.log\",\"is_monitor\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts", List.of(Map.of("text", "started")));
+        detachedResult.put("capture", detachedCapture);
+        join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+        Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+        fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                Map.of("state", "prepared"));
+        fixture.transport.statusResult = CompletableFuture.completedFuture(
+                Map.of("state", "settled", "result", detachedResult));
+        ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                "harness", "runtime", "key", reference, digest, "pub-1"));
+        join(fixture.service.startExecution("harness", "runtime",
+                prepared.getExecutionCallId(), payload, "pub-1", "token"));
+        awaitExecution(fixture.executionRepository, prepared.getExecutionCallId() + ":process",
+                ToolExecutionRecord.State.PREPARED);
+        fixture.transport.controls.clear();
+        fixture.transport.lastControl = null;
+        return prepared;
     }
 
     @Test
@@ -6148,6 +6502,7 @@ class RuntimeBrokerServiceTest {
                 CompletableFuture.completedFuture(
                         Map.of("executionStatus", "success"));
         volatile CompletableFuture<Map<String, Object>> executeV3Result;
+        volatile CompletableFuture<Void> installPublicationResult;
         volatile CompletableFuture<Map<String, Object>> cancelResult =
                 CompletableFuture.completedFuture(
                         Map.of("state", "cancel_requested"));
@@ -6214,6 +6569,9 @@ class RuntimeBrokerServiceTest {
         @Override
         public CompletionStage<Void> installPublication(RuntimeLease lease,
                 RuntimeSession session, RuntimePublicationGrant grant) {
+            if (installPublicationResult != null) {
+                return installPublicationResult;
+            }
             return executeV3Result == null ? RuntimeTransport.super.installPublication(lease, session, grant)
                     : CompletableFuture.completedFuture(null);
         }
