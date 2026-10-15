@@ -24,6 +24,7 @@ import {
   costLedgerCommand,
 } from './cost-ledger.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const SESSION = 'S-ledger';
 
@@ -1862,9 +1863,9 @@ describe('cost-ledger — prior-session bounds, faults and wall time', () => {
   });
 
   // chmod 0o000 is a POSIX-only fault: on Windows it toggles the read-only
-  // attribute and readdir still succeeds, and root bypasses the mode
-  // entirely — the repo convention for this shape.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // attribute and readdir still succeeds, and root with its DAC capabilities
+  // bypasses the mode entirely.
+  it.skipIf(!arePermissionBitsEnforced())(
     'discloses an unreadable prior agent dir instead of silently flooring it',
     () => {
       const { plan, env, project } = fixture();

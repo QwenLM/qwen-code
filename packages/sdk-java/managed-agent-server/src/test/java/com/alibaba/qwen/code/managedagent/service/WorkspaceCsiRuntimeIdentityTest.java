@@ -365,7 +365,7 @@ class WorkspaceCsiRuntimeIdentityTest {
         try (var provider = provider()) {
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             provider.reserveResource(original);
-            new ManagedSchemaJdbcTemplate(source).update("UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+            new ManagedSchemaJdbcTemplate(source).update("UPDATE ma_runtime_binding SET operation_lease_until = 946684800000");
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             assertThat(api.creates).isZero();
         }

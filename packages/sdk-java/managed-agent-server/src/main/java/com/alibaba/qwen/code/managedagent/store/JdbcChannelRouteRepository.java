@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.O
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -17,7 +18,7 @@ import java.util.Optional;
 /** The ingress receipt fixes routing identity; its operation owns attachment admission. */
 public final class JdbcChannelRouteRepository implements ChannelRouteRepository {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String SELECT = "SELECT o.* FROM ma_request_receipt r JOIN ma_operation o"
+    private static final String SELECT = "SELECT " + ManagedSchemaProjection.OPERATION.columns("o") + " FROM ma_request_receipt r JOIN ma_operation o"
             + " ON o.operation_key = r.result_operation_key AND o.operation_kind = 'CHANNEL_INGRESS'"
             + " WHERE r.namespace = 'CHANNEL_INGRESS'";
     private final JdbcTemplate jdbc;
@@ -59,7 +60,7 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
             int admitted = jdbc.update("INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
                             + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, request_digest,"
                             + " channel_id, account_generation, semantic_revision, session_id, state, result_operation_key,"
-                            + " created_at, updated_at) VALUES (?, 'CHANNEL_INGRESS', ?, ?, 'CHANNEL', ?, ?, ?, ?, ?,"
+                            + " gmt_create, gmt_modified) VALUES (?, 'CHANNEL_INGRESS', ?, ?, 'CHANNEL', ?, ?, ?, ?, ?,"
                             + " ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)",
                     receipt, ManagedSchemaKeys.key(candidate.tenantId()), candidate.tenantId(), scope,
                     candidate.channelInstanceId(), route, ManagedSchemaKeys.key(route), digest,
@@ -68,7 +69,7 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
             if (admitted == 1) {
                 jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id,"
                                 + " session_id, target_kind, target_key, request_digest, request_json, result_json, phase, state,"
-                                + " created_at, updated_at) VALUES (?, ?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
+                                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
                         operation, ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()), scope, route, candidate.tenantId(), candidate.sessionId(), target, digest, request,
                         candidate.inputId() == null ? null : JSON.createObjectNode().put("inputId", candidate.inputId()).toString(),
                         "admitted".equals(candidate.state()) ? "ADMITTED" : "STAGING", candidate.state(), now, now);
@@ -109,7 +110,7 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
         String operation = ManagedSchemaKeys.operationKey(OperationKind.CHANNEL_INGRESS, scope,
                 ManagedSchemaKeys.key(old.sessionId()), routeKey);
         int changed = jdbc.update("UPDATE ma_operation SET state = 'admitted', phase = 'ADMITTED', result_json = ?,"
-                        + " updated_at = ? WHERE operation_key = ? AND operation_kind = 'CHANNEL_INGRESS' AND state = 'staged'",
+                        + " gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'CHANNEL_INGRESS' AND state = 'staged'",
                 JSON.createObjectNode().put("inputId", inputId).toString(), databaseNow(), operation);
         ChannelRoute current = find(tenantId, routeKey).orElse(null);
         return changed == 1 || current != null && "admitted".equals(current.state()) && inputId.equals(current.inputId())
@@ -126,14 +127,14 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
         List<Object> args = new ArrayList<>(List.of(ManagedSchemaKeys.key(tenantId), tenantId, channelInstanceId));
         String cursor = "";
         if (before != null) {
-            cursor = " AND (r.created_at < ? OR r.created_at = ? AND r.idempotency_key < ?)";
+            cursor = " AND (r.gmt_create < ? OR r.gmt_create = ? AND r.idempotency_key < ?)";
             args.add(before.createdAt());
             args.add(before.createdAt());
             args.add(before.routeKey());
         }
         args.add(limit + 1);
         List<ChannelRoute> rows = jdbc.query(SELECT + " AND r.tenant_key = ? AND r.tenant_id = ? AND r.channel_id = ?"
-                + cursor + " ORDER BY r.created_at DESC, r.idempotency_key DESC LIMIT ?", this::row, args.toArray());
+                + cursor + " ORDER BY r.gmt_create DESC, r.idempotency_key DESC LIMIT ?", this::row, args.toArray());
         boolean more = rows.size() > limit;
         return new RoutePage(more ? rows.subList(0, limit) : rows, more);
     }
@@ -148,7 +149,7 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
                 body.path("accountGeneration").asLong(), body.path("platformEventId").asText(),
                 body.path("semanticRevision").asLong(), row.getString("session_id"), body.path("senderId").asText(),
                 nullable(body, "chatId"), nullable(body, "threadId"), row.getString("state"), nullable(result, "inputId"),
-                List.copyOf(refs), row.getLong("created_at"), row.getLong("updated_at"));
+                List.copyOf(refs), row.getLong("gmt_create"), row.getLong("gmt_modified"));
     }
 
     private static String nullable(JsonNode body, String field) {
