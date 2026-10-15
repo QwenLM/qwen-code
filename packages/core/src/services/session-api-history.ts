@@ -5,11 +5,13 @@
  */
 
 import type { Content, Part } from '@google/genai';
+import { isTurnResultRecordPayload } from './chatRecordingService.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
+  TurnResultRecordPayload,
 } from './chatRecordingService.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 
@@ -45,6 +47,94 @@ export function findApiHistoryPromptIndex(
     match = index;
   }
   return match;
+}
+
+export function getLastApiHistoryPromptId(
+  history: readonly Content[],
+  trailingSystemNotifications?: number,
+): string | undefined {
+  const prompt = history
+    .slice(0, history.length - (trailingSystemNotifications ?? 0))
+    .findLast((content) => getApiHistoryPromptId(content) !== undefined);
+  return prompt && getApiHistoryPromptId(prompt);
+}
+
+export function getTurnResultCancellation(
+  result: Pick<
+    TurnResultRecordPayload,
+    'promptId' | 'state' | 'cancelledAt' | 'cancelReason'
+  >,
+  owned = true,
+): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+  return result.state === 'cancelled' &&
+    typeof result.cancelledAt === 'number' &&
+    Number.isFinite(result.cancelledAt)
+    ? {
+        reason: owned && result.cancelReason === 'user' ? 'user' : 'unknown',
+        promptId: result.promptId,
+      }
+    : undefined;
+}
+
+export function getLastApiPromptCancellation(
+  history: readonly Content[],
+  records: readonly ChatRecord[],
+  trailingSystemNotifications?: number,
+): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+  const promptId = getLastApiHistoryPromptId(
+    history,
+    trailingSystemNotifications,
+  );
+  const isOwner = (record: ChatRecord) =>
+    (record.type === 'user' && record.subtype === undefined) ||
+    (record.type === 'system' && record.subtype === 'turn_attempt');
+  const isResult = (record: ChatRecord) =>
+    record.type === 'system' && record.subtype === 'turn_result';
+  const cancellation = (record: ChatRecord | undefined, owned: boolean) => {
+    if (!record || !isResult(record)) return undefined;
+    const result = record.systemPayload as TurnResultRecordPayload;
+    return getTurnResultCancellation(
+      {
+        ...result,
+        promptId:
+          typeof result?.promptId === 'string' && result.promptId.length > 0
+            ? result.promptId
+            : record.uuid,
+      },
+      owned && isTurnResultRecordPayload(result),
+    );
+  };
+  const latest = records.findLast(
+    (record) => isOwner(record) || isResult(record),
+  );
+  const owner =
+    promptId &&
+    records.findLast(
+      (record) => isOwner(record) && record.promptId === promptId,
+    );
+  if (!owner) return cancellation(latest, false);
+  const results = records
+    .slice(records.indexOf(owner) + 1)
+    .filter(
+      (record) =>
+        isResult(record) &&
+        (record.promptId === promptId ||
+          (record.promptId === undefined &&
+            owner.daemonPromptId !== undefined &&
+            (record.systemPayload as TurnResultRecordPayload)?.promptId ===
+              owner.daemonPromptId)),
+    );
+  const result = results.findLast((record) => cancellation(record, false));
+  if (!result)
+    return results.length > 0 ? undefined : cancellation(latest, false);
+  const owned =
+    results.length === 1 &&
+    (result.promptId === promptId ||
+      records.filter(
+        (record) =>
+          isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
+      ).length === 1);
+  return cancellation(result, owned);
 }
 
 export interface BuildApiHistoryOptions {

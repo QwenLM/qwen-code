@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
@@ -43,7 +44,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -75,9 +77,9 @@ class WorkspaceCsiRuntimeIdentityTest {
     void setUp() {
         source = new DriverManagerDataSource("jdbc:h2:mem:provenance-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        ManagedSchema.initialize(source);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
-        storage = new WorkspaceCsiReservationStore(new JdbcTemplate(source), new DataSourceTransactionManager(source), new ObjectMapper());
+        storage = new WorkspaceCsiReservationStore(new ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source), new ObjectMapper());
         storage.register(registration);
         var request = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace"), null, "kubernetes-workspace", "storage");
@@ -122,6 +124,11 @@ class WorkspaceCsiRuntimeIdentityTest {
             WorkspaceCsiRuntimeIdentity.verify(original);
             assertThat(WorkspaceCsiRuntimeIdentity.expectedPod(original).get("uid")).isEqualTo(UID);
             assertThat(WorkspaceCsiRuntimeIdentity.boot(original).get("version")).isEqualTo(3);
+            com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.verify(original);
+            assertThat(com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.expectedPod(original))
+                    .isEqualTo(WorkspaceCsiRuntimeIdentity.expectedPod(original));
+            assertThat(com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.boot(original))
+                    .isEqualTo(WorkspaceCsiRuntimeIdentity.boot(original));
             assertThat(new String(WorkspaceCsiRuntimeIdentity.bytes(handle.getValue()), StandardCharsets.UTF_8))
                     .doesNotContain(original.getProvisionSeed().getToken());
             var pod = api.objects.get("pods");
@@ -358,7 +365,7 @@ class WorkspaceCsiRuntimeIdentityTest {
         try (var provider = provider()) {
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             provider.reserveResource(original);
-            new JdbcTemplate(source).update("UPDATE qwen_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+            new ManagedSchemaJdbcTemplate(source).update("UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             assertThat(api.creates).isZero();
         }

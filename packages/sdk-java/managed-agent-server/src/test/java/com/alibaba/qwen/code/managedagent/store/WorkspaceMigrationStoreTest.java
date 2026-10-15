@@ -24,7 +24,8 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -50,8 +51,8 @@ class WorkspaceMigrationStoreTest {
         temp = temp.toRealPath();
         var data = new DriverManagerDataSource("jdbc:h2:mem:migration-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(data);
+        ManagedSchema.initialize(data);
+        jdbc = new ManagedSchemaJdbcTemplate(data);
         manager = new DataSourceTransactionManager(data);
         source = Files.createDirectory(temp.resolve("source")).toRealPath();
         target = Files.createDirectory(temp.resolve("target")).toRealPath();
@@ -87,22 +88,19 @@ class WorkspaceMigrationStoreTest {
     @ValueSource(booleans = {false, true})
     void rejectsCsiStorageBeforeInstallingAnyMigrationFence(boolean alias) throws Exception {
         if (alias) {
-            jdbc.update("INSERT INTO managed_workspace_csi_registration"
-                    + " (alias_key, tenant_id, storage_id, physical_key, registration_revision, registration_json)"
-                    + " VALUES (?, 'tenant', 'storage', ?, 1, '{}')",
-                    WorkspaceCsiRegistration.aliasKey("tenant", "storage"), "a".repeat(64));
+            jdbc.update("UPDATE ma_storage SET storage_kind = 'CSI' WHERE alias_key = ?", WorkspaceCsiRegistration.aliasKey("tenant", "storage"));
         } else {
-            jdbc.update("UPDATE managed_workspace_execution_lease SET storage_kind = 'CSI'");
+            jdbc.update("UPDATE ma_storage_owner SET storage_kind = 'CSI'");
         }
-        var registration = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        var registration = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         byte[] marker = Files.readAllBytes(source.resolve(".qwen-managed-storage.json"));
         assertThatThrownBy(() -> store(true)).isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
             assertThat(error.getCode()).isEqualTo("workspace_unavailable");
             assertThat(error.isRetryable()).isFalse();
         });
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(registration);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(registration);
         assertThat(Files.readAllBytes(source.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
     }
 
@@ -112,8 +110,8 @@ class WorkspaceMigrationStoreTest {
         var permissions = PosixFilePermissions.fromString("rwxr-xr-x");
         Files.setPosixFilePermissions(directory, permissions);
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_state_unavailable");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
         assertThat(Files.getPosixFilePermissions(directory)).isEqualTo(permissions);
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
         assertThat(store(true).inspect().path("state").asText()).isEqualTo("RETIRING");
@@ -129,16 +127,16 @@ class WorkspaceMigrationStoreTest {
         }
         String code = "stateDirectory".equals(field) ? "migration_state_unavailable" : "migration_history_unverified";
         assertThatThrownBy(() -> store(true)).hasMessageContaining(code);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
     }
 
     @Test
     void rejectsUnprovedHistoryIdentityBeforeInstallingAnyFenceAndPreservesOperationReplay() throws Exception {
         unreadableIdentity = Path.of(request.path("fileHistoryRoot").asText());
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_history_unverified");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
         unreadableIdentity = null;
         var original = store(true).inspect();
         Files.delete(Path.of(request.path("stateDirectory").asText()));
@@ -174,8 +172,8 @@ class WorkspaceMigrationStoreTest {
         new WorkspaceRecoveryStore(jdbc, manager, guard, null, "capture",
                 captureRequest.toString().getBytes(StandardCharsets.UTF_8));
         // Protocol fixture: no claim of sealed file content; exercise the real verify failure RPC.
-        jdbc.update("UPDATE managed_workspace_recovery_operation SET state = 'SEALED', manifest_digest = ?, result_json = '{}'"
-                + " WHERE operation_id = ?", "0".repeat(64), request.path("captureOperationId").asText());
+        new WorkspaceOperations(jdbc, "tenant").update(WorkspaceOperations.Kind.WORKSPACE_RECOVERY,
+                request.path("captureOperationId").asText(), WorkspaceOperations.values("state", "SEALED", "manifest_digest", "0".repeat(64), "result_json", "{}"));
         assertThatThrownBy(() -> operation.verify(false)).isInstanceOfSatisfying(
                 WorkspaceRecoveryStore.RecoveryFailure.class, error -> {
                     assertThat(error.code).isEqualTo(code);
@@ -185,8 +183,7 @@ class WorkspaceMigrationStoreTest {
         assertThat(operation.inspect().path("state").asText())
                 .isEqualTo("source_drift".equals(code) ? "INVALIDATED" : "PREPARING");
         assertThat(operation.inspect().path("lastErrorCode").asText()).isEqualTo(code);
-        assertThat(jdbc.queryForObject("SELECT last_error_code FROM managed_workspace_recovery_operation WHERE operation_id = ?",
-                String.class, attempt)).isEqualTo(code);
+        assertThat(new WorkspaceOperations(jdbc, "tenant").find(WorkspaceOperations.Kind.WORKSPACE_RECOVERY, attempt, false).get("last_error_code")).isEqualTo(code);
         if (!"source_drift".equals(code)) {
             assertThatThrownBy(() -> operation.verify(false)).hasMessageContaining(code);
             assertThat(operation.inspect().path("verifyOperationId").asText()).isEqualTo(attempt);
@@ -279,7 +276,7 @@ class WorkspaceMigrationStoreTest {
                 assertThat(receipt.path("lastErrorCode").isNull()).isTrue();
                 assertThat(receipt.path("result_json").path("contentVerified").asBoolean()).isTrue();
                 assertThat(receipt.path("result_json").path("activation").asBoolean()).isFalse();
-                assertThat(jdbc.queryForObject("SELECT mount_revision FROM managed_workspace_execution_lease", Long.class))
+                assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage")))
                         .isEqualTo(promote ? 2 : 1);
                 operation.verify(promote);
                 assertThat(operation.inspect()).isEqualTo(receipt);
@@ -325,55 +322,56 @@ class WorkspaceMigrationStoreTest {
     void rejectsAnOversizedProtocolVersionBeforeInstallingAnyFence() {
         request.put("version", 4_294_967_297L);
         assertThatThrownBy(() -> store(true)).hasMessageContaining("invalid_request");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"PENDING", "RUNNING"})
     void refusesUnfinishedTitleDeliveryEvenWithAFailedPublicReceipt(String state) {
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
                 + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
                 + " context_revision, workspace_config_ref, workspace_policy_ref)"
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_agent_command (tenant_id, operation, idempotency_key, request_digest,"
-                + " session_id, created_at, updated_at, command_status)"
-                + " VALUES ('tenant', 'RENAME_SESSION', 'rename', 'digest', 'session', 1, 1, 'FAILED')");
-        jdbc.update("INSERT INTO managed_session_rename_delivery (tenant_id, session_id, revision, idempotency_key, title,"
-                + " delivery_state, available_at, lease_owner, lease_until)"
-                + " VALUES ('tenant', 'session', 1, 'rename', 'new title', ?, 0, 'lost-owner', 0)", state);
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
+        jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
+                WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
+        ManagedReceipts.insertCommand(jdbc, "tenant", "RENAME_SESSION", "rename", "digest", "session", null, "FAILED", null, 1);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
+                + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, available_at, created_at, updated_at)"
+                + " VALUES (?, ?, ?, 'RENAME', 'rename:1', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', ?, 'SUBMITTED', ?, 0, 1, 1)",
+                WorkspaceOperations.hash("rename"), scope, scope, WorkspaceOperations.hash("session"), state, state);
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT command_status FROM managed_agent_command", String.class)).isEqualTo("FAILED");
-        assertThat(jdbc.queryForObject("SELECT delivery_state FROM managed_session_rename_delivery", String.class)).isEqualTo(state);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND'", String.class)).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM ma_operation WHERE operation_kind = 'RENAME'", String.class)).isEqualTo(state);
     }
 
     @Test
     void rejectsDescriptorDriftBeforeRetirementAndReusesTheNormalBindingReader() {
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
                 + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
                 + " context_revision, workspace_config_ref, workspace_policy_ref)"
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id, actor_id, idempotency_key, request_digest,"
-                + " session_id, created_at) VALUES ('tenant', ?, 'create', 'sha256:test', 'session', 1)",
-                "owner".getBytes(StandardCharsets.UTF_8));
-        assertThat(jdbc.query("SELECT * FROM managed_agent_session", (row, index) -> ManagedAgentStore.readBinding(row))
+        ManagedReceipts.insertCreation(jdbc, "tenant", "owner".getBytes(StandardCharsets.UTF_8), "create", "sha256:test", "session", null, 1);
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, updated_at) VALUES (?, ?, 'SESSION', ?, 1)", "tenant", "session", new byte[0]);
+        assertThat(jdbc.query("SELECT * FROM ma_session", (row, index) -> ManagedAgentStore.readBinding(row))
                 .getFirst().getStorageId()).isEqualTo("storage");
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_member_uninitialized");
-        jdbc.update("UPDATE managed_agent_session SET workspace_config_ref = 'changed'");
+        jdbc.update("UPDATE ma_session SET workspace_config_ref = 'changed'");
         assertThatThrownBy(() -> store(true)).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Persisted Workspace configuration descriptor changed");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
-        jdbc.update("UPDATE managed_agent_session SET workspace_id = NULL, workspace_generation = NULL,"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
+        jdbc.update("UPDATE ma_session SET workspace_id = NULL, workspace_generation = NULL,"
                 + " workspace_storage_id = NULL, cwd_relative = NULL, context_config_ref = NULL, context_revision = NULL,"
                 + " workspace_config_ref = NULL, workspace_policy_ref = NULL");
-        assertThat(jdbc.query("SELECT * FROM managed_agent_session", (row, index) -> ManagedAgentStore.readBinding(row))
+        assertThat(jdbc.query("SELECT * FROM ma_session", (row, index) -> ManagedAgentStore.readBinding(row))
                 .getFirst()).isNull();
     }
 
@@ -381,7 +379,7 @@ class WorkspaceMigrationStoreTest {
     void persistsFenceWithoutPublicCloseAndAbortsOnlyAfterStorageIsFenced() {
         var operation = store(true);
         assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRING");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_harness_drain", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE head_kind = 'HARNESS'", Long.class)).isZero();
         assertThatThrownBy(() -> WorkspaceMigrationAdmission.requireOpen(jdbc, "tenant", "storage"));
         operation.retire(mock(RuntimeBrokerService.class));
         assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRED");
@@ -397,16 +395,16 @@ class WorkspaceMigrationStoreTest {
 
     @Test
     void refusesAStorageWhoseChildWorkspaceIsStillOpen() {
-        jdbc.update("INSERT INTO qwen_managed_child_workspace (tenant_id, parent_session_id, child_run_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, parent_session_id, child_run_id,"
                 + " child_workspace_id, workspace_id, workspace_generation, storage_id, parent_cwd_relative,"
-                + " state, created_at, updated_at) VALUES ('tenant', 'parent', 'run', ?, 'workspace', 1,"
-                + " 'storage', '.', 'ready', 0, 0)", "0".repeat(32));
+                + " workspace_kind, child_state, parent_workspace_id, display_name, config_ref, policy_ref, state, created_at, updated_at) VALUES ('tenant', 'parent', 'run', ?, ?, 1,"
+                + " 'storage', '.', 'CHILD_GIT', 'ready', 'workspace', 'Child', 'config', 'policy', 'ACTIVE', 0, 0)", "0".repeat(32), "0".repeat(32));
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
         // A landed merge still owes its cleanup.
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applied' WHERE child_workspace_id = ?",
+        jdbc.update("UPDATE ma_workspace SET child_state = 'applied' WHERE child_workspace_id = ?",
                 "0".repeat(32));
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'conflicted' WHERE child_workspace_id = ?",
+        jdbc.update("UPDATE ma_workspace SET child_state = 'conflicted' WHERE child_workspace_id = ?",
                 "0".repeat(32));
         assertThat(store(true).inspect().path("state").asText()).isEqualTo("RETIRING");
     }
@@ -418,7 +416,24 @@ class WorkspaceMigrationStoreTest {
         assertThatThrownBy(() -> store(true)).hasMessageContaining("operation_conflict");
         request.put("migrationOperationId", UUID.randomUUID().toString());
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_conflict");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isEqualTo(1);
+    }
+
+
+    @Test
+    void preservesTheServiceRefusalCodeWhenMountIdentityBecomesUnreadable() throws Exception {
+        var operation = store(true);
+        operation.retire(mock(RuntimeBrokerService.class));
+        guard.fence("tenant", "storage", 1, request.path("fenceOperationId").asText());
+        unreadableIdentity = target;
+        assertThatThrownBy(() -> operation.verify(false)).isInstanceOfSatisfying(RuntimeBrokerException.class,
+                error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(WorkspaceRecoveryStore.errorCode(error)).isEqualTo("workspace_unavailable");
+                    operation.failed(WorkspaceRecoveryStore.errorCode(error));
+                });
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRED");
+        assertThat(operation.inspect().path("lastErrorCode").asText()).isEqualTo("workspace_unavailable");
     }
 
     @Test
@@ -445,7 +460,7 @@ class WorkspaceMigrationStoreTest {
         assertThat(Files.readAllBytes(target.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
         assertThat(Files.readString(source.resolve(".qwen-managed-storage.json"))).contains(source.toString());
         guard.promoteMigration(original, identity, registration, request.path("migrationOperationId").asText());
-        assertThat(jdbc.queryForObject("SELECT mount_revision FROM managed_workspace_execution_lease", Long.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage"))).isEqualTo(2);
         assertThatThrownBy(() -> guard.promoteMigration(original, identity, registration, request.path("migrationOperationId").asText()));
     }
 }
