@@ -102,11 +102,18 @@ describe('AgentComposer', () => {
     | {
         contentGeneratorConfig: {
           authType?: string;
+          baseUrl?: string;
           contextWindowSize?: number;
         };
       }
     | undefined;
+  // Keyed `authType|modelId|baseUrl`, like the registry itself.
   let registryWindows: Record<string, number>;
+  let sessionConfig: {
+    authType?: string;
+    baseUrl?: string;
+    contextWindowSize: number;
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -114,6 +121,11 @@ describe('AgentComposer', () => {
     agentModel = undefined;
     agentRuntimeView = undefined;
     registryWindows = {};
+    sessionConfig = {
+      authType: 'openai',
+      baseUrl: 'https://session.example/v1',
+      contextWindowSize: 250_000,
+    };
     agentFooterProps.contextWindowSize = undefined;
     capturedKeypressHandlers = [];
     capturedKeypressOptions = [];
@@ -153,20 +165,20 @@ describe('AgentComposer', () => {
       setAgentMessageQueue: vi.fn(),
     } as never);
     vi.mocked(useConfig).mockReturnValue({
-      getContentGeneratorConfig: () => ({
-        authType: 'openai',
-        contextWindowSize: 1_000_000,
-      }),
+      getContentGeneratorConfig: () => sessionConfig,
       getModel: () => 'qwen3-coder-plus',
       getModelsConfig: () => ({
-        getResolvedModel: (_authType: string, modelId: string) =>
-          registryWindows[modelId] === undefined
+        getResolvedModel: (
+          authType: string,
+          modelId: string,
+          baseUrl?: string,
+        ) => {
+          const window =
+            registryWindows[`${authType}|${modelId}|${baseUrl ?? ''}`];
+          return window === undefined
             ? undefined
-            : {
-                generationConfig: {
-                  contextWindowSize: registryWindows[modelId],
-                },
-              },
+            : { generationConfig: { contextWindowSize: window } };
+        },
       }),
     } as never);
     vi.mocked(usePreferredEditor).mockReturnValue(undefined);
@@ -205,11 +217,38 @@ describe('AgentComposer', () => {
   describe('footer context window', () => {
     it("uses the window the registry declares for the agent's model", () => {
       agentModel = 'gpt-4o';
-      registryWindows = { 'gpt-4o': 128_000 };
+      registryWindows = { 'openai|gpt-4o|https://session.example/v1': 128_000 };
 
       render(<AgentComposer agentId="agent-1" />);
 
       expect(agentFooterProps.contextWindowSize).toBe(128_000);
+    });
+
+    it('finds a registry entry declared without a base URL', () => {
+      agentModel = 'gpt-4o';
+      registryWindows = { 'openai|gpt-4o|': 96_000 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(96_000);
+    });
+
+    it("looks the window up on the agent's own provider", () => {
+      agentModel = 'gpt-4o';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'anthropic',
+          baseUrl: 'https://other.example/v1',
+        },
+      };
+      registryWindows = {
+        'openai|gpt-4o|https://session.example/v1': 128_000,
+        'anthropic|gpt-4o|https://other.example/v1': 64_000,
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(64_000);
     });
 
     it("uses the model's known limit when the agent inherited the session window", () => {
@@ -219,7 +258,8 @@ describe('AgentComposer', () => {
       agentRuntimeView = {
         contentGeneratorConfig: {
           authType: 'openai',
-          contextWindowSize: 1_000_000,
+          baseUrl: 'https://session.example/v1',
+          contextWindowSize: 250_000,
         },
       };
 
@@ -228,7 +268,6 @@ describe('AgentComposer', () => {
       expect(agentFooterProps.contextWindowSize).toBe(
         tokenLimit('gpt-4o', 'input'),
       );
-      expect(agentFooterProps.contextWindowSize).not.toBe(1_000_000);
     });
 
     it("uses the model's known limit when the agent has no runtime config", () => {
@@ -241,18 +280,49 @@ describe('AgentComposer', () => {
       );
     });
 
-    it("uses the session window for an agent on the session's model", () => {
+    it("uses the model's known limit when the session names no provider", () => {
+      agentModel = 'gpt-4o';
+      sessionConfig = { contextWindowSize: 250_000 };
+      registryWindows = { 'openai|gpt-4o|': 96_000 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
+    });
+
+    it("uses the session window for an agent on the session's model and route", () => {
+      // 250K is neither the registry's nor the model's known limit, so only
+      // the same-model shortcut can produce it.
       agentModel = 'qwen3-coder-plus';
 
       render(<AgentComposer agentId="agent-1" />);
 
-      expect(agentFooterProps.contextWindowSize).toBe(1_000_000);
+      expect(agentFooterProps.contextWindowSize).toBe(250_000);
+    });
+
+    it('does not borrow the session window for the same model id on another endpoint', () => {
+      agentModel = 'qwen3-coder-plus';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'openai',
+          baseUrl: 'https://other.example/v1',
+        },
+      };
+      registryWindows = {
+        'openai|qwen3-coder-plus|https://other.example/v1': 128_000,
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(128_000);
     });
 
     it('uses the session window when the agent names no model', () => {
       render(<AgentComposer agentId="agent-1" />);
 
-      expect(agentFooterProps.contextWindowSize).toBe(1_000_000);
+      expect(agentFooterProps.contextWindowSize).toBe(250_000);
     });
   });
 

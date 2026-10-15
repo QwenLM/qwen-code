@@ -96,16 +96,30 @@ export function getAgentContextWindowSize(
 ): number | undefined {
   const sessionConfig = config.getContentGeneratorConfig();
   const agentModel = core?.modelConfig.model;
-  if (!agentModel || agentModel === config.getModel()) {
+  const ownRoute = core?.runtimeView?.contentGeneratorConfig;
+  // The same model id on another provider or endpoint is a different model,
+  // so the session window only applies when the agent also shares its route.
+  const onSessionRoute =
+    !ownRoute ||
+    (ownRoute.authType === sessionConfig?.authType &&
+      ownRoute.baseUrl === sessionConfig?.baseUrl);
+  if (!agentModel || (agentModel === config.getModel() && onSessionRoute)) {
     return sessionConfig?.contextWindowSize;
   }
-  const route = core?.runtimeView?.contentGeneratorConfig ?? sessionConfig;
-  const declared = route?.authType
-    ? config
-        .getModelsConfig?.()
-        ?.getResolvedModel(route.authType, agentModel, route.baseUrl)
-        ?.generationConfig.contextWindowSize
-    : undefined;
+  const route = ownRoute ?? sessionConfig;
+  const modelsConfig = config.getModelsConfig?.();
+  // A registry entry declared without a base URL still names this model, so
+  // look it up again without one when the exact endpoint has no entry.
+  const declared =
+    route?.authType && modelsConfig
+      ? (
+          modelsConfig.getResolvedModel(
+            route.authType,
+            agentModel,
+            route.baseUrl,
+          ) ?? modelsConfig.getResolvedModel(route.authType, agentModel)
+        )?.generationConfig.contextWindowSize
+      : undefined;
   return declared ?? tokenLimit(agentModel, 'input');
 }
 
