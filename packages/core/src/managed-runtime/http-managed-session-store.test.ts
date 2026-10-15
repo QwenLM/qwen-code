@@ -3893,22 +3893,24 @@ describe('collectNestedResourceRefs', () => {
     };
   }
 
-  it('includes private file history admission refs without re-entering its predecessor', () => {
+  it('includes private file history admission refs by walking only preparation', () => {
     const ref = closureRef('managed-file_history', 'prepared');
     const inputRef = closureRef('managed-tool-input', 'input');
     const toolDefinitionRef = closureRef(
       'managed-tool-definition',
       'definition',
     );
-    const intentRef = closureRef('managed-file_history', 'intent');
-    const previousRecordRef = closureRef('managed-file_history', 'previous');
+    // A prepared record's previousRecordRef and preparation.intentRef denote
+    // one resource: SQL admission requires both to equal the predecessor's
+    // file-history ref, and reads that ref from this transaction.
+    const predecessorRef = closureRef('managed-file_history', 'predecessor');
     const body = {
       schemaVersion: 2,
       profile: 'csi-files-retirement/1',
-      previousRecordRef,
+      previousRecordRef: predecessorRef,
       preparation: {
         stage: 'prepared',
-        intentRef,
+        intentRef: predecessorRef,
         invocations: [
           { inputRef, toolDefinitionRef },
           { inputRef, toolDefinitionRef },
@@ -3921,9 +3923,8 @@ describe('collectNestedResourceRefs', () => {
     );
     expect(nested).toHaveLength(3);
     expect(nested).toEqual(
-      expect.arrayContaining([inputRef, toolDefinitionRef, intentRef]),
+      expect.arrayContaining([inputRef, toolDefinitionRef, predecessorRef]),
     );
-    expect(nested).not.toContainEqual(previousRecordRef);
     for (const ordinary of [
       { snapshots: [] },
       { ...body, preparation: null },
@@ -3934,6 +3935,16 @@ describe('collectNestedResourceRefs', () => {
         collectNestedResourceRefs(ref, Buffer.from(JSON.stringify(ordinary))),
       ).toEqual([]);
     }
+  });
+
+  it('refuses a malformed file history record instead of collapsing its closure', () => {
+    const ref = closureRef('managed-file_history', 'malformed');
+    expect(() =>
+      collectNestedResourceRefs(ref, Buffer.from('null', 'utf8')),
+    ).toThrow(/file history must be an object/);
+    expect(() =>
+      collectNestedResourceRefs(ref, Buffer.from('{', 'utf8')),
+    ).toThrow(/record is not valid JSON/);
   });
 
   it('closes over every private outcome part and rejects malformed manifests', () => {

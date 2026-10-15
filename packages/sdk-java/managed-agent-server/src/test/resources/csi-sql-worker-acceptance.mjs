@@ -719,6 +719,7 @@ try {
                 changed,
                 { ...workerHeaders, ...override },
                 code,
+                name,
               );
               assert.deepEqual(
                 await fs.readFile(path.join(workspace, 'marker.txt')),

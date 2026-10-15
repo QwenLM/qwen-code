@@ -1841,8 +1841,10 @@ export function collectNestedResourceRefs(
       ),
       'file history',
     );
-    // SQL admits preparation resources in this transaction; predecessor
-    // history already belongs to its original journal transaction.
+    // Only `preparation` is walked: a bind/result record's previousRecordRef
+    // belongs to its original journal transaction, while a prepared record
+    // re-admits its predecessor through preparation.intentRef, which SQL's
+    // activation proof reads from this transaction.
     return record['schemaVersion'] === 2 &&
       record['profile'] === 'csi-files-retirement/1'
       ? collectRefs([record['preparation']])

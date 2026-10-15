@@ -264,15 +264,19 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         Files.copy(directory.resolve("result.json"), output.resolve("result.json"));
                     }
                 } finally {
+                    boolean childExited = true;
                     if (child != null && child.isAlive()) {
                         child.destroyForcibly();
-                        assertThat(child.waitFor(10, TimeUnit.SECONDS)).isTrue();
+                        childExited = child.waitFor(10, TimeUnit.SECONDS);
                     }
                     adapter.stop(0);
                     executor.shutdownNow();
-                    assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+                    boolean executorTerminated = executor.awaitTermination(10, TimeUnit.SECONDS);
                     actualClient.shutdownNow();
-                    assertThat(actualClient.awaitTermination(Duration.ofSeconds(10))).isTrue();
+                    boolean clientTerminated = actualClient.awaitTermination(Duration.ofSeconds(10));
+                    assertThat(childExited).as("node child did not exit after destroyForcibly").isTrue();
+                    assertThat(executorTerminated).as("adapter executor did not terminate").isTrue();
+                    assertThat(clientTerminated).as("http client did not terminate").isTrue();
                 }
             }
         }
