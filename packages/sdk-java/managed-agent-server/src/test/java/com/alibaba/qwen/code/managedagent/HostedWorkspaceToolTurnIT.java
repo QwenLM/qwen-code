@@ -449,7 +449,7 @@ class HostedWorkspaceToolTurnIT {
                             for (String sessionId : List.of(sessions.get(index).get("sessionId").toString(), secondarySessionId)) {
                                 var publications = jdbc.queryForList("SELECT state, producer_phase,"
                                         + " CASE WHEN accepted_complete THEN 1 ELSE 0 END AS complete"
-                                        + " FROM qwen_tool_publication WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+                                        + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
                                 if (cases.contains("o2")) {
                                     assertThat(publications).hasSize(1);
                                     var publication = publications.getFirst();
@@ -457,10 +457,10 @@ class HostedWorkspaceToolTurnIT {
                                     assertThat(publication.get("producer_phase")).isEqualTo("REFERENCED");
                                     assertThat(((Number) publication.get("complete")).intValue()).isEqualTo(1);
                                 } else assertThat(publications).isEmpty();
-                                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
+                                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
                                         + " WHERE harness_session_id = ?", Integer.class, sessionId)).isEqualTo(1);
                                 var execution = jdbc.queryForMap("SELECT dispatch_generation, execution_state, execution_status"
-                                        + " FROM qwen_tool_execution WHERE harness_session_id = ?", sessionId);
+                                        + " FROM ma_tool_execution WHERE harness_session_id = ?", sessionId);
                                 assertThat(((Number) execution.get("dispatch_generation")).longValue()).isEqualTo(1);
                                 assertThat(execution.get("execution_state")).isEqualTo("SETTLED");
                                 assertThat(execution.get("execution_status")).isEqualTo("success");
