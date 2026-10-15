@@ -17062,6 +17062,716 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  describe('new-task panel regression coverage', () => {
+    const storageKey = 'qwen-code-web-shell-right-panel-state';
+    const draftKey = 'draft\0/tmp/project';
+    const sessionKey = '/tmp/project\0session-1';
+    const filesTab = {
+      id: 'files:project',
+      kind: 'files',
+      title: 'Files',
+      workspaceCwd: '/tmp/project',
+    };
+    const terminalTab = {
+      id: 'terminal:stored',
+      kind: 'terminal',
+      title: 'Terminal',
+      workspaceCwd: '/tmp/project',
+    };
+    function setupDraft(twoWorkspaces = false) {
+      mockConnection.sessionId = undefined;
+      testState.messages = [];
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+          ...(twoWorkspaces
+            ? [
+                {
+                  id: 'other',
+                  cwd: '/tmp/other',
+                  primary: false,
+                  trusted: true,
+                },
+              ]
+            : []),
+        ],
+      } as typeof mockWorkspace.capabilities;
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-1';
+        return { sessionId: 'session-1' };
+      });
+    }
+    function seedDeferredDraft() {
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          v: 1,
+          [draftKey]: {
+            open: true,
+            activeTabId: terminalTab.id,
+            tabs: [filesTab, terminalTab],
+          },
+        }),
+      );
+    }
+    async function submitFirstPrompt() {
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit(
+          'hello',
+          undefined,
+          undefined,
+          editorCommit,
+        );
+        await Promise.resolve();
+      });
+      await flush();
+    }
+
+    it.each([false, true])(
+      'keeps the workspace icon when the composer does not report it (toolbar hidden=%s)',
+      async (hideToolbar) => {
+        setupDraft(hideToolbar);
+        const { container } = renderApp({
+          rightPanel: { items: ['files'] },
+          ...(hideToolbar
+            ? { composerToolbarActions: ['model'] as const }
+            : {}),
+        });
+        await flush();
+        expect(
+          container.querySelector('[data-testid="chat-header-workspace"]'),
+        ).not.toBeNull();
+      },
+    );
+
+    it('honors the host hiding the right-panel header item on the new-task page', async () => {
+      setupDraft();
+      const { container } = renderApp({
+        header: { items: ['title'] },
+        rightPanel: { items: ['files'] },
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="chat-context-header"]'),
+      ).toBeNull();
+    });
+
+    it('does not offer workspace panels until the new-task workspace resolves as trusted', async () => {
+      setupDraft();
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'project', cwd: '/tmp/project', primary: true, trusted: false },
+        ],
+        features: [],
+      } as typeof mockWorkspace.capabilities;
+      const { container, rerender } = renderApp({
+        rightPanel: { items: ['files', 'terminal', 'webPreview'] },
+      });
+      await flush();
+      expect(
+        container.querySelector('button[aria-label="Toggle right panel"]'),
+      ).toBeNull();
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        workspaces: mockWorkspace.capabilities.workspaces.map((entry) => ({
+          ...entry,
+          trusted: true,
+        })),
+      };
+      rerender();
+      await flush();
+      expect(
+        container.querySelector('button[aria-label="Toggle right panel"]'),
+      ).not.toBeNull();
+    });
+
+    it('preserves deferred draft tab order when the first prompt creates a session', async () => {
+      setupDraft();
+      seedDeferredDraft();
+      renderApp({ rightPanel: { items: ['files', 'terminal'] } });
+      await flush();
+      await flush();
+      await submitFirstPrompt();
+      const stored = JSON.parse(
+        window.localStorage.getItem(storageKey) ?? '{}',
+      );
+      expect(
+        stored[sessionKey]?.tabs.map((tab: { kind: string }) => tab.kind),
+      ).toEqual(['files', 'terminal']);
+      expect(stored[draftKey]).toBeUndefined();
+    });
+
+    it('hydrates a deferred terminal after the first prompt without switching sessions', async () => {
+      setupDraft();
+      seedDeferredDraft();
+      const { container, rerender } = renderApp({
+        rightPanel: { items: ['files', 'terminal'] },
+      });
+      await flush();
+      await flush();
+      expect(
+        container.querySelector('[data-terminal-id="terminal:stored"]'),
+      ).toBeNull();
+      await submitFirstPrompt();
+      mockConnection.capabilities.features = ['web_terminal'];
+      rerender();
+      await flush();
+      await flush();
+      expect(
+        container.querySelector('[data-terminal-id="terminal:stored"]'),
+      ).not.toBeNull();
+    });
+
+    it('keeps draft tabs and workspace owners separate when the pending workspace changes', async () => {
+      setupDraft(true);
+      mockConnection.capabilities.features = ['web_terminal'];
+      testState.captureArtifactPanelOnly = true;
+      const { container } = renderApp({
+        rightPanel: { items: ['files', 'terminal'] },
+      });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectWorkspace?.('/tmp/other'),
+      );
+      await flush();
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).toBeNull();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      act(() => testState.latestArtifactPanelProps?.onOpenTerminal?.());
+      await flush();
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'files',
+            workspaceCwd: '/tmp/other',
+          }),
+          expect.objectContaining({
+            kind: 'terminal',
+            workspaceCwd: '/tmp/other',
+          }),
+        ]),
+      );
+      const stored = JSON.parse(
+        window.localStorage.getItem(storageKey) ?? '{}',
+      );
+      expect(stored[draftKey]?.tabs).toContainEqual(
+        expect.objectContaining({
+          kind: 'files',
+          workspaceCwd: '/tmp/project',
+        }),
+      );
+      expect(stored['draft\0/tmp/other']?.tabs).toContainEqual(
+        expect.objectContaining({ kind: 'files', workspaceCwd: '/tmp/other' }),
+      );
+    });
+
+    it('retains twenty real session panel states while adding a workspace draft', async () => {
+      setupDraft();
+      const sessions = Object.fromEntries(
+        Array.from({ length: 20 }, (_, index) => [
+          `/tmp/project\0session-${index}`,
+          { open: true, activeTabId: filesTab.id, tabs: [filesTab] },
+        ]),
+      );
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({ v: 1, ...sessions }),
+      );
+      const { container } = renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      const stored = JSON.parse(
+        window.localStorage.getItem(storageKey) ?? '{}',
+      );
+      for (const key of Object.keys(sessions))
+        expect(stored[key]).toBeDefined();
+      expect(stored[draftKey]).toBeDefined();
+    });
+
+    it('retains session capacity across mixed-store reloads and evicts only the oldest draft', async () => {
+      setupDraft(true);
+      const sessions = Object.fromEntries(
+        Array.from({ length: 20 }, (_, index) => [
+          `/tmp/project\0session-${index}`,
+          { open: true, activeTabId: filesTab.id, tabs: [filesTab] },
+        ]),
+      );
+      const drafts = Object.fromEntries(
+        Array.from({ length: 19 }, (_, index) => [
+          `draft\0/tmp/draft-${index}`,
+          { open: false, activeTabId: null, tabs: [] },
+        ]),
+      );
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          v: 1,
+          ...sessions,
+          ...drafts,
+          [draftKey]: {
+            open: true,
+            activeTabId: filesTab.id,
+            tabs: [filesTab],
+          },
+        }),
+      );
+      const first = renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      first.unmount();
+      const { container } = renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).not.toBeNull();
+      for (const key of Object.keys(sessions))
+        expect(
+          JSON.parse(window.localStorage.getItem(storageKey) ?? '{}')[key],
+        ).toBeDefined();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectWorkspace?.('/tmp/other'),
+      );
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      const stored = JSON.parse(
+        window.localStorage.getItem(storageKey) ?? '{}',
+      );
+      for (const key of Object.keys(sessions))
+        expect(stored[key]).toBeDefined();
+      expect(
+        Object.keys(stored).filter((key) => key.startsWith('draft\0')),
+      ).toHaveLength(20);
+      expect(stored['draft\0/tmp/draft-0']).toBeUndefined();
+      expect(stored['draft\0/tmp/other']).toBeDefined();
+    });
+
+    it('does not consume a workspace draft when selecting an earlier standalone allocation', async () => {
+      setupDraft();
+      mockConnection.sessionContext = { kind: 'standalone' };
+      mockWorkspace.capabilities.features = ['standalone_sessions_v1'];
+      const { container, rerender } = renderApp({
+        rightPanel: { items: ['files'] },
+      });
+      await flush();
+      await submitFirstPrompt();
+      expect(mockConnection.sessionId).toBe('session-1');
+      mockConnection.sessionId = undefined;
+      mockConnection.sessionContext = undefined;
+      rerender();
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      expect(
+        JSON.parse(window.localStorage.getItem(storageKey) ?? '{}')[draftKey],
+      ).toBeDefined();
+      mockConnection.sessionId = 'session-1';
+      mockConnection.sessionContext = { kind: 'standalone' };
+      rerender();
+      await flush();
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).toBeNull();
+      expect(
+        JSON.parse(window.localStorage.getItem(storageKey) ?? '{}')[draftKey],
+      ).toBeDefined();
+    });
+
+    it('retains the Files panel width when the draft becomes the first session', async () => {
+      setupDraft();
+      testState.captureArtifactPanelOnly = true;
+      vi.spyOn(
+        HTMLElement.prototype,
+        'getBoundingClientRect',
+      ).mockImplementation(function () {
+        return this.dataset['testid'] === 'chat-pane-container'
+          ? new DOMRect(0, 0, 1200, 800)
+          : new DOMRect();
+      });
+      const { container } = renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      const width = testState.latestArtifactPanelProps?.panelWidth;
+      expect(width).toBeGreaterThanOrEqual(740);
+      await submitFirstPrompt();
+      expect(testState.latestArtifactPanelProps?.panelWidth).toBe(width);
+    });
+
+    it('retains fullscreen when the draft becomes the first session', async () => {
+      setupDraft();
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          v: 1,
+          [draftKey]: {
+            open: true,
+            activeTabId: filesTab.id,
+            tabs: [filesTab],
+          },
+        }),
+      );
+      testState.captureArtifactPanelOnly = true;
+      renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      act(() => testState.latestArtifactPanelProps?.onToggleFullscreen?.());
+      expect(testState.latestArtifactPanelProps?.fullscreen).toBe(true);
+      await submitFirstPrompt();
+      expect(testState.latestArtifactPanelProps?.fullscreen).toBe(true);
+    });
+  });
+
+  it('shows a reduced chat header on the empty new-task page', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'other', cwd: '/tmp/other', primary: false, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp({
+      header: {
+        showMobileAccess: true,
+        items: [
+          'title',
+          'environment',
+          'rightPanel',
+          'tokenUsage',
+          'contextUsage',
+        ],
+      },
+      rightPanel: { items: ['files', 'terminal', 'webPreview'] },
+    });
+    await flush();
+
+    const header = container.querySelector(
+      '[data-testid="chat-context-header"]',
+    );
+    expect(header).not.toBeNull();
+    // The composer below already names the workspace, so the chip is hidden.
+    expect(
+      header?.querySelector('[data-testid="chat-header-workspace"]'),
+    ).toBeNull();
+    // Session-scoped entries stay hidden until a session exists.
+    expect(header?.textContent).not.toContain('New session');
+    expect(
+      header?.querySelector(
+        'button[aria-label="Toggle environment information"]',
+      ),
+    ).toBeNull();
+    expect(
+      header?.querySelector('button[aria-label="Session token usage"]'),
+    ).toBeNull();
+    expect(
+      header?.querySelector('button[aria-label="Context Usage"]'),
+    ).toBeNull();
+    // Daemon- and workspace-level entries remain.
+    expect(
+      header?.querySelector('[aria-label="Mobile access"]'),
+    ).not.toBeNull();
+    expect(
+      header?.querySelector('button[aria-label="Toggle right panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('hides the new-task header when nothing workspace-scoped is available', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]'),
+    ).toBeNull();
+  });
+
+  it('offers only workspace-scoped right panel entries on the empty new-task page', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockConnection.capabilities.features = ['web_terminal'];
+    const { container } = renderApp({
+      rightPanel: {
+        items: [
+          'files',
+          'review',
+          'sideTask',
+          'terminal',
+          'webPreview',
+          'trajectory',
+        ],
+      },
+    });
+    await flush();
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+
+    const actions = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    );
+    const labels = actions.map((button) => button.textContent ?? '');
+    expect(labels.some((text) => text.includes('Files'))).toBe(true);
+    expect(labels.some((text) => text.includes('Web preview'))).toBe(true);
+    expect(labels.some((text) => text.includes('Terminal'))).toBe(true);
+    // Session-scoped entries stay hidden on the new-task page.
+    expect(labels.some((text) => text.includes('Changes'))).toBe(false);
+    expect(actions).toHaveLength(3);
+  });
+
+  it('keeps the empty new-task page headerless for custom header hosts', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    const renderChatHeader = vi.fn(() => (
+      <header data-testid="custom-chat-header">Custom session header</header>
+    ));
+    const { container } = renderApp({ renderChatHeader });
+    await flush();
+
+    expect(renderChatHeader).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="custom-chat-header"]'),
+    ).toBeNull();
+  });
+
+  it('migrates the new-task panel into the session the first prompt creates', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'project-workspace',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-1';
+      return { sessionId: 'session-1' };
+    });
+    const { container } = renderApp({ rightPanel: { items: ['files'] } });
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      )
+        .find((button) => button.textContent?.includes('Files'))
+        ?.click();
+    });
+    expect(
+      testState.latestArtifactPanelProps?.tabs?.some(
+        (tab: { kind: string }) => tab.kind === 'files',
+      ),
+    ).toBe(true);
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        editorCommit,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    // The panel carries into the created session...
+    expect(
+      testState.latestArtifactPanelProps?.tabs?.some(
+        (tab: { kind: string }) => tab.kind === 'files',
+      ),
+    ).toBe(true);
+    // ...and the workspace's draft entry is gone from storage.
+    const stored = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    );
+    expect(Object.keys(stored).some((key) => key.startsWith('draft'))).toBe(
+      false,
+    );
+    expect(Object.keys(stored).some((key) => key.endsWith('session-1'))).toBe(
+      true,
+    );
+  });
+
+  it('restores the new-task panel across a reload', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'project-workspace',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const first = renderApp({ rightPanel: { items: ['files'] } });
+    await flush();
+
+    act(() => {
+      first.container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      Array.from(
+        first.container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      )
+        .find((button) => button.textContent?.includes('Files'))
+        ?.click();
+    });
+    await flush();
+    first.unmount();
+
+    const second = renderApp({ rightPanel: { items: ['files'] } });
+    await flush();
+    await flush();
+
+    expect(
+      second.container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.tabs).toContainEqual(
+      expect.objectContaining({ kind: 'files' }),
+    );
+  });
+
+  it('keeps the new-task panel across a switch to another session and back', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'project-workspace',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['files'] },
+    });
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      )
+        .find((button) => button.textContent?.includes('Files'))
+        ?.click();
+    });
+    await flush();
+
+    // Switching to an existing session is not a materialization: the session
+    // shows its own (empty) panel and the draft stays stored.
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).toBeNull();
+
+    mockConnection.sessionId = undefined;
+    rerender();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.tabs).toContainEqual(
+      expect.objectContaining({ kind: 'files' }),
+    );
+  });
+
   it('opens environment information without restoring composer Git information', () => {
     mockConnection.gitBranch = 'main';
     mockConnection.gitStatus = {
