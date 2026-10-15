@@ -1,36 +1,33 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.anyString;
-
-import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiNodeEvidence;
-import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeProvisioner;
-import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiResourceGuard;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiNodeEvidence;
+import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiResourceGuard;
+import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
-import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal;
 import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceClient;
+import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal;
 import com.alibaba.qwen.code.runtimebroker.CsiPodDeletion;
-import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.net.URI;
@@ -47,20 +44,24 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class WorkspaceCsiNodeSourceStoreTest {
     private final ObjectMapper json = new ObjectMapper();
@@ -196,7 +197,9 @@ class WorkspaceCsiNodeSourceStoreTest {
         var expired = new AtomicBoolean();
         var nodeReads = new AtomicInteger();
         when(api.getCluster("nodes", configuration.node().name())).thenAnswer(call -> {
-            if (nodeReads.incrementAndGet() == 1) { return CompletableFuture.completedFuture(node); }
+            if (nodeReads.incrementAndGet() == 1) {
+                return CompletableFuture.completedFuture(node);
+            }
             nodeEntered.countDown();
             return nodeReply;
         });
@@ -289,15 +292,21 @@ class WorkspaceCsiNodeSourceStoreTest {
         var closed = new CountDownLatch(1);
         var nodeReads = new AtomicInteger();
         when(api.getCluster("nodes", configuration.node().name())).thenAnswer(call -> {
-            if (nodeReads.incrementAndGet() <= 2) { return CompletableFuture.completedFuture(node); }
+            if (nodeReads.incrementAndGet() <= 2) {
+                return CompletableFuture.completedFuture(node);
+            }
             entered.countDown();
             return nodeReply;
         });
         var evidence = spy(new WorkspaceCsiNodeEvidence(store, configuration.node(), registration, api, source, gateway,
                 "registry.example/worker@sha256:" + configuration.imageDigest()));
         doAnswer(call -> {
-            try { return call.callRealMethod(); }
-            finally { closed.countDown(); }
+            try {
+                return call.callRealMethod();
+            }
+            finally {
+                closed.countDown();
+            }
         }).when(evidence).bindAndOpen(any(), any(), any(), any());
         try (var provider = new WorkspaceCsiRuntimeProvisioner(new WorkspaceCsiReservationStore(jdbc, manager, json),
                 bindings, registration, api, guard, "registry.example/worker@sha256:" + configuration.imageDigest(),
@@ -439,7 +448,9 @@ class WorkspaceCsiNodeSourceStoreTest {
             }
             record.put("previous", previous);
             for (String field : new String[] {"begin", "publish", "stop"}) {
-                if (record.has(field)) { ((ObjectNode) record.path(field)).put("hash", hashes.get(record.path(field).path("sequence").longValue())); }
+                if (record.has(field)) {
+                    ((ObjectNode) record.path(field)).put("hash", hashes.get(record.path(field).path("sequence").longValue()));
+                }
             }
             record.remove("hash");
             previous = CsiNativeActivationProof.sha256(json.writeValueAsBytes(record));
@@ -734,7 +745,7 @@ class WorkspaceCsiNodeSourceStoreTest {
             case "request" -> ((ObjectNode) altered.path("attempts").get(0)).put("resourceVersion", "316");
             case "ordinal" -> ((ObjectNode) altered.path("attempts").get(0)).put("ordinal", 2);
             case "reply" -> ((ObjectNode) altered.path("attempts").get(0)).put("responseBase64", "");
-            case "trailing" -> { }
+            case "trailing" -> { /* Trailing bytes are appended after encoding. */ }
             default -> throw new AssertionError(fault);
         }
         byte[] bytes = fault.equals("trailing") ? (json.writeValueAsString(altered) + " {}").getBytes(StandardCharsets.UTF_8)
@@ -922,7 +933,7 @@ class WorkspaceCsiNodeSourceStoreTest {
                     .thenReturn(new CsiNodeSourceClient.Control(supplied, supplied.stream().head()));
             var metadata = Map.<String, Object>of("namespace", registration.namespace(), "name", configuration.scope().podName(),
                     "uid", podUid, "resourceVersion", "opaque:1");
-            assertThatThrownBy(() -> evidence.bindAndOpen(binding, reservation, Map.of("metadata", metadata, "spec", spec), () -> { }))
+            assertThatThrownBy(() -> evidence.bindAndOpen(binding, reservation, Map.of("metadata", metadata, "spec", spec), () -> {}))
                     .isInstanceOf(RuntimeBrokerException.class);
             assertThat(store.inspect(binding.getBindingId()).phase()).isEqualTo("ARMED");
             assertThat(store.inspect(binding.getBindingId()).bound()).isNull();

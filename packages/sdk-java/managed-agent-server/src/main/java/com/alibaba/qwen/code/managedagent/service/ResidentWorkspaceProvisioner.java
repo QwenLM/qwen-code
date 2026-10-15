@@ -15,14 +15,15 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.transaction.PlatformTransactionManager;
 
 final class ResidentWorkspaceProvisioner implements RuntimeProvisioner {
     private final ResidentWorkspaces residents;

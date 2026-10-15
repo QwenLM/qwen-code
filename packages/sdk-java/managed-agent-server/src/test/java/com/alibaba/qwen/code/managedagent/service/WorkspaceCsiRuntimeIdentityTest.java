@@ -1,35 +1,19 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doCallRealMethod;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.never;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeConstructionFixture;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeAccess;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeConstructionFixture;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
-import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
-import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -39,12 +23,26 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
-import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -59,19 +57,19 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.CannotCreateTransactionException;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class WorkspaceCsiRuntimeIdentityTest {
     private static final String IMAGE = "registry.example/worker@sha256:" + "a".repeat(64);
@@ -88,7 +86,7 @@ class WorkspaceCsiRuntimeIdentityTest {
     private Api api;
     private RuntimeTransport transport;
     private final AtomicInteger attestations = new AtomicInteger();
-    private Runnable afterAttestation = () -> { };
+    private Runnable afterAttestation = () -> {};
 
     @BeforeEach
     void setUp() {
@@ -1039,8 +1037,8 @@ class WorkspaceCsiRuntimeIdentityTest {
         private final Map<String, Map<String, Object>> objects = new LinkedHashMap<>();
         private int creates;
         private String loseReply;
-        private Consumer<Map<String, Object>> changeCreatedPod = ignored -> { };
-        private Consumer<Map<String, Object>> observePod = ignored -> { };
+        private Consumer<Map<String, Object>> changeCreatedPod = ignored -> {};
+        private Consumer<Map<String, Object>> observePod = ignored -> {};
         private CompletableFuture<Map<String, Object>> secretReply;
 
         private Api() {

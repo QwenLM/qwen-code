@@ -1,13 +1,18 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
-
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal;
 import com.alibaba.qwen.code.runtimebroker.CsiPodDeletion;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -17,12 +22,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
-import org.springframework.jdbc.core.ConnectionCallback;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DataSourceUtils;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
 
 /** Full original application authority and durable physical progress; no release permission. */
 public final class WorkspaceCsiPhysicalStore {

@@ -1,9 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.ResidentWorkspace;
 import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiResourceGuard.ProtectionIdentity;
@@ -27,8 +24,13 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
@@ -39,11 +41,10 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 class ResidentWorkspacesTest {
     private ManagedSchemaJdbcTemplate jdbc;
@@ -126,8 +127,13 @@ class ResidentWorkspacesTest {
 
     private boolean concurrentCreate(java.util.concurrent.CountDownLatch start, String key) throws InterruptedException {
         start.await();
-        try { create(key); return true; }
-        catch (RuntimeBrokerException refusal) { return false; }
+        try {
+            create(key);
+            return true;
+        }
+        catch (RuntimeBrokerException refusal) {
+            return false;
+        }
     }
 
     @Test
@@ -367,7 +373,9 @@ class ResidentWorkspacesTest {
             @Override public CompletionStage<Map<String, Object>> execute(RuntimeLease lease, RuntimeSession session, Map<String, Object> reference) { throw new AssertionError("No new execution"); }
             @Override public CompletionStage<Map<String, Object>> cancel(RuntimeLease lease, RuntimeSession session, Map<String, Object> reference) { throw new AssertionError("No cancellation"); }
             @Override public CompletionStage<Boolean> release(RuntimeLease lease, RuntimeSession session) {
-                releases.incrementAndGet(); return CompletableFuture.completedFuture(confirmed); }
+                releases.incrementAndGet();
+                return CompletableFuture.completedFuture(confirmed);
+            }
         };
         return new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(original.getRequest().getScope()), provider,
                 transport, bindings, runtimeSessions, executions, "closing", Duration.ofSeconds(30), Duration.ofSeconds(30));

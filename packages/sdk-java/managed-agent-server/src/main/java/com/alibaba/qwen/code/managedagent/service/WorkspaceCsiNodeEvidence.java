@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.digest;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.name;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.require;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.text;
-
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiNodeSourceStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
@@ -14,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal;
 import com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -21,6 +16,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.digest;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.name;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.require;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.text;
 
 /** One reviewed node, armed before CREATE and bound durably before the scheduler gate opens. */
 public final class WorkspaceCsiNodeEvidence implements AutoCloseable {

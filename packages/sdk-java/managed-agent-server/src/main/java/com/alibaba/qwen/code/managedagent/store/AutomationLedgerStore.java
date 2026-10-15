@@ -5,7 +5,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.R
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
-
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;

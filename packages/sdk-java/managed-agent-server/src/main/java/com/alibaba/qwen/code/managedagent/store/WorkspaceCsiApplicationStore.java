@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
-
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Snapshot;
 import com.alibaba.qwen.code.runtimebroker.CsiFileFinalizeProtocol;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
@@ -18,13 +16,20 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
-import java.sql.SQLException;
 import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -32,12 +37,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.springframework.jdbc.core.ConnectionCallback;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceUtils;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
 
 /** Original Session application retirement; RPCs never hold SQL locks. */
 public final class WorkspaceCsiApplicationStore {

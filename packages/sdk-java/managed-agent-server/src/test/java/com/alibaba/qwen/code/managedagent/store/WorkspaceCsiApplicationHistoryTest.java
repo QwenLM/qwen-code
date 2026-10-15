@@ -1,18 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verifyNoInteractions;
-
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Proxy;
-import java.sql.Connection;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -20,6 +10,17 @@ import org.springframework.jdbc.datasource.AbstractDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class WorkspaceCsiApplicationHistoryTest {
     @Test

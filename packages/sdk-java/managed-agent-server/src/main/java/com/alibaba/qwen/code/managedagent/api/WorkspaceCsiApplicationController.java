@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationStore;
-import java.util.Map;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,6 +12,8 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Map;
 
 @RestController
 @ConditionalOnProperty(prefix = "qwen.managed-agent", name = {"session-store.enabled", "runtime-broker.enabled"}, havingValue = "true")

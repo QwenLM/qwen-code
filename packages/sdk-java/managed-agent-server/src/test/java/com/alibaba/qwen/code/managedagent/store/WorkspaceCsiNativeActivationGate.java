@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -24,19 +21,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.sql.Connection;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.List;
-import java.util.Map;
-import java.util.Base64;
-import java.util.TreeMap;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
@@ -46,6 +30,23 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Explicit SQL integration gate; requires built Node native producer modules. */
 class WorkspaceCsiNativeActivationGate {

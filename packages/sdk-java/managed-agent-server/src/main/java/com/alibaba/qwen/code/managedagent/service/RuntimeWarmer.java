@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+
 import java.util.concurrent.CompletionStage;
 
 public interface RuntimeWarmer {

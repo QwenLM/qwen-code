@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -21,14 +18,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.net.URI;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -38,6 +27,18 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.net.URI;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceCsiSessionGuardTest {
     private static final String TOKEN = "csi-original-writer-token-for-test";

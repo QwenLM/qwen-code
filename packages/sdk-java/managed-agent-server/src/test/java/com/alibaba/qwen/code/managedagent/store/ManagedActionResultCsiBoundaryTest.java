@@ -1,10 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verifyNoInteractions;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -12,13 +7,6 @@ import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
-import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,6 +16,19 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class ManagedActionResultCsiBoundaryTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -173,7 +174,6 @@ class ManagedActionResultCsiBoundaryTest {
                         + " retirement_operation_id, retirement_generation, retired_at, recovery_protected, created_at, updated_at)"
                         + " VALUES (?, ?, 'tenant', ?, 'CONTROL', 'retirement', 1, 0, FALSE, 0, 0)", ToolPublicationRetentionStore.hash("tenant"),
                         ToolPublicationRetentionStore.hash(session), session);
-
             }
             var conflicting = new ManagedToolResultStore.Source(source.id(), source.tenantId(), source.workspaceId(),
                     "foreign", source.executionCallId(), 1, 1, source.outcomeRef(), source.resultRef(),

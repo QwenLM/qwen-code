@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map;
-
 import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiResourceGuard;
 import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceClient;
 import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal;
@@ -10,12 +7,16 @@ import com.alibaba.qwen.code.runtimebroker.CsiPodDeletion;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map;
 
 /** Fixed original-source operations and normal Pod deletion, outside every SQL transaction. */
 public final class WorkspaceCsiPhysicalCoordinator {

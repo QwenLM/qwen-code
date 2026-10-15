@@ -1,10 +1,16 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.AbstractDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
@@ -19,12 +25,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import javax.sql.DataSource;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.AbstractDataSource;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Real InnoDB snapshot qualification; the fixture journal is SQL mapping data only. */
 @Timeout(60)

@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
-
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Membership;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Row;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Snapshot;
@@ -9,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage;
 import com.fasterxml.jackson.databind.JsonNode;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -17,6 +16,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
 
 /** Exact declared stage deltas over the once-saved SETTLING image. */
 final class WorkspaceCsiApplicationImage {

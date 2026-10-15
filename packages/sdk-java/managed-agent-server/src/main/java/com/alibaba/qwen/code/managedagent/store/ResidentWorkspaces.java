@@ -6,9 +6,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.util.HashSet;
 import java.util.List;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 /** Explicit administrator selection; a CSI registration alone never enables public execution. */
 public final class ResidentWorkspaces {

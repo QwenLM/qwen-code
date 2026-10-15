@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.daemon.DaemonException;
 import com.alibaba.qwen.code.managedagent.AutomationHarnessFake;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -21,16 +18,6 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,6 +28,19 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.UnexpectedRollbackException;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * H6b: the scanner and the service against the real ledger on H2 and the

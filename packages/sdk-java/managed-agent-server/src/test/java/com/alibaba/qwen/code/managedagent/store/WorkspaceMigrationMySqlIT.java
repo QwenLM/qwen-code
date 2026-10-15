@@ -1,21 +1,19 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -30,8 +28,6 @@ import java.sql.Connection;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -39,11 +35,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceMigrationMySqlIT {
     @TempDir Path temp;
@@ -135,7 +129,7 @@ class WorkspaceMigrationMySqlIT {
         transaction.setTimeout(15);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> { },
+        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
         var original = create(store, transaction, "migrating", "original");
         var other = cwd ? create(store, transaction, "unrelated", "other") : null;
@@ -157,7 +151,7 @@ class WorkspaceMigrationMySqlIT {
                 });
             }
         };
-        var waitingStore = new ManagedAgentStore(waitingJdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> { },
+        var waitingStore = new ManagedAgentStore(waitingJdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(waitingJdbc), properties);
         try (var migration = data.getConnection(); var pool = Executors.newFixedThreadPool(2)) {
             migration.setAutoCommit(false);

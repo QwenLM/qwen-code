@@ -11,6 +11,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import javax.sql.DataSource;
+
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -20,15 +24,13 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.TreeSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
-import javax.sql.DataSource;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /** A private component snapshot; it cannot authorize settlement or release. */
 public final class WorkspaceCsiCheckpointSnapshotStore {

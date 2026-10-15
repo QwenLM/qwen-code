@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -11,6 +8,19 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -25,18 +35,9 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DelegatingDataSource;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedSessionNativeReadTest {
     private static final String TOKEN = "csi-original-writer-token-for-test";
@@ -92,7 +93,7 @@ class ManagedSessionNativeReadTest {
 
     @AfterEach
     void closeOwnedDatabase() {
-        source.onFetch = () -> { };
+        source.onFetch = () -> {};
         source.closeFailure = "";
         jdbc.execute("SHUTDOWN");
     }
@@ -341,7 +342,7 @@ class ManagedSessionNativeReadTest {
     }
 
     private static final class FaultSource extends DelegatingDataSource {
-        private Runnable onFetch = () -> { };
+        private Runnable onFetch = () -> {};
         private String closeFailure = "";
 
         private FaultSource(DriverManagerDataSource source) {

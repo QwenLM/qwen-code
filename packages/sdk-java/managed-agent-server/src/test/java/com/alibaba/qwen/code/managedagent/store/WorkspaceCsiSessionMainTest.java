@@ -1,15 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -24,6 +14,18 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DynamicTest;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -40,17 +42,16 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DynamicTest;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestFactory;
-import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class WorkspaceCsiSessionMainTest {
     private final ObjectMapper json = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
@@ -222,8 +223,14 @@ class WorkspaceCsiSessionMainTest {
     void concurrentCreatorsCommitOneOriginalSession() throws Exception {
         var gate = new CyclicBarrier(2);
         try (var executor = Executors.newFixedThreadPool(2)) {
-            var one = executor.submit(() -> { gate.await(); return create(request("race")); });
-            var two = executor.submit(() -> { gate.await(); return create(request("race")); });
+            var one = executor.submit(() -> {
+                gate.await();
+                return create(request("race"));
+            });
+            var two = executor.submit(() -> {
+                gate.await();
+                return create(request("race"));
+            });
             var first = one.get(10, TimeUnit.SECONDS);
             var second = two.get(10, TimeUnit.SECONDS);
             assertThat(first.sessionId()).isEqualTo(second.sessionId());
@@ -506,6 +513,10 @@ class WorkspaceCsiSessionMainTest {
             }
             if (type == Map.class) {
                 return Map.of();
+            }
+            if (type == StoreModels.RenameDelivery.class) {
+                return new StoreModels.RenameDelivery(
+                        "tenant", sessionId, "unused", "title", 1, 0);
             }
             throw new IllegalStateException("Unsupported mutation parameter " + type);
         }).toArray();

@@ -1,17 +1,18 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.closed;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
-
 import com.alibaba.qwen.code.runtimebroker.CsiFileFinalizeProtocol;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.fasterxml.jackson.databind.JsonNode;
+
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.closed;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
 
 final class WorkspaceCsiApplicationWorkerMatch {
     private WorkspaceCsiApplicationWorkerMatch() {

@@ -1,23 +1,29 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
-
+import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Membership;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Row;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Snapshot;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Membership;
 import com.alibaba.qwen.code.runtimebroker.CsiFileFinalizeProtocol;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
-import com.alibaba.qwen.code.runtimebroker.JdbcCsiExecutionAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiExecutionAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Arrays;
@@ -27,13 +33,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
-import org.springframework.jdbc.core.ConnectionCallback;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceUtils;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionDefinition;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
 
 /** Application semantics only; reference closure and qualified physical outcome remain separate. */
 final class WorkspaceCsiApplicationHistory {

@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -13,24 +10,28 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Proxy;
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.sql.Connection;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.Map;
-import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceCsiApplicationInventoryTest {
     private DriverManagerDataSource source;
@@ -320,7 +321,10 @@ class WorkspaceCsiApplicationInventoryTest {
             try {
                 // This explicit hook tests the narrow SQL component, not a validated frozen owner.
                 var read = new WorkspaceCsiApplicationInventory.HistoricalScan(observedRead(target, queries), System.nanoTime(),
-                        (scan, carrier) -> { calls.incrementAndGet(); throw new AssertionError("Nested carrier scan"); });
+                        (scan, carrier) -> {
+                            calls.incrementAndGet();
+                            throw new AssertionError("Nested carrier scan");
+                        });
                 assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.auditForeignOwner(read, owner, original, intent))
                         .isInstanceOf(IllegalArgumentException.class);
                 assertThat(queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_"))).isEmpty();
@@ -591,7 +595,9 @@ class WorkspaceCsiApplicationInventoryTest {
                     ((com.fasterxml.jackson.databind.node.ObjectNode) record.path("runtime")).put("podUid", scope.path("podUid").textValue());
                 }
             }
-            if (record.has("intentHash")) { record.put("intentHash", sha(plan)); }
+            if (record.has("intentHash")) {
+                record.put("intentHash", sha(plan));
+            }
             record.put("previous", previous);
             for (String field : List.of("begin", "publish", "stop")) {
                 if (record.has(field)) {
@@ -1894,7 +1900,9 @@ class WorkspaceCsiApplicationInventoryTest {
                 .put("sha256", contentDigest).put("storage_kind", "MYSQL_INLINE").put("resource_state", "REFERENCED")
                 .put("started_at", 1).put("delivery_expires_at", expires);
         String requestDigest = sha(value.toString().getBytes(StandardCharsets.UTF_8));
-        if (!"OPEN".equals(state)) { value.put("ended_at", ended).put("outcome_code", outcome); }
+        if (!"OPEN".equals(state)) {
+            value.put("ended_at", ended).put("outcome_code", outcome);
+        }
         jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
                         + "idempotency_key,idempotency_digest,request_digest,operation,state,session_id,result_json,created_at,updated_at)"
                         + " VALUES (?,'SESSION_COMMAND',?,'tenant','SESSION',?,?,?,?,?,'CSI_RESOURCE_READ',?,?,?,1,?)",

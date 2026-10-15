@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiNodeSourceStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
@@ -16,15 +10,22 @@ import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
 import java.math.BigInteger;
 import java.net.URI;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class WorkspaceCsiNodeEvidenceTest {
     private static final String NODE_UID = "11111111-1111-4111-8111-111111111111";
@@ -40,7 +41,7 @@ class WorkspaceCsiNodeEvidenceTest {
         when(api.getCluster("nodes", "owned-node")).thenReturn(CompletableFuture.completedFuture(node(mutation)));
         var evidence = evidence();
         assertThatThrownBy(() -> evidence.arm(mock(RuntimeBindingRecord.class),
-                mock(WorkspaceCsiReservationStore.Reservation.class), () -> { })).isInstanceOf(RuntimeBrokerException.class);
+                mock(WorkspaceCsiReservationStore.Reservation.class), () -> {})).isInstanceOf(RuntimeBrokerException.class);
         verify(api).getCluster("nodes", "owned-node");
         verifyNoInteractions(source, gateway, store);
     }
@@ -57,7 +58,7 @@ class WorkspaceCsiNodeEvidenceTest {
         when(original.getProvisionSeed()).thenReturn(RuntimeProvisionSeed.create(NODE_UID, 1));
         var reservation = mock(WorkspaceCsiReservationStore.Reservation.class);
         when(reservation.reservationId()).thenReturn("33333333-3333-4333-8333-333333333333");
-        assertThatThrownBy(() -> evidence().arm(original, reservation, () -> { })).isSameAs(nextStage);
+        assertThatThrownBy(() -> evidence().arm(original, reservation, () -> {})).isSameAs(nextStage);
         verify(api).getCluster("nodes", "owned-node");
         verify(api).getCluster("runtimeclasses", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS);
         verify(source).observeEvidence();
@@ -71,7 +72,7 @@ class WorkspaceCsiNodeEvidenceTest {
         when(api.getCluster("runtimeclasses", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS))
                 .thenReturn(CompletableFuture.completedFuture(runtimeClass(mutation)));
         assertThatThrownBy(() -> evidence().arm(mock(RuntimeBindingRecord.class),
-                mock(WorkspaceCsiReservationStore.Reservation.class), () -> { })).isInstanceOf(RuntimeBrokerException.class);
+                mock(WorkspaceCsiReservationStore.Reservation.class), () -> {})).isInstanceOf(RuntimeBrokerException.class);
         verifyNoInteractions(source, gateway, store);
     }
 
@@ -93,7 +94,7 @@ class WorkspaceCsiNodeEvidenceTest {
             case "overhead" -> runtime.put("overhead", Map.of());
             case "scheduling" -> runtime.put("scheduling", Map.of());
             case "extra" -> runtime.put("extra", true);
-            case "correct" -> { }
+            case "correct" -> { /* Leave the control input unchanged. */ }
             default -> throw new AssertionError(mutation);
         }
         return runtime;
@@ -118,7 +119,7 @@ class WorkspaceCsiNodeEvidenceTest {
             case "missing-boot" -> info.clear();
             case "empty" -> info.put("bootID", "");
             case "not-string" -> info.put("bootID", 2);
-            case "correct", "missing-info" -> { }
+            case "correct", "missing-info" -> { /* These controls need no mutation. */ }
             default -> throw new AssertionError(mutation);
         }
         var status = new LinkedHashMap<String, Object>(Map.of("conditions", List.of(Map.of("type", "Ready", "status", "True"))));

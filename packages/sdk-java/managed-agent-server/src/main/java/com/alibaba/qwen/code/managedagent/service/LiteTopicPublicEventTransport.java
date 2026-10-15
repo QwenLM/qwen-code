@@ -5,6 +5,12 @@ import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.rocketmq.client.apis.ClientServiceProvider;
+import org.apache.rocketmq.client.apis.message.Message;
+import org.apache.rocketmq.client.apis.producer.Producer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.Closeable;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -18,11 +24,6 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
-import org.apache.rocketmq.client.apis.ClientServiceProvider;
-import org.apache.rocketmq.client.apis.message.Message;
-import org.apache.rocketmq.client.apis.producer.Producer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Publishes the public {@code managed_agent_event} stream as

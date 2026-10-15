@@ -1,17 +1,18 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
-
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Membership;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Row;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Snapshot;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Table;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
 
 /** Immutable original read set, independent of the shared holder and unrelated owners. */
 final class WorkspaceCsiPhysicalHistoryImage {

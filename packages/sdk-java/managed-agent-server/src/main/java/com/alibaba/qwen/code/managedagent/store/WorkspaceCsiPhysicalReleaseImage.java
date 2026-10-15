@@ -1,17 +1,18 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
-
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Row;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Snapshot;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Table;
 import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
 
 /** Expected ownership delta only; neither a physical receipt nor release authority. */
 final class WorkspaceCsiPhysicalReleaseImage {

@@ -24,6 +24,12 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.support.AbstractBeanDefinition;
+import org.springframework.boot.autoconfigure.flyway.FlywayMigrationInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
@@ -32,11 +38,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.springframework.beans.factory.support.AbstractBeanDefinition;
-import org.springframework.boot.autoconfigure.flyway.FlywayMigrationInitializer;
-import org.springframework.context.ConfigurableApplicationContext;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.transaction.PlatformTransactionManager;
 
 /** Test placement only: boot 2 and an ordinary directory; never a CSI Pod or mount. */
 public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
@@ -67,21 +68,33 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
         }
         String r = p + "resident-workspaces[0].";
         var values = new java.util.LinkedHashMap<String, String>();
-        values.put("workspace-id", "workspace-0"); values.put("workspace-generation", "1");
-        values.put("registration.tenant-id", tenant); values.put("registration.storage-id", "storage-0");
-        values.put("registration.cluster-domain", "ordinary-fixture"); values.put("registration.namespace", "fixture");
-        values.put("registration.pvc-name", "claim"); values.put("registration.pvc-uid", "fixture-pvc");
-        values.put("registration.pv-name", "volume"); values.put("registration.pv-uid", "fixture-pv");
-        values.put("registration.driver", "fixture.csi.example"); values.put("registration.volume-handle", "fixture-handle");
-        values.put("registration.backend-domain", "fixture-backend"); values.put("registration.disk-serial", "fixture-serial");
-        values.put("registration.mount-root", root.toString()); values.put("registration.revision", "1");
+        values.put("workspace-id", "workspace-0");
+        values.put("workspace-generation", "1");
+        values.put("registration.tenant-id", tenant);
+        values.put("registration.storage-id", "storage-0");
+        values.put("registration.cluster-domain", "ordinary-fixture");
+        values.put("registration.namespace", "fixture");
+        values.put("registration.pvc-name", "claim");
+        values.put("registration.pvc-uid", "fixture-pvc");
+        values.put("registration.pv-name", "volume");
+        values.put("registration.pv-uid", "fixture-pv");
+        values.put("registration.driver", "fixture.csi.example");
+        values.put("registration.volume-handle", "fixture-handle");
+        values.put("registration.backend-domain", "fixture-backend");
+        values.put("registration.disk-serial", "fixture-serial");
+        values.put("registration.mount-root", root.toString());
+        values.put("registration.revision", "1");
         values.put("protection.namespace-uid", "fixture-namespace");
-        values.put("protection.policy-name", "fixture-policy"); values.put("protection.policy-uid", "fixture-policy-uid");
-        values.put("protection.policy-generation", "1"); values.put("protection.binding-name", "fixture-binding");
-        values.put("protection.binding-uid", "fixture-binding-uid"); values.put("protection.binding-generation", "1");
+        values.put("protection.policy-name", "fixture-policy");
+        values.put("protection.policy-uid", "fixture-policy-uid");
+        values.put("protection.policy-generation", "1");
+        values.put("protection.binding-name", "fixture-binding");
+        values.put("protection.binding-uid", "fixture-binding-uid");
+        values.put("protection.binding-generation", "1");
         values.put("image", "worker@sha256:" + "a".repeat(64));
         values.put("artifacts", "");
-        values.put("command[0]", "node"); values.put("command[1]", "/fixture-not-consumed-cli.js");
+        values.put("command[0]", "node");
+        values.put("command[1]", "/fixture-not-consumed-cli.js");
         values.forEach((key, value) -> arguments.add(r + key + "=" + value));
     }
 
@@ -98,7 +111,9 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
                 var jdbc = factory.getBean(JdbcTemplate.class);
                 var manager = factory.getBean(PlatformTransactionManager.class);
                 var bindings = (JdbcRuntimeBindingRepository) factory.getBean(RuntimeBindingRepository.class);
-                if (!bindings.usesDataSource(jdbc.getDataSource())) throw new IllegalStateException("Original DataSource required");
+                if (!bindings.usesDataSource(jdbc.getDataSource())) {
+                    throw new IllegalStateException("Original DataSource required");
+                }
                 var fixture = new ResidentHostedRuntimeFixture(properties, jdbc, manager, bindings, command, processDirectory);
                 factory.registerSingleton("residentHostedFixture", fixture);
                 return new EmbeddedRuntimeBroker(factory.getBean(AgentStateStore.class), properties, bindings,
@@ -113,8 +128,12 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
             PlatformTransactionManager manager, JdbcRuntimeBindingRepository bindings,
             List<String> command, Path processDirectory) {
         var configured = properties.getRuntimeBroker().getResidentWorkspaces();
-        if (configured.size() != 1) throw new IllegalArgumentException("One fixture Workspace required");
-        mapping = configured.getFirst(); residents = new ResidentWorkspaces(configured); this.bindings = bindings;
+        if (configured.size() != 1) {
+            throw new IllegalArgumentException("One fixture Workspace required");
+        }
+        mapping = configured.getFirst();
+        residents = new ResidentWorkspaces(configured);
+        this.bindings = bindings;
         storage = new WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
         storage.register(mapping.registration());
         ResidentWorkspaces.requireRegistration(jdbc, mapping);
@@ -123,25 +142,44 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
 
     public static com.fasterxml.jackson.databind.JsonNode snapshot(JdbcTemplate jdbc, String sql, Object... args) {
         var rows = jdbc.queryForList(sql, args);
-        for (var row : rows) row.replaceAll((key, value) -> {
-            try {
-                if (value instanceof byte[] bytes) return Map.of("type", "bytes", "value", java.util.Base64.getEncoder().encodeToString(bytes));
-                if (value instanceof java.sql.Blob blob) return Map.of("type", "blob", "value", java.util.Base64.getEncoder().encodeToString(blob.getBytes(1, Math.toIntExact(blob.length()))));
-                if (value instanceof java.sql.Clob clob) return Map.of("type", "clob", "value", clob.getSubString(1, Math.toIntExact(clob.length())));
-                if (value instanceof java.sql.Timestamp timestamp) return Map.of("type", "timestamp", "value", timestamp.toLocalDateTime().toString(), "nanos", timestamp.getNanos());
-                if (value instanceof java.math.BigDecimal decimal) return Map.of("type", "decimal", "value", decimal.toPlainString());
-                if (value instanceof java.time.temporal.TemporalAccessor || value instanceof java.util.Date)
-                    return Map.of("type", value.getClass().getName(), "value", value.toString());
-                if (value == null || value instanceof String || value instanceof Number || value instanceof Boolean) return value;
-                throw new IllegalArgumentException("Unexpected fixture JDBC type " + value.getClass().getName());
-            } catch (java.sql.SQLException error) { throw new IllegalStateException(error); }
-        });
+        for (var row : rows) {
+            row.replaceAll((key, value) -> {
+                try {
+                    if (value instanceof byte[] bytes) {
+                        return Map.of("type", "bytes", "value", java.util.Base64.getEncoder().encodeToString(bytes));
+                    }
+                    if (value instanceof java.sql.Blob blob) {
+                        return Map.of("type", "blob", "value", java.util.Base64.getEncoder().encodeToString(blob.getBytes(1, Math.toIntExact(blob.length()))));
+                    }
+                    if (value instanceof java.sql.Clob clob) {
+                        return Map.of("type", "clob", "value", clob.getSubString(1, Math.toIntExact(clob.length())));
+                    }
+                    if (value instanceof java.sql.Timestamp timestamp) {
+                        return Map.of("type", "timestamp", "value", timestamp.toLocalDateTime().toString(), "nanos", timestamp.getNanos());
+                    }
+                    if (value instanceof java.math.BigDecimal decimal) {
+                        return Map.of("type", "decimal", "value", decimal.toPlainString());
+                    }
+                    if (value instanceof java.time.temporal.TemporalAccessor || value instanceof java.util.Date) {
+                        return Map.of("type", value.getClass().getName(), "value", value.toString());
+                    }
+                    if (value == null || value instanceof String || value instanceof Number || value instanceof Boolean) {
+                        return value;
+                    }
+                    throw new IllegalArgumentException("Unexpected fixture JDBC type " + value.getClass().getName());
+                } catch (java.sql.SQLException error) {
+                    throw new IllegalStateException(error);
+                }
+            });
+        }
         return new ObjectMapper().valueToTree(rows);
     }
 
     public static void assertConflict(Runnable call) {
         Throwable error = org.assertj.core.api.Assertions.catchThrowable(call::run);
-        while (error instanceof java.util.concurrent.CompletionException && error.getCause() != null) error = error.getCause();
+        while (error instanceof java.util.concurrent.CompletionException && error.getCause() != null) {
+            error = error.getCause();
+        }
         org.assertj.core.api.Assertions.assertThat(error).isInstanceOf(RuntimeBrokerException.class);
         org.assertj.core.api.Assertions.assertThat(((RuntimeBrokerException) error).getStatusCode()).isEqualTo(409);
     }
@@ -149,7 +187,9 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
     @Override public String kind() { return "kubernetes-workspace"; }
     @Override public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
         residents.require(scope);
-        if (isolationKey != null) throw new IllegalArgumentException("Shared fixture has no isolation key");
+        if (isolationKey != null) {
+            throw new IllegalArgumentException("Shared fixture has no isolation key");
+        }
         return new RuntimeProvisionRequest(scope, null, kind(), mapping.registration().storageId());
     }
     @Override public void reserveResource(RuntimeBindingRecord original) {
@@ -164,12 +204,15 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
                 || request != null && (!request.equals(actual) || !seed.equals(actualSeed))) {
             throw new IllegalStateException("Fixture cannot replace its original request or seed");
         }
-        request = actual; seed = actualSeed;
+        request = actual;
+        seed = actualSeed;
     }
     @Override public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle knownHandle) {
         remember(request, seed);
-        if (knownHandle != null && !handle.equals(knownHandle)) throw new IllegalStateException("Fixture handle differs");
+        if (knownHandle != null && !handle.equals(knownHandle)) {
+            throw new IllegalStateException("Fixture handle differs");
+        }
         return CompletableFuture.completedFuture(handle);
     }
     @Override public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
@@ -179,7 +222,10 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
         remember(request, seed);
         if (started == null) {
             starts.incrementAndGet();
-            started = delegate.provision(request, seed).thenApply(actual -> { lease = actual; return actual; });
+            started = delegate.provision(request, seed).thenApply(actual -> {
+                lease = actual;
+                return actual;
+            });
         }
         return started;
     }
@@ -193,7 +239,9 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
                 lease.getEndpoint(), lease.getRuntimeInstanceId(), lease.getLeaseId(), lease.getEpoch()));
     }
     @Override public CompletionStage<Void> confirm(RuntimeProvisionRequest request, RuntimeLease lease) {
-        if (!this.request.equals(request) || !sameLease(this.lease, lease)) throw new IllegalStateException("Original lease required");
+        if (!this.request.equals(request) || !sameLease(this.lease, lease)) {
+            throw new IllegalStateException("Original lease required");
+        }
         return delegate.confirm(request, lease);
     }
     @Override public boolean isUsable(RuntimeLease lease) { return sameLease(this.lease, lease) && delegate.isUsable(lease); }

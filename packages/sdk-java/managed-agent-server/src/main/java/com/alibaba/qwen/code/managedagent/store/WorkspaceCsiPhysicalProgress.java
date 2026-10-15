@@ -1,20 +1,21 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
-
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal;
 import com.alibaba.qwen.code.runtimebroker.CsiPodDeletion;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.nio.ByteBuffer;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJson.require;
 
 /** Durable progress only. UNPUBLISHED is not a qualified physical release. */
 final class WorkspaceCsiPhysicalProgress {

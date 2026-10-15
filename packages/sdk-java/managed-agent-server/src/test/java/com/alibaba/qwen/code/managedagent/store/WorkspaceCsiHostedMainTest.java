@@ -1,13 +1,12 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -21,8 +20,10 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 class WorkspaceCsiHostedMainTest {
     @Test

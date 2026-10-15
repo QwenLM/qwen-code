@@ -1,15 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import java.time.Duration;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -18,6 +14,11 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 /** One bounded page per tick; storage deletion never holds a database transaction. */
 public final class ToolPublicationCollector {
