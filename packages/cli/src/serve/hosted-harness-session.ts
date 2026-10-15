@@ -439,11 +439,16 @@ interface HostedSession {
   /** The settled Turn's file-history retirement failed after the terminal
    * record landed; the next settled /prompt or close retires it. */
   fileHistoryOwed?: string;
-  /** #13856: promptIds of turns whose Runtime Session ended held by a
-   * live background run (the designed hold — the broker refused the
-   * routine release with `runtime_session_held` and stopped nothing).
-   * The Session's close drain-releases each; a later turn never re-uses
-   * the id, so a held Runtime is owed exactly until the close. */
+  /** #13856: two key kinds coexist in this set, both strings. The
+   * in-process hold sites add promptIds of turns whose Runtime Session
+   * ended held by a live background run (the designed hold — the broker
+   * refused the routine release with `runtime_session_held` and stopped
+   * nothing); the load additionally restores Runtime Session ids from the
+   * Broker's durable hold rows (#13930 R1-2), which never passed through a
+   * refused release. The Session's close drain-releases each; a later turn
+   * never re-uses the id, so a held Runtime is owed exactly until the
+   * close. `hostedRuntimeSessionId` is idempotent, so the close's drain
+   * maps either kind back to itself. */
   readonly heldRuntimeTurns: Set<string>;
 }
 
@@ -5536,6 +5541,37 @@ export function registerHostedHarnessSessionRoutes(
           );
         }
       }
+      // #13930 R1-2: the load restores the close's held-Runtime drain
+      // obligation from the Broker's durable hold rows — the in-memory set
+      // a restart emptied. Restore-only: the answer adds entries and never
+      // discharges one, and a failed query loads without the obligation
+      // rather than failing the load (the Workspace-level cascade stays
+      // the backstop). The Broker answers Runtime Session ids, and
+      // hostedRuntimeSessionId is idempotent, so the close's drain maps a
+      // restored entry back to itself. The set's only reader is the close's
+      // drain loop, which sits in the v1-only close block: a lifecycle-v2
+      // Session would restore an obligation its close never drains, so the
+      // restore stays off that load (#13986 R1-3).
+      if (
+        !create &&
+        brokerOptions &&
+        isHostedWorkspaceProfile(session.toolProfile) &&
+        session.lifecycleProtocolVersion !== 2
+      ) {
+        try {
+          const held = await new HostedWorkspaceBroker(
+            brokerOptions,
+            session.managed.authority.sessionHeader.sessionKey,
+            sessionId,
+          ).activeHoldRuntimeSessionIds();
+          for (const runtimeSessionId of held)
+            session.heldRuntimeTurns.add(runtimeSessionId);
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} could not restore its held Runtimes: ${sanitizeDaemonLogLine(String(cause))}`,
+          );
+        }
+      }
       sessions.set(sessionId, session);
       // H6c: a settle → settle-revision crash window closes here. It runs
       // beside the pump's first turn: the funnel serializes its commits and
@@ -9465,6 +9501,10 @@ export function registerHostedHarnessSessionRoutes(
         // them. A drain that cannot prove a stop fails the close honestly
         // below: the Session stays reopenable and nothing claims settled.
         let heldDrainFailed: unknown = null;
+        // A drain the restarted Broker declared unprovable (503 below) is
+        // tolerated so the close is not wedged, but it is not a proven stop
+        // either — the loops below must still settle runtime_lost.
+        let heldDrainUnproven = false;
         if (brokerOptions) {
           for (const heldTurn of [...session.heldRuntimeTurns]) {
             try {
@@ -9488,6 +9528,27 @@ export function registerHostedHarnessSessionRoutes(
                 session.heldRuntimeTurns.delete(heldTurn);
                 continue;
               }
+              // A Broker that restarted beside the Harness no longer holds
+              // the Session in memory and cannot prove its release: it
+              // answers the declared-retryable 503
+              // runtime_reconciliation_required, and the Workspace-level
+              // cascade owns the Runtime from there. Tolerate the answer so
+              // the close still retires the Session — otherwise every retry
+              // re-seeds the same id and the Session can never close — while
+              // the unproven drain keeps the loops off a stop_requested
+              // settle (#13986 R2-1).
+              if (
+                cause instanceof HostedWorkspaceBrokerRejection &&
+                cause.status === 503 &&
+                cause.code === 'runtime_reconciliation_required'
+              ) {
+                session.heldRuntimeTurns.delete(heldTurn);
+                heldDrainUnproven = true;
+                writeStderrLineSafe(
+                  `qwen serve: Hosted Harness drain of held Runtime ${heldTurn} deferred to the Workspace cascade: ${String(cause)}`,
+                );
+                continue;
+              }
               heldDrainFailed ??= cause;
               writeStderrLineSafe(
                 `qwen serve: Hosted Harness drain of held Runtime ${heldTurn} failed: ${String(cause)}`,
@@ -9505,7 +9566,7 @@ export function registerHostedHarnessSessionRoutes(
         // the loop ends, and the record keeps an honest rebuild path. A
         // failed held-Runtime drain is the same unproven shape.
         const stopSettle =
-          session.blocked || heldDrainFailed !== null
+          session.blocked || heldDrainFailed !== null || heldDrainUnproven
             ? 'runtime_lost'
             : 'stop_requested';
         for (const loop of session.shell?.monitorLoops?.values() ?? [])

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -224,7 +226,7 @@ class JdbcPlacementGuardTest {
             long attested = durableReady ? Math.max(1, attestation) : attestation;
             if (handle != null) {
                 execute("UPDATE ma_runtime_binding SET resource_handle_version = ?, resource_handle_json = ?, "
-                                + "last_reconciled_at = CURRENT_TIMESTAMP WHERE binding_id = ?",
+                                + "last_reconciled_at = " + ManagedSchemaTime.SQL_NOW + " WHERE binding_id = ?",
                         handle.getVersion(), handle.toJson(), created.getBindingId());
             }
             execute("UPDATE ma_runtime_binding SET binding_state = ?, attestation_generation = ? WHERE binding_id = ?",

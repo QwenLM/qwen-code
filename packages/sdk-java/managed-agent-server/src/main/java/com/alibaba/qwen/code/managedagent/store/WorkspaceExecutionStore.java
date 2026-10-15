@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -377,8 +378,7 @@ public class WorkspaceExecutionStore {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             String key = storageKey(binding);
             WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
-            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ?"
-                    + " AND operation_kind = 'CHILD_WORKSPACE' AND claim_until > CURRENT_TIMESTAMP(6) FOR UPDATE",
+            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CHILD_WORKSPACE' AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE",
                     Long.class, WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, binding.getTenantId(), maintenanceId));
             if (generations.size() != 1 || generations.getFirst() != claimGeneration) {
                 throw unavailable();
@@ -452,10 +452,9 @@ public class WorkspaceExecutionStore {
                         saved.getState().name().equals(row.getString("binding_state")) && row.getBoolean("drain_requested")
                         && saved.getOperationOwner().equals(row.getString("operation_owner"))
                         && saved.getOperationGeneration() == row.getLong("operation_generation")
-                        && row.getTimestamp("operation_lease_until") != null
-                        && row.getTimestamp("operation_lease_until", java.util.Calendar.getInstance(
-                                java.util.TimeZone.getTimeZone("UTC"))).toInstant().isAfter(java.time.Instant.ofEpochSecond(
-                                        row.getLong("db_seconds"), row.getLong("db_micros") * 1000))
+                        && ManagedSchemaTime.timestamp(row, "operation_lease_until") != null
+                        && ManagedSchemaTime.timestamp(row, "operation_lease_until").toInstant().isAfter(java.time.Instant.ofEpochMilli(
+                                        row.getLong("db_seconds") * 1000 + row.getLong("db_micros") / 1000))
                         && saved.getRequest().getScope().getTenantId().equals(row.getString("tenant_id"))
                         && saved.getRequest().getStorageId().equals(row.getString("storage_id")),
                 saved.getBindingId(), saved.getGeneration());
@@ -504,10 +503,9 @@ public class WorkspaceExecutionStore {
                             && saved.getVersion() == row.getLong("record_version")
                             && saved.getOperationOwner().equals(row.getString("operation_owner"))
                             && saved.getOperationGeneration() == row.getLong("operation_generation")
-                            && row.getTimestamp("operation_lease_until") != null
-                            && row.getTimestamp("operation_lease_until", java.util.Calendar.getInstance(
-                                    java.util.TimeZone.getTimeZone("UTC"))).toInstant().isAfter(java.time.Instant.ofEpochSecond(
-                                            row.getLong("db_seconds"), row.getLong("db_micros") * 1000))
+                            && ManagedSchemaTime.timestamp(row, "operation_lease_until") != null
+                            && ManagedSchemaTime.timestamp(row, "operation_lease_until").toInstant().isAfter(java.time.Instant.ofEpochMilli(
+                                            row.getLong("db_seconds") * 1000 + row.getLong("db_micros") / 1000))
                             && row.getString("loss_evidence_json") != null && row.getString("stop_evidence_json") != null,
                     saved.getBindingId());
             if (exact.size() != 1 || !exact.getFirst()

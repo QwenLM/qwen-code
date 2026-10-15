@@ -51,15 +51,7 @@ public class ChildWorkspaceStore {
             "base_commit", "result_commit", "parent_tree", "merged_tree", "finish_request", "outcome_code",
             "conflict_paths", "last_error");
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String SELECT = "SELECT w.tenant_id, w.parent_session_id, w.child_run_id,"
-            + " w.child_workspace_id, w.parent_workspace_id AS workspace_id, w.workspace_generation, w.storage_id,"
-            + " w.parent_cwd_relative, w.repository_relative, w.child_cwd_relative, w.base_commit,"
-            + " w.result_commit, w.parent_tree, w.merged_tree, w.child_state AS state, w.finish_request, w.outcome_code,"
-            + " w.conflict_paths, w.last_error, o.claim_owner AS claimed_by,"
-            + " FLOOR(UNIX_TIMESTAMP(o.claim_until) * 1000.0) AS claimed_until, o.claim_generation, o.attempt_count AS attempts,"
-            + " o.available_at AS next_retry_at, w.created_at, w.updated_at FROM ma_workspace w"
-            + " JOIN ma_operation o ON o.tenant_id = w.tenant_id AND o.operation_id = w.child_workspace_id"
-            + " AND o.operation_kind = 'CHILD_WORKSPACE'";
+    private static final String SELECT = "SELECT w.tenant_id, w.parent_session_id, w.child_run_id, w.child_workspace_id, w.parent_workspace_id AS workspace_id, w.workspace_generation, w.storage_id, w.parent_cwd_relative, w.repository_relative, w.child_cwd_relative, w.base_commit, w.result_commit, w.parent_tree, w.merged_tree, w.child_state AS state, w.finish_request, w.outcome_code, w.conflict_paths, w.last_error, o.claim_owner AS claimed_by, FLOOR(o.claim_until) AS claimed_until, o.claim_generation, o.attempt_count AS attempts, o.available_at AS next_retry_at, w.gmt_create, w.gmt_modified FROM ma_workspace w JOIN ma_operation o ON o.tenant_id = w.tenant_id AND o.operation_id = w.child_workspace_id AND o.operation_kind = 'CHILD_WORKSPACE'";
     private static final WorkspaceOperations.Kind KIND = WorkspaceOperations.Kind.CHILD_WORKSPACE;
 
     /** One child Workspace row. */
@@ -104,7 +96,7 @@ public class ChildWorkspaceStore {
             String childId = childWorkspaceId(tenantId, parentSessionId, childRunId);
             jdbc.update("INSERT IGNORE INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state, workspace_kind, parent_workspace_id, parent_session_id,"
-                    + " child_run_id, child_workspace_id, parent_cwd_relative, child_state, created_at, updated_at)"
+                    + " child_run_id, child_workspace_id, parent_cwd_relative, child_state, gmt_create, gmt_modified)"
                     + " SELECT tenant_id, ?, ?, ?, display_name, config_ref, policy_ref, 'ACTIVE', 'CHILD_GIT', workspace_id,"
                     + " ?, ?, ?, ?, ?, ?, ? FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
                     childId, parent.getWorkspaceGeneration(), parent.getStorageId(), parentSessionId, childRunId,
@@ -138,9 +130,7 @@ public class ChildWorkspaceStore {
      * live claim is a step running right now.
      */
     public List<Row> findDue(long now, int limit) {
-        return jdbc.query(SELECT + " WHERE o.delivery_state = 'PENDING' AND o.available_at <= ?"
-                        + " AND (o.claim_until IS NULL OR o.claim_until <= FROM_UNIXTIME(? / 1000.0))"
-                        + " ORDER BY o.available_at, o.operation_key LIMIT ?",
+        return jdbc.query(SELECT + " WHERE o.delivery_state = 'PENDING' AND o.available_at <= ? AND (o.claim_until IS NULL OR o.claim_until <= ?) ORDER BY o.available_at, o.operation_key LIMIT ?",
                 this::row, now, now, limit);
     }
 
@@ -160,9 +150,7 @@ public class ChildWorkspaceStore {
             if (!physical.isEmpty()) {
                 return null;
             }
-            int claimed = jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_until = FROM_UNIXTIME(? / 1000.0),"
-                    + " claim_generation = claim_generation + 1, updated_at = ? WHERE operation_key = ?"
-                    + " AND operation_kind = 'CHILD_WORKSPACE' AND (claim_until IS NULL OR claim_until <= FROM_UNIXTIME(? / 1000.0))",
+            int claimed = jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_until = ?, claim_generation = claim_generation + 1, gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'CHILD_WORKSPACE' AND (claim_until IS NULL OR claim_until <= ?)",
                     owner, Math.addExact(now, leaseMillis), now, operationKey(row), now);
             if (claimed != 1) {
                 return null;
@@ -183,7 +171,7 @@ public class ChildWorkspaceStore {
             if (!lockClaim(claimed, owner, now)) {
                 return false;
             }
-            StringBuilder sql = new StringBuilder("UPDATE ma_workspace SET child_state = ?, updated_at = ?");
+            StringBuilder sql = new StringBuilder("UPDATE ma_workspace SET child_state = ?, gmt_modified = ?");
             List<Object> args = new ArrayList<>(List.of(toState, now));
             for (Map.Entry<String, Object> column : columns.entrySet()) {
                 if (!COLUMNS.contains(column.getKey())) {
@@ -200,7 +188,7 @@ public class ChildWorkspaceStore {
             }
             Row current = find(claimed.tenantId(), claimed.parentSessionId(), claimed.childRunId());
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, delivery_state = ?, attempt_count = 0, available_at = 0,"
-                    + " updated_at = ? WHERE operation_key = ?", toState, toState,
+                    + " gmt_modified = ? WHERE operation_key = ?", toState, toState,
                     owesWork(toState, current.finishRequest()) ? "PENDING" : "IDLE", now, operationKey(claimed));
             return true;
         });
@@ -237,10 +225,10 @@ public class ChildWorkspaceStore {
             if (!lockClaim(claimed, owner, now)) {
                 return false;
             }
-            jdbc.update("UPDATE ma_workspace SET last_error = ?, updated_at = ? WHERE tenant_id = ? AND workspace_id = ?",
+            jdbc.update("UPDATE ma_workspace SET last_error = ?, gmt_modified = ? WHERE tenant_id = ? AND workspace_id = ?",
                     StringUtils.truncate(error, 1024), now, claimed.tenantId(), claimed.childWorkspaceId());
             return jdbc.update("UPDATE ma_operation SET attempt_count = attempt_count + ?, available_at = ?,"
-                    + " claim_owner = NULL, claim_until = NULL, updated_at = ? WHERE operation_key = ?"
+                    + " claim_owner = NULL, claim_until = NULL, gmt_modified = ? WHERE operation_key = ?"
                     + " AND claim_generation = ? AND claim_owner = ?", countAttempt ? 1 : 0, nextRetryAt, now,
                     operationKey(claimed), claimed.claimGeneration(), owner) == 1;
         });
@@ -248,14 +236,13 @@ public class ChildWorkspaceStore {
 
     /** Extends a live claim; false once the claim moved on. */
     public boolean renew(Row claimed, String owner, long until, long now) {
-        return jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(? / 1000.0), updated_at = ? WHERE operation_key = ?"
-                + " AND claim_generation = ? AND claim_owner = ? AND claim_until > FROM_UNIXTIME(? / 1000.0)", until, now,
+        return jdbc.update("UPDATE ma_operation SET claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ? AND claim_owner = ? AND claim_until > ?", until, now,
                 operationKey(claimed), claimed.claimGeneration(), owner, now) == 1;
     }
 
     /** Gives a claimed row back without touching anything else. */
     public void release(Row claimed, String owner, long now) {
-        jdbc.update("UPDATE ma_operation SET claim_owner = NULL, claim_until = NULL, updated_at = ?"
+        jdbc.update("UPDATE ma_operation SET claim_owner = NULL, claim_until = NULL, gmt_modified = ?"
                 + " WHERE operation_key = ? AND claim_generation = ? AND claim_owner = ?",
                 now, operationKey(claimed), claimed.claimGeneration(), owner);
     }
@@ -319,9 +306,9 @@ public class ChildWorkspaceStore {
                     recorded = DISCARD_PINNED;
                 }
             }
-            jdbc.update("UPDATE ma_workspace SET finish_request = ?, updated_at = ?"
+            jdbc.update("UPDATE ma_workspace SET finish_request = ?, gmt_modified = ?"
                     + " WHERE tenant_id = ? AND workspace_id = ?", recorded, now, tenantId, row.childWorkspaceId());
-            jdbc.update("UPDATE ma_operation SET available_at = 0, delivery_state = 'PENDING', updated_at = ? WHERE operation_key = ?",
+            jdbc.update("UPDATE ma_operation SET available_at = 0, delivery_state = 'PENDING', gmt_modified = ? WHERE operation_key = ?",
                     now, operationKey(row));
             return find(tenantId, parentSessionId, childRunId);
         });
@@ -334,8 +321,7 @@ public class ChildWorkspaceStore {
     }
 
     private boolean lockClaim(Row row, String owner, long now) {
-        List<Boolean> claims = jdbc.query("SELECT claim_owner, claim_generation, FLOOR(UNIX_TIMESTAMP(claim_until) * 1000.0) AS lease_epoch, state FROM ma_operation"
-                + " WHERE operation_key = ? FOR UPDATE", (result, index) -> owner.equals(result.getString("claim_owner"))
+        List<Boolean> claims = jdbc.query("SELECT claim_owner, claim_generation, FLOOR(claim_until) AS lease_epoch, state FROM ma_operation WHERE operation_key = ? FOR UPDATE", (result, index) -> owner.equals(result.getString("claim_owner"))
                         && row.claimGeneration() == result.getLong("claim_generation")
                         && row.state().equals(result.getString("state"))
                         && result.getObject("lease_epoch") != null
@@ -361,7 +347,7 @@ public class ChildWorkspaceStore {
                 result.getString("last_error"), result.getString("claimed_by"),
                 result.getObject("claimed_until", Long.class), result.getLong("claim_generation"),
                 result.getInt("attempts"), result.getLong("next_retry_at"),
-                result.getLong("created_at"), result.getLong("updated_at"));
+                result.getLong("gmt_create"), result.getLong("gmt_modified"));
     }
 
     private static List<String> paths(String json) {

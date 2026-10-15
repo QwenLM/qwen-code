@@ -1404,13 +1404,7 @@ public final class ChildWorktreeGit {
 
     private static List<String> lines(byte[] out) {
         String text = new String(out, StandardCharsets.UTF_8);
-        List<String> lines = new ArrayList<>();
-        for (String line : text.split("\n")) {
-            if (!line.isEmpty()) {
-                lines.add(line);
-            }
-        }
-        return lines;
+        return new ArrayList<>(List.of(StringUtils.split(text, '\n')));
     }
 
     private static List<String> tokens(byte[] out) {

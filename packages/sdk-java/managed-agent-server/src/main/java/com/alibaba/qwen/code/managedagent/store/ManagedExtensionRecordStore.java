@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidR
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.StreamReadConstraints;
@@ -147,7 +149,7 @@ public class ManagedExtensionRecordStore {
                         + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND tenant_id = ?"
                         + " AND session_id = ? AND domain = ?"
-                        + " ORDER BY created_at, record_key",
+                        + " ORDER BY gmt_create, record_key",
                 (result, row) -> result.getString("record_resource_id"),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 tenantId, sessionId, domain);
@@ -185,8 +187,7 @@ public class ManagedExtensionRecordStore {
             return Optional.empty();
         }
         return jdbc.query(
-                        "SELECT * FROM ma_session_record WHERE record_kind = 'DOMAIN' AND"
-                            + " session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
+                        "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
                 (result, row) -> {
                     taskRow(result, tenantId, sessionId);
                     return new String[] {result.getString("domain"),
@@ -225,11 +226,7 @@ public class ManagedExtensionRecordStore {
     private StoredResource readResource(String tenantId, String sessionId,
             String resourceId) {
         StoredResource resource = jdbc.query(
-                                "SELECT * FROM ma_resource WHERE session_scope_key = ? AND"
-                                    + " tenant_id = ? AND session_id = ? AND resource_id = ? AND"
-                                    + " state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND"
-                                    + " object_key IS NULL AND object_version_id IS NULL AND"
-                                    + " encryption_key_id IS NULL",
+                                "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL",
                 (result, row) -> new StoredResource(
                         result.getString("resource_id"),
                         result.getString("kind"), result.getInt("schema_version"),
@@ -605,16 +602,16 @@ public class ManagedExtensionRecordStore {
                 sessionId));
         String cursor = "";
         if (beforeCreatedAt != null) {
-            cursor = " AND (created_at < ? OR created_at = ?"
+            cursor = " AND (gmt_create < ? OR gmt_create = ?"
                     + " AND record_key < ?)";
             arguments.add(beforeCreatedAt);
             arguments.add(beforeCreatedAt);
             arguments.add(recordKey(beforeTaskId));
         }
         arguments.add(limit + 1);
-        List<TaskRow> rows = jdbc.query("SELECT * FROM"
+        List<TaskRow> rows = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM"
                         + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
-                        + " session_scope_key = ? AND task_kind IS NOT NULL" + cursor + " ORDER BY created_at DESC,"
+                        + " session_scope_key = ? AND task_kind IS NOT NULL" + cursor + " ORDER BY gmt_create DESC,"
                         + " record_key DESC LIMIT ?",
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 arguments.toArray());
@@ -629,8 +626,7 @@ public class ManagedExtensionRecordStore {
             return Optional.empty();
         }
         return jdbc.query(
-                        "SELECT * FROM ma_session_record WHERE record_kind = 'DOMAIN' AND"
-                            + " session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
+                        "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 recordKey).stream().findFirst();
@@ -1015,7 +1011,7 @@ public class ManagedExtensionRecordStore {
                     "Child run delivery cannot go unknown or rejected after its"
                             + " acceptance record.");
         }
-        StoredRow previous = jdbc.query("SELECT * FROM"
+        StoredRow previous = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM"
                         + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND record_key = ?",
                 ManagedExtensionRecordStore::storedRow, scopeKey, recordKey)
@@ -1209,7 +1205,7 @@ public class ManagedExtensionRecordStore {
                                 + " operation_hash, revision, record_resource_id,"
                                 + " task_kind, task_state, runtime_state,"
                                 + " definition_revision, delivery_target,"
-                                + " delivery_state, created_at, started_at,"
+                                + " delivery_state, gmt_create, started_at,"
                                 + " settled_at, first_sequence, hook_once_key_hash,"
                                 + " hook_occurrence_hash, hook_ordinal,"
                                 + " hook_definition_hash) VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?,"
@@ -1253,10 +1249,7 @@ public class ManagedExtensionRecordStore {
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
                         + " AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scopeKey, recordKey);
         jdbc.update(
-                "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                    + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                    + " resource_id, created_at) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?,"
-                    + " CURRENT_TIMESTAMP(6))",
+                "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scopeKey, recordKey, revision, ManagedSchemaKeys.key(scopeKey, resourceId), tenantId, workspaceId, sessionId, resourceId);
         if (body.taskKindOf().apply(record) != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
@@ -1308,7 +1301,7 @@ public class ManagedExtensionRecordStore {
         return new TaskProjection(result.getString("task_state"),
                 result.getString("runtime_state"),
                 result.getObject("definition_revision", Long.class),
-                result.getLong("created_at"),
+                result.getLong("gmt_create"),
                 result.getObject("started_at", Long.class),
                 result.getObject("settled_at", Long.class));
     }
