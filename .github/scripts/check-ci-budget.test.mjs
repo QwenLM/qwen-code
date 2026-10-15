@@ -233,10 +233,19 @@ describe('checkBudget', () => {
       `${BARE_ON}  test:\n    timeout-minutes: 7\n`,
     );
     writeFileSync(baselineFile, '1 10 0 pull_request a.yml\n');
-    // Not a git repo, so the base can never resolve: the ratchet must not
+    // Point git at a directory that is no repository, so neither rev-parse nor
+    // the fetch fallback can reach a remote: the suite runs in the repo itself,
+    // and a dep-free lane must not depend on the network. The ratchet must not
     // downgrade the error to a stale-baseline warning.
-    const { errors } = run('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
-    assert.equal(errors.length, 1);
-    assert.match(errors[0], /grew its PR-stage CI budget/);
+    const savedGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = join(dir, 'not-a-repo.git');
+    try {
+      const { errors } = run('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
+      assert.equal(errors.length, 1);
+      assert.match(errors[0], /grew its PR-stage CI budget/);
+    } finally {
+      if (savedGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = savedGitDir;
+    }
   });
 });

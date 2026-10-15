@@ -187,6 +187,19 @@ function unchangedFromBase(file, baseSha) {
   }
 }
 
+/**
+ * Staleness for one workflow: true only when this PR moved neither side, false
+ * when it moved the workflow or the ledger, null when the base is unresolvable.
+ * A PR that edits only .ci-budget leaves the workflow byte-identical, so a
+ * workflow-only test would call its own loosened entry main-side drift.
+ */
+function staleOnMain(workflowFile, baselineFile, baseSha) {
+  const workflow = unchangedFromBase(workflowFile, baseSha);
+  // Short-circuit so an unresolvable base costs one git probe, not two.
+  if (workflow !== true) return workflow;
+  return unchangedFromBase(baselineFile, baseSha);
+}
+
 const DIMENSIONS = [
   { key: 'jobCount', label: 'PR-stage jobs' },
   { key: 'timeoutMinutes', label: 'declared timeout-minutes' },
@@ -231,7 +244,7 @@ export function checkBudget({
     });
 
     if (!recorded) {
-      const match = unchangedFromBase(file, baseSha);
+      const match = staleOnMain(file, baselineFile, baseSha);
       const entry = `${measured.jobCount} ${measured.timeoutMinutes} ${noTimeoutCount} ${measured.triggers.join('+')} ${name}`;
       if (match === true) {
         warnings.push(
@@ -261,7 +274,7 @@ export function checkBudget({
       const detail = grown
         .map(({ key, label }) => `${label} ${recorded[key]} → ${actual[key]}`)
         .join(', ');
-      const match = unchangedFromBase(file, baseSha);
+      const match = staleOnMain(file, baselineFile, baseSha);
       if (match === true) {
         warnings.push(
           `${file} exceeds its recorded budget (${detail}), but is unchanged from this PR's base — the baseline went stale on main, not in this PR. Bump ${baselineFile} on main; unrelated PRs are not blocked.`,
