@@ -85,7 +85,7 @@ Node host: `getJsInterpreterCommand` only deviates from `process.execPath`
 when a standalone `manifest.json` exists in the package layout, which npm and
 source installs do not have.
 
-## Proposed contract
+## Contract
 
 ### 1. App launcher
 
@@ -116,45 +116,52 @@ source installs do not have.
      `runtime` must be exactly `'bun'` or `'node'`, and the interpreter —
      the `interpreter` field resolved against the package root, else the
      standard `bun/bin/bun` / `node/bin/node` location — must be an existing
-     executable regular file (directories and non-executable files reject).
+     regular file. POSIX additionally requires execute permission; Windows
+     checks regular-file existence only, not PE validity or launchability.
+     The Windows default paths are `bun/bun.exe` and `node/node.exe`.
   3. Any invalid or missing declaration — non-object manifest, unknown
      `runtime`, non-string `interpreter`, missing binary, directory,
-     non-executable file, missing entry marker — falls back to
+     non-executable POSIX file, missing entry marker — falls back to
      `process.execPath`, the interpreter running this process (host Node,
      bundled Node, or the private bundled Bun). The resolution never
      guesses at a different binary and never throws.
 - Result memoized per process; `resetJsInterpreterCacheForTests()` clears it.
-- Invariant: **never returns the application binary**. Under a compiled
-  flavor the manifest must carry the interpreter path (packaging change in
-  S4).
+- Supported scope: **interpreter-based Node/Bun distributions**. Rejection
+  returns `process.execPath`, which would be the application binary in a
+  compiled build. This PR does not support compiled applications or provide
+  a compiled-artifact producer. That future flavor needs explicit interpreter
+  packaging and separately verified failure behavior before adoption; the
+  present fallback does not guarantee a usable interpreter in that flavor.
 
 Migration rule: any new code that spawns a JS file or `-e` snippet as a child
 goes through `getJsInterpreterCommand`; sites that re-invoke the app go
 through `QWEN_CODE_CLI` / the entry fallback.
 
-## Bun compatibility facts (probed this change)
+## Cross-runtime test coverage
 
-Probed with Bun 1.4.0 local vs Node 24.19.0 (same fixture, see
-`packages/core/src/utils/runtime-boundary.node-bun.test.ts`). The _shipped_
-Bun 1.3.14 pin is verified by the packaging acceptance, not here.
+`packages/core/src/utils/runtime-boundary.node-bun.test.ts` runs the same
+fixture under Node and an available Bun interpreter. It covers identity and
+stdio JSON framing, exit-code propagation, POSIX SIGTERM handling, IPC
+round-trips with explicit shutdown, `--expose-gc`, and
+`--input-type=commonjs --eval`. These are test contracts, not a claim that all
+platforms or packaged artifacts have passed. Windows skips the catchable
+SIGTERM case. An absent Bun binary skips the Bun leg; record the actual
+runtime versions and skips when reporting a run. The shipped Bun 1.3.14 pin
+and standalone artifacts require separate packaging acceptance.
 
-| Behavior                                                                     | Node 24.19.0 | Bun 1.4.0                                                                                                   |
-| ---------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------- |
-| `--expose-gc script.js` → `typeof gc === 'function'`                         | yes          | yes (`--expose-gc` accepted)                                                                                |
-| `--input-type=commonjs --eval '…'`                                           | yes          | yes                                                                                                         |
-| Node IPC channel (`spawn stdio:[…,'ipc']`, `process.send` / `on('message')`) | yes          | yes, round-trip OK                                                                                          |
-| SIGTERM handler → graceful `exit(0)`                                         | yes          | yes                                                                                                         |
-| exit-code propagation via `process.exit(n)`                                  | yes          | yes                                                                                                         |
-| `process.execve`                                                             | yes          | absent — code must feature-detect (`relaunch.ts`, `processUtils.ts`, `daemon-update-restart.ts` already do) |
-| PTY (`@lydell/node-pty`)                                                     | yes          | **disabled in `getPty`** — S2 blocker                                                                       |
+This fixture does not probe `process.execve`, native PTY loading, fd-3 status
+pipes or process-group signaling. `process.execve` feature detection at
+relaunch sites and Bun gating in `getPty` are source mechanisms, not results
+from this matrix. Native PTY and process-tree behavior need their own real
+process and artifact evidence.
 
 ## Validation plan
 
 - `packages/core/src/utils/runtime-info.test.ts` — manifest resolution,
   fallbacks, memoization.
 - `packages/core/src/utils/runtime-boundary.node-bun.test.ts` — the
-  same-fixture matrix above; Bun leg skips cleanly when no Bun binary exists
-  (CI stays green; local runs with `bun` on PATH exercise it).
+  same-fixture coverage described above; the Bun leg skips when no Bun
+  binary exists. A skipped leg is not a compatibility pass.
 - S2/S3 consume the inventory tables as their migration checklist; S5 reruns
   the matrix on the real archives per the MYWO-8 acceptance protocol.
 

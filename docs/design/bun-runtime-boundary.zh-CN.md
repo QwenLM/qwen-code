@@ -77,33 +77,30 @@
 - `isBunRuntime(): boolean` —— 唯一的运行时检测点。
 - `getJsInterpreterCommand(importMetaUrl): { command, runtime }` —— 解析任意 JS 子进程使用的解释器：
   1. 唯一可信位置是 **standalone 包根**：调用方 bundle 目录（`resolveBundleDir`）的父目录，必须同时存在 `manifest.json` 与 standalone 入口标记 `lib/cli-entry.js`。**不做向上遍历** —— 无关祖先清单（例如 npm 宿主工程的构建 manifest）永远不会被读取，npm、源码与 SDK 布局因此始终使用 `process.execPath`。
-  2. 在该可信包根内，所有声明先校验后使用：`runtime` 必须恰为 `'bun'` 或 `'node'`；解释器 —— `interpreter` 字段相对包根解析，否则取标准位置 `bun/bin/bun` / `node/bin/node` —— 必须是已存在的可执行普通文件（目录与不可执行文件均拒绝）。
-  3. 任何无效或缺失的声明 —— 非对象清单、未知 `runtime`、非字符串 `interpreter`、二进制缺失、目录、不可执行文件、入口标记缺失 —— 一律回退 `process.execPath`（运行当前进程的解释器：宿主 Node、内置 Node，或 standalone Bun 形态的私有内置 Bun）。解析绝不猜测其他二进制，也绝不抛出异常。
+  2. 在该可信包根内，所有声明先校验后使用：`runtime` 必须恰为 `'bun'` 或 `'node'`；解释器 —— `interpreter` 字段相对包根解析，否则取标准位置 `bun/bin/bun` / `node/bin/node` —— 必须是已存在的普通文件。POSIX 还要求执行权限；Windows 只检查普通文件存在，不验证 PE 格式或实际可启动性，默认路径为 `bun/bun.exe` / `node/node.exe`。
+  3. 任何无效或缺失的声明 —— 非对象清单、未知 `runtime`、非字符串 `interpreter`、二进制缺失、目录、POSIX 不可执行文件、入口标记缺失 —— 一律回退 `process.execPath`（运行当前进程的解释器：宿主 Node、内置 Node，或 standalone Bun 形态的私有内置 Bun）。解析绝不猜测其他二进制，也绝不抛出异常。
 - 结果按进程记忆；`resetJsInterpreterCacheForTests()` 清除。
-- 不变量：**绝不返回应用二进制**。编译形态下 manifest 必须携带解释器路径（S4 打包变更）。
+- 支持范围：**基于解释器的 Node/Bun 分发**。拒绝声明时返回 `process.execPath`，它在编译形态下会是应用二进制。本 PR 不支持编译应用，也没有提供编译制品生产路径。未来该形态必须显式打包解释器并独立验证失败行为后才能采用；当前回退不保证在编译形态下得到可用解释器。
 
 迁移规则：任何新增的、以子进程方式运行 JS 文件或 `-e` 片段的代码必须走 `getJsInterpreterCommand`；再唤起应用的位置走 `QWEN_CODE_CLI` / 入口回退。
 
-## Bun 兼容事实（本变更实测）
+## 跨运行时测试覆盖
 
-以本机 Bun 1.4.0 对照 Node 24.19.0（同一 fixture，见
-`packages/core/src/utils/runtime-boundary.node-bun.test.ts`）。_交付_ 的
-Bun 1.3.14 固定版本由打包验收负责，不在此处。
+`packages/core/src/utils/runtime-boundary.node-bun.test.ts` 在 Node 和可用的
+Bun 解释器下运行同一 fixture，覆盖身份与 stdio JSON 行、退出码传播、POSIX
+SIGTERM 处理、显式 shutdown 的 IPC 往返、`--expose-gc` 和
+`--input-type=commonjs --eval`。这些是测试契约，不代表全部平台或打包制品已经通过。
+Windows 跳过可捕获 SIGTERM 用例；缺少 Bun 二进制时跳过 Bun 腿。报告执行结果时必须
+记录实际运行时版本与 skip。交付 Bun 1.3.14 固定版本及 standalone 制品仍需独立打包验收。
 
-| 行为                                                                       | Node 24.19.0 | Bun 1.4.0                                                                                     |
-| -------------------------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------- |
-| `--expose-gc script.js` → `typeof gc === 'function'`                       | 是           | 是（接受 `--expose-gc`）                                                                      |
-| `--input-type=commonjs --eval '…'`                                         | 是           | 是                                                                                            |
-| Node IPC 通道（`spawn stdio:[…,'ipc']`、`process.send` / `on('message')`） | 是           | 是，往返正常                                                                                  |
-| SIGTERM 处理函数 → 优雅 `exit(0)`                                          | 是           | 是                                                                                            |
-| `process.exit(n)` 退出码传播                                               | 是           | 是                                                                                            |
-| `process.execve`                                                           | 是           | 缺失 —— 代码必须特性检测（`relaunch.ts`、`processUtils.ts`、`daemon-update-restart.ts` 已做） |
-| PTY（`@lydell/node-pty`）                                                  | 是           | **在 `getPty` 中禁用** —— S2 阻塞项                                                           |
+此 fixture 不探测 `process.execve`、原生 PTY 加载、fd-3 状态管道或进程组信号。
+重新启动位置的 `process.execve` 特性检测和 `getPty` 的 Bun 门禁属于源码机制，
+不是本矩阵的实测结果。原生 PTY 与进程树行为需要各自真实进程和制品证据。
 
 ## 验证计划
 
 - `packages/core/src/utils/runtime-info.test.ts` —— manifest 解析、回退、记忆化。
-- `packages/core/src/utils/runtime-boundary.node-bun.test.ts` —— 上表同一 fixture 矩阵；无 Bun 二进制时 Bun 腿干净跳过（CI 保持绿色；本机 PATH 有 bun 即执行）。
+- `packages/core/src/utils/runtime-boundary.node-bun.test.ts` —— 上述同一 fixture 覆盖；无 Bun 二进制时 Bun 腿跳过，跳过不代表兼容性通过。
 - S2/S3 以上述清单表为迁移检查清单；S5 按 MYWO-8 验收协议在真实归档上重跑矩阵。
 
 ## 遗留问题

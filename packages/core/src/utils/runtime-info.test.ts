@@ -32,10 +32,15 @@ describe('isBunRuntime', () => {
 describe('getJsInterpreterCommand', () => {
   let tempRoot: string;
 
-  const writeExecutable = (filePath: string): void => {
+  const interpreterPath = (root: string, runtime: 'bun' | 'node'): string =>
+    process.platform === 'win32'
+      ? path.join(root, runtime, `${runtime}.exe`)
+      : path.join(root, runtime, 'bin', runtime);
+
+  const writeExecutable = (filePath: string, executable = true): void => {
     mkdirSync(path.dirname(filePath), { recursive: true });
     writeFileSync(filePath, '#!/bin/sh\n');
-    chmodSync(filePath, 0o755);
+    chmodSync(filePath, executable ? 0o755 : 0o644);
   };
 
   // A standalone install root: manifest + entry marker + interpreter.
@@ -45,7 +50,7 @@ describe('getJsInterpreterCommand', () => {
     manifest: Record<string, unknown>;
     withBun?: boolean;
     withNode?: boolean;
-    interpreterTarget?: 'file' | 'directory' | 'non-executable';
+    interpreterTarget?: 'non-executable';
     marker?: boolean;
   }): string => {
     const root = mkdtempSync(path.join(tempRoot, 'pkg-'));
@@ -53,17 +58,13 @@ describe('getJsInterpreterCommand', () => {
       path.join(root, 'manifest.json'),
       JSON.stringify(options.manifest),
     );
-    if (options.withBun) {
-      const bunPath = path.join(root, 'bun', 'bin', 'bun');
-      mkdirSync(path.dirname(bunPath), { recursive: true });
-      writeFileSync(bunPath, '#!/bin/sh\n');
-      chmodSync(
-        bunPath,
-        options.interpreterTarget === 'non-executable' ? 0o644 : 0o755,
-      );
-    }
-    if (options.withNode) {
-      writeExecutable(path.join(root, 'node', 'bin', 'node'));
+    for (const runtime of ['bun', 'node'] as const) {
+      if (runtime === 'bun' ? options.withBun : options.withNode) {
+        writeExecutable(
+          interpreterPath(root, runtime),
+          options.interpreterTarget !== 'non-executable',
+        );
+      }
     }
     if (options.marker !== false) {
       mkdirSync(path.join(root, 'lib'), { recursive: true });
@@ -108,7 +109,7 @@ describe('getJsInterpreterCommand', () => {
       withBun: true,
     });
     expect(resolvedFor(root, 'lib/worker.js')).toEqual({
-      command: path.join(root, 'bun', 'bin', 'bun'),
+      command: interpreterPath(root, 'bun'),
       runtime: 'bun',
     });
   });
@@ -119,18 +120,22 @@ describe('getJsInterpreterCommand', () => {
       withNode: true,
     });
     expect(resolvedFor(root, 'lib/worker.js')).toEqual({
-      command: path.join(root, 'node', 'bin', 'node'),
+      command: interpreterPath(root, 'node'),
       runtime: 'node',
     });
   });
 
   it('honours an explicit interpreter field relative to the package root', () => {
     const root = writeStandaloneLayout({
-      manifest: { runtime: 'bun', interpreter: './bun/bin/bun' },
+      manifest: {
+        runtime: 'bun',
+        interpreter:
+          process.platform === 'win32' ? './bun/bun.exe' : './bun/bin/bun',
+      },
       withBun: true,
     });
     expect(resolvedFor(root, 'lib/worker.js')).toEqual({
-      command: path.join(root, 'bun', 'bin', 'bun'),
+      command: interpreterPath(root, 'bun'),
       runtime: 'bun',
     });
   });
@@ -146,9 +151,12 @@ describe('getJsInterpreterCommand', () => {
     const runner = path.join(host, 'custom-runner');
     writeFileSync(runner, '#!/bin/sh\necho UNRELATED_EXECUTABLE_INVOKED\n');
     chmodSync(runner, 0o755);
+    mkdirSync(path.join(host, 'lib'), { recursive: true });
+    writeFileSync(path.join(host, 'lib', 'cli-entry.js'), 'export {};\n');
     writeFileSync(
       path.join(host, 'manifest.json'),
       JSON.stringify({
+        runtime: 'bun',
         name: 'unrelated-sdk-host',
         interpreter: './custom-runner',
       }),
@@ -178,7 +186,9 @@ describe('getJsInterpreterCommand', () => {
       path.join(host, 'manifest.json'),
       JSON.stringify({ runtime: 'bun' }),
     );
-    writeExecutable(path.join(host, 'bun', 'bin', 'bun'));
+    writeExecutable(interpreterPath(host, 'bun'));
+    mkdirSync(path.join(host, 'lib'), { recursive: true });
+    writeFileSync(path.join(host, 'lib', 'cli-entry.js'), 'export {};\n');
     const packageDir = path.join(
       host,
       'node_modules',
@@ -205,20 +215,28 @@ describe('getJsInterpreterCommand', () => {
 
   it('falls back when the declared interpreter is a directory', () => {
     const root = writeStandaloneLayout({
-      manifest: { runtime: 'bun', interpreter: './bun/bin' },
+      manifest: {
+        runtime: 'bun',
+        interpreter: process.platform === 'win32' ? './bun' : './bun/bin',
+      },
       withBun: true,
     });
     expect(resolvedFor(root, 'lib/worker.js')).toEqual(execPathFallback());
   });
 
-  it('falls back when the declared interpreter is not executable', () => {
-    const root = writeStandaloneLayout({
-      manifest: { runtime: 'bun' },
-      withBun: true,
-      interpreterTarget: 'non-executable',
-    });
-    expect(resolvedFor(root, 'lib/worker.js')).toEqual(execPathFallback());
-  });
+  it.each(['bun', 'node'] as const)(
+    'falls back when the declared %s interpreter is not executable',
+    { skip: process.platform === 'win32' },
+    (runtime) => {
+      const root = writeStandaloneLayout({
+        manifest: { runtime },
+        withBun: true,
+        withNode: true,
+        interpreterTarget: 'non-executable',
+      });
+      expect(resolvedFor(root, 'lib/worker.js')).toEqual(execPathFallback());
+    },
+  );
 
   it('falls back when the standard interpreter binary is absent', () => {
     const root = writeStandaloneLayout({
@@ -252,6 +270,34 @@ describe('getJsInterpreterCommand', () => {
     writeFileSync(path.join(root, 'lib', 'cli-entry.js'), 'export {};\n');
     expect(resolvedFor(root, 'lib/worker.js')).toEqual(execPathFallback());
   });
+
+  it.each(['{', '{"runtime":"bun",', ''])(
+    'falls back on malformed manifest %j',
+    (contents) => {
+      const root = writeStandaloneLayout({
+        manifest: { runtime: 'bun' },
+        withBun: true,
+      });
+      writeFileSync(path.join(root, 'manifest.json'), contents);
+      expect(() => resolvedFor(root, 'lib/worker.js')).not.toThrow();
+      expect(resolvedFor(root, 'lib/worker.js')).toEqual(execPathFallback());
+    },
+  );
+
+  it.each(['bun', 'node'] as const)(
+    'resolves %s from a standalone lib/chunks entry',
+    (runtime) => {
+      const root = writeStandaloneLayout({
+        manifest: { runtime },
+        withBun: true,
+        withNode: true,
+      });
+      expect(resolvedFor(root, 'lib/chunks/worker.js')).toEqual({
+        command: interpreterPath(root, runtime),
+        runtime,
+      });
+    },
+  );
 
   it('memoizes the resolution for the process lifetime', () => {
     const root = writeStandaloneLayout({
