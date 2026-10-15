@@ -410,5 +410,36 @@
                 </plugin>
             </plugins></build>
         </profile>
+        <profile>
+            <!-- The MQ3 deployment fault matrix
+                 (docs/design/2026-10-14-managed-agent-event-transport-mq3.md):
+                 two control-plane nodes, each with its own packaged Harness,
+                 against one MySQL server and a RocketMQ 5.5 LiteTopic cluster
+                 (scripts/rocketmq-lite-broker.sh start). The gate starts the
+                 nodes itself; the MySQL server (mysql.url / user / password),
+                 the bundled CLI (qwen.cli.entry, node.executable) and the
+                 broker coordinates (qwen.gate.rocketmq.endpoints / topic /
+                 work-dir) are required system properties. -->
+            <id>event-transport-multi-node-gates</id>
+            <build><plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration><skipTests>true</skipTests></configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${maven-failsafe-plugin.version}</version>
+                    <configuration>
+                        <includes><include>**/EventTransportMultiNodeGate.java</include></includes>
+                        <failIfNoTests>true</failIfNoTests>
+                        <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                        <forkedProcessTimeoutInSeconds>3000</forkedProcessTimeoutInSeconds>
+                    </configuration>
+                    <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+                </plugin>
+            </plugins></build>
+        </profile>
     </profiles>
 </project>
