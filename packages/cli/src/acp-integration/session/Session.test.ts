@@ -62,7 +62,10 @@ import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
-import { userContentPushSnapshotKey } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import {
+  userContentPushSnapshotKey,
+  userContentPushAcceptedKey,
+} from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
@@ -4415,6 +4418,9 @@ describe('Session', () => {
       'iterator-failed',
       'iterator-failed-after-chunk',
       'rolled-back',
+      'rolled-back-then-concurrent-push',
+      'session-changed',
+      'inline-repaired',
     ] as const)(
       'forwards only request-owned accepted ACP results (%s)',
       async (mode) => {
@@ -4456,12 +4462,25 @@ describe('Session', () => {
               ]);
             }
             forwarded = message;
+            const rolledBack = mode.startsWith('rolled-back');
             if (mode !== 'concurrent-only') {
               Object.defineProperty(message, userContentPushSnapshotKey, {
                 value: pushCount,
               });
+              Object.defineProperty(message, userContentPushAcceptedKey, {
+                value: rolledBack
+                  ? undefined
+                  : mode === 'inline-repaired'
+                    ? []
+                    : message,
+              });
             }
-            if (mode !== 'rolled-back') pushCount += 1;
+            if (!rolledBack) pushCount += 1;
+            if (mode === 'session-changed') {
+              vi.spyOn(mockConfig, 'getSessionId').mockReturnValue(
+                'new-session',
+              );
+            }
             if (mode === 'failed-after-push')
               throw new Error('fixture provider failed');
             return (async function* () {
@@ -4476,6 +4495,7 @@ describe('Session', () => {
               yield { type: core.StreamEventType.CHUNK, value: { text: '.' } };
               acceptedBeforeSourceComplete =
                 mockLlmClient.acceptCompletedToolResults.mock.calls.length;
+              if (mode === 'rolled-back-then-concurrent-push') pushCount += 1;
             })();
           });
         const result = session.prompt({
@@ -4486,14 +4506,17 @@ describe('Session', () => {
           await expect(result).rejects.toThrow('fixture provider failed');
         else await result;
         expect(forwarded?.[0]?.functionResponse?.id).toBe('acceptance-call');
-        const accepted = mode !== 'concurrent-only' && mode !== 'rolled-back';
+        const accepted =
+          mode !== 'concurrent-only' &&
+          !mode.startsWith('rolled-back') &&
+          mode !== 'session-changed';
         expect(mockLlmClient.acceptCompletedToolResults).toHaveBeenCalledTimes(
           accepted ? 1 : 0,
         );
         if (accepted) {
           expect(
             mockLlmClient.acceptCompletedToolResults.mock.calls[0][0],
-          ).toBe(forwarded);
+          ).toEqual(mode === 'inline-repaired' ? [] : forwarded);
         }
         if (!mode.includes('failed')) {
           expect(acceptedBeforeSourceComplete).toBe(accepted ? 1 : 0);

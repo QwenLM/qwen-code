@@ -56,7 +56,11 @@ const completedOutcome = (callId: string): CompletedToolOutcome => ({
   resultDisplay: undefined,
 });
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
+import {
+  LlmChat,
+  userContentPushSnapshotKey,
+  userContentPushAcceptedKey,
+} from './llm-chat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -567,13 +571,16 @@ const requestWithout = (...parts: unknown[]) =>
 const exactRequest = (...parts: unknown[]) =>
   ['test-model', parts, expect.any(AbortSignal)] as const;
 
-/**
- * Miniature of GeminiChat's contract: publish the push counter on the
- * request immediately before pushing it.
- */
-const publishPushSnapshot = (request: unknown, pushCount: number) => {
+/** Miniature of LlmChat's snapshot and confirmed history-push contract. */
+const publishPushSnapshot = (
+  request: unknown,
+  pushCount: number,
+  accepted = true,
+) => {
   (request as Record<PropertyKey, unknown>)[userContentPushSnapshotKey] =
     pushCount;
+  (request as Record<PropertyKey, unknown>)[userContentPushAcceptedKey] =
+    accepted ? request : undefined;
 };
 
 /** A Stop-hook bus request that blocks once with `reason`, then allows. */
@@ -10526,6 +10533,8 @@ Other open files:
         'concurrent-only',
         'failed-after-push',
         'rolled-back',
+        'rolled-back-then-concurrent-push',
+        'session-changed',
       ] as const)(
         'records a result only after its own history push (%s)',
         async (mode) => {
@@ -10540,15 +10549,22 @@ Other open files:
             completedOutcome('one'),
           );
           let countBeforeSourceComplete: number | undefined;
+          const rolledBack = mode.startsWith('rolled-back');
           mockTurnRunFn.mockImplementation((_model, request) => {
             if (mode !== 'concurrent-only')
-              publishPushSnapshot(request, pushCount);
-            if (mode !== 'rolled-back') pushCount += 1;
+              publishPushSnapshot(request, pushCount, !rolledBack);
+            if (!rolledBack) pushCount += 1;
             return (async function* () {
               if (mode === 'failed-after-push')
                 throw new Error('provider failed');
+              if (mode === 'session-changed') {
+                vi.mocked(mockConfig.getSessionId).mockReturnValue(
+                  'new-session',
+                );
+              }
               yield { type: LlmEventType.Content, value: 'Done' };
               countBeforeSourceComplete = client['toolCallCount'];
+              if (mode === 'rolled-back-then-concurrent-push') pushCount += 1;
             })();
           });
           const result = run([responsePart('one')], 'accepted-result', {
@@ -10557,7 +10573,7 @@ Other open files:
           if (mode === 'failed-after-push')
             await expect(result).rejects.toThrow('provider failed');
           else await result;
-          const accepted = mode !== 'concurrent-only' && mode !== 'rolled-back';
+          const accepted = mode === 'accepted' || mode === 'failed-after-push';
           expect(client['toolCallCount']).toBe(accepted ? 1 : 0);
           expect(client['pendingExperienceOutcomes'].size).toBe(
             accepted ? 0 : 1,
@@ -10605,6 +10621,101 @@ Other open files:
           expect(
             accepted ? steerInput.accept : steerInput.restore,
           ).toHaveBeenCalledOnce();
+        },
+      );
+
+      it('does not credit a rolled-back steer after another send pushes', async () => {
+        let pushCount = 0;
+        installChat({ getUserContentPushCount: () => pushCount });
+        mockTurnRunFn.mockImplementation((_model, request) => {
+          publishPushSnapshot(request, pushCount, false);
+          return (async function* () {
+            yield { type: LlmEventType.Content, value: 'Done' };
+            pushCount += 1;
+          })();
+        });
+        await run([{ text: 'change course' }], 'rolled-back-steer', {
+          type: SendMessageType.Steer,
+        });
+        expect(client['experienceSignals'].userSteer).toBe(false);
+      });
+
+      it.each([undefined, 100])(
+        'counts only surviving inline-repaired results, including hoisted results (budget=%s)',
+        async (budget) => {
+          mockConfig.getAutoCompactThreshold = vi
+            .fn()
+            .mockReturnValue(undefined);
+          mockConfig.getToolOutputBatchBudget = vi.fn().mockReturnValue(budget);
+          const synthetic = {
+            functionResponse: {
+              id: 'late',
+              name: 'read_file',
+              response: { error: 'synthetic repair' },
+            },
+          };
+          const late = responsePart('late');
+          const fresh = fnResponse(
+            'read_file',
+            { output: 'x'.repeat(1000) },
+            'fresh',
+          );
+          const chat = client.getChat();
+          chat.setHistory([
+            userText('read both files'),
+            {
+              role: 'model',
+              parts: ['late', 'fresh'].map((id) => ({
+                functionCall: { id, name: 'read_file', args: {} },
+              })),
+            },
+            { role: 'user', parts: [synthetic] },
+          ]);
+          client.recordCompletedToolCall('read_file', undefined, {
+            ...completedOutcome('late'),
+            executionStatus: 'error',
+            error: new Error('late real failure'),
+          });
+          client.recordCompletedToolCall(
+            'read_file',
+            undefined,
+            completedOutcome('fresh'),
+          );
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockResolvedValue(streamOf(modelChunk([{ text: 'Done' }], 'STOP')));
+          mockTurnRunFn.mockImplementation((_model, request) =>
+            (async function* () {
+              await drain(
+                await chat.sendMessageStream(
+                  'test-model',
+                  { message: request },
+                  'inline-repair',
+                ),
+              );
+              yield { type: LlmEventType.Content, value: 'Done' };
+            })(),
+          );
+
+          await run([late, fresh], 'inline-repair', {
+            type: SendMessageType.ToolResult,
+          });
+
+          const responses = chat
+            .getHistory()
+            .flatMap((entry) => entry.parts ?? [])
+            .filter((part) => part.functionResponse);
+          expect(responses).toHaveLength(2);
+          expect(responses[0]).toEqual(synthetic);
+          expect(responses[1]?.functionResponse?.id).toBe('fresh');
+          if (budget) expect(responses[1]).not.toEqual(fresh);
+          else expect(responses[1]).toEqual(fresh);
+          expect(client['toolCallCount']).toBe(1);
+          expect([...client['pendingExperienceOutcomes'].keys()]).toEqual([
+            'late',
+          ]);
+          expect(client['failedExperienceToolNames'].size).toBe(0);
+          expect(client['experienceSignals'].retryArc).toBe(false);
         },
       );
 

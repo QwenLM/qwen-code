@@ -482,7 +482,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
-import { userContentPushSnapshotKey } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { userContentPushAcceptedKey } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
@@ -9741,17 +9741,18 @@ export class Session implements SessionContext {
     };
     const goalPermit = goalTurnContext.getStore();
     let experienceInputRecorded = false;
+    const experienceSessionId = this.config.getSessionId();
     const recordAcceptedToolResults = () => {
-      const snapshot = (message as unknown as Record<PropertyKey, unknown>)[
-        userContentPushSnapshotKey
-      ];
+      const acceptedParts = (
+        message as unknown as Record<PropertyKey, unknown>
+      )[userContentPushAcceptedKey];
       if (
         !experienceInputRecorded &&
-        typeof snapshot === 'number' &&
-        chat.getUserContentPushCount() > snapshot
+        this.config.getSessionId() === experienceSessionId &&
+        Array.isArray(acceptedParts)
       ) {
         experienceInputRecorded = true;
-        llmClient.acceptCompletedToolResults(message);
+        llmClient.acceptCompletedToolResults(acceptedParts);
       }
     };
     let sourceStream: AsyncGenerator<StreamEvent>;
