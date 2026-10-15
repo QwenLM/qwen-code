@@ -2050,6 +2050,10 @@ export async function recoverHostedRuntimeTurn(input: {
             status: { state: settled ? 'settled' : 'executing' },
           })),
         },
+        // Always drivable, exactly like the agent and command waits: every
+        // call reads known by construction and the fold belongs to the
+        // continue/cancel route's resume arm.
+        drivable: true,
       });
     }
     // H4e-b3: the command wait classifies exactly like the agent wait —
