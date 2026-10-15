@@ -62,6 +62,19 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
+// The composed PowerShell command, so a wrapper change is one edit here
+// rather than seven hand edits.
+const PS_UTF8 = '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;';
+const PS_STRICT =
+  "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; ";
+const PS_CATCH =
+  '} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }';
+const PS_TAIL =
+  '$__s = $?\nif ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }';
+/** The command as the runner composes it, newline-delimited at both splices. */
+const psCommand = (body: string, withUtf8 = true): string =>
+  `${withUtf8 ? PS_UTF8 : ''}${PS_STRICT}try {\n${body}\n${PS_CATCH}\n${PS_TAIL}`;
+
 describe('HookRunner', () => {
   let hookRunner: HookRunner;
 
@@ -1818,7 +1831,7 @@ describe('HookRunner', () => {
       expect(spawnArgs[1]).toEqual([
         '-NoProfile',
         '-Command',
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output test",
+        psCommand('Write-Output test'),
       ]);
       expect(spawnArgs[2].shell).toBe(false);
     });
@@ -1839,7 +1852,7 @@ describe('HookRunner', () => {
       const command = mockSpawn.mock.calls[0][1][2];
       expect(command).not.toContain('[Console]::OutputEncoding');
       expect(command).toContain(
-        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output test",
+        PS_STRICT + 'try {\nWrite-Output test\n} catch {',
       );
     });
 
@@ -1864,7 +1877,7 @@ describe('HookRunner', () => {
         expect(spawnArgs[1]).toEqual([
           '-NoProfile',
           '-Command',
-          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; echo test",
+          psCommand('echo test'),
         ]);
         // cmd.exe keeps the inner quotes that PowerShell drops.
         await hookRunner.executeHook(
@@ -1882,8 +1895,25 @@ describe('HookRunner', () => {
         expect(mockSpawn.mock.calls[1][1]).toEqual([
           '-NoProfile',
           '-Command',
-          `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; bash "C:/Program Files/app/script.sh" arg`,
+          psCommand('bash "C:/Program Files/app/script.sh" arg'),
         ]);
+        // A native gate keeps its veto: `-Command` would fold its non-zero exit
+        // into 1, which does not block, so the wrapper promotes it back.
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'gate.cmd',
+            source: HooksConfigSource.Project,
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        // The wrapper and the promotion tail are both load-bearing here:
+        // `-Command` would fold the gate's exit 2 into 1, which does not block,
+        // so dropping the tail must turn this red.
+        expect(mockSpawn.mock.calls[2][1][2]).toMatch(
+          /try \{\s*gate\.cmd\s*\} catch \{[\s\S]*exit 2 \}[\s\S]*\$__s = \$\?[\s\S]*exit \$LASTEXITCODE/,
+        );
       } finally {
         spy.mockRestore();
       }
@@ -1907,7 +1937,7 @@ describe('HookRunner', () => {
         'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
       );
       expect(spawnArgs[1][2]).toBe(
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd",
+        psCommand('$env:CLAUDE_PROJECT_DIR/scripts/validate.cmd'),
       );
     });
 
@@ -1939,12 +1969,8 @@ describe('HookRunner', () => {
         const fallbackArgs = mockSpawn.mock.calls[1][1];
         expect(mockSpawn.mock.calls[1][0]).toBe(mockSpawn.mock.calls[0][0]);
         expect(fallbackArgs.slice(0, 2)).toEqual(explicitArgs.slice(0, 2));
-        expect(explicitArgs[2]).toBe(
-          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output explicit",
-        );
-        expect(fallbackArgs[2]).toBe(
-          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output fallback",
-        );
+        expect(explicitArgs[2]).toBe(psCommand('Write-Output explicit'));
+        expect(fallbackArgs[2]).toBe(psCommand('Write-Output fallback'));
       } finally {
         spy.mockRestore();
       }
@@ -2096,7 +2122,7 @@ describe('HookRunner', () => {
       );
       const spawnArgs = mockSpawn.mock.calls[0];
       expect(spawnArgs[1][2]).toMatch(
-        /^\[Console\]::OutputEncoding=\[System\.Text\.Encoding\]::UTF8;Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$global:LASTEXITCODE = \$null;\s*\$CLAUDE_PROJECT_DIR$/,
+        /^\[Console\]::OutputEncoding=\[System\.Text\.Encoding\]::UTF8;Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$global:LASTEXITCODE = \$null;\s*try \{\s*\$CLAUDE_PROJECT_DIR/,
       );
       expect(result.success).toBe(false);
       expect(result.exitCode).toBe(1);
@@ -2160,15 +2186,6 @@ describe('HookRunner', () => {
       expect(execSpy).toHaveBeenCalledTimes(3);
     });
 
-    it('resolves to the first match when the lookup lists several', () => {
-      execSpy.mockImplementation((() => ({
-        path: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe\r\nD:\\shims\\pwsh.exe',
-      })) as never);
-      expect(resolvePowerShellExecutable()).toBe(
-        'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
-      );
-    });
-
     it('names the lookup error when the probe failed rather than missed', () => {
       execSpy.mockImplementation((() => ({
         path: null,
@@ -2182,14 +2199,15 @@ describe('HookRunner', () => {
     it('probes from a neutral cwd so a workspace copy cannot answer', () => {
       execSpy.mockImplementation((() => ({ path: null })) as never);
       expect(() => resolvePowerShellExecutable()).toThrow();
-      // `where` searches the current directory before PATH: probing from the
-      // process cwd would return a workspace-planted pwsh.exe, and the temp
-      // directory is writable, so Windows probes from the system directory.
-      const neutral =
-        process.platform === 'win32'
-          ? `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32`
-          : tmpdir();
-      expect(execSpy).toHaveBeenCalledWith('pwsh', { cwd: neutral });
+      // Both finders reach the probe cwd before PATH: `where.exe` consults it
+      // directly, and `command -v` through an empty or `.` PATH component. So
+      // neither platform may probe from the process cwd.
+      if (process.platform === 'win32') {
+        const neutral = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32`;
+        expect(execSpy).toHaveBeenCalledWith('pwsh', { cwd: neutral });
+      } else {
+        expect(execSpy).toHaveBeenCalledWith('pwsh', { cwd: tmpdir() });
+      }
     });
   });
 

@@ -258,9 +258,10 @@ do not create process isolation. On Windows, the allowlisted `PATH` must
 resolve both `pwsh` and `powershell` to administrator-controlled
 executables (`pwsh` wins when both are present, and only where the hook
 shell is resolved by probing), `ComSpec` must be pinned to the **absolute
-path** of the interpreter the hooks are written for because a `ComSpec`
-naming `powershell.exe` or `pwsh.exe` is launched as it stands with no
-`PATH` lookup; if neither `pwsh` nor `powershell` resolves on the
+path** of the interpreter the hooks are written for because Qwen spawns the
+`ComSpec` value verbatim, and a bare name is searched through the loading
+directory and the parent's current directory before `PATH`; if neither
+`pwsh` nor `powershell` resolves on the
 approved `PATH` the hook reports `non_blocking_error` and the tool call
 proceeds, and PowerShell profiles must be absent or administrator-controlled.
 
