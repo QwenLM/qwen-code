@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.R
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -18,11 +19,9 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +32,7 @@ import java.util.function.Function;
 
 @Repository
 public class ManagedActionStore {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
 
@@ -649,10 +649,7 @@ public class ManagedActionStore {
         decision.put("inputRevision", response.path("inputRevision").asLong());
         decision.put("policyRevision", response.path("policyRevision").asText());
         try {
-            return HexFormat.of()
-                    .formatHex(
-                            MessageDigest.getInstance("SHA-256")
-                                    .digest(new ObjectMapper().writeValueAsBytes(decision)));
+            return DigestUtils.sha256Hex(JSON.writeValueAsBytes(decision));
         } catch (Exception error) {
             throw new IllegalStateException(error);
         }

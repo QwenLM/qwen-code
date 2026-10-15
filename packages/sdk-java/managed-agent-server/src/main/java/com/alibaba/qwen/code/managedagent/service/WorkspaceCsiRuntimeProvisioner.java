@@ -17,6 +17,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.dao.DataAccessException;
 import org.springframework.transaction.TransactionException;
 
@@ -135,7 +137,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         if (api != null) {
             require(guard != null && image != null && image.matches("[^\\s]+@sha256:[0-9a-f]{64}")
                     && !command.isEmpty() && command.size() <= 32 && command.stream().allMatch(value ->
-                            value != null && !value.isBlank() && value.length() <= 8192 && value.indexOf('\0') < 0)
+                            StringUtils.isNotBlank(value) && value.length() <= 8192 && value.indexOf('\0') < 0)
                     && artifacts.size() <= 48 && artifacts.stream().map(WorkerArtifact::configMapName).distinct().count() == artifacts.size());
         }
     }
@@ -509,9 +511,9 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
 
     private static String rawDigest(byte[] bytes) {
         try {
-            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (java.security.NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException(impossible);
+            return DigestUtils.sha256Hex(bytes);
+        } catch (IllegalArgumentException error) {
+            throw new IllegalStateException(error);
         }
     }
 
