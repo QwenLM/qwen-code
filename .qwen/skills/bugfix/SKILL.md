@@ -103,6 +103,13 @@ with a verdict:
 After fixing valid issues, re-run unit tests and a quick verification sanity
 check.
 
+## Step 7: Knowledge Closeout
+
+Run `/knowledge-lifecycle` before declaring the fix complete. Route only facts
+introduced or changed by this work, update repository files that are in scope,
+and leave GitHub mutations as proposals unless they are explicitly authorized.
+Do not create a closeout artifact when no knowledge should persist.
+
 ## Iteration Rules
 
 - If Step 4 fails, go back to Step 3, then re-run Step 4.
