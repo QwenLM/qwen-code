@@ -950,19 +950,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
         Map<String, Object> immutable = immutableMap(deferred, "reference");
         byte[] input = inputBytes.clone();
         byte[] definition = definitionBytes.clone();
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
-            context.lock();
-            try {
-                JdbcRuntimeBindingRepository jdbc = privateCsiRepository(context);
-                ToolExecutionRecord candidate = ToolExecutionRecord.prepared(nextExecutionId(), key,
-                        context.binding().getBindingId(), context.binding().getGeneration(), harnessSessionId, runtimeSessionId,
-                        referenceString(immutable, "promptId"), referenceString(immutable, "callId"),
-                        referenceString(immutable, "argsDigest"), immutable);
-                return jdbc.prepareCsiExecution(sessionRepository, executionRepository, context.binding(), candidate, input, definition);
-            } finally {
-                context.unlock();
-            }
-        });
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenApply(context -> {
+                    context.lock();
+                    try {
+                        JdbcRuntimeBindingRepository jdbc = privateCsiRepository(context);
+                        ToolExecutionRecord candidate = ToolExecutionRecord.prepared(nextExecutionId(), key,
+                                context.binding().getBindingId(), context.binding().getGeneration(), harnessSessionId, runtimeSessionId,
+                                referenceString(immutable, "promptId"), referenceString(immutable, "callId"),
+                                referenceString(immutable, "argsDigest"), immutable);
+                        return jdbc.prepareCsiExecution(sessionRepository, executionRepository, context.binding(), candidate, input, definition);
+                    } finally {
+                        context.unlock();
+                    }
+                })));
     }
 
     public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
@@ -970,15 +971,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         BrokerValues.requireId(promptId, "promptId");
         BrokerValues.requireId(batchId, "batchId");
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
-            context.lock();
-            try {
-                return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
-                        context.binding(), promptId, batchId);
-            } finally {
-                context.unlock();
-            }
-        });
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenApply(context -> {
+                    context.lock();
+                    try {
+                        return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
+                                context.binding(), promptId, batchId);
+                    } finally {
+                        context.unlock();
+                    }
+                })));
     }
 
     private JdbcRuntimeBindingRepository privateCsiRepository(SessionContext context) {

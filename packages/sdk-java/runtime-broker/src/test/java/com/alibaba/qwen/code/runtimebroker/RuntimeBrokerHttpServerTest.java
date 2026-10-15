@@ -835,6 +835,7 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     void answersAStoreFailureAsRetryableServiceUnavailable() throws Exception {
         InMemoryToolExecutionRepository inner = new InMemoryToolExecutionRepository(Clock.systemUTC());
         AtomicBoolean failing = new AtomicBoolean(true);
@@ -940,6 +941,141 @@ class RuntimeBrokerHttpServerTest {
                     "findByExecutionCallId", "findByExecutionCallId", "findByExecutionCallId",
                     "findByExecutionCallId", "findByIdempotencyKey"),
                     intercepted);
+        }
+
+        // The private CSI routes reach the same store through the JDBC binding
+        // repository's own transaction; the same outage maps the same way.
+        String csiSession = "550e8400-e29b-41d4-a716-4466554400ff";
+        var csiRequest = CsiFilesRetirementProfile.request(
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                        "tenant", "workspace", 1, "storage", ".",
+                        CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
+                "/workspace", csiSession);
+        var csiSource = new org.h2.jdbcx.JdbcDataSource();
+        csiSource.setURL("jdbc:h2:mem:csi-outage-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        JdbcRuntimeBrokerSchema.initialize(csiSource);
+        try (var connection = csiSource.getConnection();
+                var statement = connection.prepareStatement(
+                        "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile,"
+                                + " runtime_request_key, workspace_id, workspace_generation,"
+                                + " workspace_storage_id, cwd_relative, context_config_ref,"
+                                + " context_revision, workspace_config_ref, workspace_policy_ref,"
+                                + " created_at, updated_at) VALUES ('tenant', ?, 'qwen-code', ?, ?,"
+                                + " 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, csiSession);
+            statement.setString(2, CsiFilesRetirementProfile.PROFILE);
+            statement.setString(3, csiRequest.requestKey());
+            JdbcRepositorySupport.setIdentity(statement, 4,
+                    CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
+            JdbcRepositorySupport.setIdentity(statement, 5,
+                    CsiFilesRetirementProfile.CONFIG_REF);
+            JdbcRepositorySupport.setIdentity(statement, 6,
+                    CsiFilesRetirementProfile.POLICY_REF);
+            statement.executeUpdate();
+        }
+        AtomicBoolean csiFailing = new AtomicBoolean();
+        var failingSource = (javax.sql.DataSource) Proxy.newProxyInstance(
+                RuntimeBrokerHttpServerTest.class.getClassLoader(),
+                new Class<?>[] { javax.sql.DataSource.class },
+                (proxy, method, arguments) -> {
+                    if (csiFailing.get() && method.getName().equals("getConnection")) {
+                        throw new java.sql.SQLException("simulated outage");
+                    }
+                    try {
+                        return method.invoke(csiSource, arguments);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        var csiBindings = new JdbcRuntimeBindingRepository(failingSource,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var csiSessions = new JdbcRuntimeSessionRepository(failingSource);
+        var csiExecutions = new JdbcToolExecutionRepository(failingSource);
+        var csiCreated = csiBindings.findOrCreate(csiRequest);
+        var csiClaimed = csiBindings.claimOperation(csiCreated.getBindingId(), "setup",
+                Duration.ofMinutes(1));
+        var csiSeed = csiClaimed.getProvisionSeed();
+        var csiLease = new RuntimeLease(csiSeed.getProvisionalRuntimeId(),
+                URI.create("http://127.0.0.1:1234"), csiSeed.getToken(),
+                csiSeed.getLeaseId(), csiSeed.getEpoch());
+        var csiBinding = csiBindings.compareAndSet(csiClaimed, csiClaimed.withAttestation(
+                csiLease, new RuntimeResourceHandle(csiRequest.getProvisionerKind(), 1,
+                        Map.of("resource", "original")),
+                java.time.Instant.now(), java.time.Instant.now()));
+        var csiRuntime = new RuntimeSession(csiSession, csiSession, "bootstrap",
+                csiRequest.getScope());
+        var csiSaved = csiSessions.findOrCreate(new RuntimeSessionRecord(csiRuntime,
+                csiBinding.getBindingId(), csiBinding.getGeneration(),
+                RuntimeSessionRecord.State.ACQUIRING, 0, java.time.Instant.now()));
+        csiSessions.compareAndSet(csiSaved, csiSaved.withState(
+                RuntimeSessionRecord.State.READY, java.time.Instant.now()));
+        csiFailing.set(true);
+        try (var csiService = new RuntimeBrokerService(
+                id -> CompletableFuture.completedFuture(csiRequest.getScope()),
+                new StaticRuntimeProvisioner(csiLease), new FailingTransport(), csiBindings,
+                csiSessions, csiExecutions, "broker", Duration.ofMinutes(1),
+                Duration.ofMinutes(1));
+                var csiClient = HttpClient.newHttpClient()) {
+            var contextClass = Class.forName(
+                    RuntimeBrokerService.class.getName() + "$SessionContext");
+            var contextConstructor = contextClass.getDeclaredConstructor(
+                    RuntimeSession.class, RuntimeBindingRecord.class, RuntimeLease.class);
+            contextConstructor.setAccessible(true);
+            var installed = RuntimeBrokerService.class.getDeclaredField("sessions");
+            installed.setAccessible(true);
+            ((Map<String, CompletableFuture<?>>) installed.get(csiService)).put(csiSession,
+                    CompletableFuture.completedFuture(contextConstructor.newInstance(
+                            csiRuntime, csiBinding, csiLease)));
+            var csiServer = new RuntimeBrokerHttpServer(
+                    new InetSocketAddress("127.0.0.1", 0), "secret", csiService);
+            csiServer.start();
+            try {
+                String csiDigest = "sha256:" + "c".repeat(64);
+                Map<String, Object> csiPrepare = new java.util.LinkedHashMap<>(Map.of(
+                        "protocolVersion", 1, "requestId", "csi-prepare",
+                        "idempotencyKey", "csi-key", "harnessSessionId", csiSession,
+                        "runtimeSessionId", csiSession, "turnId", "turn", "toolCallId",
+                        "call", "requestDigest", csiDigest,
+                        "reference", Map.of("sessionId", csiSession, "promptId", "turn",
+                                "callId", "call", "argsDigest", csiDigest)));
+                csiPrepare.put("inputBytesBase64", java.util.Base64.getEncoder()
+                        .encodeToString("{\"payloadJson\":\"{}\"}"
+                                .getBytes(StandardCharsets.UTF_8)));
+                csiPrepare.put("toolDefinitionBytesBase64", java.util.Base64.getEncoder()
+                        .encodeToString("{\"name\":\"read_file\"}"
+                                .getBytes(StandardCharsets.UTF_8)));
+                HttpResponse<String> csiPrepared = csiClient.send(HttpRequest.newBuilder(
+                        csiServer.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX
+                                + "/executions:prepare"))
+                        .header("Authorization", "Bearer secret")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(csiPrepare)))
+                        .build(), HttpResponse.BodyHandlers.ofString());
+                assertEquals(503, csiPrepared.statusCode(), csiPrepared.body());
+                var csiPrepareError = JSON.parseObject(csiPrepared.body());
+                assertEquals("runtime_broker_store_unavailable",
+                        csiPrepareError.getString("code"));
+                assertTrue(csiPrepareError.getBooleanValue("retryable"));
+                HttpResponse<String> csiBatch = csiClient.send(HttpRequest.newBuilder(
+                        csiServer.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX
+                                + "/executions:read-batch"))
+                        .header("Authorization", "Bearer secret")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(Map.of(
+                                "protocolVersion", 1, "requestId", "csi-read",
+                                "harnessSessionId", csiSession,
+                                "runtimeSessionId", csiSession,
+                                "promptId", "turn", "batchId", "batch"))))
+                        .build(), HttpResponse.BodyHandlers.ofString());
+                assertEquals(503, csiBatch.statusCode(), csiBatch.body());
+                var csiBatchError = JSON.parseObject(csiBatch.body());
+                assertEquals("runtime_broker_store_unavailable",
+                        csiBatchError.getString("code"));
+                assertTrue(csiBatchError.getBooleanValue("retryable"));
+            } finally {
+                csiServer.close();
+            }
         }
     }
 
