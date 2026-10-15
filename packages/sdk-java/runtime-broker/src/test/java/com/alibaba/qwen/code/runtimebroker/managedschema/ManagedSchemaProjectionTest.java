@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
@@ -15,7 +16,7 @@ class ManagedSchemaProjectionTest {
     @Test
     void declaresEveryExistingColumnWithoutSelectingFutureSchemaAdditions() throws Exception {
         JdbcDataSource source = new JdbcDataSource();
-        source.setURL("jdbc:h2:mem:explicit-projections;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
+        source.setURL("jdbc:h2:mem:explicit-projections-" + UUID.randomUUID() + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
         ManagedSchema.initialize(source);
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             for (ManagedSchemaProjection projection : ManagedSchemaProjection.values()) {

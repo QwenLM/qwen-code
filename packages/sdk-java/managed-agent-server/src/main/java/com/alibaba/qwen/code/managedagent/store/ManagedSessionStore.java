@@ -369,7 +369,7 @@ public class ManagedSessionStore {
         Timestamp now = databaseNow();
         requireWriter(head, writer, generation, token, now, true);
         requireInstalledCsiWriter(csiOriginal);
-        return new PublicationWriter(databaseEpochMillis(now), databaseEpochMillis(head.writerLeaseUntil()),
+        return new PublicationWriter(epochMillis(now), epochMillis(head.writerLeaseUntil()),
                 head.journalRevision(), head.committedSequence(), head.activationEpoch(),
                 head.latestCheckpointResourceId(), head.recoveryStatus(), head.activationId(),
                 head.activationPhase(), head.activationEventEpoch(), head.activationExpiresAt(),
@@ -449,7 +449,7 @@ public class ManagedSessionStore {
                     JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId);
-            return new WriterGrant(1, databaseEpochMillis(initialLeaseUntil), 0, 0, null, 0, false);
+            return new WriterGrant(1, epochMillis(initialLeaseUntil), 0, 0, null, 0, false);
         }
         try {
             jdbc.update(
@@ -468,7 +468,7 @@ public class ManagedSessionStore {
                     tokenHash,
                     createdAt.getTime(),
                     createdAt.getTime());
-            return new WriterGrant(1, databaseEpochMillis(initialLeaseUntil), 0, 0,
+            return new WriterGrant(1, epochMillis(initialLeaseUntil), 0, 0,
                     null, 0, false);
         } catch (DuplicateKeyException ignored) {
             // A prior acquire created the row; lock and inspect it below.
@@ -525,7 +525,7 @@ public class ManagedSessionStore {
                 JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
-        return new WriterGrant(generation, databaseEpochMillis(leaseUntil),
+        return new WriterGrant(generation, epochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), false);
     }
@@ -2129,8 +2129,8 @@ public class ManagedSessionStore {
         if (continuation != null) {
             requireCsiLease(
                     continuation,
-                    databaseEpochMillis(head.writerLeaseUntil()),
-                    databaseEpochMillis(head.writerLeaseUntil()));
+                    epochMillis(head.writerLeaseUntil()),
+                    epochMillis(head.writerLeaseUntil()));
             requireWriter(head, writerId, generation, token, databaseNow(), true);
         }
     }
@@ -2139,8 +2139,8 @@ public class ManagedSessionStore {
         requireReadGrant(head, token);
         requireCsiLease(
                 continuation,
-                databaseEpochMillis(head.writerLeaseUntil()),
-                databaseEpochMillis(head.writerLeaseUntil()));
+                epochMillis(head.writerLeaseUntil()),
+                epochMillis(head.writerLeaseUntil()));
     }
 
     private record CsiContinuation(
@@ -2316,12 +2316,12 @@ public class ManagedSessionStore {
 
     private WriterGrant grant(HeadRow head, Timestamp leaseUntil,
             boolean replayed) {
-        return new WriterGrant(head.writerGeneration(), databaseEpochMillis(leaseUntil),
+        return new WriterGrant(head.writerGeneration(), epochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), replayed);
     }
 
-    private long databaseEpochMillis(Timestamp timestamp) {
+    private static long epochMillis(Timestamp timestamp) {
         return timestamp.getTime();
     }
 
@@ -2641,7 +2641,7 @@ public class ManagedSessionStore {
     }
 
     private boolean insertSessionRoot(String tenantId, String sessionId) {
-        long now = databaseEpochMillis(databaseNow());
+        long now = epochMillis(databaseNow());
         String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
         int inserted = jdbc.update(
@@ -2664,7 +2664,7 @@ public class ManagedSessionStore {
     }
 
     private void materializeSessionRoot(String tenantId, String sessionId) {
-        long now = databaseEpochMillis(databaseNow());
+        long now = epochMillis(databaseNow());
         String tenantKey = JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?"
