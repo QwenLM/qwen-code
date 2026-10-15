@@ -72,8 +72,8 @@ public class SessionMessageRelayStore {
                     + " AND (l.available_at IS NULL OR l.available_at <= ?)"
                     + " AND (l.claim_until IS NULL OR l.claim_until <= ?"
                     + " OR l.claim_owner = ?)"
-                    + " ORDER BY r.created_at, r.session_id, r.record_id"
-                    + " LIMIT ?";
+                    + " ORDER BY r.created_at, r.session_id, r.first_sequence,"
+                    + " r.record_id LIMIT ?";
 
     // The entries handed over and waiting for their target to read them,
     // driven from the ledger's own (state, next_retry_at) index, so the
@@ -204,6 +204,37 @@ public class SessionMessageRelayStore {
                         + " LIMIT 1",
                 (result, row) -> result.getInt(1), commandId, ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId,
                 senderSessionId).isEmpty();
+    }
+
+    /** The bodies of a sender's messages older than this one, by its own
+     * commit order, that still owe their handover or receipt: planned,
+     * accepting or unknown, before discovery has opened a row or on one
+     * neither classified nor past the attempt bound — a sender that takes
+     * no further revision never lets the give-up's own step land, and the
+     * hold on a younger message must end where the settlement's does. The
+     * relay keeps the ones to the same run ahead of it. */
+    public List<String> olderOwedMessages(String tenantId,
+            String senderSessionId, String messageId) {
+        return jdbc.query("SELECT r.record_resource_id FROM"
+                        + " ma_session_record r"
+                        + " JOIN ma_session_record c"
+                        + " ON c.session_scope_key = r.session_scope_key AND c.tenant_id = r.tenant_id"
+                        + " AND c.session_id = r.session_id"
+                        + " AND c.domain = r.domain"
+                        + " AND c.record_id = ?"
+                        + " LEFT JOIN ma_delivery l"
+                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = r.session_scope_key AND l.tenant_id = r.tenant_id"
+                        + " AND l.source_session_id = r.session_id"
+                        + " AND l.delivery_id = r.record_id"
+                        + " WHERE r.session_scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
+                        + " AND r.domain = 'session_message'"
+                        + " AND r.first_sequence < c.first_sequence"
+                        + " AND r.delivery_state IN ('planned', 'accepting', 'unknown')"
+                        + " AND (l.delivery_id IS NULL OR (l.transport_state NOT IN"
+                        + " ('done', 'unknown', 'orphaned') AND l.attempt_count < "
+                        + MAX_ATTEMPTS + "))",
+                (result, row) -> result.getString("record_resource_id"), messageId,
+                ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId, senderSessionId);
     }
 
     /** Insert-or-claim: returns the row this worker now owns, or null when

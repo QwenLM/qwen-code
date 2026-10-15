@@ -345,6 +345,65 @@ class SessionMessageRelayTest {
         assertThat(row.get().state()).isEqualTo("done");
     }
 
+    /** An older message of the sender, still owing its handover. */
+    private void olderOwed(String sender, String route, String childRunId) {
+        when(store.olderOwedMessages(TENANT, sender, MESSAGE))
+                .thenReturn(List.of("resource-older"));
+        when(records.readResource(TENANT, sender, "resource-older"))
+                .thenReturn("{\"direction\":\"outbound\",\"route\":\""
+                        + route + "\",\"childRunId\":\"" + childRunId
+                        + "\"}");
+    }
+
+    // One run's messages pass in send order: a younger one handed over
+    // while an older one's receive is retried would run first.
+    @Test
+    void holdsAMessageBehindAnOlderOneToTheSameRun() {
+        olderOwed(PARENT, "to_child", "run-1");
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        verify(store).scheduleRetry(any(MessageRow.class), anyString(),
+                Mockito.eq(6_000L), anyLong(), anyLong());
+        when(store.olderOwedMessages(TENANT, PARENT, MESSAGE))
+                .thenReturn(List.of());
+        relay.scan();
+        assertThat(kinds()).containsExactly("handover", "receive",
+                "accepted");
+    }
+
+    @Test
+    void neverHoldsAMessageBehindOneToAnotherRun() {
+        olderOwed(PARENT, "to_child", "run-2");
+        relay.scan();
+        assertThat(kinds()).containsExactly("handover", "receive",
+                "accepted");
+    }
+
+    @Test
+    void holdsAChildMessageBehindAnOlderOneToItsParent() {
+        row.set(new MessageRow(TENANT, CHILD, MESSAGE, null, "relaying",
+                "owner", 31_000L, 0, 0, null));
+        pending.set(new PendingMessage(TENANT, CHILD, MESSAGE,
+                "session_message", "planned", "resource-message"));
+        body("to_parent", CHILD, null);
+        when(store.lineage(TENANT, CHILD))
+                .thenReturn(new Lineage(PARENT, "run-1"));
+        olderOwed(CHILD, "to_parent", "run-1");
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+    }
+
+    // The order never holds what the run's end already decided.
+    @Test
+    void cancelsAMessageToAnEndedRunEvenBehindAnOlderOne() {
+        olderOwed(PARENT, "to_child", "run-1");
+        childRun("settled", CHILD);
+        relay.scan();
+        assertThat(kinds()).containsExactly("cancelled");
+    }
+
     @Test
     void routesAChildMessageToItsRecordedParent() {
         row.set(new MessageRow(TENANT, CHILD, MESSAGE, null, "relaying",
