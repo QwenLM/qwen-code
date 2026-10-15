@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
 
@@ -43,6 +44,63 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it.each(['.', 'assets'])(
+    'ships the spreadsheet worker in a lazy chunk in dist/%s',
+    (directory) => {
+      const chunkDir = resolve(DIST_DIR, directory);
+      const files = readdirSync(chunkDir).filter((name) =>
+        name.endsWith('.js'),
+      );
+      const previewName = files.find((name) =>
+        /^SpreadsheetPreview-.*\.js$/.test(name),
+      );
+      expect(previewName).toBeDefined();
+      const preview = readFileSync(resolve(chunkDir, previewName!), 'utf8');
+      expect(preview).toContain('data-web-shell-excel-preview');
+      expect(preview).toContain('new Worker(');
+      expect(preview).toContain('createObjectURL');
+      const otherChunks = files
+        .filter((name) => name !== previewName)
+        .map((name) => readFileSync(resolve(chunkDir, name), 'utf8'))
+        .join('\n');
+      expect(otherChunks.includes(`import("./${previewName}")`)).toBe(true);
+      expect(
+        /(?:from|import)\s*["']\.\/SpreadsheetPreview-[^"']+\.js["']/.test(
+          otherChunks,
+        ),
+      ).toBe(false);
+      expect(otherChunks.includes('data-web-shell-excel-preview')).toBe(false);
+      const workerCode = preview.match(/["']([A-Za-z0-9+/=]{1000,})["']/)?.[1];
+      expect(workerCode).toBeDefined();
+      const decodedWorker = Buffer.from(workerCode!, 'base64').toString();
+      // Parser code must stay inside the worker, even if the UI remains lazy.
+      for (const marker of [
+        'Worksheet index is outside the preview range.',
+        'Cannot merge already merged cells',
+      ]) {
+        expect(
+          decodedWorker.includes(marker),
+          `Worker contains ${marker}`,
+        ).toBe(true);
+        expect(
+          preview.includes(marker),
+          `Parser leaked into preview: ${marker}`,
+        ).toBe(false);
+        expect(
+          otherChunks.includes(marker),
+          `Parser leaked outside worker: ${marker}`,
+        ).toBe(false);
+      }
+      expect(otherChunks.includes(workerCode!)).toBe(false);
+      // Embedded hosts must not resolve external ExcelJS/SSF packages themselves.
+      expect(
+        /(?:from|import)\s*["'](?:exceljs|ssf)["']/.test(
+          `${preview}\n${otherChunks}\n${decodedWorker}`,
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('does not depend on @qwen-code/webui', () => {
     const bundle = readPackageJavascript();
     expect(bundle).not.toContain('@qwen-code/webui');
@@ -74,6 +132,39 @@ describe('build artifact — package boundary', () => {
     const bundle = readPackageJavascript();
     // Should not contain raw SDK implementation
     expect(bundle).not.toMatch(/DaemonSessionClient\s*\{/);
+  });
+
+  it('bundles Pierre highlighter dependencies instead of resolving the host Shiki major', () => {
+    const notices = readFileSync(resolve(DIST_DIR, '../NOTICES.txt'), 'utf8');
+    for (const name of ['diffs', 'trees', 'theming', 'theme']) {
+      expect(notices).toContain(`@pierre/${name}@`);
+    }
+    const treeAttribution = notices
+      .split('@pierre/trees@')[1]!
+      .split(
+        '============================================================',
+      )[0]!;
+    // This is the bundled tree's NOTICE credit, not a separate dependency entry.
+    expect(treeAttribution).toContain('Original license for');
+    expect(treeAttribution).toContain('headless-tree/core');
+    expect(notices).toContain('shiki@4.');
+    expect(readPackageJavascript()).not.toMatch(
+      /(?:from\s*|import\s*\()\s*["']@pierre\//,
+    );
+    const previews = readdirSync(DIST_DIR).filter((name) =>
+      /^PierreFilePreview-.*\.js$/.test(name),
+    );
+    expect(previews).toHaveLength(1);
+    const preview = readFileSync(resolve(DIST_DIR, previews[0]!), 'utf8');
+    expect(preview).not.toMatch(/from\s+["']shiki["']/);
+    expect(preview).toContain('createJavaScriptRegexEngine');
+    const hostHighlighter = readdirSync(DIST_DIR).find((name) =>
+      /^codeHighlighter-.*\.js$/.test(name),
+    );
+    expect(hostHighlighter).toBeDefined();
+    expect(readFileSync(resolve(DIST_DIR, hostHighlighter!), 'utf8')).toContain(
+      'from "shiki"',
+    );
   });
 
   it('scopes every component CSS rule to a WebShell root', () => {
@@ -408,14 +499,44 @@ describe('build artifact — transcript entry (#11031)', () => {
     // every entry ships — no interactive cwd code enters this graph — and
     // measured 1,323,120 before main's host-status copy. After rebasing onto
     // c34b8423, main measures 1,321,586 and this branch 1,324,022; substituting
-    // main's i18n table yields an identical JS remainder. The ceiling leaves
-    // a small margin around that intentional UI; re-measure and lower it if
-    // the entry gets leaner.
+    // main's i18n table yields an identical JS remainder. The selection-copy
+    // menu strings (#13833) land in that same shared table — the menu itself
+    // stays stubbed out of this entry — and measure 1,325,251. The
+    // action-reminder help copy (#13832) entered that same table only after
+    // the 1,325,251 measurement was taken, so the entry was already past the
+    // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
+    // Managed task panel's copy (#13936) stays stubbed out of this entry.
+    // At 008c0de7 the remainder measures 1,327,531. The read-only Excel
+    // preview puts its ten excel.* strings into that same shared table in
+    // both locales; its parser, worker and markup stay inside the lazily
+    // imported SpreadsheetPreview chunk, so only the copy enters this graph.
+    // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
+    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
+    // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_325_000);
+    expect(js.length).toBeLessThan(1_331_500);
+  });
+
+  it('keeps selection copying and its converter out of the transcript entry', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('data-selection-copy-math');
+    expect(js).not.toContain('selectionCopyListWrapper');
+  });
+
+  it('excludes Files-only messages from the transcript entry', () => {
+    const bundle = readTranscriptBundle();
+    for (const key of [
+      'files.description',
+      'files.reloadUnavailable',
+      'files.sourceTooLarge',
+    ] as const)
+      expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -438,6 +559,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('Talk in this browser');
   });
 
+  it('keeps dictation strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]voice\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('voice.error.noModel');
+    expect(interactive).toContain('Dismiss voice message');
+    expect(interactive).toContain('当前工作区未配置语音模型。');
+  });
+
   it('carries no collaboration strings and looks none up', () => {
     // Same arrangement as Live Voice: the collaboration dictionary is stubbed
     // in this build, which is only safe while no transcript surface asks for
@@ -453,6 +586,14 @@ describe('build artifact — transcript entry (#11031)', () => {
     ).toEqual([]);
   });
 
+  it('carries no Managed task-panel strings or lookups', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js.includes('managed.tasks.')).toBe(false);
+  });
+
   it('carries no settings strings and looks none up', () => {
     // Same contract as the Live Voice stub above, for
     // client/settings/messages.ts: a settings.* lookup here would render as
@@ -463,6 +604,18 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js).not.toMatch(/["'`]settings\./);
+  });
+
+  it('keeps MCP App message review strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]mcpApp\.message\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('mcpApp.message.title');
+    expect(interactive).toContain('Review App message');
+    expect(interactive).toContain('审阅 App 消息');
   });
 
   it('keeps trajectory filter strings in the interactive entry only', () => {

@@ -1090,20 +1090,73 @@ describe('managed session metadata', () => {
     },
   );
 
+  async function writeLongTitleTranscript(
+    authority: LocalManagedSessionAuthority,
+  ): Promise<number> {
+    await authority.commitDomainRecord(
+      renameCommand('cmd-title-old'),
+      {
+        domain: 'session_metadata',
+        content: { title: 'Title old', titleSource: 'manual' },
+      },
+      { class: 'trusted_entry' },
+    );
+    const activation = await authority.installActivation({
+      activationId: 'activation-tail-padding',
+      workerId: 'worker-tail-padding',
+      leaseDurationMs: 60_000,
+    });
+    const firstPaddingSequence = authority.committedSequence + 1;
+    await authority.appendExecution(
+      {
+        operation: 'appendMessageDeltaBatch',
+        commandId: 'cmd-tail-padding-batch',
+        sessionKey,
+        contentDigest: 'd'.repeat(64),
+      },
+      Array.from({ length: 16 }, (_, index) => ({
+        v: 1,
+        sequence: firstPaddingSequence + index,
+        eventId: `message-delta-tail-padding-${index}`,
+        sessionKey,
+        kind: 'message.delta',
+        occurredAt: Date.now(),
+        subject: {
+          type: 'activation' as const,
+          scopeId: activation.activationId,
+          ...activation,
+        },
+        payload: {
+          messageId: 'tail-padding-message',
+          turnId: 'tail-padding-turn',
+          role: 'assistant',
+          text: 'x'.repeat(4096),
+        },
+      })),
+      { class: 'harness', activation },
+    );
+    await authority.commitDomainRecord(
+      renameCommand('cmd-title-previous'),
+      {
+        domain: 'session_metadata',
+        content: { title: 'Title previous', titleSource: 'manual' },
+      },
+      { class: 'trusted_entry' },
+    );
+    await authority.commitDomainRecord(
+      renameCommand('cmd-title-new'),
+      {
+        domain: 'session_metadata',
+        content: { title: 'Title new', titleSource: 'manual' },
+      },
+      { class: 'trusted_entry' },
+    );
+    return authority.committedSequence;
+  }
+
   it('finds the committed title in the bounded tail window of a long log', async () => {
     const harness = await createHarness();
-    await withAuthority(harness, async (authority) => {
-      for (let index = 0; index < 64; index++) {
-        await authority.commitDomainRecord(
-          renameCommand(`cmd-${index}`),
-          {
-            domain: 'session_metadata',
-            content: { title: `Title ${index}`, titleSource: 'manual' },
-          },
-          { class: 'trusted_entry' },
-        );
-      }
-    });
+    await withAuthority(harness, writeLongTitleTranscript);
     const text = await fs.readFile(harness.transcriptPath, 'utf8');
     expect(Buffer.byteLength(text)).toBeGreaterThan(64 * 1024);
     const lines = text.trimEnd().split('\n');
@@ -1116,7 +1169,7 @@ describe('managed session metadata', () => {
         harness.runtimeBaseDir,
       ),
     ).toEqual({
-      title: 'Title 62',
+      title: 'Title previous',
       source: 'manual',
     });
   });
@@ -1128,20 +1181,10 @@ describe('managed session metadata', () => {
   // gives up returns an older title, not this one.
   it('still reads the committed title from the tail window when a glued line sits inside it', async () => {
     const harness = await createHarness();
-    await withAuthority(harness, async (authority) => {
-      for (let index = 0; index < 64; index++) {
-        await authority.commitDomainRecord(
-          renameCommand(`cmd-${index}`),
-          {
-            domain: 'session_metadata',
-            content: { title: `Title ${index}`, titleSource: 'manual' },
-          },
-          { class: 'trusted_entry' },
-        );
-      }
-    });
-
-    const newestSequence = 64;
+    const newestSequence = await withAuthority(
+      harness,
+      writeLongTitleTranscript,
+    );
     const marker = await glueRecordToNext(
       harness.transcriptPath,
       domainEvent(newestSequence),
@@ -1152,8 +1195,8 @@ describe('managed session metadata', () => {
       lastSequence: newestSequence,
     });
 
-    // Glue costs the file one newline; assert the size after it (measured
-    // 98054 bytes here), because `tailOffset > 0` — and with it the whole tail
+    // Glue costs the file one newline; assert the size after it,
+    // because `tailOffset > 0` — and with it the whole tail
     // branch — holds exactly when the file is longer than the window. Without
     // this the fixture could drift under the limit and the case would quietly
     // stop covering anything.
@@ -1166,7 +1209,7 @@ describe('managed session metadata', () => {
         harness.runtimeBaseDir,
       ),
     ).toEqual({
-      title: `Title ${newestSequence - 1}`,
+      title: 'Title new',
       source: 'manual',
     });
   });

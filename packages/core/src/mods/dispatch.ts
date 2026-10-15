@@ -6,12 +6,19 @@
 
 import { isDeepStrictEqual } from 'node:util';
 import { MOD_TIMEOUT_MS, MOD_MAX_BYTES } from './types.js';
+import {
+  validateToolInput,
+  validToolResult,
+  validToolCheck,
+} from './tool-events.js';
 
 export type ModEvent =
   | 'session.start'
   | 'session.end'
   | 'command.run'
   | 'command.register'
+  | 'tool.call'
+  | 'tool.check'
   | 'ui.log';
 export type ModInput = Record<string, unknown>;
 export interface ModFrame {
@@ -32,7 +39,9 @@ export function validateInput(
   original: ModInput,
 ): asserts value is ModInput {
   if (!record(value)) throw new Error('Invalid Mod event input.');
-  if (event === 'command.run') {
+  if (event === 'tool.call') {
+    validateToolInput(value, original);
+  } else if (event === 'command.run') {
     if (
       typeof value['args'] !== 'string' ||
       !isDeepStrictEqual({ ...value, args: '' }, { ...original, args: '' })
@@ -69,7 +78,9 @@ export function validateInput(
 export function validateResult(event: ModEvent, value: unknown): void {
   if (!record(value)) throw new Error('Invalid Mod ' + event + ' result.');
   let valid: boolean;
-  if (event === 'command.run')
+  if (event === 'tool.call') valid = validToolResult(value);
+  else if (event === 'tool.check') valid = validToolCheck(value);
+  else if (event === 'command.run')
     valid =
       Object.keys(value).every((key) => key === 'text') &&
       (value['text'] === undefined || typeof value['text'] === 'string');
@@ -130,6 +141,7 @@ export interface ModInvocation {
   plugin: number;
   event: ModEvent;
   input: ModInput;
+  toNativeInput: (input: ModInput) => ModInput;
   origin: ModOrigin;
   frames: ModFrame[];
   budget: ModBudget;

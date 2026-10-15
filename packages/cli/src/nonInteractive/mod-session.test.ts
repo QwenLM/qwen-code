@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import { convertClaudePluginPackage } from '@qwen-code/qwen-code-core/extension/claude-converter.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import type { ModLog } from '@qwen-code/qwen-code-core/mods/types.js';
@@ -63,6 +64,10 @@ describe('headless Mod session ownership', () => {
     };
     const adapter = { emitSystemMessage: vi.fn() };
     const runtime = {
+      hasToolHooks: false,
+      runTool: vi.fn<ModToolCall>(async (input, next, signal) =>
+        next(input, signal, async (_input, verdict) => verdict),
+      ),
       getCommands: vi.fn(() => [{ name: 'hello', description: 'Hello' }]),
       runCommand: vi.fn().mockResolvedValue('answer'),
       end: vi.fn().mockResolvedValue(undefined),
@@ -107,6 +112,80 @@ describe('headless Mod session ownership', () => {
       ),
     ).toBeUndefined();
     expect(mocks.load).not.toHaveBeenCalled();
+  });
+
+  it('exposes tool middleware only for a loaded tool hook and charges every repeated next', async () => {
+    const { session, runtime } = setup();
+    const signal = new AbortController().signal;
+    const repeat = vi.fn();
+    expect(session.toolCall(repeat)).toBeUndefined();
+    await session.initialize(signal);
+    expect(session.toolCall(repeat)).toBeUndefined();
+    runtime.hasToolHooks = true;
+    runtime.runTool.mockImplementation(async (e, next, active) => {
+      await next(e, active, async (_e, v) => v);
+      return next(e, active, async (_e, v) => v);
+    });
+    const next = vi.fn().mockResolvedValue({ result: {} });
+    await session.toolCall(repeat)!({ tool: 'write_file' }, next, signal);
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(repeat).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes roots and refuses a queued call after group invalidation', async () => {
+    const { session, runtime, extension } = setup();
+    const signal = new AbortController().signal;
+    await session.initialize(signal);
+    runtime.hasToolHooks = true;
+    let release: () => void = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const next = vi.fn(async () => {
+      await pending;
+      return { result: {} };
+    });
+    const middleware = session.toolCall(() => {})!;
+    const first = middleware({ tool: 'write_file' }, next, signal);
+    const second = middleware({ tool: 'write_file' }, next, signal);
+    const rejected = second.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(next).toHaveBeenCalledTimes(1));
+    extension.isActive = false;
+    release();
+    await first;
+    expect(await rejected).toEqual(
+      expect.objectContaining({
+        message: expect.stringMatching(/chain changed/),
+      }),
+    );
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels and settles tool work before ending a session', async () => {
+    const { session, runtime } = setup();
+    const signal = new AbortController().signal;
+    await session.initialize(signal);
+    runtime.hasToolHooks = true;
+    let settled = false;
+    const next = vi.fn(async (_e, active: AbortSignal) => {
+      await new Promise<void>((resolve) =>
+        active.addEventListener('abort', () => resolve(), { once: true }),
+      );
+      settled = true;
+      return { result: {} };
+    });
+    const running = session.toolCall(() => {})!(
+      { tool: 'write_file' },
+      next,
+      signal,
+    );
+    await vi.waitFor(() => expect(next).toHaveBeenCalledTimes(1));
+    runtime.end.mockImplementation(async () => {
+      expect(settled).toBe(true);
+    });
+    await session.close();
+    await running;
+    expect(settled).toBe(true);
   });
 
   it.each([
@@ -196,6 +275,62 @@ describe('headless Mod session ownership', () => {
     expect(mocks.create.mock.calls[0][0][0].options).toEqual({
       value: 'system',
     });
+  });
+
+  it.each([
+    [undefined, undefined, 'native'],
+    ['claude', undefined, 'claude'],
+    ['claude', 'native', 'native'],
+  ] as const)(
+    'selects dialect from operator settings, not workspace or plugin origin (%s, %s)',
+    async (user, system, expected) => {
+      const { config, adapter, extension } = setup();
+      Object.assign(extension, { originSource: 'claude' });
+      const settings = {
+        merged: {
+          experimental: { mods: true },
+          pluginConfigs: { 'hello-mod': { toolDialect: 'claude' } },
+        },
+        systemDefaults: { settings: {} },
+        user: {
+          settings: {
+            pluginConfigs: { 'hello-mod@inline': { toolDialect: user } },
+          },
+        },
+        system: {
+          settings: { pluginConfigs: { 'hello-mod': { toolDialect: system } } },
+        },
+      } as unknown as LoadedSettings;
+      const session = ModSession.create(
+        config as unknown as Config,
+        settings,
+        adapter as unknown as JsonOutputAdapterInterface,
+      )!;
+      sessions.push(session);
+      await session.initialize(new AbortController().signal);
+      expect(mocks.create.mock.calls[0][0][0]).toMatchObject({
+        toolDialect: expected,
+        options: {},
+      });
+    },
+  );
+
+  it('rejects an invalid dialect on a later plugin before any worker starts without userConfig', async () => {
+    const extensions = [
+      { id: 'a', name: 'a', path: '/a', version: '1.0.0', isActive: true },
+      { id: 'b', name: 'b', path: '/b', version: '1.0.0', isActive: true },
+    ];
+    const { config, adapter } = setup({ getExtensions: () => extensions });
+    const session = new ModSession(
+      config as unknown as Config,
+      adapter as unknown as JsonOutputAdapterInterface,
+      [{ b: { toolDialect: 'unsupported' } }],
+    );
+    sessions.push(session);
+    await expect(
+      session.initialize(new AbortController().signal),
+    ).rejects.toThrow('Mod b: Invalid Mod toolDialect');
+    expect(mocks.create).not.toHaveBeenCalled();
   });
 
   it.each(['missing', 'cycle', 'options'])(

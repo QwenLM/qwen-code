@@ -1,16 +1,29 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import jakarta.annotation.PostConstruct;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.springframework.boot.context.properties.ConfigurationProperties;
 import java.util.Locale;
 import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.convert.DurationUnit;
+import org.springframework.context.EnvironmentAware;
+import org.springframework.core.env.Environment;
 
 @ConfigurationProperties("qwen.managed-agent")
-public class ManagedAgentProperties {
+public class ManagedAgentProperties implements EnvironmentAware {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            ManagedAgentProperties.class);
+
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
     private final ToolPublication toolPublication = new ToolPublication();
@@ -22,6 +35,7 @@ public class ManagedAgentProperties {
     private final InternalServer internalServer = new InternalServer();
     private final Automation automation = new Automation();
     private final Channels channels = new Channels();
+    private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
@@ -29,6 +43,8 @@ public class ManagedAgentProperties {
             List.of("hosted-workspace-files/1");
     private List<String> definitionModels = List.of();
     private String trustedActorHeader = "";
+    // Null on a plain `new`; the sweep then falls back to magnitude bands.
+    private Environment environment;
 
     public Harness getHarness() {
         return harness;
@@ -48,6 +64,10 @@ public class ManagedAgentProperties {
 
     public Channels getChannels() {
         return channels;
+    }
+
+    public EventTransport getEventTransport() {
+        return eventTransport;
     }
 
     public SessionStore getSessionStore() {
@@ -105,11 +125,22 @@ public class ManagedAgentProperties {
         this.trustedActorHeader = trustedActorHeader;
     }
 
+    @Override
+    public void setEnvironment(Environment environment) {
+        this.environment = environment;
+    }
+
     @PostConstruct
     void validateWorkspaceFiles() {
+        // The sweep runs first, so a bare milliseconds-style override
+        // warns with the unit hint before the range check below fails the
+        // boot, and the refusal message itself names the convention.
+        warnOnSecondScaleOverrides();
+        runtimeBroker.getRetention().validate();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
-            throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h");
+            throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h;"
+                    + " a suffix-less number binds as seconds, so write 300s rather than 300000");
         }
         String mode = harness.getApprovalMode();
         if (harness.isWorkspaceShellEnabled()
@@ -205,6 +236,120 @@ public class ManagedAgentProperties {
         return !osName.toLowerCase(Locale.ROOT).startsWith("windows");
     }
 
+    // A suffix-less override bound milliseconds before the @DurationUnit
+    // sweep and now binds seconds, and the written shape is the signal:
+    // with an Environment (every Spring boot) the sweep reads each
+    // seconds-convention field's raw property text, warns when it is a
+    // bare integer and stays quiet on a suffixed value. With no
+    // Environment (a plain `new`) the magnitude bands are the fallback:
+    // a bound value at 1000x its field default or more is that flip's
+    // signature, the mirror band catches the other direction — a bare
+    // value meant in a larger unit binds at least 10x below the default
+    // (zero is unambiguous and never trips) — and a required field ships
+    // no default to compare against, so it warns from one hour up
+    // instead. Warn, never refuse: a deliberate value must still boot.
+    private void warnOnSecondScaleOverrides() {
+        warnOnSecondScaleOverrides("qwen.managed-agent.", this,
+                new ManagedAgentProperties(), environment);
+    }
+
+    private static void warnOnSecondScaleOverrides(String prefix,
+            Object bound, Object initial, Environment environment) {
+        for (Field field : bound.getClass().getDeclaredFields()) {
+            if (Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            // Only Duration fields can carry the flipped unit, and only
+            // the nested groups can hold one; both expose getXxx getters
+            // (the boolean isXxx getters belong to fields skipped here).
+            boolean duration = field.getType() == Duration.class;
+            boolean group = field.getType().getEnclosingClass()
+                    == ManagedAgentProperties.class;
+            if (!duration && !group) {
+                continue;
+            }
+            Object value;
+            Object basis;
+            try {
+                Method getter = bound.getClass().getMethod("get"
+                        + Character.toUpperCase(field.getName().charAt(0))
+                        + field.getName().substring(1));
+                value = getter.invoke(bound);
+                basis = getter.invoke(initial);
+            } catch (NoSuchMethodException | IllegalAccessException
+                    | InvocationTargetException error) {
+                throw new IllegalStateException(error);
+            }
+            String property = prefix + field.getName()
+                    .replaceAll("([A-Z])", "-$1")
+                    .toLowerCase(Locale.ROOT);
+            if (duration) {
+                DurationUnit unit = field.getAnnotation(DurationUnit.class);
+                Duration basisDefault = basis instanceof Duration basisDuration
+                        ? basisDuration : null;
+                if (unit != null && unit.value() == ChronoUnit.SECONDS
+                        && value instanceof Duration boundValue) {
+                    String written = environment == null ? null
+                            : environment.getProperty(property);
+                    if (written != null) {
+                        // A bare integer is the stale milliseconds-style
+                        // override; a suffixed value never flips units.
+                        String text = written.trim();
+                        if (text.matches("-?\\d+")) {
+                            LOG.warn("{}={} binds as {} (seconds); before"
+                                    + " the @DurationUnit sweep the same"
+                                    + " suffix-less value bound as"
+                                    + " milliseconds ({}). Write an"
+                                    + " explicit suffix (for example"
+                                    + " 1800000ms or 30m) to confirm"
+                                    + " the intent.",
+                                    property, text, boundValue,
+                                    Duration.ofMillis(Long.parseLong(text)));
+                        }
+                    } else if (environment == null && basisDefault != null
+                            && boundValue.compareTo(
+                                    basisDefault.multipliedBy(1000)) >= 0) {
+                        LOG.warn("{} resolved to {}, at least 1000x its"
+                                + " default ({}) — the signature of a stale"
+                                + " milliseconds-style override: a"
+                                + " suffix-less number now binds as"
+                                + " seconds. Write an explicit suffix"
+                                + " (for example 1800000ms) to confirm"
+                                + " the intent.",
+                                property, boundValue, basisDefault);
+                    } else if (environment == null && basisDefault != null
+                            && !boundValue.isZero()
+                            && !boundValue.isNegative()
+                            && boundValue.compareTo(
+                                    basisDefault.dividedBy(10)) <= 0) {
+                        LOG.warn("{} resolved to {}, at least 10x below its"
+                                + " default ({}) — a suffix-less number"
+                                + " now binds as seconds, so a value meant"
+                                + " in a larger unit shrinks this far."
+                                + " Write an explicit suffix (for example"
+                                + " 30m) to confirm the intent.",
+                                property, boundValue, basisDefault);
+                    } else if (environment == null && basisDefault == null
+                            && boundValue.compareTo(Duration.ofHours(1))
+                                    >= 0) {
+                        LOG.warn("{} resolved to {} — this required setting"
+                                + " ships no default to compare against: a"
+                                + " suffix-less number now binds as"
+                                + " seconds, and this scale is the"
+                                + " signature of a stale milliseconds-style"
+                                + " override. Write an explicit suffix"
+                                + " (for example 1800000ms) to confirm"
+                                + " the intent.",
+                                property, boundValue);
+                    }
+                }
+            } else if (value != null) {
+                warnOnSecondScaleOverrides(property + ".", value, basis,
+                        environment);
+            }
+        }
+    }
+
     public static class Harness {
         private boolean enabled;
         private boolean workspaceFilesEnabled;
@@ -213,6 +358,9 @@ public class ManagedAgentProperties {
         private String token = "";
         private String capabilityDigest = "";
         private String approvalMode = "yolo";
+        // Unit-less operator overrides must bind in the annotated unit; an
+        // un-annotated Duration silently binds milliseconds.
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration approvalTimeout = Duration.ofMinutes(10);
 
         public Duration getApprovalTimeout() {
@@ -223,9 +371,13 @@ public class ManagedAgentProperties {
             approvalTimeout = value;
         }
 
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration connectTimeout = Duration.ofSeconds(5);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration requestTimeout = Duration.ofSeconds(30);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration loadTimeout = Duration.ofSeconds(120);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration heartbeatInterval = Duration.ofSeconds(30);
         /**
          * Turn-level deadline passed to the Harness at prompt admission. An
@@ -233,6 +385,7 @@ public class ManagedAgentProperties {
          * classified deadline failure, so a stalled model stream cannot pin
          * a Session forever.
          */
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration turnDeadline = Duration.ofMinutes(30);
 
         public boolean isEnabled() {
@@ -336,6 +489,7 @@ public class ManagedAgentProperties {
         private boolean enabled;
         private String baseUrl = "";
         private String workspaceId = "";
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration writerLeaseDuration = Duration.ofSeconds(60);
         private String bindingKey = "";
         private boolean allowInsecureHttp;
@@ -392,6 +546,12 @@ public class ManagedAgentProperties {
     public static class Auth {
         private String mode = "auto";
         private String signingKey = "";
+        // MILLIS, deliberately against the sweep's SECONDS: a stale
+        // milliseconds-style override (300000) must keep binding the
+        // documented 5m — under SECONDS it would silently widen the
+        // signature-replay window to ~83h and still pass BrokerSecurity's
+        // 1s floor.
+        @DurationUnit(ChronoUnit.MILLIS)
         private Duration allowedDrift = Duration.ofMinutes(5);
         private boolean allowInsecureBind;
         private long maxSignedBodyBytes = 10 * 1024 * 1024;
@@ -472,11 +632,17 @@ public class ManagedAgentProperties {
         private Long tenantBytes;
         private Long activeCaptures;
         private Integer entryConcurrency;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration operationTimeout;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration claimTimeout;
         private Long verificationBytesPerSecond;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration maxVerificationTimeout;
         private boolean gcEnabled;
+        private boolean asyncVerificationEnabled;
+        private int verificationConcurrency = 2;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
         // Off by default: the head's activation columns are only trustworthy
         // once no pre-V36 binary can still commit. Enable after the fleet
@@ -484,6 +650,10 @@ public class ManagedAgentProperties {
         private boolean journalHeadAuthorization;
 
         public boolean isJournalHeadAuthorization() { return journalHeadAuthorization; }
+        public boolean isAsyncVerificationEnabled() { return asyncVerificationEnabled; }
+        public void setAsyncVerificationEnabled(boolean value) { asyncVerificationEnabled = value; }
+        public int getVerificationConcurrency() { return verificationConcurrency; }
+        public void setVerificationConcurrency(int value) { verificationConcurrency = value; }
         public void setJournalHeadAuthorization(boolean value) { journalHeadAuthorization = value; }
         public boolean isGcEnabled() { return gcEnabled; }
         public void setGcEnabled(boolean value) { gcEnabled = value; }
@@ -525,7 +695,9 @@ public class ManagedAgentProperties {
         private boolean publishOriginal;
         private boolean publishPreview;
         private int maxConcurrentReads = 4;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration readTimeout = Duration.ofMinutes(2);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration readRevalidationInterval = Duration.ofSeconds(5);
 
         public boolean isEnabled() { return enabled; }
@@ -544,20 +716,22 @@ public class ManagedAgentProperties {
     }
 
     public static class Dispatch {
-        private Duration scanDelay = Duration.ofSeconds(1);
+        // No typed scan-delay field. The deployed default comes from
+        // application.yml (`dispatch.scan-delay: '1s'`); the same
+        // "${...scan-delay:1s}" fallback is repeated by three @Scheduled
+        // methods — ActionResponseCoordinator.recover,
+        // HarnessCoordinator.recoverExpiredTurns and
+        // SessionLifecycleCoordinator.recoverOperations — and @Scheduled
+        // reads a bare number as milliseconds, not seconds.
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration leaseDuration = Duration.ofSeconds(60);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration leaseRenewInterval = Duration.ofSeconds(20);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration retryInitialDelay = Duration.ofSeconds(1);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration retryMaxDelay = Duration.ofMinutes(1);
         private int maxPreAdmissionRetries = 5;
-
-        public Duration getScanDelay() {
-            return scanDelay;
-        }
-
-        public void setScanDelay(Duration scanDelay) {
-            this.scanDelay = scanDelay;
-        }
 
         public Duration getLeaseDuration() {
             return leaseDuration;
@@ -601,11 +775,18 @@ public class ManagedAgentProperties {
     }
 
     public static class Events {
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration pollInterval = Duration.ofSeconds(5);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration heartbeatInterval = Duration.ofSeconds(15);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration streamTimeout = Duration.ofMinutes(30);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration readGrantRecheckInterval = Duration.ofSeconds(5);
+        @DurationUnit(ChronoUnit.MILLIS)
         private Duration batchInterval = Duration.ofMillis(75);
+        @DurationUnit(ChronoUnit.MILLIS)
+        private Duration materializeInterval = Duration.ofMillis(100);
         private int batchMaxEvents = 64;
         private int batchMaxBytes = 65536;
         private boolean replayFloorEnabled;
@@ -655,6 +836,14 @@ public class ManagedAgentProperties {
             this.batchInterval = batchInterval;
         }
 
+        public Duration getMaterializeInterval() {
+            return materializeInterval;
+        }
+
+        public void setMaterializeInterval(Duration materializeInterval) {
+            this.materializeInterval = materializeInterval;
+        }
+
         public int getBatchMaxEvents() {
             return batchMaxEvents;
         }
@@ -687,11 +876,13 @@ public class ManagedAgentProperties {
 
     public static class RuntimeBroker {
         private boolean enabled;
+        private final Retention retention = new Retention();
         private String host = "127.0.0.1";
         private int port = 4182;
         private boolean allowNonLoopback;
         private String token = "";
         private String provisioner = "local-process";
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration v3ResultWindow = Duration.ofMinutes(30);
         private String workspaceId = "";
         private String workspaceGeneration = "1";
@@ -707,19 +898,6 @@ public class ManagedAgentProperties {
         private String credentialKey = "";
         private String nodeExecutable = "";
         private String workerEntry = "";
-        private String cliEntry = "";
-        private String kubernetesApiServer =
-                "https://kubernetes.default.svc";
-        private String kubernetesTokenFile =
-                "/var/run/secrets/kubernetes.io/serviceaccount/token";
-        private String kubernetesCaFile =
-                "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
-        private String kubernetesClusterUid = "";
-        private String kubernetesNamespace = "qwen-runtimes";
-        private String kubernetesImage = "";
-        private int kubernetesPort = 4190;
-        private String kubernetesServiceAccountName = "";
-        private String kubernetesWorkspaceClaimName = "";
         private String staticEndpoint = "";
         private String staticToken = "";
         private String staticRuntimeInstanceId = "standalone-runtime";
@@ -728,7 +906,40 @@ public class ManagedAgentProperties {
         private Map<String, String> environment = new LinkedHashMap<>();
         private boolean childWorkspacesEnabled;
         private String childWorkspaceGit = "git";
+        @DurationUnit(ChronoUnit.MILLIS)
         private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
+
+        public Retention getRetention() {
+            return retention;
+        }
+
+        public static class Retention {
+            private boolean enabled;
+            @DurationUnit(ChronoUnit.DAYS)
+            private Duration maxAge = Duration.ofDays(30);
+            private int batchSize = 100;
+            @DurationUnit(ChronoUnit.MILLIS)
+            private Duration scanDelay = Duration.ofMinutes(1);
+
+            public boolean isEnabled() { return enabled; }
+            public void setEnabled(boolean value) { enabled = value; }
+            public Duration getMaxAge() { return maxAge; }
+            public void setMaxAge(Duration value) { maxAge = value; }
+            public int getBatchSize() { return batchSize; }
+            public void setBatchSize(int value) { batchSize = value; }
+            public Duration getScanDelay() { return scanDelay; }
+            public void setScanDelay(Duration value) { scanDelay = value; }
+
+            void validate() {
+                if (maxAge == null || maxAge.isZero() || maxAge.isNegative()
+                        || maxAge.compareTo(Duration.ofMillis(1)) < 0
+                        || scanDelay == null || scanDelay.isZero() || scanDelay.isNegative()
+                        || scanDelay.toMillis() < 1 || batchSize < 1 || batchSize > 1000) {
+                    throw new IllegalStateException("Runtime Broker retention requires positive max-age and scan-delay"
+                            + " (at least 1ms), and batch-size between 1 and 1000");
+                }
+            }
+        }
 
         public boolean isEnabled() {
             return enabled;
@@ -925,90 +1136,6 @@ public class ManagedAgentProperties {
             this.workerEntry = workerEntry;
         }
 
-        public String getCliEntry() {
-            return cliEntry;
-        }
-
-        public void setCliEntry(String cliEntry) {
-            this.cliEntry = cliEntry;
-        }
-
-        public String getKubernetesApiServer() {
-            return kubernetesApiServer;
-        }
-
-        public void setKubernetesApiServer(String kubernetesApiServer) {
-            this.kubernetesApiServer = kubernetesApiServer;
-        }
-
-        public String getKubernetesTokenFile() {
-            return kubernetesTokenFile;
-        }
-
-        public void setKubernetesTokenFile(String kubernetesTokenFile) {
-            this.kubernetesTokenFile = kubernetesTokenFile;
-        }
-
-        public String getKubernetesCaFile() {
-            return kubernetesCaFile;
-        }
-
-        public void setKubernetesCaFile(String kubernetesCaFile) {
-            this.kubernetesCaFile = kubernetesCaFile;
-        }
-
-        public String getKubernetesClusterUid() {
-            return kubernetesClusterUid;
-        }
-
-        public void setKubernetesClusterUid(String kubernetesClusterUid) {
-            this.kubernetesClusterUid = kubernetesClusterUid;
-        }
-
-        public String getKubernetesNamespace() {
-            return kubernetesNamespace;
-        }
-
-        public void setKubernetesNamespace(String kubernetesNamespace) {
-            this.kubernetesNamespace = kubernetesNamespace;
-        }
-
-        public String getKubernetesImage() {
-            return kubernetesImage;
-        }
-
-        public void setKubernetesImage(String kubernetesImage) {
-            this.kubernetesImage = kubernetesImage;
-        }
-
-        public int getKubernetesPort() {
-            return kubernetesPort;
-        }
-
-        public void setKubernetesPort(int kubernetesPort) {
-            this.kubernetesPort = kubernetesPort;
-        }
-
-        public String getKubernetesServiceAccountName() {
-            return kubernetesServiceAccountName;
-        }
-
-        public void setKubernetesServiceAccountName(
-                String kubernetesServiceAccountName) {
-            this.kubernetesServiceAccountName =
-                    kubernetesServiceAccountName;
-        }
-
-        public String getKubernetesWorkspaceClaimName() {
-            return kubernetesWorkspaceClaimName;
-        }
-
-        public void setKubernetesWorkspaceClaimName(
-                String kubernetesWorkspaceClaimName) {
-            this.kubernetesWorkspaceClaimName =
-                    kubernetesWorkspaceClaimName;
-        }
-
         public String getStaticEndpoint() {
             return staticEndpoint;
         }
@@ -1062,9 +1189,13 @@ public class ManagedAgentProperties {
     /** H6b/H6c: the automation scanner, its lease and the slot window. */
     public static class Automation {
         private boolean enabled;
+        @DurationUnit(ChronoUnit.MILLIS)
         private Duration scanDelay = Duration.ofSeconds(10);
+        @DurationUnit(ChronoUnit.MILLIS)
         private Duration lease = Duration.ofSeconds(60);
+        @DurationUnit(ChronoUnit.MILLIS)
         private Duration lateTolerance = Duration.ofMinutes(5);
+        @DurationUnit(ChronoUnit.MILLIS)
         private Duration lookback = Duration.ofHours(24);
         private int maxSlotsPerTick = 1000;
         private int concurrency = 4;
@@ -1128,9 +1259,14 @@ public class ManagedAgentProperties {
 
     /** H5b/H5c: the trusted channel adapter surface and its claim lease. */
     public static class Channels {
+        // No typed scan-delay field. The deployed default comes from
+        // application.yml (`channels.scan-delay: '30s'`); the same
+        // "${...channels.scan-delay:30s}" fallback drives
+        // ManagedChannelService.reconcile, and @Scheduled reads a bare
+        // number as milliseconds, not seconds.
         private boolean enabled;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration claimLease = Duration.ofMinutes(10);
-        private Duration scanDelay = Duration.ofSeconds(30);
 
         public boolean isEnabled() {
             return enabled;
@@ -1147,13 +1283,106 @@ public class ManagedAgentProperties {
         public void setClaimLease(Duration claimLease) {
             this.claimLease = claimLease;
         }
+    }
 
-        public Duration getScanDelay() {
-            return scanDelay;
+    /**
+     * Broker-backed EventTransport (design
+     * 2026-10-04-managed-agent-event-transport): the authoritative journal
+     * wire (phase MQ2b), and the public-event wire and the wake and
+     * materialization consumers (phase MQ2c). Default off, so a flag-off
+     * deployment creates no transport, producer or consumer bean and stays
+     * byte-identical. The topic must be a LITE topic, and the
+     * capability-probe, wake-bootstrap and owner groups must be pre-created
+     * as LITE groups bound to it — see EventTransportConfiguration for the
+     * deployment prerequisites.
+     */
+    public static class EventTransport {
+        private boolean enabled;
+        // The RocketMQ proxy gRPC endpoint (e.g. "host:8081").
+        private String endpoints = "";
+        // The parent topic the per-Session LiteTopics (journal and public
+        // envelopes alike) and the wake bootstrap LiteTopic live under.
+        private String topic = "";
+        // The group the startup capability probe subscribes in; pre-created
+        // as a LITE group bound to the topic like the lane groups.
+        private String capabilityProbeGroup =
+                "qwen-managed-journal-capability-probe";
+        // The one LiteTopic every wake.requested envelope is also sent to, so
+        // a node can learn of a wake nobody owns yet. Session ids are UUIDs,
+        // so this name cannot collide with a Session's LiteTopic.
+        private String wakeBootstrapLiteTopic = "qwen-wake-bootstrap";
+        // Shared by every node; one dispatch reaches one member.
+        private String wakeBootstrapGroup = "qwen-managed-wake-bootstrap";
+        // Shared by every node; each subscribes it to the Sessions it holds.
+        private String ownerGroup = "qwen-managed-session-owner";
+        // How often the owner subscriptions follow this node's held Sessions.
+        // Unit-less operator overrides must bind in the annotated unit.
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration ownerReconcileInterval = Duration.ofSeconds(1);
+
+        public String getCapabilityProbeGroup() {
+            return capabilityProbeGroup;
         }
 
-        public void setScanDelay(Duration scanDelay) {
-            this.scanDelay = scanDelay;
+        public void setCapabilityProbeGroup(String capabilityProbeGroup) {
+            this.capabilityProbeGroup = capabilityProbeGroup;
+        }
+
+        public String getWakeBootstrapLiteTopic() {
+            return wakeBootstrapLiteTopic;
+        }
+
+        public void setWakeBootstrapLiteTopic(String wakeBootstrapLiteTopic) {
+            this.wakeBootstrapLiteTopic = wakeBootstrapLiteTopic;
+        }
+
+        public String getWakeBootstrapGroup() {
+            return wakeBootstrapGroup;
+        }
+
+        public void setWakeBootstrapGroup(String wakeBootstrapGroup) {
+            this.wakeBootstrapGroup = wakeBootstrapGroup;
+        }
+
+        public String getOwnerGroup() {
+            return ownerGroup;
+        }
+
+        public void setOwnerGroup(String ownerGroup) {
+            this.ownerGroup = ownerGroup;
+        }
+
+        public Duration getOwnerReconcileInterval() {
+            return ownerReconcileInterval;
+        }
+
+        public void setOwnerReconcileInterval(
+                Duration ownerReconcileInterval) {
+            this.ownerReconcileInterval = ownerReconcileInterval;
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getEndpoints() {
+            return endpoints;
+        }
+
+        public void setEndpoints(String endpoints) {
+            this.endpoints = endpoints;
+        }
+
+        public String getTopic() {
+            return topic;
+        }
+
+        public void setTopic(String topic) {
+            this.topic = topic;
         }
     }
 }

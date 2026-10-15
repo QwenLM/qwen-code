@@ -12,6 +12,8 @@ import {
 } from 'quickjs-emscripten-core';
 import { MOD_GUEST_FACTORY } from './guest.js';
 import { compileModModules } from './module-loader.js';
+import { modToolInputView } from './tool-dialect.js';
+import type { ModToolCallInput, ModToolCheckResult } from './tool-events.js';
 import {
   MOD_MAX_BYTES,
   MOD_TIMEOUT_MS,
@@ -42,6 +44,15 @@ const realms: Realm[] = [];
 const calls = new Map<number, ModInvocation>();
 const commands = new Map<string, ModCommand & { plugin: string }>();
 const notifications = new Set<Promise<unknown>>();
+const hostOperations = new Map<
+  number,
+  {
+    parent?: ModInvocation;
+    frames: ModFrame[];
+    resolve: (result: unknown) => void;
+    reject: (error: Error) => void;
+  }
+>();
 let serial = 0;
 let epoch = 0;
 let deadline = Infinity;
@@ -50,6 +61,7 @@ let busy = false;
 let logChars = 0;
 let operations = 0;
 let pumping = false;
+let builtinTool: string | undefined;
 const send = (reply: ModReply) => port.postMessage(reply);
 const abandoned = () =>
   Atomics.load(cancelled, 0) !== 0 || Date.now() >= deadline;
@@ -319,7 +331,11 @@ async function dispatch(
   input: ModInput,
   origin: ModOrigin,
   frames: ModFrame[],
-  bottom: (e: ModInput) => Promise<unknown>,
+  bottom: (
+    e: ModInput,
+    frames: ModFrame[],
+    parent?: ModInvocation,
+  ) => Promise<unknown>,
   index = 0,
   parent?: ModInvocation,
 ): Promise<unknown> {
@@ -327,12 +343,19 @@ async function dispatch(
   if (index === 0 && ++operations > 4096)
     throw new Error('Mod dispatch operation limit exceeded.');
   const realm = realms[index];
-  if (!realm) return bottom(input);
+  if (!realm) return bottom(input, frames, parent);
   let owner = parent;
   const next = (e: ModInput, nested: ModFrame[]) =>
     dispatch(event, e, origin, nested, bottom, index + 1, owner);
   if (!realm.patterns.some((pattern) => patternMatches(pattern, event)))
     return next(input, frames);
+  const view = modToolInputView(
+    event,
+    input,
+    realm.plugin.toolDialect,
+    builtinTool,
+  );
+  if (!view) return next(input, frames);
   const active = frames.filter((frame) => frame.plugin === index);
   const lastFrame = frames.at(-1);
   const leftOut = lastFrame?.plugin === index ? [lastFrame.registration] : [];
@@ -346,7 +369,8 @@ async function dispatch(
     closed: false,
     plugin: index,
     event,
-    input,
+    input: view.input,
+    toNativeInput: view.toNativeInput,
     origin,
     frames,
     budget: new ModBudget(told.length ? 1000 : MOD_TIMEOUT_MS),
@@ -364,7 +388,7 @@ async function dispatch(
         realm.invoke('run', {
           id: call.id,
           event,
-          input,
+          input: call.input,
           origin,
           leftOut,
           told,
@@ -420,11 +444,13 @@ async function dispatch(
   } finally {
     call.live = false;
     call.closed = true;
+    cancelAbandonedOperations();
     realm.notify('finish', call.id);
     calls.delete(call.id);
     if (recovery) {
       recovery.live = false;
       recovery.closed = true;
+      cancelAbandonedOperations();
       realm.notify('finish', recovery.id);
       calls.delete(recovery.id);
     }
@@ -456,7 +482,8 @@ async function hostCall(
   if (method === 'next') {
     if (call.recovering && call.last) return call.budget.lend(() => call.last!);
     validateInput(call.event, value, call.input);
-    const task = call.budget.lend(() => call.next(value, frames));
+    const nativeInput = call.toNativeInput(value);
+    const task = call.budget.lend(() => call.next(nativeInput, frames));
     call.last = task;
     void task.catch(() => {});
     return task;
@@ -508,7 +535,73 @@ async function hostCall(
   return method === 'ui.log' ? invoke() : call.budget.lend(invoke);
 }
 
+function cancelAbandonedOperations(): void {
+  const cancelled: number[] = [];
+  for (const [id, operation] of hostOperations) {
+    if (!callAbandoned(operation.parent)) continue;
+    hostOperations.delete(id);
+    cancelled.push(id);
+    operation.reject(new Error('Mod tool continuation is no longer active.'));
+  }
+  if (cancelled.length) send({ type: 'host-cancel', ids: cancelled });
+}
+
+async function executeHostTool(
+  input: ModInput,
+  frames: ModFrame[],
+  parent?: ModInvocation,
+): Promise<unknown> {
+  assertLive(parent);
+  if (++operations > 4096 || hostOperations.size >= 32)
+    throw new Error('Mod host operation limit exceeded.');
+  const id = ++serial;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  try {
+    return await new Promise((resolve, reject) => {
+      hostOperations.set(id, { parent, frames, resolve, reject });
+      timer = setInterval(cancelAbandonedOperations, 5);
+      send({ type: 'host-call', id, input: input as ModToolCallInput });
+    });
+  } finally {
+    clearInterval(timer);
+    hostOperations.delete(id);
+  }
+}
+
 port.on('message', async (request: ModRequest) => {
+  if (request.type === 'host-result') {
+    const operation = hostOperations.get(request.id);
+    if (!operation) return;
+    hostOperations.delete(request.id);
+    if (request.error !== undefined) operation.reject(new Error(request.error));
+    else operation.resolve(request.result);
+    return;
+  }
+  if (request.type === 'tool-check') {
+    const operation = hostOperations.get(request.operation);
+    try {
+      if (!busy || !operation) throw new Error('Mod tool operation has ended.');
+      assertLive(operation.parent);
+      const result = (await dispatch(
+        'tool.check',
+        request.input,
+        engineOrigin,
+        operation.frames,
+        async () => request.verdict,
+        0,
+        operation.parent,
+      )) as ModToolCheckResult;
+      assertLive(operation.parent);
+      send({ type: 'check-result', id: request.id, result });
+    } catch (error) {
+      send({
+        type: 'check-result',
+        id: request.id,
+        error: String(error).slice(0, 4000),
+      });
+    }
+    return;
+  }
   if (busy) {
     send({
       type: 'error',
@@ -517,6 +610,7 @@ port.on('message', async (request: ModRequest) => {
     return;
   }
   busy = true;
+  builtinTool = request.type === 'tool' ? request.builtinTool : undefined;
   epoch++;
   logChars = 0;
   operations = 0;
@@ -544,7 +638,16 @@ port.on('message', async (request: ModRequest) => {
         [],
         async (e) => ({ cwd: e['cwd'] }),
       );
-      result = [...commands.values()];
+      result = {
+        commands: [...commands.values()],
+        tools: realms.some((realm) =>
+          realm.patterns.some(
+            (pattern) =>
+              patternMatches(pattern, 'tool.call') ||
+              patternMatches(pattern, 'tool.check'),
+          ),
+        ),
+      };
     } else if (request.type === 'command') {
       if (!commands.has(request.command))
         throw new Error('Unknown Mod command.');
@@ -561,6 +664,14 @@ port.on('message', async (request: ModRequest) => {
         async (e) => {
           throw new Error('No Mod hook answered /' + String(e['command']));
         },
+      );
+    } else if (request.type === 'tool') {
+      result = await dispatch(
+        'tool.call',
+        request.input,
+        engineOrigin,
+        [],
+        executeHostTool,
       );
     } else {
       result = await dispatch(
@@ -589,7 +700,14 @@ port.on('message', async (request: ModRequest) => {
       call.aborted = true;
       realms[call.plugin].notify('abort', call.id);
     }
+    if (hostOperations.size)
+      send({ type: 'host-cancel', ids: [...hostOperations.keys()] });
+    for (const operation of hostOperations.values()) {
+      operation.reject(new Error('Mod root dispatch has ended.'));
+    }
+    hostOperations.clear();
     starting = false;
+    builtinTool = undefined;
     deadline = Infinity;
     busy = false;
   }

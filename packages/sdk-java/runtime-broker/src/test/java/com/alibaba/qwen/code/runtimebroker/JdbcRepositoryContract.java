@@ -107,9 +107,9 @@ public final class JdbcRepositoryContract {
         session.put("record_version", 4);
         session.put("last_active_at", java.sql.Timestamp.from(START));
         try (Connection connection = source.getConnection()) {
-            insertLegacy(connection, "qwen_runtime_binding_slot", slot);
-            insertLegacy(connection, "qwen_runtime_binding", binding);
-            insertLegacy(connection, "qwen_runtime_session", session);
+            insertLegacy(connection, "ma_runtime_slot", slot);
+            insertLegacy(connection, "ma_runtime_binding", binding);
+            insertLegacy(connection, "ma_runtime_session", session);
             for (String state : List.of("PREPARED", "UNKNOWN", "SETTLED")) {
                 String id = prefix + "-" + state;
                 Map<String, Object> execution = new LinkedHashMap<>();
@@ -137,7 +137,7 @@ public final class JdbcRepositoryContract {
                     execution.put("result_json", "{\"executionStatus\":\"success\"}");
                     execution.put("settled_at", java.sql.Timestamp.from(START));
                 }
-                insertLegacy(connection, "qwen_tool_execution", execution);
+                insertLegacy(connection, "ma_tool_execution", execution);
             }
         }
         return request;
@@ -210,32 +210,9 @@ public final class JdbcRepositoryContract {
                 + " is shorter than " + lease + " after " + before);
     }
 
-    private static void verifySchema(DataSource dataSource)
-            throws SQLException {
-        try (Connection connection = dataSource.getConnection()) {
-            try (PreparedStatement create = connection.prepareStatement(
-                    "CREATE TABLE IF NOT EXISTS broker_witness "
-                            + "(witness_id INT PRIMARY KEY)")) {
-                create.execute();
-            }
-            try (PreparedStatement delete = connection.prepareStatement(
-                    "DELETE FROM broker_witness")) {
-                delete.executeUpdate();
-            }
-            try (PreparedStatement insert = connection.prepareStatement(
-                    "INSERT INTO broker_witness (witness_id) VALUES (1)")) {
-                insert.executeUpdate();
-            }
-        }
-        JdbcRuntimeBrokerSchema.initialize(dataSource);
-        JdbcRuntimeBrokerSchema.initialize(dataSource);
-        try (Connection connection = dataSource.getConnection();
-                PreparedStatement query = connection.prepareStatement(
-                        "SELECT COUNT(*) FROM broker_witness");
-                ResultSet result = query.executeQuery()) {
-            assertTrue(result.next());
-            assertEquals(1, result.getLong(1));
-        }
+    private static void verifySchema(DataSource dataSource) {
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(dataSource);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(dataSource);
     }
 
     private static void verifyBinding(DataSource dataSource, String prefix)
@@ -285,7 +262,7 @@ public final class JdbcRepositoryContract {
         assertEquals(ownerA.getVersion() + 1, renewedA.getVersion());
         assertNull(second.claimOperation(bindingId, prefix + "-owner-b",
                 Duration.ofMinutes(30)));
-        expire(dataSource, "qwen_runtime_binding",
+        expire(dataSource, "ma_runtime_binding",
                 "operation_lease_until", "binding_id", bindingId);
 
         RuntimeBindingRecord ownerB = second.claimOperation(bindingId,
@@ -457,7 +434,7 @@ public final class JdbcRepositoryContract {
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement statement = connection.prepareStatement(
                         "SELECT provision_seed_ciphertext "
-                                + "FROM qwen_runtime_binding "
+                                + "FROM ma_runtime_binding "
                                 + "WHERE binding_id = ?")) {
             statement.setString(1, bindingId);
             try (ResultSet result = statement.executeQuery()) {
@@ -473,7 +450,7 @@ public final class JdbcRepositoryContract {
                 PreparedStatement statement = connection.prepareStatement(
                         "SELECT runtime_credential_ciphertext, "
                                 + "runtime_credential_key_id "
-                                + "FROM qwen_runtime_binding "
+                                + "FROM ma_runtime_binding "
                                 + "WHERE binding_id = ?")) {
             statement.setString(1, bindingId);
             try (ResultSet result = statement.executeQuery()) {
@@ -562,7 +539,7 @@ public final class JdbcRepositoryContract {
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement statement = connection.prepareStatement(
                         "SELECT provision_seed_ciphertext, credential_key_id "
-                                + "FROM qwen_runtime_binding "
+                                + "FROM ma_runtime_binding "
                                 + "WHERE binding_id = ?")) {
             statement.setString(1, bindingId);
             try (ResultSet result = statement.executeQuery()) {
@@ -659,7 +636,7 @@ public final class JdbcRepositoryContract {
         assertTrue(second.hasActiveByBinding(prefix + "-binding", 1));
         assertFalse(second.hasActiveByBinding(prefix + "-other-binding", 1));
         assertFalse(second.hasActiveByBinding(prefix + "-binding", 2));
-        expire(dataSource, "qwen_tool_execution",
+        expire(dataSource, "ma_tool_execution",
                 "dispatch_lease_until", "execution_call_id", executionId);
 
         assertNull(second.claimDispatch(executionId,
@@ -864,7 +841,7 @@ public final class JdbcRepositoryContract {
         ToolExecutionRecord firstClaim = first.claimDispatch(
                 takeoverCreated.getExecutionCallId(),
                 prefix + "-dispatcher-a", Duration.ofMinutes(30));
-        expire(dataSource, "qwen_tool_execution",
+        expire(dataSource, "ma_tool_execution",
                 "dispatch_lease_until", "execution_call_id",
                 takeoverCreated.getExecutionCallId());
         // A snapshot carrying the same (expired) lease as the stored row
@@ -936,7 +913,7 @@ public final class JdbcRepositoryContract {
                 stillExecuting.getDispatchOwner());
         assertEquals(liveExecuting.getDispatchLeaseUntil(),
                 stillExecuting.getDispatchLeaseUntil());
-        expire(dataSource, "qwen_tool_execution",
+        expire(dataSource, "ma_tool_execution",
                 "dispatch_lease_until", "execution_call_id",
                 executingCreated.getExecutionCallId());
         assertNull(second.claimDispatch(
@@ -1097,7 +1074,7 @@ public final class JdbcRepositoryContract {
                 prefix + "-zombie-digest")).getExecutionCallId();
         ToolExecutionRecord generationOne = first.claimDispatch(zombie, owner,
                 Duration.ofMinutes(30));
-        expire(dataSource, "qwen_tool_execution", "dispatch_lease_until",
+        expire(dataSource, "ma_tool_execution", "dispatch_lease_until",
                 "execution_call_id", zombie);
         assertNull(first.renewDispatch(zombie, owner,
                 generationOne.getDispatchGeneration(),
@@ -1334,7 +1311,7 @@ public final class JdbcRepositoryContract {
             String executionCallId, String value) throws SQLException {
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement statement = connection.prepareStatement(
-                        "UPDATE qwen_tool_execution SET " + column
+                        "UPDATE ma_tool_execution SET " + column
                                 + " = ? WHERE execution_call_id = ?")) {
             statement.setString(1, value);
             statement.setString(2, executionCallId);

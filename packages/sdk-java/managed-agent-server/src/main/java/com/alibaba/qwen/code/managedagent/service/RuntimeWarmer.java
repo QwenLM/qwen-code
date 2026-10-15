@@ -24,6 +24,18 @@ public interface RuntimeWarmer {
                 new UnsupportedOperationException("Workspace close is unavailable"));
     }
 
+    default CompletionStage<Void> drainWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("Workspace resource drain is unavailable"));
+    }
+
+    default CompletionStage<Void> recoverStoppedWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("Stopped Workspace recovery is unavailable"));
+    }
+
     /**
      * The W2 settlement probe: verifies the target directory of a cwd
      * change against the administrator mount mapping, its continuity and

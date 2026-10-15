@@ -5,7 +5,7 @@ import java.util.Optional;
 
 /**
  * Persistence boundary for the H5 channel delivery outbox
- * (qwen_managed_channel_delivery). One row per deliveryId; a streaming card
+ * (ma_delivery, CHANNEL). One row per deliveryId; a streaming card
  * or segmented reply keeps a stable segment identity and ordinal, and an
  * explicit resend is a new deliveryId for the same segment.
  */
@@ -70,6 +70,10 @@ public interface ChannelDeliveryRepository {
     ChannelDelivery transition(String tenantId, String channelInstanceId,
             String deliveryId, String expectedState, String state,
             String providerReceipt);
+
+    ChannelDelivery transition(String tenantId, String channelInstanceId,
+            String deliveryId, String expectedState, String state,
+            String providerReceipt, long claimGeneration);
 
     /**
      * Newest first by (createdAt, deliveryId) descending; {@code before}

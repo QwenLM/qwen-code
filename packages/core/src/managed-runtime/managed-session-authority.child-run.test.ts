@@ -14,10 +14,9 @@ import { managedExtensionRecordKey } from './managed-extension-projection.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { type ManagedSessionDurableRef } from './managed-session-records.js';
 
-// child_run's shell kind is enabled by the H3 enablement slice; this
-// suite runs the commit/rebuild path ahead of it, like the monitor suite
-// does for H0c. H4b turned the gate per-kind, so the mock lifts the kind
-// gate while the flag stands.
+// child_run's shell kind is enabled by the H3 enablement slice (#13856),
+// so this suite commits through the real gate. A test that needs the gate
+// shut closes it per test — never the other way around.
 const enablement = vi.hoisted(() => ({ childRun: true }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -26,9 +25,12 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
   return {
     ...actual,
     assertManagedSessionChildRunKindEnabled: (kind: string) => {
-      if (!enablement.childRun) {
-        actual.assertManagedSessionChildRunKindEnabled(kind);
+      if (kind === 'shell' && !enablement.childRun) {
+        throw new actual.ManagedSessionRecordError(
+          'domain child_run kind shell is registered but not enabled for submission.',
+        );
       }
+      actual.assertManagedSessionChildRunKindEnabled(kind);
     },
   };
 });

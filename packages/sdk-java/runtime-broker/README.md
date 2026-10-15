@@ -50,8 +50,7 @@ the arbiter.
 
 ## JDBC persistence
 
-`JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the four private
-Broker tables. The JDBC implementations use `javax.sql.DataSource` for
+`JdbcRuntimeBrokerSchema.initialize(DataSource)` initializes or validates the shared 32-table fresh-database baseline used by Broker and Managed Server. It rejects legacy, foreign, partial and system catalogs before mutation; it does not upgrade or copy existing data. The JDBC implementations use `javax.sql.DataSource` for
 database access and fastjson2 (2.0.65) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
 `JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
@@ -82,12 +81,37 @@ arguments.
 This module intentionally does not wire a Spring service or dispatch Tool
 calls.
 
-Before upgrading an installation that already used the Broker, stop new
-admission and check for historical seeded failures:
+`JdbcRuntimeRetention` provides an explicit off-request-path JDBC sweep for
+retired generations. The embedding owns scheduling and supplies same-connection
+reference checks for its own tables. Each sweep bounds binding checks, child
+checks and total deletions; retain its returned cursor between ticks. It preserves
+operator-recovery records, active children, physical-stop evidence requirements,
+slots and admission fences. In the managed server, publication and CSI worker ACK
+references retain their execution and its parent session and binding, including
+COLLECTED publications; unreferenced siblings may be removed.
+See [JDBC retention](../../../docs/design/runtime-broker-jdbc-retention.md)
+for eligibility and the managed-server opt-in configuration (disabled by default,
+30-day age, 100-row batches and one-minute delay). Standalone embeddings must
+also serialize new external references with the original binding lock.
+
+Enabling retention allows eligible, unreferenced historical records to be deleted
+once they age past `max-age`; it does not guarantee deletion by that age.
+Publication and CSI worker ACK references in the managed server retain executions
+and their parent sessions and bindings regardless of age, including COLLECTED
+publications. After records are removed, callers must not reuse expired
+Runtime Session identifiers or idempotency keys. A missing execution is not
+permission to replay it. No permanent execution-key tombstone is retained.
+
+The Broker and Managed Server share the canonical 32-table V1 baseline. Initialize
+a fresh database; old catalogs are refused rather than upgraded. Keep the old
+environment for historical reads and settle its work before cutover. Repeated
+initialization validates structure without repairing it or changing receipts.
+For the canonical environment, stop new admission before investigating seeded
+failures:
 
 ```sql
 SELECT tenant_id, COUNT(*) AS failed_bindings
-FROM qwen_runtime_binding
+FROM ma_runtime_binding
 WHERE binding_state = 'FAILED' AND provision_seed_ciphertext IS NOT NULL
 GROUP BY tenant_id;
 ```
