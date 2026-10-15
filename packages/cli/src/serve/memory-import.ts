@@ -48,8 +48,11 @@ export function mountMemoryImportRoutes(
   }
   function withRuntime<T>(runtime: WorkspaceRuntime, run: () => T): T {
     const configured =
-      runtime.env.effectiveEnv?.['QWEN_CODE_MEMORY_PROJECT_SCOPE'] ??
-      process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+      runtime.env.effectiveEnv !== undefined
+        ? runtime.env.effectiveEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE']
+        : runtime.env.mode === 'parent-process'
+          ? process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']
+          : undefined;
     const scope =
       configured?.trim().toLowerCase() === 'workspace'
         ? 'workspace'

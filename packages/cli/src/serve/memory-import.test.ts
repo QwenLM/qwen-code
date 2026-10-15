@@ -157,40 +157,91 @@ describe('selected-workspace memory import HTTP', () => {
       ).status,
     ).toBe(404);
   });
-  it('uses the selected runtime memory scope without reading the containing repository scope', async () => {
-    const h = await setup(true);
-    await Storage.runWithResolvedRuntimeBaseDir(
-      h.secondary.sessionRuntimeBaseDir,
-      async () => {
-        for (const scope of ['workspace', 'git-root'] as const) {
-          const directory = runWithMemoryProjectScope(scope, () =>
-            getAutoMemoryRoot(h.secondary.workspaceCwd),
-          );
-          await fs.mkdir(directory, { recursive: true });
-          await fs.writeFile(
-            path.join(directory, 'existing.md'),
-            document.replace(
-              'Validate rollback paths.',
-              scope === 'workspace'
-                ? 'SELECTED_SCOPE_ONLY'
-                : 'WRONG_REPOSITORY_SCOPE',
-            ),
-          );
-        }
-      },
-    );
-    const base = '/workspaces/secondary/memory/import';
-    const response = await request(h.app)
-      .post(`${base}/batches`)
-      .set('x-confirm', 'yes')
-      .send({ source, selection: selection(), idempotencyKey: 'scope' });
-    expect(response.status).toBe(202);
-    await terminal(h.app, base, response.body.id);
-    const input = vi.mocked(h.secondary.bridge.invokeWorkspaceCommand).mock
-      .calls[0][1];
-    expect(JSON.stringify(input)).toContain('SELECTED_SCOPE_ONLY');
-    expect(JSON.stringify(input)).not.toContain('WRONG_REPOSITORY_SCOPE');
-  });
+  it.each(['workspace', 'git-root', undefined, null] as const)(
+    'uses selected runtime scope %s without falling back to the process scope',
+    async (configuredScope) => {
+      const h = await setup(true);
+      const selectedScope = configuredScope ?? 'git-root';
+      vi.stubEnv(
+        'QWEN_CODE_MEMORY_PROJECT_SCOPE',
+        selectedScope === 'workspace' ? 'git-root' : 'workspace',
+      );
+      Object.assign(h.secondary.env, {
+        mode: configuredScope === null ? 'runtime-overlay' : 'parent-process',
+        effectiveEnv:
+          configuredScope === null
+            ? undefined
+            : configuredScope === undefined
+              ? {}
+              : { QWEN_CODE_MEMORY_PROJECT_SCOPE: configuredScope },
+      });
+      await Storage.runWithResolvedRuntimeBaseDir(
+        h.secondary.sessionRuntimeBaseDir,
+        async () => {
+          for (const scope of ['workspace', 'git-root'] as const) {
+            const directory = runWithMemoryProjectScope(scope, () =>
+              getAutoMemoryRoot(h.secondary.workspaceCwd),
+            );
+            await fs.mkdir(directory, { recursive: true });
+            await fs.writeFile(
+              path.join(directory, 'existing.md'),
+              document.replace(
+                'Validate rollback paths.',
+                scope === selectedScope
+                  ? 'SELECTED_SCOPE_ONLY'
+                  : 'WRONG_REPOSITORY_SCOPE',
+              ),
+            );
+          }
+        },
+      );
+      const base = '/workspaces/secondary/memory/import';
+      const response = await request(h.app)
+        .post(`${base}/batches`)
+        .set('x-confirm', 'yes')
+        .send({ source, selection: selection(), idempotencyKey: 'scope' });
+      expect(response.status).toBe(202);
+      await terminal(h.app, base, response.body.id);
+      const input = vi.mocked(h.secondary.bridge.invokeWorkspaceCommand).mock
+        .calls[0][1];
+      expect(JSON.stringify(input)).toContain('SELECTED_SCOPE_ONLY');
+      expect(JSON.stringify(input)).not.toContain('WRONG_REPOSITORY_SCOPE');
+    },
+  );
+  it.each(['QWEN_CODE_MEMORY_BASE_DIR', 'QWEN_CODE_MEMORY_LOCAL'])(
+    'rejects legacy process override %s even when the runtime overlay clears it',
+    async (key) => {
+      const h = await setup();
+      vi.stubEnv(
+        key,
+        key === 'QWEN_CODE_MEMORY_LOCAL'
+          ? '1'
+          : path.join(root, 'other-runtime'),
+      );
+      Object.assign(h.secondary.env, {
+        effectiveEnv: {
+          [key]: '',
+          QWEN_CODE_MEMORY_PROJECT_SCOPE: 'workspace',
+        },
+      });
+      const response = await request(h.app)
+        .post('/workspaces/secondary/memory/import/batches')
+        .set('x-confirm', 'yes')
+        .send({
+          source,
+          selection: selection(),
+          idempotencyKey: 'legacy-override',
+        });
+      expect(response.status).toBe(400);
+      expect(h.secondary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+      await expect(
+        fs.stat(h.secondary.sessionRuntimeBaseDir),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(
+        fs.stat(path.join(root, 'other-runtime')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
   it('preserves mutation protection and rejects missing or untrusted workspace without fallback', async () => {
     const h = await setup();
     expect(
