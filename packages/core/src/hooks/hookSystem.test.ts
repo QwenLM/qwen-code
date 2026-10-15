@@ -46,6 +46,8 @@ import type { Config } from '../config/config.js';
 import type { AggregatedHookResult } from './hookAggregator.js';
 import type { HookOutput } from './types.js';
 import path from 'node:path';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { FileChangedWatcher } from './file-changed-watcher.js';
 import { applySkillHooks } from '../tools/skill-utils.js';
 import { getHookExecutionOwner } from './hook-execution-context.js';
@@ -201,12 +203,88 @@ describe('HookSystem', () => {
       ]);
     });
 
+    it('does not derive recursive directory watches from static matchers', async () => {
+      const directory = mkdtempSync(path.join(tmpdir(), 'hook-static-'));
+      try {
+        mkdirSync(path.join(directory, 'node_modules'));
+        vi.mocked(mockConfig.getWorkingDir).mockReturnValue(directory);
+        vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
+          {
+            ...registryEntry(HookEventName.FileChanged),
+            matcher: 'node_modules|future.md',
+          },
+        ]);
+        await hookSystem.initialize();
+        expect(watcher().setPaths).toHaveBeenCalledWith(
+          [path.join(directory, 'future.md')],
+          [path.join(directory, 'future.md')],
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      '(notes|todo|other)\\.md',
+      '^notes|todo.md',
+      '(notes)|todo.md',
+      '**.md',
+      '[abc].env',
+      'notes\\|todo\\.md',
+    ])('does not derive static paths from regex %s', async (matcher) => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
+        { ...registryEntry(HookEventName.FileChanged), matcher },
+      ]);
+      await hookSystem.initialize();
+      expect(FileChangedWatcher).not.toHaveBeenCalled();
+    });
+
+    it('relocates static paths without losing explicit dynamic roots', async () => {
+      await hookSystem.initialize();
+      await start([watchOutput(['/explicit/root'])]);
+      vi.mocked(mockConfig.getWorkingDir).mockReturnValue('/new/cwd');
+      await hookSystem.refreshFileWatchingForWorkingDirectory();
+      expect(watcher().setPaths).toHaveBeenLastCalledWith(
+        [
+          '/explicit/root',
+          path.resolve('/new/cwd', '.env'),
+          path.resolve('/new/cwd', '.envrc'),
+        ],
+        [path.resolve('/new/cwd', '.env'), path.resolve('/new/cwd', '.envrc')],
+      );
+    });
+
+    it('gives normalized dynamic paths precedence over static file roles', async () => {
+      await start([watchOutput(['/test/cwd/sub/../.env'])]);
+      expect(watcher().setPaths).toHaveBeenLastCalledWith(
+        [
+          '/test/cwd/sub/../.env',
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [path.resolve('/test/cwd', '.envrc')],
+      );
+    });
+
+    it('does not start bootstrap watching during cwd refresh', async () => {
+      await hookSystem.initialize({ skipFileWatching: true });
+      vi.mocked(mockConfig.getWorkingDir).mockReturnValue('/new/cwd');
+      await hookSystem.refreshFileWatchingForWorkingDirectory();
+      expect(FileChangedWatcher).not.toHaveBeenCalled();
+    });
+
     it('starts static paths during initialization without any SessionStart hook', async () => {
       await hookSystem.initialize();
-      expect(watcher().setPaths).toHaveBeenCalledWith([
-        path.resolve('/test/cwd', '.env'),
-        path.resolve('/test/cwd', '.envrc'),
-      ]);
+      expect(watcher().setPaths).toHaveBeenCalledWith(
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
       expect(mockHookEventHandler.fireSessionStartEvent).not.toHaveBeenCalled();
     });
 
@@ -216,10 +294,16 @@ describe('HookSystem', () => {
       expect(mockHookRegistry.initialize).toHaveBeenCalledOnce();
       expect(FileChangedWatcher).not.toHaveBeenCalled();
       await start();
-      expect(watcher().setPaths).toHaveBeenCalledWith([
-        path.resolve('/test/cwd', '.env'),
-        path.resolve('/test/cwd', '.envrc'),
-      ]);
+      expect(watcher().setPaths).toHaveBeenCalledWith(
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
     });
 
     it('refreshes static paths when a skill registers directly with the session manager', async () => {
@@ -248,9 +332,10 @@ describe('HookSystem', () => {
         },
       );
       await vi.waitFor(() => {
-        expect(watcher().setPaths).toHaveBeenLastCalledWith([
-          path.resolve('/test/cwd', 'topic.md'),
-        ]);
+        expect(watcher().setPaths).toHaveBeenLastCalledWith(
+          [path.resolve('/test/cwd', 'topic.md')],
+          [path.resolve('/test/cwd', 'topic.md')],
+        );
       });
       const manager = hookSystem.getSessionHooksManager();
       const [entry] = manager.getHooksForEvent(
@@ -259,7 +344,7 @@ describe('HookSystem', () => {
       );
       manager.removeHook('test-session-id', entry.hookId);
       await vi.waitFor(() =>
-        expect(watcher().setPaths).toHaveBeenLastCalledWith([]),
+        expect(watcher().setPaths).toHaveBeenLastCalledWith([], []),
       );
     });
 
@@ -279,11 +364,17 @@ describe('HookSystem', () => {
         },
       );
       expect(output?.hookSpecificOutput?.['additionalContext']).toBe('context');
-      expect(watcher().setPaths).toHaveBeenCalledWith([
-        '/memory',
-        path.resolve('/test/cwd', '.env'),
-        path.resolve('/test/cwd', '.envrc'),
-      ]);
+      expect(watcher().setPaths).toHaveBeenCalledWith(
+        [
+          '/memory',
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
     });
 
     it('uses the last valid list and rejects an entire invalid list', async () => {
@@ -292,11 +383,17 @@ describe('HookSystem', () => {
         watchOutput(['/second']),
         watchOutput(['/partial', 'relative']),
       ]);
-      expect(watcher().setPaths).toHaveBeenLastCalledWith([
-        '/second',
-        path.resolve('/test/cwd', '.env'),
-        path.resolve('/test/cwd', '.envrc'),
-      ]);
+      expect(watcher().setPaths).toHaveBeenLastCalledWith(
+        [
+          '/second',
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
     });
 
     it('clears dynamic paths with [] while retaining static paths', async () => {
@@ -312,10 +409,16 @@ describe('HookSystem', () => {
           },
         ],
       });
-      expect(watcher().setPaths).toHaveBeenLastCalledWith([
-        path.resolve('/test/cwd', '.env'),
-        path.resolve('/test/cwd', '.envrc'),
-      ]);
+      expect(watcher().setPaths).toHaveBeenLastCalledWith(
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
     });
 
     it('does not interpret match-all or path matchers as a workspace scan', async () => {
@@ -401,10 +504,10 @@ describe('HookSystem', () => {
       vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
       hookSystem.setHookEnabled('test-hook', false);
       await vi.waitFor(() =>
-        expect(watcher().setPaths).toHaveBeenLastCalledWith([]),
+        expect(watcher().setPaths).toHaveBeenLastCalledWith([], []),
       );
       await hookSystem.reload();
-      expect(watcher().setPaths).toHaveBeenLastCalledWith([]);
+      expect(watcher().setPaths).toHaveBeenLastCalledWith([], []);
     });
 
     it('rebinds the watcher on session rotation and discards outgoing dynamic paths', async () => {
@@ -414,10 +517,16 @@ describe('HookSystem', () => {
       await start();
       expect(oldWatcher.close).toHaveBeenCalledOnce();
       expect(FileChangedWatcher).toHaveBeenCalledTimes(2);
-      expect(watcher().setPaths).toHaveBeenCalledWith([
-        path.resolve('/test/cwd', '.env'),
-        path.resolve('/test/cwd', '.envrc'),
-      ]);
+      expect(watcher().setPaths).toHaveBeenCalledWith(
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
     });
 
     it('does not close the replacement watcher when an outgoing SessionEnd completes late', async () => {

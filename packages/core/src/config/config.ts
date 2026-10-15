@@ -7881,6 +7881,7 @@ export class Config {
     this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
+    await this.hookSystem?.refreshFileWatchingForWorkingDirectory();
     resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);

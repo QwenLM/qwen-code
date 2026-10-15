@@ -315,6 +315,9 @@ vi.mock('../hooks/index.js', () => {
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.close = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.refreshFileWatchingForWorkingDirectory = vi
+    .fn()
+    .mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -8240,6 +8243,10 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = makeConfig();
+    const refreshFileWatchingForWorkingDirectory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    internals(config).hookSystem = { refreshFileWatchingForWorkingDirectory };
     Object.assign(config, {
       memoryRecallMode: 'structured',
       memoryRecallModeInitialized: true,
@@ -8263,6 +8270,7 @@ describe('Server Config (config.ts)', () => {
 
     await config.relocateWorkingDirectory(NEW_DIR);
 
+    expect(refreshFileWatchingForWorkingDirectory).toHaveBeenCalledOnce();
     expect(cwd.chdirSpy).toHaveBeenCalledWith(NEW_DIR);
     expect(config.getTargetDir()).toBe(NEW_DIR);
     expect(config.getProjectRoot()).toBe(NEW_DIR);

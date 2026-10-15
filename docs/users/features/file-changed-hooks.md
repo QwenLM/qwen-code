@@ -56,6 +56,14 @@ the file's basename using the
 Regex patterns filter already watched paths; register their files or directories
 explicitly through `watchPaths`.
 
+Static roots accept only bare literal filenames, including dotfiles. Regex/glob
+metacharacters and path separators do not create static roots. Existing
+directories and paths that cannot be inspected are excluded; missing files may be watched
+for creation. Static file discovery observes their parent directory while excluding
+unrelated entries before traversal. Use explicit `watchPaths` for recursive directories. Changing
+the session working directory relocates static roots before relocation finishes;
+explicit absolute dynamic roots stay unchanged.
+
 ## Watch directories and paths outside cwd
 
 A successful synchronous `SessionStart` hook can register absolute files or directories

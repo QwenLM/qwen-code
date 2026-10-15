@@ -23,6 +23,14 @@ working directory, separated by `|` (for example `.envrc|.env`). Omitted, empty,
 `*`, and `.*` matchers register no static paths. They receive events from the session’s shared watch set, including dynamic
 paths. Matching an observed event uses its basename and the existing hook
 matcher rules. Static registration is not a glob or a recursive workspace scan.
+Static roots accept only bare literal filenames, including dotfiles. Regex/glob
+metacharacters and path separators do not create static roots. Existing
+directories and paths that cannot be inspected are excluded; missing files may be watched
+for creation. Static file discovery observes their parent directory while excluding
+unrelated entries before traversal. Use explicit `watchPaths` for recursive directories. Changing
+the session working directory relocates static roots before relocation finishes;
+explicit absolute dynamic roots stay unchanged. Bootstrap configs that disabled
+watching remain disabled.
 
 Successful synchronous `SessionStart` and `FileChanged` outputs can return absolute files
 or directories in `hookSpecificOutput.watchPaths`. Directories are watched

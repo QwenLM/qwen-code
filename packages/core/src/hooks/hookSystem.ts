@@ -6,6 +6,8 @@
 
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { statSync } from 'node:fs';
+import { splitListEntries } from './hook-matcher.js';
 import type { Config } from '../config/config.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
@@ -184,6 +186,10 @@ export class HookSystem {
     return this.fileWatcherClosing;
   }
 
+  async refreshFileWatchingForWorkingDirectory(): Promise<void> {
+    await this.refreshFileWatching();
+  }
+
   private refreshFileWatchingInBackground(): void {
     void this.refreshFileWatching().catch((error: unknown) => {
       debugLogger.warn(`Failed to update FileChanged watch paths: ${error}`);
@@ -234,30 +240,34 @@ export class HookSystem {
     const sessionEntries = this.sessionHooksManager
       .getHooksForEvent(this.config.getSessionId(), HookEventName.FileChanged)
       .filter((entry) => !entry.trustGated || this.config.isTrustedFolder());
+    const staticFiles = [...entries, ...sessionEntries].flatMap((entry) =>
+      (/^[\^(]/.test((entry.matcher ?? '').trimStart())
+        ? []
+        : splitListEntries(entry.matcher ?? '')
+      )
+        .map((filename) => filename.trim())
+        .filter(
+          (filename) =>
+            filename !== '' &&
+            !/[\\^$|?*+()[\]{}]/.test(filename) &&
+            path.basename(filename) === filename &&
+            filename !== '.' &&
+            filename !== '..',
+        )
+        .map((filename) => path.resolve(this.config.getWorkingDir(), filename))
+        .filter((filename) => {
+          try {
+            return statSync(filename).isFile();
+          } catch (error) {
+            return (error as NodeJS.ErrnoException).code === 'ENOENT';
+          }
+        }),
+    );
     const paths =
       this.config.getDisableAllHooks?.() ||
       entries.length + sessionEntries.length === 0
         ? []
-        : [
-            ...this.dynamicWatchPaths,
-            ...[...entries, ...sessionEntries].flatMap((entry) =>
-              (entry.matcher ?? '')
-                .split('|')
-                .map((filename) => filename.trim())
-                .filter(
-                  (filename) =>
-                    filename !== '' &&
-                    filename !== '*' &&
-                    filename !== '.*' &&
-                    path.basename(filename) === filename &&
-                    filename !== '.' &&
-                    filename !== '..',
-                )
-                .map((filename) =>
-                  path.resolve(this.config.getWorkingDir(), filename),
-                ),
-            ),
-          ];
+        : [...this.dynamicWatchPaths, ...staticFiles];
     if (!this.fileWatcher && paths.length > 0) {
       const owner = Object.freeze({
         runtimeId: this.runtimeId,
@@ -275,7 +285,13 @@ export class HookSystem {
         ),
       );
     }
-    await this.fileWatcher?.setPaths(paths);
+    const dynamicPaths = new Set(
+      this.dynamicWatchPaths.map((file) => path.resolve(file)),
+    );
+    await this.fileWatcher?.setPaths(
+      paths,
+      staticFiles.filter((file) => !dynamicPaths.has(file)),
+    );
   }
 
   async fireFileChangedEvent(

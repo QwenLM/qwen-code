@@ -102,6 +102,89 @@ describe('FileChangedWatcher with real files', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it('watches both missing static files without traversing siblings and retains dynamic recursion', async () => {
+    const parent = path.join(root, 'static');
+    const dynamic = path.join(root, 'dynamic');
+    await Promise.all([fs.mkdir(parent), fs.mkdir(dynamic)]);
+    const files = ['.env', '.envrc'].map((name) => path.join(parent, name));
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([...files, dynamic], files);
+    await fs.writeFile(files[1], 'rc');
+    await fs.writeFile(files[0], 'env');
+    await fs.mkdir(path.join(parent, 'unrelated'));
+    await fs.writeFile(path.join(parent, 'unrelated', 'deep.md'), 'ignored');
+    await fs.writeFile(path.join(parent, 'other.md'), 'ignored');
+    await fs.mkdir(path.join(dynamic, 'nested'));
+    const nested = path.join(dynamic, 'nested', 'topic.md');
+    await fs.writeFile(nested, 'included');
+    await vi.waitFor(() => {
+      for (const file of [...files, nested]) {
+        expect(notify).toHaveBeenCalledWith(
+          file,
+          'add',
+          expect.any(AbortSignal),
+        );
+      }
+    }, waitOptions);
+    await delay(300);
+    expect(notify.mock.calls.map(([file]) => file).sort()).toEqual(
+      [...files, nested].sort(),
+    );
+  });
+
+  it('reconfigures when a static-only path becomes a recursive dynamic root', async () => {
+    const directory = path.join(root, 'role');
+    await fs.mkdir(directory);
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([directory], [directory]);
+    await fs.writeFile(path.join(directory, 'ignored.md'), 'ignored');
+    await delay(400);
+    expect(notify).not.toHaveBeenCalled();
+    await watcher.setPaths([directory]);
+    const file = path.join(directory, 'included.md');
+    await fs.writeFile(file, 'included');
+    await vi.waitFor(
+      () =>
+        expect(notify).toHaveBeenCalledWith(
+          file,
+          'add',
+          expect.any(AbortSignal),
+        ),
+      waitOptions,
+    );
+  });
+
+  it('discovers missing dynamic siblings and future nested files without observing unrelated paths', async () => {
+    const files = ['.env', '.envrc'].map((name) => path.join(root, name));
+    const directory = path.join(root, 'future');
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([...files, directory]);
+    await fs.writeFile(files[1], 'rc');
+    await fs.writeFile(files[0], 'env');
+    await fs.mkdir(path.join(directory, 'nested'), { recursive: true });
+    const nested = path.join(directory, 'nested', 'topic.md');
+    await fs.writeFile(nested, 'included');
+    await fs.mkdir(path.join(root, 'unrelated'));
+    await fs.writeFile(path.join(root, 'unrelated', 'deep.md'), 'ignored');
+    await fs.writeFile(path.join(root, 'other.md'), 'ignored');
+    await vi.waitFor(() => {
+      for (const file of [...files, nested]) {
+        expect(notify).toHaveBeenCalledWith(
+          file,
+          'add',
+          expect.any(AbortSignal),
+        );
+      }
+    }, waitOptions);
+    await delay(300);
+    expect(notify.mock.calls.map(([file]) => file).sort()).toEqual(
+      [...files, nested].sort(),
+    );
+  });
+
   it('continues delivering after a callback failure', async () => {
     const notify = vi
       .fn()
