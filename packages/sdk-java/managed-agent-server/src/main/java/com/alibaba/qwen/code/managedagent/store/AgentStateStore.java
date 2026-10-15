@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalChangeResult;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelOption;
@@ -129,6 +131,17 @@ public interface AgentStateStore {
         }
         return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
                 requestDigest, agentId, requestedRevision, title, input, payloadDigest, selection);
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title, List<Map<String, Object>> input,
+            String payloadDigest, WorkspaceSelection selection, String approvalMode,
+            boolean approvalSelectionSupported) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest,
+                selection, approvalMode);
     }
 
     default WebShellSessionOptions workspaceSessionOptions(
@@ -453,6 +466,21 @@ public interface AgentStateStore {
             boolean supported) {
         throw new UnsupportedOperationException("Model selection is unavailable");
     }
+
+    default Map<String, WebShellApprovalSelection> findApprovalSelections(
+            String tenantId, List<String> sessionIds) { return Map.of(); }
+
+    default Set<String> findApprovalOwners(String tenantId, String actorId,
+            List<String> sessionIds) { return Set.of(); }
+
+    default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported) {
+        throw new UnsupportedOperationException("Approval selection is unavailable");
+    }
+
+    default WebShellApprovalSelection findTurnApprovalSelection(String tenantId, String sessionId,
+            String promptId) { return null; }
 
     default WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
             String promptId) { return null; }

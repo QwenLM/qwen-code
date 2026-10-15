@@ -238,15 +238,20 @@ public final class HostedHarnessClient implements AutoCloseable {
                 && !capabilities().getFeatures().contains("model-selection/1")) {
             throw new DaemonException("Hosted model selection is unavailable");
         }
+        if (request.getApprovalSelection() != null
+                && !capabilities().getFeatures().contains("approval-selection/1")) {
+            throw new DaemonException("Hosted approval selection is unavailable");
+        }
         ActivePrompt candidate = new ActivePrompt(request.getPromptId(),
-                request.getPayloadDigest(), request.getModelSelection());
+                request.getPayloadDigest(), request.getModelSelection(), request.getApprovalSelection());
         ActivePrompt existing = activePrompts.putIfAbsent(
                 session.getHarnessSessionId(), candidate);
         if (existing != null
                 && (!existing.promptId.equals(candidate.promptId)
                         || !existing.payloadDigest.equals(candidate.payloadDigest)
                         || !java.util.Objects.equals(existing.modelSelection,
-                                candidate.modelSelection))) {
+                                candidate.modelSelection)
+                        || !java.util.Objects.equals(existing.approvalSelection, candidate.approvalSelection))) {
             throw new DaemonException(
                     "Hosted Harness session already has a running turn");
         }
@@ -1548,11 +1553,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         private final String promptId;
         private final String payloadDigest;
         private final Map<String, Object> modelSelection;
+        private final Map<String, Object> approvalSelection;
 
-        ActivePrompt(String promptId, String payloadDigest, Map<String, Object> modelSelection) {
+        ActivePrompt(String promptId, String payloadDigest, Map<String, Object> modelSelection,
+                Map<String, Object> approvalSelection) {
             this.promptId = promptId;
             this.payloadDigest = payloadDigest;
             this.modelSelection = modelSelection;
+            this.approvalSelection = approvalSelection;
         }
     }
 

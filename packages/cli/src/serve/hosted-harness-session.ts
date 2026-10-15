@@ -5,6 +5,12 @@
  */
 
 import {
+  parseHostedApprovalSelection,
+  readHostedTurnApprovalSelection,
+  hostedTurnApproval,
+  type HostedApprovalSelection,
+} from './hosted-approval-selection.js';
+import {
   findHostedModelRequest,
   findHostedCommittedModelOutput,
   createHostedModelRequest,
@@ -3068,7 +3074,11 @@ async function executeHostedTurn(
                 session.publication,
                 session.shell,
                 session.approval && {
-                  settings: session.approval,
+                  settings: (await hostedTurnApproval(
+                    session.managed,
+                    promptId,
+                    session.approval,
+                  ))!,
                   waiters: session.waiters,
                 },
                 {
@@ -4166,7 +4176,14 @@ export function registerHostedHarnessSessionRoutes(
                   ...(isHostedWorkspaceShellProfile(toolProfile)
                     ? { captureBytes }
                     : {}),
-                  ...(approval ? hostedApprovalDefinition(approval) : {}),
+                  ...(approval
+                    ? hostedApprovalDefinition(
+                        approval,
+                        !agentDefinition &&
+                          (toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
+                            isHostedWorkspaceShellProfile(toolProfile)),
+                      )
+                    : {}),
                   // H4b: a child's ancestry persists with its definition,
                   // so a load answers its depth without a second channel.
                   ...(lineage ? { lineage } : {}),
@@ -5913,6 +5930,28 @@ export function registerHostedHarnessSessionRoutes(
     const prompt = body?.['prompt'];
     const digest = body?.['payloadDigest'];
     const deadlineMs = body?.['deadlineMs'];
+    let approvalSelection: HostedApprovalSelection | undefined;
+    try {
+      approvalSelection = parseHostedApprovalSelection(
+        body?.['approvalSelection'],
+      );
+      if (
+        approvalSelection &&
+        (session.agentDefinition ||
+          !session.approval ||
+          ![
+            'hosted-workspace-files/1',
+            'hosted-workspace-shell/1',
+            'hosted-workspace-files/2',
+            'hosted-workspace-shell/2',
+          ].includes(session.toolProfile ?? '') ||
+          (approvalSelection.revision === 0 &&
+            approvalSelection.mode !== session.approval.mode))
+      )
+        throw new Error('Approval selection is unavailable for this Session.');
+    } catch {
+      return error(res, 400, 'invalid_hosted_approval_selection');
+    }
     let modelSelection: HostedModelSelection | undefined;
     try {
       modelSelection = parseHostedModelSelection(body?.['modelSelection']);
@@ -5929,7 +5968,7 @@ export function registerHostedHarnessSessionRoutes(
     // replay answers through the ordinary dedup machinery; every other
     // shape keeps the pre-change refusal.
     if (workflowLaunch !== undefined) {
-      if (modelSelection !== undefined)
+      if (modelSelection !== undefined || approvalSelection !== undefined)
         return error(res, 400, 'invalid_hosted_model_selection');
       const journaledInputs = session.managed.authority
         .eventsInSequenceRange(1, session.managed.authority.committedSequence)
@@ -5996,6 +6035,10 @@ export function registerHostedHarnessSessionRoutes(
           !isDeepStrictEqual(
             await readHostedTurnModelSelection(session.managed, promptId),
             modelSelection,
+          ) ||
+          !isDeepStrictEqual(
+            await readHostedTurnApprovalSelection(session.managed, promptId),
+            approvalSelection,
           )
         )
           return error(res, 409, 'hosted_prompt_conflict');
@@ -6153,6 +6196,12 @@ export function registerHostedHarnessSessionRoutes(
                     acceptedAdmission['modelSelection'],
                   ),
                   modelSelection,
+                ) ||
+                !isDeepStrictEqual(
+                  parseHostedApprovalSelection(
+                    acceptedAdmission?.['approvalSelection'],
+                  ),
+                  approvalSelection,
                 )
               ) {
                 if (!res.headersSent) error(res, 409, 'hosted_prompt_conflict');
@@ -6297,6 +6346,7 @@ export function registerHostedHarnessSessionRoutes(
               promptId,
               digest,
               ...(modelSelection ? { modelSelection } : {}),
+              ...(approvalSelection ? { approvalSelection } : {}),
             }),
           ),
         );
@@ -8071,7 +8121,11 @@ export function registerHostedHarnessSessionRoutes(
           session.publication,
           session.shell,
           session.approval && {
-            settings: session.approval,
+            settings: (await hostedTurnApproval(
+              session.managed,
+              promptId,
+              session.approval,
+            ))!,
             waiters: session.waiters,
           },
           {

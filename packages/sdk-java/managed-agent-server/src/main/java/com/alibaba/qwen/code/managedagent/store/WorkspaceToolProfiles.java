@@ -32,6 +32,16 @@ public final class WorkspaceToolProfiles {
         return version == 1 || version == 2;
     }
 
+    public static boolean supportsApprovalMode(String mode) {
+        return "default".equals(mode) || "auto-edit".equals(mode) || "yolo".equals(mode);
+    }
+
+    public static boolean supportsApprovalSelection(StoreModels.SessionRecord session) {
+        return session.workspace() != null && "qwen-code".equals(session.agentId())
+                && session.agentDefinitionDigest() == null
+                && (FILES.equals(session.toolProfile()) || isPublicShell(session.toolProfile()));
+    }
+
     public static boolean requiresApproval(String mode) {
         return "default".equals(mode) || "auto-edit".equals(mode);
     }

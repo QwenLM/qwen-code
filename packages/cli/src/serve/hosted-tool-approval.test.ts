@@ -14,6 +14,7 @@ import {
   hostedApprovalAsks,
   hostedApprovalDefinition,
   parseHostedApprovalSettings,
+  readHostedApprovalDefinition,
 } from './hosted-tool-approval.js';
 
 describe('Hosted tool approval settings', () => {
@@ -105,6 +106,14 @@ describe('Hosted tool approval settings', () => {
     expect(
       hostedApprovalDefinition({ mode: 'auto-edit', timeoutMs: 5_000 }),
     ).toEqual({ approvalMode: 'auto-edit', approvalTimeoutMs: 5_000 });
+  });
+
+  it('retains a selectable Full Access timeout through a cold definition read', () => {
+    const settings = parseHostedApprovalSettings('yolo', 5_000)!;
+    expect(settings.timeoutMs).toBe(5_000);
+    expect(
+      readHostedApprovalDefinition(hostedApprovalDefinition(settings, true)),
+    ).toEqual({ mode: 'yolo', timeoutMs: 5_000 });
   });
 });
 

@@ -1337,6 +1337,71 @@ describe('Hosted Harness no-tool session', () => {
     ).toEqual([request.modelSelection, { modelId: 'model-b', revision: 2 }]);
   });
 
+  it.each([undefined, { mode: 'yolo', revision: 1 }])(
+    'preserves approval selection %j and refuses changed resident and cold prompt replays',
+    async (approvalSelection) => {
+      let server = await app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+        approvalMode: 'default',
+      });
+      let clientId = created.body.clientId as string;
+      const prompt = [{ type: 'text', text: 'approval selection' }];
+      const request = {
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        approvalSelection,
+      };
+      const send = (body = request) =>
+        headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send(body);
+      const idle = () =>
+        vi.waitFor(async () => {
+          const result = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(result.body.hasActivePrompt).toBe(false);
+        });
+      await send().expect(202);
+      await idle();
+      expect(state.model).toHaveBeenCalledTimes(1);
+      await send({
+        ...request,
+        approvalSelection: { mode: 'auto-edit', revision: 2 },
+      }).expect(409);
+      await send().expect(202);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+      server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      });
+      expect(loaded.status).toBe(200);
+      clientId = loaded.body.clientId as string;
+      await send({
+        ...request,
+        approvalSelection: { mode: 'auto-edit', revision: 2 },
+      }).expect(409);
+      await send().expect(202);
+      await send({
+        ...request,
+        promptId: randomUUID(),
+        approvalSelection: { mode: 'auto-edit', revision: 2 },
+      }).expect(202);
+      await idle();
+      expect(state.model).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it('restores the accepted model selection before re-running an interrupted model', async () => {
     const server = await app();
     const created = await headers(supertest(server).post('/session')).send({

@@ -13,12 +13,15 @@ import com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -39,6 +42,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -75,6 +79,120 @@ class QwenHostedHarnessConnectorTest {
             List.of(Map.of("type", "text", "text", "hi"));
     private static final String SUBMIT_DIGEST =
             SubmitHarnessTurn.computePayloadDigest(SUBMIT_CONTENT);
+
+    @Test
+    void keepsRevisionZeroWireIdentityAcrossCapabilityUpgradeAndForwardsPositiveSnapshots() {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        var attached = mock(HarnessSessionRef.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(capabilities.getFeatures()).thenReturn(List.of());
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        when(client.loadSession(any())).thenReturn(attached);
+        when(client.submitTurn(any())).thenReturn(mock(PromptReceipt.class));
+        var sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(new SessionRecord("tenant-a", SESSION_ID,
+                "qwen-code", null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", ".",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "default", "hosted-workspace-files/1"));
+        when(sessions.findTurnApprovalSelection("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID))
+                .thenReturn(new WebShellApprovalSelection("default", 0));
+        var actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        var settings = properties();
+        settings.getHarness().setWorkspaceFilesEnabled(true);
+        var connector = new QwenHostedHarnessConnector(settings, sessions, mock(WorkspaceExecutionStore.class), actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        connector.submit("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID, SUBMIT_CONTENT, SUBMIT_DIGEST);
+        when(capabilities.getFeatures()).thenReturn(List.of("approval-selection/1"));
+        connector.submit("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID, SUBMIT_CONTENT, SUBMIT_DIGEST);
+        String selectedPrompt = "77777777-7777-4777-8777-777777777777";
+        when(sessions.findTurnApprovalSelection("tenant-a", SESSION_ID, selectedPrompt))
+                .thenReturn(new WebShellApprovalSelection("yolo", 1));
+        connector.submit("tenant-a", SESSION_ID, selectedPrompt, SUBMIT_CONTENT, SUBMIT_DIGEST);
+        var sent = ArgumentCaptor.forClass(SubmitHarnessTurn.class);
+        verify(client, times(3)).submitTurn(sent.capture());
+        for (int index = 0; index < 2; index++) {
+            assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(sent.getAllValues().get(index), "toJson"))
+                    .doesNotContainKey("approvalSelection");
+        }
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(sent.getAllValues().get(2), "toJson"))
+                .containsEntry("approvalSelection", Map.of("mode", "yolo", "revision", 1L));
+        when(capabilities.getFeatures()).thenReturn(List.of());
+        assertThatThrownBy(() -> connector.submit("tenant-a", SESSION_ID, selectedPrompt, SUBMIT_CONTENT, SUBMIT_DIGEST))
+                .hasMessageContaining("approval selection is unavailable");
+        verify(client, times(3)).submitTurn(any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"default,1", "yolo,0"})
+    void refusesAnOldHarnessBeforeAnyExecutionCapableAttachmentButKeepsCancellation(String initial, long revision) {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(capabilities.getFeatures()).thenReturn(List.of("approval-selection/1"));
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn(initial);
+        when(client.createSession(any())).thenReturn(attached);
+        when(client.loadSession(any())).thenReturn(attached);
+        var sessions = mock(AgentStateStore.class);
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), initial, "hosted-workspace-shell/1");
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        when(sessions.findApprovalSelections("tenant-a", List.of(SESSION_ID)))
+                .thenReturn(Map.of(SESSION_ID, new WebShellApprovalSelection(initial, revision)));
+        var execution = mock(WorkspaceExecutionStore.class);
+        var properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn(initial);
+        var connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        connector.createOrLoad("tenant-a", SESSION_ID, false);
+        clearInvocations(client);
+        when(capabilities.getFeatures()).thenReturn(List.of());
+
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, false))
+                .hasMessageContaining("approval selection is unavailable");
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true, true))
+                .hasMessageContaining("approval selection is unavailable");
+        assertThatThrownBy(() -> connector.continueManagedRuntime("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID, "checkpoint", "activation"))
+                .hasMessageContaining("approval selection is unavailable");
+        assertThatThrownBy(() -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false))
+                .hasMessageContaining("approval selection is unavailable");
+        verify(client, never()).loadSession(any());
+        verify(client, never()).createSession(any());
+        verify(client, never()).continueManagedRuntime(any(), any(), any(), any());
+
+        connector.recoverManagedCancellation("tenant-a", SESSION_ID);
+        var load = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(load.capture());
+        Map<String, Object> request = ReflectionTestUtils.invokeMethod(load.getValue(), "toJson");
+        assertThat(request).containsEntry("passiveManagedRuntimeRecovery", true)
+                .containsEntry("cancellationTakeover", true)
+                .doesNotContainKey("driveRuntimeRecovery");
+        if (revision > 0) {
+            clearInvocations(client);
+            when(capabilities.getFeatures()).thenReturn(List.of("approval-selection/1"));
+            var active = mock(TurnSummary.class);
+            when(active.turnId()).thenReturn("active-turn");
+            when(sessions.findActiveTurns("tenant-a", List.of(SESSION_ID))).thenReturn(Map.of(SESSION_ID, active));
+            var turn = mock(TurnRecord.class);
+            when(turn.promptId()).thenReturn(SUBMIT_PROMPT_ID);
+            when(sessions.findTurn("tenant-a", SESSION_ID, "active-turn")).thenReturn(Optional.of(turn));
+            assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true, true))
+                    .hasMessageContaining("approval snapshot is missing");
+            assertThatThrownBy(() -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false))
+                    .hasMessageContaining("approval snapshot is missing");
+            verify(client, never()).loadSession(any());
+        }
+    }
 
     @Test
     void titleCapabilityPreflightDoesNotAttachOrSendAMutation() {
@@ -423,7 +541,7 @@ class QwenHostedHarnessConnectorTest {
 
     @ParameterizedTest
     @NullAndEmptySource
-    @ValueSource(strings = {" ", "yolo", "plan", "unknown"})
+    @ValueSource(strings = {" ", "plan", "unknown"})
     void invalidPersistedShellApprovalRefusesEveryAttachmentPathEvenAfterCaching(String mode) {
         var sessions = sessions();
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
@@ -453,42 +571,42 @@ class QwenHostedHarnessConnectorTest {
         when(operation.kind()).thenReturn(OperationKind.CLOSE);
         for (boolean exists : new boolean[] {false, true}) {
             assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, exists))
-                    .hasMessageContaining("requires persisted default or auto-edit");
+                    .hasMessageContaining("requires a valid persisted approval mode");
         }
         assertThatThrownBy(() -> connector.settleLifecycle(operation))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.runMessageOperation("tenant-a", SESSION_ID, Map.of(
                 "operationId", "66666666-6666-4666-8666-666666666666", "kind", "stop")))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         verifyNoInteractions(client);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
         connector.createOrLoad("tenant-a", SESSION_ID, true);
         clearInvocations(client);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn(mode);
         assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.recoverManagedCancellation("tenant-a", SESSION_ID))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.cancel("tenant-a", SESSION_ID))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.cancelManagedRuntime("tenant-a", SESSION_ID,
                 "prompt", "checkpoint", "activation"))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.resolveAction("tenant-a", SESSION_ID, "action",
                 new ObjectMapper().createObjectNode().put("optionId", "allow")
                         .put("inputRevision", 1L).put("policyRevision", "hosted-tool-approval/1")))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.stream("tenant-a", SESSION_ID, 0, "epoch"))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.rename("tenant-a", SESSION_ID, "title"))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.settleLifecycle(operation))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         assertThatThrownBy(() -> connector.runMessageOperation("tenant-a", SESSION_ID, Map.of(
                 "operationId", "66666666-6666-4666-8666-666666666666", "kind", "stop")))
-                .hasMessageContaining("requires persisted default or auto-edit");
+                .hasMessageContaining("requires a valid persisted approval mode");
         verifyNoInteractions(client);
     }
 
