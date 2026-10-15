@@ -34,6 +34,7 @@ import type {
 } from '../tools/tools.js';
 import type { EditorType } from '../utils/editor.js';
 import type { Config } from '../config/config.js';
+import type { ModToolCheck } from '../mods/tool-events.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
@@ -235,7 +236,10 @@ import {
 } from '../utils/invocation-context.js';
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
-import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
+import {
+  codeModeToolResultStamp,
+  goalToolResultProvenance,
+} from '../goals/goal-tool-result-provenance.js';
 import {
   extractCodeModeImageContent,
   runWithoutToolCallRuntime,
@@ -1508,6 +1512,7 @@ interface CoreToolSchedulerOptions {
    * (owners without an execution allowlist).
    */
   isToolExecutionAllowed?: (toolName: string) => boolean;
+  modToolCheck?: ModToolCheck;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1878,6 +1883,7 @@ export class CoreToolScheduler {
     if (this.nestedToolScheduler) return this.nestedToolScheduler;
     this.nestedToolScheduler = new CoreToolScheduler({
       ...this.schedulerOptions,
+      modToolCheck: undefined,
       onAllToolCallsComplete: async (calls) => {
         for (const call of calls) {
           const resolver = this.nestedResolvers.get(call.request.callId);
@@ -3712,6 +3718,49 @@ export class CoreToolScheduler {
           ) {
             continue;
           }
+          const modToolCheck = this.schedulerOptions.modToolCheck;
+          if (modToolCheck) {
+            const decision = await runInRequestGoalContext(reqInfo, () =>
+              modToolCheck(
+                {
+                  tool: canonicalName,
+                  input: structuredClone(toolParams),
+                  tool_use_id: reqInfo.callId,
+                },
+                {
+                  decision:
+                    flowResult.finalPermission === 'default'
+                      ? 'ask'
+                      : flowResult.finalPermission,
+                  ...(flowResult.denyMessage
+                    ? { reason: flowResult.denyMessage }
+                    : {}),
+                },
+                signal,
+              ),
+            );
+            if (
+              this.cancelPreExecutionIfAborted(reqInfo.callId, signal, toolSpan)
+            ) {
+              continue;
+            }
+            if (!['allow', 'ask', 'deny'].includes(decision.decision)) {
+              throw new Error('Invalid Mod tool.check decision.');
+            }
+            if (flowResult.finalPermission !== 'deny') {
+              if (decision.decision === 'deny') {
+                flowResult.finalPermission = 'deny';
+                flowResult.denyMessage =
+                  decision.reason?.trim() ||
+                  `Tool "${reqInfo.name}" is denied by a Mod.`;
+              } else if (
+                decision.decision === 'ask' &&
+                flowResult.finalPermission === 'allow'
+              ) {
+                flowResult.finalPermission = 'ask';
+              }
+            }
+          }
           const {
             defaultPermission,
             finalPermission,
@@ -3943,6 +3992,12 @@ export class CoreToolScheduler {
           // fallback state — otherwise every trivially safe tool would
           // force manual approval until the user toggles modes.
           let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+          // Set when the fallback came from the deterministic destructive
+          // guard rather than the classifier. Tracked separately from
+          // `autoModeFallback` because that record is only built when the
+          // outcome carries a message, and because its `reason` is shared with
+          // the classifier escalation.
+          let autoModeFallbackRequiresHuman = false;
           if (
             !requiresUserInteraction &&
             !preToolUseAsk &&
@@ -4056,6 +4111,8 @@ export class CoreToolScheduler {
                 // pending dialog tells the user what's being asked;
                 // operators see recovery fallbacks in the debug log. A
                 // pmForcedAsk fallback isn't an audit-worthy event.
+                autoModeFallbackRequiresHuman =
+                  outcome.requiresHumanDecision === true;
                 if (
                   outcome.message &&
                   (isDenialFallbackReason(outcome.reason) ||
@@ -4252,7 +4309,13 @@ export class CoreToolScheduler {
             const isNonInteractiveDeny =
               !this.config.isInteractive() &&
               !this.config.getExperimentalZedIntegration() &&
-              this.config.getInputFormat() !== InputFormat.STREAM_JSON;
+              // STREAM_JSON is exempt because a host can answer
+              // `can_use_tool` — but that host is programmatic, so it cannot
+              // give the human-only confirmation the destructive guard
+              // escalated to. Deny here rather than hand it a dialog it is
+              // allowed to approve.
+              (this.config.getInputFormat() !== InputFormat.STREAM_JSON ||
+                autoModeFallbackRequiresHuman);
 
             if (isNonInteractiveDeny) {
               const errorMessage =
@@ -4321,12 +4384,14 @@ export class CoreToolScheduler {
               }
 
               // A deny always applies. An allow never replaces a confirmation
-              // the user must give (an interactive tool or a PreToolUse
-              // 'ask'); under an 'ask' it only has a replacement checked,
-              // which the user then confirms.
+              // the user must give (an interactive tool, a PreToolUse 'ask', or
+              // an escalation from the deterministic destructive guard); under
+              // an 'ask' it only has a replacement checked, which the user then
+              // confirms.
               const allowApplies =
                 hookResult.shouldAllow === true &&
                 !requiresUserInteraction &&
+                !autoModeFallbackRequiresHuman &&
                 (!preToolUseAsk ||
                   (hookResult.updatedInput !== undefined &&
                     planShellDecision.classification === 'not-applicable'));
@@ -7761,7 +7826,7 @@ export class CoreToolScheduler {
         call.response.responseParts,
       );
       const options = nested
-        ? { ...goalProvenance, subtype: 'code_mode_tool_result' as const }
+        ? { ...goalProvenance, ...codeModeToolResultStamp() }
         : goalProvenance;
       recorder.recordToolResult(
         call.response.responseParts,

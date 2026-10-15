@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -20,6 +14,18 @@ import com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -36,16 +42,12 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import javax.sql.DataSource;
-import org.flywaydb.core.Flyway;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.beans.factory.support.DefaultListableBeanFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DelegatingDataSource;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ToolPublicationLifecycleMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -65,7 +67,7 @@ class ToolPublicationLifecycleMySqlIT {
         try {
             var source = new ScheduledDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
-            Flyway.configure().dataSource(source).load().migrate();
+            Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
             var journal = PublicationJournalFixture.create(source, false);
             journal.reserve();
             var jdbc = journal.jdbc;
@@ -124,11 +126,11 @@ class ToolPublicationLifecycleMySqlIT {
             beans.registerSingleton("bindings", journal.bindings);
             var lifecycle = new WorkspaceLifecycleStore(jdbc, JSON, beans.getBeanProvider(RuntimeBindingRepository.class));
             agents.setWorkspaceLifecycleStore(lifecycle);
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES ('tenant-1', 'neighbor', 1, 'storage', 'Neighbor', ?, ?, 'ACTIVE')",
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES ('tenant-1', 'neighbor', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
             String session = transaction.execute(ignored -> agents.insertWorkspaceSessionCommand("tenant-1", "owner",
                     "create", "digest", "qwen-code", null, null, List.of(), null,
@@ -162,7 +164,7 @@ class ToolPublicationLifecycleMySqlIT {
             source.enabled = false;
             assertThat(agents.requireSession("tenant-1", session).status()).isEqualTo("CLOSED");
             assertThat(agents.findOperation("tenant-1", session, operationId).orElseThrow().deliveryState()).isEqualTo("CONFIRMED");
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                     + " WHERE tenant_id = 'tenant-1' AND session_id = 'session-1' AND operation = 'recordToolResult'", Integer.class)).isOne();
             assertThat(admission.commitReceipt(key, "pub-1", WRITER_TOKEN, request).path("historyRevision").asLong()).isEqualTo(sequence);
         } finally {
@@ -204,13 +206,13 @@ class ToolPublicationLifecycleMySqlIT {
                                     (prepared, call, values) -> {
                                         boolean execute = enabled && call.getName().startsWith("execute");
                                         String role = Thread.currentThread().getName();
-                                        if (execute && "receipt".equals(role) && sql.startsWith("INSERT INTO qwen_runtime_placement_guard")) {
+                                        if (execute && "receipt".equals(role) && sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'runtime_placement'")) {
                                             receiptPlacement.countDown();
                                         }
                                         try {
                                             Object value = call.invoke(statement, values);
                                             if (execute && "lifecycle".equals(role)
-                                                    && sql.startsWith("SELECT tenant_id FROM qwen_runtime_placement_guard")
+                                                    && sql.startsWith("SELECT tenant_id FROM ma_tenant_guard") && sql.contains("'runtime_placement'")
                                                     && paused.compareAndSet(false, true)) {
                                                 lifecyclePlacement.countDown();
                                                 if (!releaseLifecycle.await(10, TimeUnit.SECONDS)) {

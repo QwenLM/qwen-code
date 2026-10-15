@@ -2,25 +2,26 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
-import java.util.List;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
 @Repository
 public class WorkspaceExecutionStore {
+    static final String ORIGINAL_HOLDER_SQL = "SELECT storage_key FROM ma_storage_owner WHERE binding_id = ? AND runtime_generation = ? FOR UPDATE";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final WorkspaceStorageGuard storageGuard;
@@ -103,6 +104,18 @@ public class WorkspaceExecutionStore {
         authorizeAttachment(session, true, false, null, false);
     }
 
+    /**
+     * H4f × H4d-b: the attachment that carries a stopped run's message
+     * stop. Like a persisted cancellation it was authorized when the stop
+     * request committed on the parent, which its caller (the child result
+     * relay) has read, so it needs no CANCELLING Turn (message work never
+     * makes one) and no operator-mutable grant: only the Session's own
+     * structural binding is checked.
+     */
+    public void authorizeCommittedStop(SessionRecord session) {
+        authorizeAttachment(session, false, false, null, false, true);
+    }
+
     // Action-response delivery only: a refusal stemming solely from
     // operator-mutable grants or registry state must not certify the
     // terminal verdict, so it answers with the retryable variant instead.
@@ -113,11 +126,18 @@ public class WorkspaceExecutionStore {
     private void authorizeAttachment(SessionRecord session, boolean cancellation,
             boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
             boolean legacyClose) {
+        authorizeAttachment(session, cancellation, actionResponse, authority,
+                legacyClose, false);
+    }
+
+    private void authorizeAttachment(SessionRecord session, boolean cancellation,
+            boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
+            boolean legacyClose, boolean committedStop) {
         ContextBinding binding = session.workspace();
         String expectedStatus = authority == null && !legacyClose ? "ACTIVE" : session.status();
         if (binding == null || !(legacyClose ? "CLOSING".equals(session.status()) : authority == null ? "ACTIVE".equals(session.status())
                 : java.util.List.of("CLOSING", "DELETING").contains(session.status()))
-                || session.deletedAt() != null || !"qwen-code".equals(session.agentId())
+                || session.deletedAt() != null || !executableAgent(session.agentId(), session.agentDefinitionDigest())
                 || !session.tenantId().equals(binding.getTenantId())
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
@@ -126,8 +146,12 @@ public class WorkspaceExecutionStore {
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         // Verdicts per matched row: 0 structural mismatch, 1 refused only by
         // operator-mutable grant or registry state, 2 authorized.
+        byte[] executionActor = cancellation || committedStop ? null
+                : inheritedExecutionActor(jdbc, binding, session.sessionId());
         List<Integer> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
-                + " s.agent_id AS session_agent, s.status AS session_status,"
+                + " s.agent_id AS session_agent,"
+                + " s.agent_definition_digest AS session_definition_digest,"
+                + " s.status AS session_status,"
                 + " s.deleted_at AS session_deleted_at,"
                 + " s.workspace_id AS session_workspace,"
                 + " s.workspace_generation AS session_generation,"
@@ -138,28 +162,29 @@ public class WorkspaceExecutionStore {
                 + " s.workspace_config_ref, s.workspace_policy_ref"
                 + (cancellation
                         ? ", t.tenant_id AS cancellation_tenant, t.session_id AS cancellation_session"
+                        : committedStop ? ""
                         : ", r.tenant_id AS registry_tenant, r.workspace_id,"
                 + " r.workspace_generation, r.storage_id, r.state,"
-                + " c.tenant_id AS command_tenant, c.session_id AS command_session,"
+                + " s.tenant_id AS command_tenant, s.session_id AS command_session,"
                 + " a.tenant_id AS access_tenant, a.workspace_id AS access_workspace,"
                 + " a.role")
-                + " FROM managed_agent_session s"
+                + " FROM ma_session s"
                 + (cancellation
-                        ? " JOIN managed_agent_turn t ON t.tenant_id = s.tenant_id"
+                        ? " JOIN ma_turn t ON t.tenant_id = s.tenant_id"
                                 + " AND t.session_id = s.session_id AND t.status = 'CANCELLING'"
                                 + " AND (t.submission_attempted = TRUE OR t.harness_event_epoch IS NOT NULL)"
-                        : " JOIN managed_workspace_registry r ON r.tenant_id = s.tenant_id"
+                        : committedStop ? ""
+                        : " JOIN ma_workspace r ON r.tenant_id = s.tenant_id"
                 + " AND r.workspace_id = s.workspace_id"
-                + " JOIN managed_workspace_create_command c ON c.tenant_id = s.tenant_id"
-                + " AND c.session_id = s.session_id"
-                + " JOIN managed_workspace_access a ON a.tenant_id = r.tenant_id"
-                + " AND a.workspace_id = r.workspace_id AND a.actor_id = c.actor_id"
+                + " JOIN ma_workspace_access a ON a.tenant_id = r.tenant_id"
+                + " AND a.workspace_id = r.workspace_id AND a.actor_id = ?"
                 + " AND a.role IN ('READER', 'OPERATOR', 'OWNER')")
                 + " WHERE s.tenant_id = ? AND s.session_id = ?",
                 (row, index) -> {
                     boolean structural = session.tenantId().equals(row.getString("tenant_id"))
                             && session.sessionId().equals(row.getString("session_id"))
-                            && "qwen-code".equals(row.getString("session_agent"))
+                            && executableAgent(row.getString("session_agent"),
+                                    row.getString("session_definition_digest"))
                             && expectedStatus.equals(row.getString("session_status"))
                             && row.getObject("session_deleted_at") == null
                             && binding.getWorkspaceId().equals(row.getString("session_workspace"))
@@ -177,7 +202,8 @@ public class WorkspaceExecutionStore {
                             && (cancellation
                                     ? session.tenantId().equals(row.getString("cancellation_tenant"))
                                             && session.sessionId().equals(row.getString("cancellation_session"))
-                                    : session.tenantId().equals(row.getString("registry_tenant"))
+                                    : committedStop
+                                    || session.tenantId().equals(row.getString("registry_tenant"))
                             && session.tenantId().equals(row.getString("command_tenant"))
                             && session.sessionId().equals(row.getString("command_session"))
                             && session.tenantId().equals(row.getString("access_tenant"))
@@ -191,13 +217,14 @@ public class WorkspaceExecutionStore {
                     // Grants and registry state are operator-mutable: a
                     // refusal stemming only from them is not the structural
                     // verdict the terminal exit promises.
-                    return cancellation
+                    return cancellation || committedStop
                             || ("ACTIVE".equals(row.getString("state"))
                                     && WorkspaceAccess.valueOf(row.getString("role"))
                                             .atLeast(WorkspaceAccess.OPERATOR))
                             ? 2 : 1;
                 },
-                session.tenantId(), session.sessionId());
+                cancellation || committedStop ? new Object[] {session.tenantId(), session.sessionId()}
+                        : new Object[] {executionActor, session.tenantId(), session.sessionId()});
         if (grants.size() != 1) {
             throw unavailable();
         }
@@ -209,15 +236,46 @@ public class WorkspaceExecutionStore {
         }
     }
 
+    static byte[] inheritedExecutionActor(JdbcTemplate jdbc, ContextBinding binding, String sessionId) {
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        String current = sessionId;
+        while (visited.add(current)) {
+            var rows = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, parent_session_id, creator_actor_key,"
+                    + " workspace_id, workspace_generation, workspace_storage_id FROM ma_session"
+                    + " WHERE tenant_id = ? AND session_id = ?", binding.getTenantId(), current);
+            if (rows.size() != 1) {
+                throw unavailable();
+            }
+            var row = rows.getFirst();
+            if (!binding.getTenantId().equals(row.get("tenant_id")) || !current.equals(row.get("session_id"))
+                    || !binding.getWorkspaceId().equals(row.get("workspace_id"))
+                    || !(row.get("workspace_generation") instanceof Number generation)
+                    || binding.getWorkspaceGeneration() != generation.longValue()
+                    || !binding.getStorageId().equals(row.get("workspace_storage_id"))) {
+                throw unavailable();
+            }
+            String parent = (String) row.get("parent_session_id");
+            if (parent == null) {
+                if (!(row.get("creator_actor_key") instanceof byte[] actor)) {
+                    throw unavailable();
+                }
+                return actor;
+            }
+            current = parent;
+        }
+        throw unavailable();
+    }
+
     public void claim(ContextBinding binding, RuntimeSessionRecord session) {
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        String key = storageKey(binding);
         String holder = holderKey(session);
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            String key = storageKey(binding);
+            WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state, drain_requested,"
-                    + " tenant_id, workspace_id, workspace_generation, storage_id FROM qwen_runtime_binding"
+                    + " tenant_id, workspace_id, workspace_generation, storage_id FROM ma_runtime_binding"
                     + " WHERE binding_id = ? FOR UPDATE", (row, index) ->
                             session.getBindingId().equals(row.getString("binding_id"))
                             && session.getRuntimeGeneration() == row.getLong("runtime_generation")
@@ -230,7 +288,7 @@ public class WorkspaceExecutionStore {
                 throw unavailable();
             }
             List<Boolean> active = jdbc.query("SELECT binding_id, runtime_generation, runtime_session_id,"
-                    + " harness_session_id, session_state FROM qwen_runtime_session"
+                    + " harness_session_id, session_state FROM ma_runtime_session"
                     + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? FOR UPDATE",
                     (row, index) -> session.getBindingId().equals(row.getString("binding_id"))
                             && session.getRuntimeGeneration() == row.getLong("runtime_generation")
@@ -242,11 +300,11 @@ public class WorkspaceExecutionStore {
             if (active.size() != 1 || !active.getFirst()) {
                 throw unavailable();
             }
-            jdbc.update("INSERT INTO managed_workspace_execution_lease"
+            jdbc.update("INSERT INTO ma_storage_owner"
                     + " (storage_key, storage_kind) VALUES (?, 'LOCAL') ON DUPLICATE KEY UPDATE"
                     + " storage_key = storage_key", key);
             String current = jdbc.queryForObject("SELECT holder_key FROM"
-                    + " managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
+                    + " ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
                     String.class, key);
             if (storageGuard != null) {
                 storageGuard.verifyLocked(binding);
@@ -254,7 +312,7 @@ public class WorkspaceExecutionStore {
             if (current != null && !holder.equals(current)) {
                 throw busy();
             }
-            jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = ?,"
+            jdbc.update("UPDATE ma_storage_owner SET holder_key = ?,"
                     + " binding_id = ?, runtime_generation = ?, runtime_session_id = ?"
                     + " WHERE storage_key = ? AND storage_kind = 'LOCAL'", holder, session.getBindingId(),
                     session.getRuntimeGeneration(), session.getRuntimeSessionId(), key);
@@ -273,7 +331,7 @@ public class WorkspaceExecutionStore {
     public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session) {
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
-                + " managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL'",
+                + " ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'",
                 String.class, storageKey(binding));
         return holders.size() == 1 && holderKey(session).equals(holders.getFirst());
     }
@@ -283,7 +341,7 @@ public class WorkspaceExecutionStore {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state"
-                    + " FROM qwen_runtime_binding WHERE binding_id = ? FOR UPDATE",
+                    + " FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE",
                     (row, index) -> session.getBindingId().equals(row.getString("binding_id"))
                             && session.getRuntimeGeneration() == row.getLong("runtime_generation")
                             && ("READY".equals(row.getString("binding_state"))
@@ -292,7 +350,7 @@ public class WorkspaceExecutionStore {
             if (live.size() != 1 || !live.getFirst()) {
                 throw unavailable();
             }
-            jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
+            jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL,"
                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
                     + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ?",
                     storageKey(binding), holderKey(session));
@@ -306,29 +364,30 @@ public class WorkspaceExecutionStore {
      * registration, which need an idle lease, refuse. The Runtime holder
      * columns stay null and maintenance_id names the child Workspace. The
      * hold belongs to the child Workspace's current claim generation: a
-     * newer generation takes it over, an older one is refused, and a hold
-     * whose claim has since expired is freed by
-     * {@link #releaseStaleMaintenance}.
+     * different generation cannot take it over. A physical step releases
+     * only its own generation after returning; claim expiry leaves the
+     * original holder in place until its process is reconciled.
      */
-    public void holdForMaintenance(ContextBinding binding, String maintenanceId,
+    public String holdForMaintenance(ContextBinding binding, String maintenanceId,
             long claimGeneration) {
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        String key = storageKey(binding);
         String holder = maintenanceHolderKey(maintenanceId, claimGeneration);
-        transaction.executeWithoutResult(status -> {
+        return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
-            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM"
-                    + " qwen_managed_child_workspace WHERE child_workspace_id = ? FOR UPDATE",
-                    Long.class, maintenanceId);
+            String key = storageKey(binding);
+            WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
+            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ?"
+                    + " AND operation_kind = 'CHILD_WORKSPACE' AND claim_until > CURRENT_TIMESTAMP(6) FOR UPDATE",
+                    Long.class, WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, binding.getTenantId(), maintenanceId));
             if (generations.size() != 1 || generations.getFirst() != claimGeneration) {
                 throw unavailable();
             }
-            jdbc.update("INSERT INTO managed_workspace_execution_lease"
+            jdbc.update("INSERT INTO ma_storage_owner"
                     + " (storage_key, storage_kind) VALUES (?, 'LOCAL') ON DUPLICATE KEY UPDATE"
                     + " storage_key = storage_key", key);
             List<String[]> rows = jdbc.query("SELECT holder_key, maintenance_id FROM"
-                    + " managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
+                    + " ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
                     (row, index) -> new String[] {row.getString("holder_key"), row.getString("maintenance_id")},
                     key);
             if (rows.size() != 1) {
@@ -338,85 +397,90 @@ public class WorkspaceExecutionStore {
                 storageGuard.verifyLocked(binding);
             }
             String current = rows.getFirst()[0];
-            if (current != null && !holder.equals(current)
-                    && !maintenanceId.equals(rows.getFirst()[1])) {
+            if (current != null && !holder.equals(current)) {
                 throw busy();
             }
-            jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = ?,"
+            jdbc.update("UPDATE ma_storage_owner SET holder_key = ?,"
                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL,"
-                    + " maintenance_id = ? WHERE storage_key = ? AND storage_kind = 'LOCAL'",
-                    holder, maintenanceId, key);
+                    + " maintenance_id = ?, maintenance_generation = ? WHERE storage_key = ? AND storage_kind = 'LOCAL'",
+                    holder, maintenanceId, claimGeneration, key);
+            return WorkspaceMaintenanceRecovery.recordStart(jdbc, binding, maintenanceId, claimGeneration);
         });
     }
-
-    /** The child Workspace states a physical step runs in, and that a scan resumes. */
-    private static final java.util.Set<String> RESUMABLE_STATES = java.util.Set.of(ChildWorkspaceStore.PREPARING,
-            ChildWorkspaceStore.MERGING, ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED,
-            ChildWorkspaceStore.DISCARDING);
 
     /** Releases a maintenance hold, and only the one this claim took. */
     public void releaseMaintenance(ContextBinding binding, String maintenanceId,
-            long claimGeneration) {
+            long claimGeneration, String executionId) {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
-            jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
-                    + " maintenance_id = NULL WHERE storage_key = ? AND storage_kind = 'LOCAL'"
-                    + " AND holder_key = ? AND maintenance_id = ?", storageKey(binding),
-                    maintenanceHolderKey(maintenanceId, claimGeneration), maintenanceId);
+            if (!WorkspaceMaintenanceRecovery.recordReturned(jdbc, binding, maintenanceId, claimGeneration, executionId)) {
+                return;
+            }
+            int released = jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL,"
+                    + " maintenance_id = NULL, maintenance_generation = NULL WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+                    + " AND holder_key = ? AND maintenance_id = ? AND maintenance_generation = ?", storageKey(binding),
+                    maintenanceHolderKey(maintenanceId, claimGeneration), maintenanceId, claimGeneration);
+            if (released != 1) {
+                status.setRollbackOnly();
+            }
         });
     }
 
-    /**
-     * Clears the maintenance holds no step owns any more: their child
-     * Workspace has no live claim, because the worker died (or failed to
-     * release) after its last step. A live step renews its claim, so the
-     * hold of any step still going is never touched. A hold whose child
-     * Workspace is still in a step's state waits {@code resumableGraceMillis}
-     * past its claim (forever with {@code Long.MAX_VALUE}): a scan that
-     * resumes the row lets its new claimant take the hold over without a
-     * gap.
-     */
+    /** Expired claims cannot prove that the original physical worker stopped. */
     public int releaseStaleMaintenance(long now, long resumableGraceMillis) {
-        // Every maintenance hold is a candidate; the claim is judged once,
-        // under the child Workspace's row lock, so a claim taken meanwhile
-        // keeps its hold.
-        List<String[]> holds = jdbc.query("SELECT w.tenant_id, l.storage_key, l.maintenance_id"
-                + " FROM managed_workspace_execution_lease l JOIN qwen_managed_child_workspace w"
-                + " ON w.child_workspace_id = l.maintenance_id WHERE l.maintenance_id IS NOT NULL",
-                (row, index) -> new String[] {row.getString(1), row.getString(2), row.getString(3)});
-        int released = 0;
-        for (String[] hold : holds) {
-            Integer cleared = transaction.execute(status -> {
-                WorkspaceStorageKindGuard.lockDomain(jdbc, hold[0]);
-                List<Boolean> unclaimed = jdbc.query("SELECT claimed_until, state FROM qwen_managed_child_workspace"
-                        + " WHERE child_workspace_id = ? FOR UPDATE", (row, index) -> {
-                            long until = row.getLong(1);
-                            if (row.wasNull()) {
-                                return true;
-                            }
-                            if (!RESUMABLE_STATES.contains(row.getString(2))) {
-                                return until <= now;
-                            }
-                            return resumableGraceMillis != Long.MAX_VALUE
-                                    && until <= now - resumableGraceMillis;
-                        }, hold[2]);
-                if (unclaimed.size() != 1 || !unclaimed.getFirst()) {
-                    return 0;
-                }
-                return jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
-                        + " maintenance_id = NULL WHERE storage_key = ? AND storage_kind = 'LOCAL'"
-                        + " AND maintenance_id = ?", hold[1], hold[2]);
-            });
-            released += cleared == null ? 0 : cleared;
-        }
-        return released;
+        return 0;
     }
 
     public boolean hasHolder(RuntimeBindingRecord saved) {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease"
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner"
                 + " WHERE binding_id = ? AND runtime_generation = ? AND holder_key IS NOT NULL",
                 Integer.class, saved.getBindingId(), saved.getGeneration());
         return count != null && count > 0;
+    }
+
+    public boolean canStopDrained(RuntimeBindingRecord saved) {
+        if ((saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST)
+                || !saved.isDrainRequested() || !saved.getRequest().isManagedContext() || saved.getOperationOwner() == null
+                || !LocalProcessRuntimeProvisioner.KIND.equals(saved.getRequest().getProvisionerKind())
+                || !WorkspaceExecutionProfile.admitsIsolationClass(saved.getRequest().getScope().getIsolationClass())) {
+            return false;
+        }
+        var claims = jdbc.query("SELECT binding_state, drain_requested, operation_owner, operation_generation,"
+                + " operation_lease_until, tenant_id, storage_id, UNIX_TIMESTAMP() AS db_seconds,"
+                + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) AS db_micros FROM ma_runtime_binding"
+                + " WHERE binding_id = ? AND runtime_generation = ?", (row, index) ->
+                        saved.getState().name().equals(row.getString("binding_state")) && row.getBoolean("drain_requested")
+                        && saved.getOperationOwner().equals(row.getString("operation_owner"))
+                        && saved.getOperationGeneration() == row.getLong("operation_generation")
+                        && row.getTimestamp("operation_lease_until") != null
+                        && row.getTimestamp("operation_lease_until", java.util.Calendar.getInstance(
+                                java.util.TimeZone.getTimeZone("UTC"))).toInstant().isAfter(java.time.Instant.ofEpochSecond(
+                                        row.getLong("db_seconds"), row.getLong("db_micros") * 1000))
+                        && saved.getRequest().getScope().getTenantId().equals(row.getString("tenant_id"))
+                        && saved.getRequest().getStorageId().equals(row.getString("storage_id")),
+                saved.getBindingId(), saved.getGeneration());
+        if (claims.size() != 1 || !claims.getFirst()
+                || jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE binding_id = ?"
+                        + " AND runtime_generation = ? AND execution_state NOT IN ('SETTLED', 'ABANDONED')",
+                        Long.class, saved.getBindingId(), saved.getGeneration()) != 0) {
+            return false;
+        }
+        var holders = jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
+                + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'", (row, index) -> {
+                    String holder = row.getString("holder_key");
+                    String binding = row.getString("binding_id");
+                    String session = row.getString("runtime_session_id");
+                    long generation = row.getLong("runtime_generation");
+                    if (holder == null) {
+                        return binding == null && session == null && row.getObject("runtime_generation") == null;
+                    }
+                    return saved.getBindingId().equals(binding) && saved.getGeneration() == generation && session != null
+                            && holder.equals(digest(binding + "\u0000" + generation + "\u0000" + session))
+                            && jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
+                                    + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
+                                    Long.class, binding, generation, session, saved.getRequest().getIsolationKey()) == 1;
+                }, LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId()));
+        return holders.isEmpty() || holders.size() == 1 && holders.getFirst();
     }
 
     public void releaseLost(RuntimeBindingRecord saved) {
@@ -430,7 +494,7 @@ public class WorkspaceExecutionStore {
                     + " workspace_id, storage_id, record_version, operation_owner, operation_generation,"
                     + " operation_lease_until, loss_evidence_json, stop_evidence_json, UNIX_TIMESTAMP() AS db_seconds,"
                     + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) AS db_micros"
-                    + " FROM qwen_runtime_binding WHERE binding_id = ? FOR UPDATE", (row, index) ->
+                    + " FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE", (row, index) ->
                             saved.getBindingId().equals(row.getString("binding_id"))
                             && saved.getGeneration() == row.getLong("runtime_generation")
                             && "LOST".equals(row.getString("binding_state"))
@@ -447,14 +511,17 @@ public class WorkspaceExecutionStore {
                             && row.getString("loss_evidence_json") != null && row.getString("stop_evidence_json") != null,
                     saved.getBindingId());
             if (exact.size() != 1 || !exact.getFirst()
-                    || jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE binding_id = ?"
+                    || jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE binding_id = ?"
                             + " AND runtime_generation = ? AND execution_state NOT IN ('SETTLED', 'ABANDONED')",
                             Long.class, saved.getBindingId(), saved.getGeneration()) != 0) {
                 throw unavailable();
             }
-            String key = digest(saved.getRequest().getScope().getTenantId() + "\u0000" + saved.getRequest().getStorageId());
+            if (jdbc.queryForList(ORIGINAL_HOLDER_SQL, String.class, saved.getBindingId(), saved.getGeneration()).isEmpty()) {
+                return;
+            }
+            String key = LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId());
             jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id, maintenance_id"
-                    + " FROM managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", row -> {
+                    + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", row -> {
                         String holder = row.getString("holder_key");
                         String bindingId = row.getString("binding_id");
                         String sessionId = row.getString("runtime_session_id");
@@ -483,7 +550,7 @@ public class WorkspaceExecutionStore {
                             if (now == null || !saved.getOperationLeaseUntil().isAfter(now)) {
                                 throw unavailable();
                             }
-                            int changed = jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
+                            int changed = jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL,"
                                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
                                     + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ? AND binding_id = ?"
                                     + " AND runtime_generation = ? AND runtime_session_id = ?",
@@ -496,9 +563,22 @@ public class WorkspaceExecutionStore {
         });
     }
 
+    // qwen-code, or a Session that pinned a compiled definition (D8c-1).
+    private static boolean executableAgent(String agentId,
+            String agentDefinitionDigest) {
+        return "qwen-code".equals(agentId) || agentDefinitionDigest != null;
+    }
+
     public static RuntimeBrokerException unavailable() {
         return new RuntimeBrokerException(409, "workspace_unavailable",
                 "Workspace execution authority is unavailable.", false);
+    }
+
+    // Same structural refusal, with the discarded cause kept for the log:
+    // without it a failed mount verification reports nothing but the verdict.
+    public static RuntimeBrokerException unavailable(Throwable cause) {
+        return new RuntimeBrokerException(409, "workspace_unavailable",
+                "Workspace execution authority is unavailable.", false, cause);
     }
 
     // A probe's momentary I/O failure is not the structural verdict the
@@ -527,8 +607,12 @@ public class WorkspaceExecutionStore {
                 "Workspace storage is held by another tool turn.", true);
     }
 
-    private static String storageKey(ContextBinding binding) {
-        return digest(binding.getTenantId() + "\u0000" + binding.getStorageId());
+    private String storageKey(ContextBinding binding) {
+        return storageKey(jdbc, binding);
+    }
+
+    static String storageKey(JdbcTemplate jdbc, ContextBinding binding) {
+        return LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId());
     }
 
     private static String maintenanceHolderKey(String maintenanceId, long claimGeneration) {
@@ -542,9 +626,8 @@ public class WorkspaceExecutionStore {
 
     private static String digest(String value) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.sha256Hex(value.getBytes(StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }

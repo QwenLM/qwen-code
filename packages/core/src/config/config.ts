@@ -1197,10 +1197,11 @@ export interface ConfigParameters {
    */
   customSkillDirs?: readonly string[];
   /**
-   * Tool names hidden from the registry at construction time. Unlike
-   * `permissions.deny` (which keeps the tool registered and rejects
-   * invocation), tools listed here are not registered at all and never
-   * appear in `/tools`, `getAllTools()`, or function-call discovery.
+   * Tool names hidden from the registry at construction time. Tools listed
+   * here are not registered at all and never appear in `/tools`,
+   * `getAllTools()`, or function-call discovery. A `permissions.deny` rule
+   * without a specifier has the same effect on built-in tools; a rule with
+   * a specifier keeps the tool registered and rejects matching calls.
    * Sourced from `settings.tools.disabled` and the daemon mutation route
    * `POST /workspace/tools/:name/enable {enabled:false}`. Active sessions retain already-registered tools — the disabled
    * set is consulted at register time, so toggling takes effect on the

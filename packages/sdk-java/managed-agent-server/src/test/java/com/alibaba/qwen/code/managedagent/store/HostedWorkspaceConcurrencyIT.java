@@ -1,25 +1,33 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.h2.tools.Server;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
@@ -42,15 +50,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.flywaydb.core.Flyway;
-import org.h2.tools.Server;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedWorkspaceConcurrencyIT {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -75,7 +76,7 @@ class HostedWorkspaceConcurrencyIT {
             assertThat(LINUX).as("MySQL acceptance requires physical Linux identity").isTrue();
         }
         var source = new DriverManagerDataSource(url, user, password);
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         String tenant = "w1-race-" + UUID.randomUUID();
         Throwable failure = null;
         try {
@@ -84,13 +85,13 @@ class HostedWorkspaceConcurrencyIT {
             Files.setLastModifiedTime(root, FileTime.fromMillis(1));
             Files.createDirectory(temporary.resolve("initial-state"));
             var properties = properties(tenant, root, temporary.resolve("initial-state"));
-            Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+            ManagedSchema.initialize(source);
             var store = store(source, properties);
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES (?, 'workspace', 1, 'storage', 'Race', ?, ?, 'ACTIVE')", tenant,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
             String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
@@ -107,7 +108,7 @@ class HostedWorkspaceConcurrencyIT {
                 String runtime = UUID.randomUUID().toString();
                 first.arm("before-claim");
                 var pending = first.acquire(firstSession, runtime);
-                first.reached();
+                first.reached(pending);
                 first.assertWorker();
                 second.assertWorker();
                 String operation = UUID.randomUUID().toString();
@@ -122,8 +123,8 @@ class HostedWorkspaceConcurrencyIT {
                 assertThat(row(jdbc, tenant)).isEqualTo(fenced);
                 assertThat(refused.statusCode()).as("%s", refused.body()).isEqualTo(409);
                 assertThat(refused.body()).contains("workspace_unavailable");
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE binding_id IN"
-                        + " (SELECT binding_id FROM qwen_runtime_binding WHERE tenant_id = ?)",
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE binding_id IN"
+                        + " (SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?)",
                         Long.class, tenant)).isZero();
                 try (var files = Files.list(root)) {
                     assertThat(files.map(path -> path.getFileName().toString()).toList())
@@ -158,7 +159,9 @@ class HostedWorkspaceConcurrencyIT {
                 var executionStore = new JdbcToolExecutionRepository(source);
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
                 while (executionStore.findByExecutionCallId(execution).getResult() == null) {
-                    if (System.nanoTime() > deadline) throw new AssertionError("Tool did not settle");
+                    if (System.nanoTime() > deadline) {
+                        throw new AssertionError("Tool did not settle");
+                    }
                     Thread.sleep(10);
                 }
                 assertThat(executionStore.findByExecutionCallId(execution).getResult())
@@ -207,17 +210,15 @@ class HostedWorkspaceConcurrencyIT {
             throw error;
         } finally {
             try {
-                jdbc.update("DELETE FROM qwen_tool_execution WHERE binding_id IN"
-                        + " (SELECT binding_id FROM qwen_runtime_binding WHERE tenant_id = ?)", tenant);
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE binding_id IN"
-                        + " (SELECT binding_id FROM qwen_runtime_binding WHERE tenant_id = ?)",
+                jdbc.update("DELETE FROM ma_tool_execution WHERE binding_id IN"
+                        + " (SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?)", tenant);
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE binding_id IN"
+                        + " (SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?)",
                         Long.class, tenant)).isZero();
-                for (String table : List.of("qwen_runtime_session", "qwen_runtime_binding",
-                        "qwen_runtime_binding_slot", "qwen_runtime_placement_guard",
-                        "managed_workspace_execution_lease", "managed_agent_event",
-                        "managed_agent_consumer_progress", "managed_workspace_create_command",
-                        "managed_session_create_scope", "managed_agent_session",
-                        "managed_workspace_access", "managed_workspace_registry")) {
+                for (String table : List.of("ma_runtime_session", "ma_runtime_binding",
+                        "ma_runtime_slot", "ma_tenant_guard",
+                        "ma_storage_owner", "ma_public_event", "ma_event_stream", "ma_request_receipt", "ma_session",
+                        "ma_workspace_access", "ma_workspace")) {
                     jdbc.update("DELETE FROM " + table + " WHERE tenant_id = ?", tenant);
                     assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM " + table + " WHERE tenant_id = ?",
                             Long.class, tenant)).as("%s fixture tenant cleanup", table).isZero();
@@ -230,9 +231,13 @@ class HostedWorkspaceConcurrencyIT {
                 failure.addSuppressed(cleanupFailure);
             } finally {
                 try {
-                    if (h2 != null) h2.stop();
+                    if (h2 != null) {
+                        h2.stop();
+                    }
                 } catch (RuntimeException | Error stopFailure) {
-                    if (failure == null) throw stopFailure;
+                    if (failure == null) {
+                        throw stopFailure;
+                    }
                     failure.addSuppressed(stopFailure);
                 }
             }
@@ -240,12 +245,12 @@ class HostedWorkspaceConcurrencyIT {
     }
 
     private static Map<String, Object> row(JdbcTemplate jdbc, String tenant) {
-        return jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE tenant_id = ?", tenant);
+        return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE tenant_id = ?", tenant);
     }
 
     private static ManagedAgentStore store(DriverManagerDataSource source, ManagedAgentProperties properties) {
-        var jdbc = new JdbcTemplate(source);
-        return new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> { },
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        return new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
     }
 
@@ -266,19 +271,22 @@ class HostedWorkspaceConcurrencyIT {
         broker.setNodeExecutable(System.getProperty("node.executable", "node"));
         String bundle = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().toString();
         broker.setWorkerEntry(bundle);
-        broker.setCliEntry(bundle);
         broker.setVerifiedWorkspaceRecoveryEnabled(true);
         broker.setWorkspaceMounts(List.of(new WorkspaceMount(tenant, "storage", root.toString())));
         return properties;
     }
 
     private static WorkspaceStorageGuard guard(DriverManagerDataSource source, ManagedAgentProperties properties) {
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
-        if (LINUX) return new WorkspaceStorageGuard(jdbc, manager, properties);
+        if (LINUX) {
+            return new WorkspaceStorageGuard(jdbc, manager, properties);
+        }
         return new WorkspaceStorageGuard(jdbc, manager, properties, root -> {
             var attributes = Files.readAttributes(root, BasicFileAttributes.class);
-            if (!attributes.isDirectory() || !root.equals(root.toRealPath())) throw new java.io.IOException("Invalid root");
+            if (!attributes.isDirectory() || !root.equals(root.toRealPath())) {
+                throw new java.io.IOException("Invalid root");
+            }
             return new WorkspaceStorageGuard.Identity(root.toString(), "synthetic-host", "synthetic-device",
                     attributes.fileKey().toString(), attributes.creationTime().toInstant().toString());
         });
@@ -293,7 +301,9 @@ class HostedWorkspaceConcurrencyIT {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(25);
         while (!Files.exists(path)) {
             assertThat(process.isAlive()).as("Broker exited before %s", path).isTrue();
-            if (System.nanoTime() > deadline) throw new AssertionError("Barrier timeout: " + path);
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("Barrier timeout: " + path);
+            }
             Thread.sleep(10);
         }
     }
@@ -308,8 +318,10 @@ class HostedWorkspaceConcurrencyIT {
         Broker(String name, Map<String, Object> configuration) throws Exception {
             directory = Files.createDirectory(temporary.resolve(name));
             Files.createDirectory(directory.resolve("state"));
-            if (LINUX) Files.setPosixFilePermissions(directory.resolve("state"),
-                    PosixFilePermissions.fromString("rwx------"));
+            if (LINUX) {
+                Files.setPosixFilePermissions(directory.resolve("state"),
+                        PosixFilePermissions.fromString("rwx------"));
+            }
             JSON.writeValue(directory.resolve("config.json").toFile(), configuration);
             process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(),
                     "-Dnode.executable=" + System.getProperty("node.executable", "node"),
@@ -380,6 +392,23 @@ class HostedWorkspaceConcurrencyIT {
             Files.deleteIfExists(directory.resolve("resume"));
             Files.writeString(directory.resolve("armed"), stage);
         }
+        void reached(java.util.concurrent.CompletableFuture<HttpResponse<String>> request) throws Exception {
+            Path path = directory.resolve("reached");
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(25);
+            while (!Files.exists(path)) {
+                assertThat(process.isAlive()).as("Broker exited before %s", path).isTrue();
+                if (request.isDone()) {
+                    var response = request.get(1, TimeUnit.SECONDS);
+                    throw new AssertionError("Request returned before the physical claim barrier: status="
+                            + response.statusCode() + " body=" + response.body());
+                }
+                if (System.nanoTime() > deadline) {
+                    throw new AssertionError("Barrier timeout: " + path);
+                }
+                Thread.sleep(10);
+            }
+        }
+
         void reached() throws Exception { awaitFile(directory.resolve("reached"), process); }
         void resume() throws Exception { Files.writeString(directory.resolve("resume"), "continue"); }
         void assertWorker() {
@@ -399,7 +428,9 @@ class HostedWorkspaceConcurrencyIT {
             awaitFile(directory.resolve("result.json"), process);
             JsonNode result = JSON.readTree(directory.resolve("result.json").toFile());
             assertThat(result.get("ok").asBoolean()).as("%s", result).isEqualTo(success);
-            if (!success) assertThat(result.get("code").asText()).isEqualTo("workspace_unavailable");
+            if (!success) {
+                assertThat(result.get("code").asText()).isEqualTo("workspace_unavailable");
+            }
         }
         @Override public void close() throws Exception {
             var workers = process.descendants().toList();
@@ -432,19 +463,25 @@ class HostedWorkspaceConcurrencyIT {
             var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
             var sessions = new JdbcRuntimeSessionRepository(source);
             var executions = new JdbcToolExecutionRepository(source);
-            var authority = new WorkspaceExecutionStore(new JdbcTemplate(source), new DataSourceTransactionManager(source), guard) {
+            var authority = new WorkspaceExecutionStore(new ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source), guard) {
                 private void pause(String stage) {
                     try {
                         Path armed = directory.resolve("armed");
-                        if (!Files.exists(armed) || !Files.readString(armed).equals(stage)) return;
+                        if (!Files.exists(armed) || !Files.readString(armed).equals(stage)) {
+                            return;
+                        }
                         Files.delete(armed);
                         Files.writeString(directory.resolve("reached"), stage);
                         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(25);
                         while (!Files.exists(directory.resolve("resume"))) {
-                            if (System.nanoTime() > deadline) throw new IllegalStateException("Barrier timeout " + stage);
+                            if (System.nanoTime() > deadline) {
+                                throw new IllegalStateException("Barrier timeout " + stage);
+                            }
                             Thread.sleep(10);
                         }
-                    } catch (Exception error) { throw new IllegalStateException(error); }
+                    } catch (Exception error) {
+                        throw new IllegalStateException(error);
+                    }
                 }
                 @Override public void claim(ContextBinding binding, RuntimeSessionRecord session) {
                     pause("before-claim");
@@ -480,7 +517,7 @@ class HostedWorkspaceConcurrencyIT {
                             case "fence" -> guard.fence(tenant, "storage", revision, operation);
                             case "restore" -> guard.restoreOriginal(tenant, "storage", revision, operation);
                             case "lost-cleanup" -> {
-                                var rows = new JdbcTemplate(source).queryForList("SELECT binding_id FROM qwen_runtime_session"
+                                var rows = new ManagedSchemaJdbcTemplate(source).queryForList("SELECT binding_id FROM ma_runtime_session"
                                         + " WHERE runtime_session_id = ?", String.class, operation);
                                 assertThat(rows).hasSize(1);
                                 var saved = bindings.findById(rows.getFirst());
@@ -507,7 +544,9 @@ class HostedWorkspaceConcurrencyIT {
                             default -> throw new IllegalArgumentException("Unknown fixture command");
                         }
                         result = Map.of("ok", true);
-                    } catch (RuntimeBrokerException error) { result = Map.of("ok", false, "code", error.getCode()); }
+                    } catch (RuntimeBrokerException error) {
+                        result = Map.of("ok", false, "code", error.getCode());
+                    }
                     publish(directory.resolve("result.json"), result);
                 }
             }

@@ -16,12 +16,13 @@ import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.CursorPositions;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.EventPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.TaskEvent;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.regex.Pattern;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
 
 /**
  * The task list, detail and events of a Session (SessionTaskView), read
@@ -87,7 +88,7 @@ public class ManagedTaskService {
         ResolvedPage page = eventPage(tenantId, actorId, sessionId, taskId,
                 after, limit);
         return new PublicList<>("list", page.page().events().stream()
-                .map(event -> publicEvent(sessionId, taskId, event)).toList(),
+                .map(event -> publicEvent(tenantId, sessionId, taskId, event)).toList(),
                 page.page().hasMore(), page.nextCursor());
     }
 
@@ -97,7 +98,7 @@ public class ManagedTaskService {
         ResolvedPage page = eventPage(tenantId, actorId, sessionId, taskId,
                 after, limit);
         return new WebShellPage<>(page.page().events().stream()
-                .map(event -> webShellEvent(sessionId, taskId, event))
+                .map(event -> webShellEvent(tenantId, sessionId, taskId, event))
                 .toList(), page.nextCursor(), page.page().hasMore());
     }
 
@@ -177,7 +178,7 @@ public class ManagedTaskService {
             position = events.positions(tenantId, sessionId, taskId)
                     .expiredThrough();
         } else {
-            position = ManagedTaskEventStore.decodeCursor(taskId, after);
+            position = ManagedTaskEventStore.decodeCursor(tenantId, sessionId, taskId, after);
         }
         EventPage page = events.read(tenantId, sessionId, taskId, position,
                 limit);
@@ -197,11 +198,11 @@ public class ManagedTaskService {
         }
         String nextCursor;
         if (page.events().isEmpty()) {
-            nextCursor = ManagedTaskEventStore.encodeCursor(taskId,
+            nextCursor = ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
                     Math.max(position, floor));
         } else {
             TaskEvent last = page.events().get(page.events().size() - 1);
-            nextCursor = ManagedTaskEventStore.encodeCursor(taskId,
+            nextCursor = ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
                     last.sequence());
         }
         return new ResolvedPage(page, nextCursor);
@@ -225,7 +226,7 @@ public class ManagedTaskService {
         return new PublicTask(task.taskId(), "agent.task", sessionId,
                 task.kind(), view.state(), view.definitionRevision(),
                 view.runtimeState(), view.createdAt(), view.startedAt(),
-                view.settledAt(), outputCursor(task.taskId(), positions),
+                view.settledAt(), outputCursor(tenantId, sessionId, task.taskId(), positions),
                 positions.artifactRefs(),
                 actions(task, view, sessionActive));
     }
@@ -238,7 +239,7 @@ public class ManagedTaskService {
         return new WebShellTask(task.taskId(), sessionId, task.kind(),
                 view.state(), view.definitionRevision(), view.runtimeState(),
                 view.createdAt(), view.startedAt(), view.settledAt(),
-                outputCursor(task.taskId(), positions),
+                outputCursor(tenantId, sessionId, task.taskId(), positions),
                 positions.artifactRefs(),
                 actions(task, view, sessionActive));
     }
@@ -253,27 +254,27 @@ public class ManagedTaskService {
     }
 
     /** The committed tail at the view read; absent until the first event. */
-    private static String outputCursor(String taskId,
+    private static String outputCursor(String tenantId, String sessionId, String taskId,
             CursorPositions positions) {
         return positions.lastSequence() == 0 ? null
-                : ManagedTaskEventStore.encodeCursor(taskId,
+                : ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
                         positions.lastSequence());
     }
 
-    private static PublicTaskEvent publicEvent(String sessionId,
+    private static PublicTaskEvent publicEvent(String tenantId, String sessionId,
             String taskId, TaskEvent event) {
         return new PublicTaskEvent(event.schemaVersion(),
                 event.projectionVersion(), taskId, sessionId, event.type(),
-                ManagedTaskEventStore.encodeCursor(taskId, event.sequence()),
+                ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId, event.sequence()),
                 event.occurredAt(), event.state(), event.runtimeState(),
                 event.text(), event.truncated(), event.artifactId());
     }
 
-    private static WebShellTaskEvent webShellEvent(String sessionId,
+    private static WebShellTaskEvent webShellEvent(String tenantId, String sessionId,
             String taskId, TaskEvent event) {
         return new WebShellTaskEvent(event.schemaVersion(),
                 event.projectionVersion(), taskId, sessionId, event.type(),
-                ManagedTaskEventStore.encodeCursor(taskId, event.sequence()),
+                ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId, event.sequence()),
                 event.occurredAt(), event.state(), event.runtimeState(),
                 event.text(), event.truncated(), event.artifactId());
     }

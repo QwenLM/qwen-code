@@ -12,7 +12,7 @@ import type {
   RawFileHistoryOperation,
   HostedFileHistoryState,
 } from './hosted-file-history-protocol.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type {
@@ -32,6 +32,10 @@ import type {
   ManagedHookControl,
   ManagedHookOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import type {
+  ManagedMonitorControl,
+  ManagedMonitorOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
 import type { ManagedSessionLifecycleAuthority } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 export interface HostedWorkspaceBrokerOptions {
@@ -69,8 +73,38 @@ export function isHostedFileHistoryRefusal(
   );
 }
 
+/** The execution states the Broker can report: the four live states it
+ * answers for a record it tracks, `unknown` for a still-reconcilable
+ * outcome gap, and `abandoned` for a record it fenced terminally (see
+ * isTerminalUnknownRejection). The hosted recovery wire vocabulary is the
+ * closed subset without `unknown` (see HostedRuntimeRecoveryExecutionState):
+ * a new state here must be folded deliberately, or the client-side
+ * validator rejects the whole report. */
+export type HostedBrokerExecutionState =
+  | 'prepared'
+  | 'executing'
+  | 'cancel_requested'
+  | 'settled'
+  | 'abandoned'
+  | 'unknown';
+
+/** The Broker fences a record ABANDONED on loss evidence alone and marks the
+ * terminal answer with details.terminal; the record proves no stop, it only
+ * proves the outcome can never be observed again. */
+export function isTerminalUnknownRejection(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    cause.code === 'runtime_broker_execution_unknown' &&
+    cause.details?.['terminal'] === true
+  );
+}
+
 export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
+  private leaseAcquired = false;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -83,6 +117,10 @@ export class HostedWorkspaceBroker {
 
   get runtimeSessionId(): string {
     return this.identity.runtimeSessionId;
+  }
+
+  get acquired(): boolean {
+    return this.leaseAcquired;
   }
 
   constructor(
@@ -139,7 +177,8 @@ export class HostedWorkspaceBroker {
   }
 
   async warm(): Promise<void> {
-    await this.request('/runtimes:warm', {});
+    const response = await this.request('/runtimes:warm', {});
+    if (response['runtime'] !== undefined) this.readRuntime(response);
   }
 
   async authorizeLifecycle(): Promise<void> {
@@ -160,9 +199,15 @@ export class HostedWorkspaceBroker {
           }
         : {}),
     });
+    if (response['acquired'] !== true)
+      throw new Error('Runtime did not acquire the Session.');
+    this.readRuntime(response);
+    this.leaseAcquired = true;
+  }
+
+  private readRuntime(response: Record<string, unknown>): void {
     const scope = object(response['scope']);
     if (
-      response['acquired'] !== true ||
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST
@@ -430,7 +475,7 @@ export class HostedWorkspaceBroker {
             (cause instanceof HostedWorkspaceBrokerRejection &&
               cause.status === 409 &&
               cause.code === 'runtime_broker_execution_unknown' &&
-              cause.details?.['terminal'] !== true) ||
+              !isTerminalUnknownRejection(cause)) ||
             transportFailed
           )
         )
@@ -520,6 +565,28 @@ export class HostedWorkspaceBroker {
     return result as unknown as ManagedHookOperationView;
   }
 
+  /**
+   * #13896: one watch's maintenance through the client route. A watch
+   * answers running, exited or unknown — never the Hook/MCP settlement
+   * states — and only `exited` with its evidence proves the watch ended.
+   */
+  async monitorControl(
+    operation: ManagedMonitorControl,
+  ): Promise<ManagedMonitorOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !== operation.targetOperationId ||
+      !['running', 'exited', 'unknown'].includes(String(result['state'])) ||
+      (result['state'] === 'exited' && !result['evidence'])
+    )
+      throw new Error('Runtime Monitor response is invalid.');
+    return result as unknown as ManagedMonitorOperationView;
+  }
+
   async acknowledgeV3(
     id: string,
     receipt: {
@@ -543,9 +610,13 @@ export class HostedWorkspaceBroker {
 
   /**
    * Read-only execution state. Only a definitive not-found resolves to
-   * undefined; an unknown outcome is not proof that execution stopped.
+   * undefined; an unknown outcome is not proof that execution stopped, and a
+   * terminally abandoned record reaches the caller as the distinct
+   * `abandoned` state rather than folding into that sentinel.
    */
-  async status(id: string): Promise<{ state: string } | undefined> {
+  async status(
+    id: string,
+  ): Promise<{ state: HostedBrokerExecutionState } | undefined> {
     let response: Record<string, unknown>;
     try {
       response = await this.request(`/executions/${encodeURIComponent(id)}`);
@@ -560,7 +631,11 @@ export class HostedWorkspaceBroker {
           cause.status === 409 &&
           cause.code === 'runtime_broker_execution_unknown'
         )
-          return { state: 'unknown' };
+          // The terminal marker distinguishes a fenced ABANDONED record from
+          // a still-reconcilable UNKNOWN; only the latter may yet be running.
+          return {
+            state: isTerminalUnknownRejection(cause) ? 'abandoned' : 'unknown',
+          };
       }
       throw cause;
     }
@@ -573,7 +648,19 @@ export class HostedWorkspaceBroker {
       !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
     )
       throw new Error('Runtime execution outcome is unknown.');
-    return { state };
+    return { state: state as HostedBrokerExecutionState };
+  }
+
+  /**
+   * Read-only never-started proof component for one background dispatch. A
+   * definitive not-found is terminal evidence only after the caller has
+   * established that no pending start can still admit the process row, such
+   * as a reload boundary or a successful Broker cancellation barrier.
+   */
+  async backgroundProcessStatus(
+    executionCallId: string,
+  ): Promise<{ state: string } | undefined> {
+    return this.status(`${executionCallId}:process`);
   }
 
   async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
@@ -610,13 +697,27 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async release(): Promise<void> {
+  async release(
+    options?:
+      | { bindingId: string; generation: string; readonly drain?: boolean }
+      | { readonly drain?: boolean },
+  ): Promise<void> {
+    const expected = options && 'bindingId' in options ? options : undefined;
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
-      {},
+      {
+        ...(expected
+          ? {
+              cleanupBindingId: expected.bindingId,
+              cleanupGeneration: expected.generation,
+            }
+          : {}),
+        ...(options?.drain === true ? { drain: true } : {}),
+      },
     );
     if (response['released'] !== true)
       throw new Error('Runtime Session release is unconfirmed.');
+    this.leaseAcquired = false;
   }
 
   private async request(
@@ -691,4 +792,19 @@ export class HostedWorkspaceBroker {
       throw new Error('Runtime Broker response identity changed.');
     return parsed;
   }
+}
+
+/**
+ * The Broker admits only path-safe Runtime Session ids, while a wake
+ * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
+ * such an id is mapped to a stable path-safe digest instead of being
+ * refused at acquire. The mapped form is path-safe itself, so layering
+ * this over an id that was already mapped stays idempotent.
+ */
+export function hostedRuntimeSessionId(promptId: string): string {
+  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
+    promptId !== '.' &&
+    !promptId.includes('..')
+    ? promptId
+    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
 }

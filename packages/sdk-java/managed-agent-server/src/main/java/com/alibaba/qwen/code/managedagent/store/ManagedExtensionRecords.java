@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -33,7 +34,8 @@ public final class ManagedExtensionRecords {
             "schedule", "automation_run", "child_run", "child_acceptance",
             "memory_job", "monitor_run", "goal_state", "todo_state",
             "plan_mode", "team_state", "team_task", "team_message",
-            "team_plan", "session_message", "session_metadata",
+            "team_plan", "session_message", "session_command",
+            "session_metadata",
             "file_history", "session_source");
     /** The event kinds of managed-session/1, as the authority writes them. */
     public static final List<String> EVENT_KINDS = List.of("input.accepted",
@@ -42,7 +44,7 @@ public final class ManagedExtensionRecords {
             "tool.receipt", "checkpoint.committed", "context.compacted",
             "cancel.requested", "turn.settled", "config.bound",
             "lifecycle.changed", "domain.committed", "message.delta",
-            "message.retracted", "operation.replayed");
+            "message.retracted", "operation.replayed", "hosted.batch.planned", "hosted.cleanup");
     public static final int MAX_ID_BYTES = 512;
     public static final int MAX_TEXT_BYTES = 4096;
     public static final int MAX_GRANT_PHASES = 16;

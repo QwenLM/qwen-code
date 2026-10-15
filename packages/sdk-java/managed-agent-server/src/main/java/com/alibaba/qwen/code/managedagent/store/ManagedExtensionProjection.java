@@ -1,13 +1,10 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static java.util.Map.entry;
-
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.codec.digest.DigestUtils;
+
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -15,6 +12,8 @@ import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
+
+import static java.util.Map.entry;
 
 /**
  * H0c of #12827: how the control plane keys, chains and projects the Stage H
@@ -85,6 +84,11 @@ public final class ManagedExtensionProjection {
                     body -> body.get("messageId").textValue(),
                     ManagedSessionMessageRecords::isMessageStart,
                     ManagedSessionMessageRecords::isMessageSuccessor)),
+            entry("session_command", new Body(record -> null,
+                    ManagedSessionCommandRecords::requireCommand,
+                    body -> body.get("commandId").textValue(),
+                    ManagedSessionCommandRecords::isCommandStart,
+                    ManagedSessionCommandRecords::isCommandSuccessor)),
             entry("team_state", new Body(record -> null,
                     ManagedTeamRecords::requireState,
                     body -> body.get("teamId").textValue(),
@@ -114,13 +118,17 @@ public final class ManagedExtensionProjection {
             "provisioning", "ready", "draining", "lost");
     /**
      * H4f: the task kinds whose cancel reaches a durable stop request on
-     * their own record. A child agent's stop request is set once on its
-     * child_run record; every other kind has no public cancel path yet —
-     * H3's Shell and Monitor domains stay disabled, the workflow kind has
-     * no runtime and an automation run carries no stop request.
+     * their own record. Both child Session kinds ride the child_run stop
+     * request — set once on the record and honored by the relay's
+     * kind-blind stop arm; workflow joined in the H4f-b slice once its
+     * runtime (#13803) made the close cascade's stop of a workflow row a
+     * shipped path. Every other kind has no public cancel path yet: H3's
+     * Shell settles exited rather than stop_requested after a stop and
+     * Monitor carries no stop request, and an automation run has none
+     * either.
      */
     public static final Set<String> CANCELLABLE_TASK_KINDS = Set.of(
-            "child_agent");
+            "child_agent", "workflow");
     /** Task states a cancel may still act on: the run has not ended and
      * is not waiting on recovery reconciliation. */
     private static final Set<String> CANCELLABLE_TASK_STATES = Set.of(
@@ -166,11 +174,10 @@ public final class ManagedExtensionProjection {
     public static String recordKey(String sessionId, String domain,
             String recordId) {
         try {
-            return HexFormat.of().formatHex(MessageDigest
-                    .getInstance("SHA-256").digest((sessionId + "\u0000"
-                            + domain + "\u0000" + recordId)
-                            .getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.sha256Hex((sessionId + "\u0000"
+                    + domain + "\u0000" + recordId)
+                    .getBytes(StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }

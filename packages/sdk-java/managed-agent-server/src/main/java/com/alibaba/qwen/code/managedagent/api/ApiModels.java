@@ -1,22 +1,26 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+
 import java.util.List;
 import java.util.Map;
-import jakarta.validation.constraints.NotNull;
-import com.fasterxml.jackson.annotation.JsonAnySetter;
 
 public final class ApiModels {
     private ApiModels() {
     }
 
+    // The per-block cap is enforced in ManagedAgentService, counted in
+    // code points to match the published schema's maxLength; @Size counts
+    // UTF-16 units and would disagree on astral-plane text.
     public record InputBlock(@NotBlank String type,
-            @NotBlank @Size(max = 1_000_000) String text) {
+            @NotBlank String text) {
     }
 
     public record CreateSessionRequest(
@@ -36,7 +40,11 @@ public final class ApiModels {
     }
 
     public record UpdateSessionRequest(
-            @NotBlank @Size(max = 256) String title) {
+            // Single policy owner: ManagedAgentService.validRenameTitle
+            // (256 + control-characters + non-blank), so the rename route
+            // answers the specific invalid_title code instead of bean
+            // validation's generic envelope.
+            String title) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -80,18 +88,21 @@ public final class ApiModels {
             @JsonProperty("session_close") boolean sessionClose,
             @JsonProperty("session_archive") boolean sessionArchive,
             @JsonProperty("session_unarchive") boolean sessionUnarchive,
-            @JsonProperty("session_delete") boolean sessionDelete) {
+            @JsonProperty("session_delete") boolean sessionDelete,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell) {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
             boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
-            boolean sessionUnarchive, boolean sessionDelete) {
+            boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PublicSession(String id, String object,
             @JsonProperty("agent_id") String agentId,
             @JsonProperty("agent_revision") String agentRevision,
+            @JsonProperty("agent_digest") String agentDefinitionDigest,
             String status,
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("updated_at") long updatedAt,
@@ -340,7 +351,7 @@ public final class ApiModels {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellTurn(String turnId, String sessionId,
             String status, long submittedAt, Long completedAt,
-            String errorCode, Map<String, Object> usage) {
+            String errorCode) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -602,7 +613,8 @@ public final class ApiModels {
 
     /**
      * An AgentDefinition revision's content (D8a). The server stores and
-     * digests it; no field changes Session execution yet.
+     * digests it; a Session pinned to a revision executes its
+     * permission_policy, tools, model and instructions (D8b/D8c).
      */
     public record AgentDefinitionRequest(
             @NotNull Map<String, Object> model,
