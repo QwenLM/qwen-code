@@ -15,6 +15,7 @@ import { Storage } from '../../config/storage.js';
 import {
   generateAgentId,
   getWorkspaceFilePath,
+  LOCK_OPTIONS,
   readWorkspaceAgents,
   updateWorkspaceAgents,
 } from './store.js';
@@ -84,6 +85,7 @@ function runWorker(
 
 describe('agent workspace lock', () => {
   let runtimeDir: string;
+  let foreignRelease: (() => Promise<void>) | undefined;
 
   beforeEach(async () => {
     runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-lock-test-'));
@@ -92,6 +94,13 @@ describe('agent workspace lock', () => {
   afterEach(async () => {
     lockProbe.path = undefined;
     lockProbe.reached = undefined;
+    // A test that aborts mid-hold leaves the foreign lock registered; release
+    // it before deleting the runtime dir so its update timer never stats a
+    // missing lockfile (ECOMPROMISED) inside the worker. A raced release
+    // after a compromise rejects with ERELEASED, which is not a failure here.
+    const release = foreignRelease;
+    foreignRelease = undefined;
+    if (release) await release().catch(() => {});
     await fs.rm(runtimeDir, { recursive: true, force: true });
   });
 
@@ -124,11 +133,16 @@ describe('agent workspace lock', () => {
 
       // Hold the cross-process lock the way a slow foreign process would —
       // through proper-lockfile directly, leaving the in-process mutex free
-      // so the store gets all the way to its own lock attempt.
+      // so the store gets all the way to its own lock attempt. The store's
+      // own lock passes onCompromised for this hazard: without a handler, an
+      // aborted hold outlives afterEach's directory delete and the default
+      // handler throws uncaught from proper-lockfile's update timer.
       const release = await lockfile.lock(target, {
         retries: 0,
         realpath: false,
+        onCompromised: () => {},
       });
+      foreignRelease = release;
       const waiterReached = new Promise<void>((resolve) => {
         lockProbe.reached = resolve;
       });
@@ -158,6 +172,7 @@ describe('agent workspace lock', () => {
       // the waiter can only succeed by outlasting the hold through retries.
       await new Promise((resolve) => setTimeout(resolve, 1500));
       await release();
+      foreignRelease = undefined;
 
       expect(await outcome).toBe('ok');
       await expect(readWorkspaceAgents(PROJECT_ROOT)).resolves.toMatchObject([
@@ -166,5 +181,14 @@ describe('agent workspace lock', () => {
     } finally {
       Storage.setRuntimeBaseDir(null);
     }
+  });
+
+  it('keeps the workspace lock retry budget CI needs', () => {
+    // The contention test above stays green down to 19 retries — its 1.5s
+    // hold fits inside any budget that long — so pin the configured value
+    // itself: a trim below the documented CI sizing must go red here.
+    const retries = LOCK_OPTIONS.retries;
+    const count = typeof retries === 'number' ? retries : retries?.retries;
+    expect(count).toBeGreaterThanOrEqual(30);
   });
 });

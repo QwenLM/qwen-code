@@ -45,13 +45,16 @@ const AGENTS_FILENAME = 'agents.json';
 const HOSTS_FILENAME = 'hosts.json';
 const HOST_ENROLLMENT_TTL_MS = 15 * 60 * 1_000;
 
-const LOCK_OPTIONS: lockfile.LockOptions = {
+export const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
   retries: {
-    // A waiter must outlast one slow holder: a critical section here is an
-    // fsync-bound atomic JSON write, which on an oversubscribed host takes
-    // longer than the old 10-retry (~0.7s) budget and failed CI with ELOCKED.
-    // 30 retries (~2.7s worst case) matches the board-lock.ts budget.
+    // A waiter must outlast one slow holder. The lock is held across a whole
+    // transaction, not a single write: first use creates agents.json and
+    // workspace.json, then the caller's own fsync-bound atomic JSON write
+    // runs inside the same hold. On an oversubscribed host that exceeded the
+    // old 10-retry (~0.7s) budget and failed CI with ELOCKED.
+    // 30 retries (~2.7s worst case) matches the agents/team/board-lock.ts
+    // budget.
     retries: 30,
     minTimeout: 5,
     maxTimeout: 100,
