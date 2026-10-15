@@ -764,6 +764,45 @@ test('falls back to a per-commit issue when no test can be identified', () => {
   assert.ok(!body.includes(OCCURRENCE_MARKER));
 });
 
+test('deduplicates recurring Desktop packaging failures across commits', () => {
+  const jobs = [{ name: 'Package / Build Windows x64', steps: ['Package'] }];
+  const analysis = analyzeLogs('Desktop Checks', ['ParserError'], jobs);
+  const first = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  const next = { ...OCCURRENCE, sha: 'next-commit', runId: 'next-run' };
+  const merged = renderIssueBody({
+    analysis: analyzeLogs('Desktop Checks', ['ParserError'], jobs),
+    occurrence: next,
+    existingBody: first,
+  });
+  assert.equal(analysis.searchMarkers.length, 1);
+  assert.ok(first.includes(analysis.searchMarkers[0]));
+  assert.ok(merged.includes(OCCURRENCE.sha.slice(0, 12)));
+  assert.ok(merged.includes(next.sha));
+  assert.ok(!merged.includes(LEGACY_MARKER_PREFIX));
+});
+
+test('keeps Desktop platforms and failed steps distinct', () => {
+  const markers = [
+    { name: 'Package / Build Windows x64', steps: ['Package'] },
+    { name: 'Package / Build macOS arm64', steps: ['Package'] },
+    { name: 'Package / Build Windows x64', steps: ['Install'] },
+  ].map((job) => analyzeLogs('Desktop Checks', [], [job]).searchMarkers[0]);
+  assert.equal(new Set(markers).size, 3);
+});
+
+test('limits job-step fallback to Desktop failures without test IDs', () => {
+  const jobs = [{ name: 'Desktop Shell (windows-2022)', steps: [] }];
+  assert.equal(analyzeLogs('Desktop Checks', [], jobs).tests.length, 1);
+  assert.equal(analyzeLogs('Desktop Checks', []).tests.length, 0);
+  assert.equal(analyzeLogs('SDK Java', [], jobs).tests.length, 0);
+  assert.deepEqual(
+    analyzeLogs('Desktop Checks', [VITEST_LOG], jobs).tests.map(
+      (entry) => entry.id,
+    ),
+    [VITEST_TEST_ID],
+  );
+});
+
 test('the per-commit path leaves an already-filed body untouched', () => {
   const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
   const existingBody = 'whatever the previous run wrote\n';

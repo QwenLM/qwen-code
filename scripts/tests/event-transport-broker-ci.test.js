@@ -108,12 +108,13 @@ describe('EventTransport broker gates CI', () => {
     // provisioning script no longer has a per-change trigger: the daily
     // schedule is now the only run that boots the broker these steps
     // drive, and dropping it would retire the gate with every pin above
-    // still green.
+    // still green. The cron itself is pinned once, in
+    // sdk-java-workflow.test.js; this gate only needs one to exist.
     expect(Object.keys(workflow.on).sort()).toEqual([
       'schedule',
       'workflow_dispatch',
     ]);
-    expect(workflow.on.schedule).toEqual([{ cron: '47 19 * * *' }]);
+    expect(workflow.on.schedule).toContainEqual({ cron: expect.any(String) });
   });
 
   it('provisions every group the server and the gate subscribe in', () => {

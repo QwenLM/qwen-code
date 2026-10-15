@@ -1,12 +1,13 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assertions.assertThatCode;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
+
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedHostedRecoveryRecordsTest {
     private final ObjectMapper json = new ObjectMapper();
@@ -53,10 +54,14 @@ class ManagedHostedRecoveryRecordsTest {
     void validatesTypedReferencesBeforeResolvingThem() {
         var partial = json.createObjectNode().put("resourceId", "missing").put("kind", "hosted-model-request");
         assertThatThrownBy(() -> ManagedHostedRecoveryRecords.reference(partial, "hosted-model-request", "tenant", "workspace", "session",
-                id -> { throw new AssertionError("Malformed ref reached storage"); })).isInstanceOf(RuntimeException.class);
+                id -> {
+                    throw new AssertionError("Malformed ref reached storage");
+                })).isInstanceOf(RuntimeException.class);
         var ref = partial.put("schemaVersion", 2).put("byteLength", 2).put("digest", "a".repeat(64));
         assertThatThrownBy(() -> ManagedHostedRecoveryRecords.reference(ref, "hosted-model-request", "tenant", "workspace", "session",
-                id -> { throw new AssertionError("Unsupported ref reached storage"); })).isInstanceOf(RuntimeException.class);
+                id -> {
+                    throw new AssertionError("Unsupported ref reached storage");
+                })).isInstanceOf(RuntimeException.class);
     }
 
     @Test
