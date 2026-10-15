@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
+import { getAgentDescription } from './toolFormatting';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import {
@@ -803,6 +804,16 @@ describe('workflow agent details', () => {
     return { onOpen, render, node };
   }
 
+  it('preserves colon-space labels in the Agent panel description', () => {
+    const task = workflowTask();
+    task.dispatches[1].label = 'Review: check regressions';
+    const { onOpen, node } = mount(task);
+    act(() => node('dispatch-2').click());
+    expect(getAgentDescription(onOpen.mock.calls[0][0])).toBe(
+      'Review: check regressions',
+    );
+  });
+
   it('opens the exact agent on activation, not initial selection, focus or polling', () => {
     const { onOpen, render, node } = mount();
     act(() => node('dispatch-2').focus());
@@ -813,7 +824,7 @@ describe('workflow agent details', () => {
       expect.objectContaining({
         callId: 'correctness-agent-1',
         toolName: 'agent',
-        title: 'Correctness',
+        title: 'Agent: Correctness',
         status: 'in_progress',
         args: {
           description: 'Correctness',

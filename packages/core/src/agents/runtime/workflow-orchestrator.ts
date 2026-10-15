@@ -786,8 +786,9 @@ function attachDispatchTranscript(
     const now = new Date().toISOString();
     const meta: AgentMeta = {
       agentId,
-      agentType: agentName,
-      description: prompt,
+      agentType:
+        stripAnsiAndControl(agentName).slice(0, 200) || 'workflow-agent',
+      description: stripAnsiAndControl(prompt).slice(0, 4_096),
       parentSessionId: options.sessionId,
       parentAgentId: getCurrentAgentId() ?? null,
       createdAt:

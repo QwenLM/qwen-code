@@ -28,7 +28,7 @@ export function useWorkflowAgentDetails(
       {
         callId: dispatch.subagentId,
         toolName: 'agent',
-        title: dispatch.label,
+        title: `Agent: ${dispatch.label}`,
         status:
           dispatch.status === 'running'
             ? 'in_progress'

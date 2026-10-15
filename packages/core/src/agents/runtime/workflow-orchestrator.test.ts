@@ -3482,7 +3482,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         .trim()
         .split('\n')
         .map((line) => JSON.parse(line) as Record<string, unknown>);
-      return { calls, records };
+      const meta = JSON.parse(
+        fs.readFileSync(
+          path.join(sessionDir, names[0]!.replace(/\.jsonl$/, '.meta.json')),
+          'utf8',
+        ),
+      );
+      return { calls, records, meta };
     } finally {
       fs.rmSync(transcriptDir, { recursive: true, force: true });
     }
@@ -3542,12 +3548,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // records could not be correlated by agentName with AgentTool launches of
   // the same agentType.
   it('stamps the resolved agentType name in the transcript when a label is also set', async () => {
-    const { calls, records } = await transcriptOf(
+    const { calls, records, meta } = await transcriptOf(
       { lookup: codeReviewer, onCreate: ends('review-output') },
       'review chunk 1 of 3',
       { agentType: 'Code-Reviewer', label: 'chunk-1' },
     );
     expect(calls[0]!.config.name).toBe('code-reviewer');
+    expect(meta.agentType).toBe('code-reviewer');
     expect(records[0]!['agentName']).toBe(calls[0]!.config.name);
   });
 
@@ -5239,6 +5246,47 @@ describe('createProductionDispatch — subagent transcripts', () => {
     expect(recs[0]!['cwd']).toBe(projectDir);
     expect(names[0]).toBe(`agent-${recs[0]!['agentId'] as string}.jsonl`);
   });
+
+  it.each([
+    {
+      label: '\u001b[31mReviewer\u001b[0m\u0000\u0085',
+      prompt: '\u001b[32mInspect\u001b[0m\u0007\u007f',
+      expectedName: 'Reviewer',
+      expectedPrompt: 'Inspect',
+    },
+    {
+      label: 'a'.repeat(500),
+      prompt: 'p'.repeat(5000),
+      expectedName: 'a'.repeat(200),
+      expectedPrompt: 'p'.repeat(4096),
+    },
+    {
+      label: '\u001b[31m\u0000\u001b[0m',
+      prompt: '\u0000\u0007',
+      expectedName: 'workflow-agent',
+      expectedPrompt: '',
+    },
+  ])(
+    'bounds display metadata without changing the execution prompt: $expectedName',
+    async ({ label, prompt, expectedName, expectedPrompt }) => {
+      await createProductionDispatch(transcriptConfig())(prompt, { label });
+      const name = fs
+        .readdirSync(sessionDir())
+        .find((n) => n.endsWith('.meta.json'))!;
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(sessionDir(), name), 'utf8'),
+      );
+      expect(meta).toMatchObject({
+        agentType: expectedName,
+        description: expectedPrompt,
+      });
+      expect(partsOf(recordsIn(transcriptNames()[0]!)[0]!)).toEqual([
+        { text: prompt },
+      ]);
+      expect(created[0]!.name).toBe(label);
+      expect(created[0]!.prompt).toBe(prompt);
+    },
+  );
 
   it('persists a resolvable foreground agent identity and lifecycle', async () => {
     const readMeta = () => {

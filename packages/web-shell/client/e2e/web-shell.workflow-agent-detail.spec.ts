@@ -43,7 +43,7 @@ for (const surface of ['inline', 'workflows', 'history'] as const) {
       ).map(([id, status, subagentId]) => ({
         id,
         phaseVisitId: 'compose',
-        label: `poet:${id}`,
+        label: `poet: ${id}`,
         prompt: `Write an autumn poem in ${id} form.`,
         status,
         subagentId,
@@ -226,7 +226,7 @@ for (const surface of ['inline', 'workflows', 'history'] as const) {
     await expect(node).toBeVisible();
     await node.focus();
     await expect(
-      page.getByRole('tab', { name: 'poet:lvshi', exact: true }),
+      page.getByRole('tab', { name: 'Agent: poet: lvshi', exact: true }),
     ).toHaveCount(0);
     await node.click();
     await expect
@@ -241,6 +241,14 @@ for (const surface of ['inline', 'workflows', 'history'] as const) {
       name: 'Right panel',
       exact: true,
     });
+    await expect(
+      panel
+        .locator('[class*="descriptionRow"]')
+        .getByText('poet: lvshi', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      panel.getByRole('tab', { name: 'Agent: poet: lvshi', exact: true }),
+    ).toBeVisible();
     await expect(
       panel.getByRole('button', { name: 'Stop', exact: true }),
     ).toHaveCount(0);
@@ -286,7 +294,7 @@ for (const surface of ['inline', 'workflows', 'history'] as const) {
     });
     await node.click();
     await expect(
-      page.getByRole('tab', { name: 'poet:lvshi', exact: true }),
+      page.getByRole('tab', { name: 'Agent: poet: lvshi', exact: true }),
     ).toHaveCount(1);
     await page.locator('[data-workflow-dispatch="modern"]').focus();
     await page.keyboard.press('Enter');
