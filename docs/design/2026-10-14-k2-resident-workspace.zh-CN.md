@@ -5,7 +5,9 @@
 ## 状态与范围
 
 用户于 2026-10-14 批准这一首版范围。常驻分支已实现，本地检查和独立 worker
-协议、Java 数据及 Spring 配置验证均通过；ACK 和完整 Hosted 切换尚未验收。本设计替代此前 K2
+协议、Java 数据及 Spring 配置验证均通过；普通公开 Hosted 切换已在 H2 和明示
+测试放置下通过本地验证。ACK 应用已启动，但首个 Turn 在 worker 接入时失败，
+正常关闭仍被阻塞，完整 ACK 切换尚未验收。本设计替代此前 K2
 完成计划中本版的自动退役和卷复用要求。原设计及证据保留为后续工作，不能作为
 本版验收证据。
 
@@ -32,6 +34,15 @@ Broker 已区分运行环境绑定和 Runtime Session。普通 Runtime Session �
 Workspace、代数、CSI 注册信息、命名空间保护、镜像摘要、worker 命令和产物身份。
 配置拒绝重复 Workspace、存储别名或物理卷分配。公开 API 不能传入 Pod、PVC、
 运行环境身份或 worker 端点。未配置的 CSI 存储保持不可用。
+
+原 Kubernetes API 及其准入控制器可以提供 DNS 配置，包括 ACK NodeLocal
+DNSCache 自动注入。provisioner 只接受 `nameservers`、`searches` 和 `options`
+三个 DNS 字段，限制字符串列表长度，并对包含名称及可选字符串值的 option
+对象执行字段闭集检查。DNS 地址与域名仍由 Kubernetes 校验。这不增加对
+未知 Pod 字段的通用支持。完整的准入后 Pod spec（包括 DNS）仍写入现有持久化
+摘要；后续 DNS 变化会拒绝恢复或 reconcile。解析器地址属于基础设施配置，
+不能由调用方用作运行环境身份；worker 端点仍使用原 Pod 的 IP 字面量。
+参见 [ACK 注入约定](https://www.alibabacloud.com/help/en/ack/ack-managed-and-ack-dedicated/user-guide/configure-nodelocal-dnscache)。
 
 选中的请求采用 Workspace 隔离、空 isolation key、`resident-workspace-files/1` 能力
 摘要和固定 storage ID。Session ID 始终是独立的真实 ID。共享 request key 不写入

@@ -912,6 +912,57 @@ class WorkspaceCsiRuntimeIdentityTest {
         }
     }
 
+    @Test
+    void admittedDnsConfigurationIsPinnedAcrossProvisionAndRestart() {
+        var dns = Map.of("nameservers", List.of("169.254.20.10", "192.168.0.10"),
+                "searches", List.of("runtime.svc.cluster.local", "svc.cluster.local", "cluster.local"),
+                "options", List.of(Map.of("name", "ndots", "value", "3"),
+                        Map.of("name", "timeout", "value", "1"), Map.of("name", "attempts", "value", "2")));
+        api.changeCreatedPod = pod -> nested(pod, "spec").put("dnsConfig", dns);
+        RuntimeResourceHandle handle;
+        RuntimeLease lease;
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(attestations).hasValue(2);
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+            original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
+        }
+        var reloaded = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]))
+                .findById(original.getBindingId());
+        try (var restarted = provider()) {
+            assertThat(join(restarted.ensureResource(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle())))
+                    .isEqualTo(handle);
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), handle, lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.READY);
+            var changedDns = new LinkedHashMap<>(dns);
+            changedDns.put("nameservers", List.of("169.254.20.10", "192.168.0.11"));
+            nested(api.objects.get("pods"), "spec").put("dnsConfig", changedDns);
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), handle, lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void malformedAdmissionDnsCannotReachAttestation() {
+        for (Object dns : List.of("not-an-object", Map.of("unknown", true), Map.of("nameservers", "192.0.2.1"),
+                Map.of("nameservers", List.of(1)), Map.of("nameservers", List.of("192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4")),
+                Map.of("searches", List.of("cluster.local\noptions rotate")), Map.of("options", List.of("rotate")),
+                Map.of("options", List.of(Map.of("value", "3"))), Map.of("options", List.of(Map.of("name", "ndots", "value", 3))),
+                Map.of("options", List.of(Map.of("name", "ndots", "value", "3", "unknown", true))))) {
+            api = new Api();
+            api.changeCreatedPod = pod -> nested(pod, "spec").put("dnsConfig", dns);
+            try (var provider = provider()) {
+                provider.reserveResource(original);
+                refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+                assertThat(attestations).hasValue(0);
+                assertThat(api.creates).isEqualTo(2);
+            }
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"true,false", "false,true", "true,true"})
     void acceptsBuiltinServiceAccountAndPriorityAdmissionFields(boolean pullSecrets, boolean priorityClass) {

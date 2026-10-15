@@ -6,8 +6,10 @@
 
 The user approved this first-release scope on 2026-10-14. The resident branches
 are implemented. Local checks and independent worker protocol, Java data and
-Spring configuration validation have passed. ACK and complete Hosted handoff
-acceptance remain unverified. This
+Spring configuration validation have passed. The ordinary public Hosted handoff
+has passed locally with H2 and declared placement. The ACK application starts,
+but its first Turn failed during worker admission and normal close remains
+blocked; the complete ACK handoff remains unverified. This
 document supersedes the automatic retirement
 and volume reuse requirements of the earlier K2 completion plan for this release.
 Those designs and their evidence remain future work, not acceptance evidence for
@@ -41,6 +43,17 @@ registration, namespace protection, image digest, worker command and artifact
 pins. Configuration rejects duplicate Workspace, storage alias and physical
 volume assignments. The public API cannot supply a Pod, PVC, runtime identity or
 worker endpoint. Unconfigured CSI storage remains unavailable.
+
+The original Kubernetes API and its admission controllers may supply DNS
+configuration, including ACK NodeLocal DNSCache injection. The provisioner
+accepts only the `nameservers`, `searches` and `options` DNS fields, with bounded
+string lists and closed option objects containing a name and optional string
+value. Kubernetes remains responsible for validating DNS addresses and domains.
+This does not add general support for unknown Pod fields. The complete admitted
+Pod spec, including DNS, enters the existing persisted digest; a later DNS change
+refuses restore or reconcile. Resolver addresses are infrastructure configuration,
+not caller-supplied runtime identity. The worker endpoint still uses the original
+Pod's literal IP. See the [ACK injection contract](https://www.alibabacloud.com/help/en/ack/ack-managed-and-ack-dedicated/user-guide/configure-nodelocal-dnscache).
 
 The selected request uses Workspace isolation with a null isolation key, the
 `resident-workspace-files/1` capability digest, and the fixed storage ID. Session
