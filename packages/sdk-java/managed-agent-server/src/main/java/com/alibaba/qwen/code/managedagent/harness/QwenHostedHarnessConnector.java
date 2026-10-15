@@ -16,29 +16,32 @@ import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import java.util.LinkedHashMap;
+import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.lang3.StringUtils;
+
 import java.net.URI;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 public class QwenHostedHarnessConnector implements HarnessConnector {
     private final ManagedAgentProperties.Harness properties;
     private final ManagedAgentProperties.SessionStore sessionStore;
+    private final ManagedAgentProperties.ToolPublication toolPublication;
     private final String workspaceId;
     private final AgentStateStore sessions;
     private final WorkspaceExecutionStore workspaceExecution;
@@ -87,6 +90,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.resources = resources;
         this.properties = properties.getHarness();
         this.sessionStore = properties.getSessionStore();
+        this.toolPublication = properties.getToolPublication();
         this.workspaceId = sessionStore.getWorkspaceId();
         this.sessions = sessions;
         this.actions = actions;
@@ -129,14 +133,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (sessionStore.isEnabled()
                 && (sessionStore.getBaseUrl() == null
                         || sessionStore.getBaseUrl().isBlank()
-                        || workspaceId == null || workspaceId.isBlank())) {
+                        || StringUtils.isBlank(workspaceId))) {
             throw new IllegalStateException("Enabled Managed Session Store"
                     + " requires base URL and Runtime workspace ID");
         }
         String runtimeWorkspaceId = properties.getRuntimeBroker()
                 .getWorkspaceId();
-        if (sessionStore.isEnabled() && runtimeWorkspaceId != null
-                && !runtimeWorkspaceId.isBlank()
+        if (sessionStore.isEnabled() && StringUtils.isNotBlank(runtimeWorkspaceId)
                 && !workspaceId.equals(runtimeWorkspaceId)) {
             throw new IllegalStateException("Managed Session Store and"
                     + " Runtime Broker workspace IDs must match");
@@ -905,6 +908,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     private HarnessSessionRef create(SessionRecord session, boolean passiveManagedRuntimeRecovery) {
         try {
+            String profile = toolProfile(session);
             CreateHarnessSession.Builder builder =
                     CreateHarnessSession.builder()
                             .harnessSessionId(session.sessionId())
@@ -917,10 +921,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                                                             session.tenantId(),
                                                             session.sessionId())))
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
-                            .toolProfile(toolProfile(session))
+                            .toolProfile(profile)
                             .childWorkspaces(childWorkspaces);
-            if (WorkspaceToolProfiles.isPublicShell(toolProfile(session))) {
+            if (WorkspaceToolProfiles.isPublicShell(profile)) {
                 builder.suppressChildAgents();
+            }
+            if (toolPublication.isEnabled()
+                    && (WorkspaceToolProfiles.isPublicShell(profile)
+                            || WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(profile))) {
+                builder.captureBytes(toolPublication.getExecutionBytes());
             }
             ManagedSessionStoreConnection store = managedSessionStore(
                     session);
@@ -1292,7 +1301,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private static DaemonApprovalMode parseApprovalMode(String value) {
-        if (value == null || value.isBlank()) {
+        if (StringUtils.isBlank(value)) {
             return DaemonApprovalMode.YOLO;
         }
         try {

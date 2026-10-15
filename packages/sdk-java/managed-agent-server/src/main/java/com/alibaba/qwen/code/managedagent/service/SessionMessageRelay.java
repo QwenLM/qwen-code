@@ -1,18 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import java.util.Base64;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.function.Supplier;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
@@ -20,6 +7,20 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.MessageRow;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.PendingMessage;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Supplier;
 
 /**
  * H4d-b: the session message relay. It discovers outbox entries whose
@@ -117,7 +118,7 @@ public class SessionMessageRelay {
             return;
         }
         try {
-            JsonNode body = readJson(records.readResource(row.tenantId(),
+            JsonNode body = readJson(records.readResource(row.tenantId(), row.senderSessionId(),
                     current.recordResourceId()), "message body");
             String senderStatus = records.sessionStatus(row.tenantId(),
                     row.senderSessionId());
@@ -150,6 +151,14 @@ public class SessionMessageRelay {
                 // waits on this entry, is never left waiting on it.
                 store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
                         now + LEASE_MS, now);
+                return;
+            }
+            if (row.attempts() >= MAX_ATTEMPTS) {
+                // Past the bound only the give-up is owed, never the step:
+                // a message that a younger one was released past (see
+                // olderOwedMessages) must not land after it.
+                defer(row, pending.domain(), new IllegalStateException(
+                        "past the attempt bound: " + row.lastError()), now);
                 return;
             }
             if ("session_command".equals(pending.domain())) {
@@ -194,6 +203,20 @@ public class SessionMessageRelay {
         JsonNode run = records.childRunBody(row.tenantId(), parent,
                 body.required("childRunId").asText());
         return run != null && run.path("stopRequested").asBoolean(false);
+    }
+
+    /** Whether an older message of the sender to the same run still owes
+     * its handover or receipt. */
+    private boolean olderOwedOnRun(MessageRow row, String childRunId) {
+        for (String resource : store.olderOwedMessages(row.tenantId(),
+                row.senderSessionId(), row.messageId())) {
+            JsonNode older = readJson(records.readResource(row.tenantId(),
+                    row.senderSessionId(), resource), "older message body");
+            if (childRunId.equals(older.path("childRunId").textValue())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The receipt's input, as the Hosted side derives it
@@ -282,6 +305,14 @@ public class SessionMessageRelay {
                     now);
             return;
         }
+        if (olderOwedOnRun(row, childRunId)) {
+            // One run's messages pass in send order: a younger one handed
+            // over first would wake its turn ahead of the older. The hold
+            // costs no attempt; the older one's give-up bounds it.
+            store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
+            return;
+        }
         senderOperation(row, "handover", Map.of("targetSessionId", target));
         store.advance(row, owner, "relaying", target, now, now + LEASE_MS,
                 now);
@@ -318,7 +349,7 @@ public class SessionMessageRelay {
                 }
             }
             JsonNode contentRef = body.required("contentRef");
-            byte[] content = records.readResourceBytes(row.tenantId(),
+            byte[] content = records.readResourceBytes(row.tenantId(), row.senderSessionId(),
                     contentRef.required("resourceId").asText());
             if (content == null) {
                 throw new IllegalStateException(
@@ -519,7 +550,7 @@ public class SessionMessageRelay {
             return;
         }
         JsonNode argsRef = body.required("argsRef");
-        byte[] args = records.readResourceBytes(row.tenantId(),
+        byte[] args = records.readResourceBytes(row.tenantId(), row.senderSessionId(),
                 argsRef.required("resourceId").asText());
         if (args == null) {
             throw new IllegalStateException(
@@ -597,7 +628,7 @@ public class SessionMessageRelay {
                     } else if (latest != null
                             && !"cancelled".equals(state)) {
                         JsonNode body = readJson(records.readResource(
-                                row.tenantId(), latest.recordResourceId()),
+                                row.tenantId(), row.senderSessionId(), latest.recordResourceId()),
                                 "command body");
                         String target = body.path("targetSessionId")
                                 .isTextual()
@@ -611,13 +642,13 @@ public class SessionMessageRelay {
                                                 row.messageId());
                         if (receipt != null) {
                             JsonNode receiptBody = readJson(
-                                    records.readResource(row.tenantId(),
+                                    records.readResource(row.tenantId(), target,
                                             receipt.recordResourceId()),
                                     "command receipt");
                             JsonNode replyRef = receiptBody
                                     .required("replyRef");
                             JsonNode reply = readJson(
-                                    records.readResource(row.tenantId(),
+                                    records.readResource(row.tenantId(), target,
                                             replyRef.required("resourceId")
                                                     .asText()),
                                     "command reply");
@@ -633,7 +664,7 @@ public class SessionMessageRelay {
                 } else if ("accepting".equals(state)
                         || "unknown".equals(state)) {
                     JsonNode body = readJson(records.readResource(
-                            row.tenantId(), latest.recordResourceId()),
+                            row.tenantId(), row.senderSessionId(), latest.recordResourceId()),
                             "message body");
                     if (store.deliveryState(row.tenantId(), target(body),
                             domain, row.messageId()) != null) {

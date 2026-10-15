@@ -1506,6 +1506,139 @@ describe('extension tests', () => {
       }
     });
 
+    it('replaces ${CLAUDE_PLUGIN_ROOT} in markdown for a hooks-less Claude plugin', async () => {
+      const archivePath = archive('claude-no-hooks.zip', (destination) => {
+        writeTree(destination, {
+          ...claudePlugin('claude-no-hooks'),
+          'skills/hello/SKILL.md':
+            '---\nname: hello\ndescription: Synthetic skill\n---\nRun `${CLAUDE_PLUGIN_ROOT}/scripts/hello.sh`.\n',
+        });
+      });
+      const manager = createExtensionManager();
+      const prepared = await prepare(manager, archivePath);
+
+      try {
+        // The gate used to require a hooks directory: assert this one has none.
+        expect(exists(prepared.destinationDirectory, 'hooks')).toBe(false);
+        await manager.commitPreparedExtension(prepared);
+
+        const skill = readText(
+          prepared.destinationDirectory,
+          'skills',
+          'hello',
+          'SKILL.md',
+        );
+        expect(skill).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+        // The "/" is part of the markdown text, not a path separator, so the
+        // expectation concatenates the real installed dir rather than path.join.
+        expect(skill).toContain(
+          `${prepared.destinationDirectory}/scripts/hello.sh`,
+        );
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
+    it.each([
+      { shape: 'inline hooks', hooks: {}, extra: {} },
+      {
+        shape: 'a hooks file path',
+        hooks: './config/hooks.json',
+        extra: { 'config/hooks.json': '{}' },
+      },
+    ])(
+      'replaces ${CLAUDE_PLUGIN_ROOT} in markdown for a Claude plugin with $shape',
+      async ({ hooks, extra }) => {
+        const archivePath = archive(
+          `claude-${hooks === './config/hooks.json' ? 'file' : 'inline'}-hooks.zip`,
+          (destination) => {
+            writeTree(destination, {
+              '.claude-plugin/plugin.json': {
+                name: 'claude-hooks-shape',
+                version: '1.0.0',
+                hooks,
+              },
+              'skills/hello/SKILL.md':
+                '---\nname: hello\ndescription: Synthetic skill\n---\nRun `${CLAUDE_PLUGIN_ROOT}/scripts/hello.sh`.\n',
+              ...extra,
+            });
+          },
+        );
+        const manager = createExtensionManager();
+        const prepared = await prepare(manager, archivePath);
+
+        try {
+          await manager.commitPreparedExtension(prepared);
+
+          const skill = readText(
+            prepared.destinationDirectory,
+            'skills',
+            'hello',
+            'SKILL.md',
+          );
+          expect(skill).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+          expect(skill).toContain(
+            `${prepared.destinationDirectory}/scripts/hello.sh`,
+          );
+        } finally {
+          await manager.disposePreparedExtension(prepared);
+        }
+      },
+    );
+
+    /** Markdown carrying the plugin-root token plus the hook-gated rewrites. */
+    const rewriteProbeMd =
+      '${CLAUDE_PLUGIN_ROOT}/run.sh\n```!\nnpm install\n```\nSee ~/.claude/settings.json\n';
+
+    it('leaves hook-gated markdown rewrites off for a hooks-less Claude plugin', async () => {
+      const archivePath = archive('claude-gated-off.zip', (destination) => {
+        writeTree(destination, {
+          ...claudePlugin('claude-gated-off'),
+          'README.md': rewriteProbeMd,
+        });
+      });
+      const manager = createExtensionManager();
+      const prepared = await prepare(manager, archivePath);
+
+      try {
+        expect(exists(prepared.destinationDirectory, 'hooks')).toBe(false);
+        await manager.commitPreparedExtension(prepared);
+        const readme = readText(prepared.destinationDirectory, 'README.md');
+
+        // The plugin root resolves on every Claude install...
+        expect(readme).toContain(`${prepared.destinationDirectory}/run.sh`);
+        // ...but the rewrites that stay hook-gated must not run here.
+        expect(readme).toContain('```!\nnpm install\n```');
+        expect(readme).toContain('~/.claude/settings.json');
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
+    it('still applies hook-gated markdown rewrites when a hooks directory exists', async () => {
+      const archivePath = archive('claude-gated-on.zip', (destination) => {
+        writeTree(destination, {
+          ...claudePlugin('claude-gated-on'),
+          'README.md': rewriteProbeMd,
+        });
+        fs.mkdirSync(path.join(destination, 'hooks'));
+      });
+      const manager = createExtensionManager();
+      const prepared = await prepare(manager, archivePath);
+
+      try {
+        await manager.commitPreparedExtension(prepared);
+        const readme = readText(prepared.destinationDirectory, 'README.md');
+
+        expect(readme).toContain(`${prepared.destinationDirectory}/run.sh`);
+        expect(readme).toContain('!{npm install}');
+        expect(readme).toContain('~/.qwen/settings.json');
+        expect(readme).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
     /** `ready()` then a prepared local-archive install of extension `name`. */
     async function readyPrepared(name: string) {
       const archivePath = archive(`${name}.zip`, name);

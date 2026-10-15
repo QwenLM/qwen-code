@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -9,11 +7,15 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -24,9 +26,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Real maintenance CLI, real worker and SQL; only the model is deterministic. */
 final class HostedOperatorRecoveryProbe implements AutoCloseable {
@@ -72,7 +73,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
 
     private Map<String, Object> check(Map<String, Object> session, String phase) throws Exception {
         String id = session.get("sessionId").toString();
-        var rows = jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?", id);
+        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", id);
         assertThat(rows).hasSize(1);
         var execution = rows.getFirst();
         String binding = execution.get("binding_id").toString();
@@ -125,9 +126,9 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         Files.setPosixFilePermissions(evidence, PosixFilePermissions.fromString("rw-------"));
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease WHERE binding_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?",
                 Integer.class, binding)).isZero();
-        assertThat(jdbc.queryForObject("SELECT binding_state FROM qwen_runtime_binding WHERE binding_id = ?",
+        assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                 String.class, binding)).isEqualTo("RELEASED");
         var next = broker.acquire(session.get("secondarySessionId").toString(), UUID.randomUUID().toString(), "bootstrap")
                 .toCompletableFuture().get(30, TimeUnit.SECONDS);
@@ -154,7 +155,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
     }
 
     private void assertHeld(String binding, String holder) {
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM managed_workspace_execution_lease WHERE binding_id = ?",
+        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner WHERE binding_id = ?",
                 String.class, binding)).isEqualTo(holder);
     }
 

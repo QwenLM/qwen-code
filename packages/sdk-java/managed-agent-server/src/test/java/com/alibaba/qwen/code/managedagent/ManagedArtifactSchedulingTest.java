@@ -1,14 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
@@ -17,7 +8,6 @@ import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.support.StaticListableBeanFactory;
 import org.springframework.boot.autoconfigure.task.TaskSchedulingAutoConfiguration;
@@ -31,6 +21,15 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class ManagedArtifactSchedulingTest {
     @Configuration
@@ -54,11 +53,11 @@ class ManagedArtifactSchedulingTest {
         var beans = new StaticListableBeanFactory();
         beans.addBean("publication", data);
         var provider = beans.getBeanProvider(ToolPublicationDataStore.class);
-        fixture.jdbc().update("DELETE FROM managed_agent_artifact");
+        ToolPublicationStoreTest.releaseArtifacts(fixture.jdbc(), fixture.manager());
         fixture.jdbc()
                 .update(
-                        "UPDATE managed_agent_tool_result SET work_state='PENDING',"
-                            + " next_attempt_at=0");
+                        "UPDATE ma_operation SET state='PENDING',"
+                            + " available_at=0 WHERE operation_kind='TOOL_RESULT_PROJECTION'");
         var state = mock(AgentStateStore.class);
         AtomicInteger materialized = new AtomicInteger();
         when(state.findMaterializationTargets(anyInt()))

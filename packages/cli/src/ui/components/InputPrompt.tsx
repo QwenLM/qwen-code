@@ -271,9 +271,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const mouseInteractionsEnabled = isVpMode && mouseTrackingEnabled;
   // Bare ↑/↓ belong to input history; the transcript is scrolled with
   // Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End or the mouse wheel (the contract
-  // ui.useTerminalBuffer documents). Opt-in only: on a terminal that cannot
-  // report the wheel — macOS Terminal.app — the wheel arrives as a burst of
-  // ↑/↓ and would rewrite the composer with an older prompt (#10749), so
+  // ui.useTerminalBuffer documents). Opt-in only: on a terminal or
+  // multiplexer that does not pass mouse reporting through, the wheel arrives
+  // as a burst of ↑/↓ and would rewrite the composer with an older
+  // prompt (#10749), so
   // ui.arrowKeysScrollTranscript hands those keys to the viewport instead.
   // Derived once so the ↑ and ↓ branches cannot drift apart.
   const arrowKeysScrollTranscript =
