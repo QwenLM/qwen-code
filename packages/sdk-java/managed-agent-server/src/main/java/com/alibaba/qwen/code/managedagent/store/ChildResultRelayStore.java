@@ -352,9 +352,7 @@ public class ChildResultRelayStore {
                     + " WHERE r.session_scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
                     + " AND r.domain = 'session_message'"
                     + " AND r.delivery_state IN ('planned', 'accepting')"
-                    + " AND (l.delivery_id IS NULL OR (l.transport_state NOT IN"
-                    + " ('done', 'orphaned', 'unknown') AND l.attempt_count < "
-                    + SessionMessageRelayStore.MAX_ATTEMPTS + "))";
+                    + " AND " + SessionMessageRelayStore.LEDGER_OWES_WORK;
 
     /**
      * H4d-b: the messages on one parent–child edge. `undelivered` counts
