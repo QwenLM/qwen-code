@@ -263,16 +263,11 @@ function mrHeadRefSpec(prNumber: number): string {
   return `refs/merge-requests/${prNumber}/head`;
 }
 
-/** The MR's live head SHA: under AGit-Flow `sourceBranch` IS the head.
- *  Stated ONCE for the provider — every read site (getMrAuthorAndHead,
- *  getPrMeta, getFetchMeta, getReviewContext, submit's pre-write drift
- *  gate, the head-moved-during-post re-read) routes through here.
- *  Hand-derived copies had already diverged on normalization (two of the
- *  five read untrimmed), and a padded server value then drifted against
- *  the trimmed reads — a phantom "PR head advanced during review" for an
- *  MR that never moved (#9629 review). */
-function aoneHeadSha(view: NonNullable<AoneMrView['mergeRequest']>): string {
-  return (view.sourceBranch ?? '').trim();
+const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
+
+interface AoneHeadFacts {
+  source: string;
+  sha: string;
 }
 
 /**
@@ -320,6 +315,58 @@ function mrRepoPath(detailUrl: string | undefined): string | undefined {
     detailUrl.trim(),
   );
   return m?.[1]?.toLowerCase();
+}
+
+function currentOriginIdentity(): RepoIdentity | null {
+  try {
+    return parseRemoteUrl(git('remote', 'get-url', 'origin'));
+  } catch {
+    return null;
+  }
+}
+
+function originMatchesMr(
+  origin: RepoIdentity | null,
+  view: NonNullable<AoneMrView['mergeRequest']>,
+  ownerRepo: string,
+): boolean {
+  if (origin === null || !isAoneHostFamily(origin.host)) return false;
+  return (
+    origin.groupPath === (mrRepoPath(view.detailUrl) ?? ownerRepo.toLowerCase())
+  );
+}
+
+/**
+ * Aone exposes two `sourceBranch` shapes: a full SHA for AGit-Flow and a
+ * branch name for ordinary MRs. Resolve the latter only through the exact MR
+ * ref of a verified target-repository clone; otherwise report the SHA as
+ * unavailable instead of relabelling the branch name as a commit.
+ */
+function aoneHeadFacts(
+  prNumber: number,
+  ownerRepo: string,
+  view: NonNullable<AoneMrView['mergeRequest']>,
+): AoneHeadFacts {
+  const source = (view.sourceBranch ?? '').trim();
+  if (source === '') return { source, sha: '' };
+  if (FULL_SHA_RE.test(source)) {
+    return { source, sha: source.toLowerCase() };
+  }
+
+  if (!originMatchesMr(currentOriginIdentity(), view, ownerRepo)) {
+    return { source, sha: '' };
+  }
+
+  const ref = mrHeadRefSpec(prNumber);
+  try {
+    const out = git('ls-remote', '--exit-code', '--refs', 'origin', ref);
+    const match = /^([0-9a-f]{40})\t([^\n]+)$/i.exec(out);
+    return match?.[2] === ref
+      ? { source, sha: match[1].toLowerCase() }
+      : { source, sha: '' };
+  } catch {
+    return { source, sha: '' };
+  }
 }
 
 /**
@@ -438,7 +485,7 @@ export const aoneReader: ReviewPlatformReader = {
     const view = mrView(prNumber, ownerRepo);
     return {
       number: prNumber,
-      headSha: aoneHeadSha(view),
+      headSha: aoneHeadFacts(prNumber, ownerRepo, view).sha,
       webUrl: view.detailUrl ?? '',
     };
   },
@@ -496,23 +543,17 @@ export const aoneReader: ReviewPlatformReader = {
     // lightweight run from a DIFFERENT Aone clone would otherwise fetch the
     // ref from the wrong repository (ref-not-found, or a wrong MR's diff
     // written as evidence if the global id happens to exist there).
-    let originUrl: string | undefined;
-    try {
-      originUrl = git('remote', 'get-url', 'origin').trim();
-    } catch {
-      originUrl = undefined;
-    }
-    const originIdentity = originUrl ? parseRemoteUrl(originUrl) : null;
+    const originIdentity = currentOriginIdentity();
     // The MR view is consulted BEFORE the guard: its detailUrl names the
     // repo the MR actually lives in — authoritative identity, where the
     // seam's `ownerRepo` is only the collapsed last-two form. The collapse
     // is non-injective on nested-group platforms, so a different group's
     // same-tail clone would pass an owner/repo comparison and serve the
     // ref-fetch; comparing FULL paths (origin's parsed groupPath against
-    // the detailUrl's path) closes it. Without a detailUrl the guard falls
-    // back to the collapsed comparison (plus the host check).
+    // the detailUrl's path) closes it. Without a detailUrl only an origin
+    // whose full path equals ownerRepo is accepted; a nested path cannot be
+    // proven from the collapsed coordinate and fails closed.
     const view = mrView(prNumber, ownerRepo);
-    const mrPath = mrRepoPath(view.detailUrl);
     // The comparison carries the origin's HOST too — owner/repo equality
     // alone lets a same-named repo on a DIFFERENT platform pass the guard
     // and serve the ref-fetch. The host arm keys on the CANONICAL Aone
@@ -520,12 +561,7 @@ export const aoneReader: ReviewPlatformReader = {
     // accepts a dotted-FQDN origin as Aone, so the diff gate must too; a
     // harder comparison here refused a genuine clone with a misdirecting
     // remedy.
-    const sameRepo =
-      originIdentity !== null &&
-      isAoneHostFamily(originIdentity.host) &&
-      (mrPath !== undefined
-        ? originIdentity.groupPath === mrPath
-        : `${originIdentity.owner}/${originIdentity.repo}` === ownerRepo);
+    const sameRepo = originMatchesMr(originIdentity, view, ownerRepo);
     if (!sameRepo) {
       throw new Error(
         `the cwd clone is ${
@@ -695,7 +731,7 @@ export const aoneReader: ReviewPlatformReader = {
     checkOwnerRepo(ownerRepo);
     const view = mrView(prNumber, ownerRepo);
     return {
-      headRefOid: aoneHeadSha(view),
+      headRefOid: aoneHeadFacts(prNumber, ownerRepo, view).sha,
       baseRefName: view.targetBranch ?? 'master',
       // The reviewer clones the repo the CR lives in — never cross-repo.
       isCrossRepository: false,
@@ -707,6 +743,7 @@ export const aoneReader: ReviewPlatformReader = {
   getReviewContext(prNumber: number, ownerRepo: string): ReviewContext {
     checkOwnerRepo(ownerRepo);
     const view = mrView(prNumber, ownerRepo);
+    const head = aoneHeadFacts(prNumber, ownerRepo, view);
     // One flat collection serves the three GitHub channels; `--sort asc`
     // gives chronological order (the GitHub endpoints' natural order).
     // The full resolved-INCLUSIVE surface (default + `--resolved`, deduped
@@ -751,15 +788,8 @@ export const aoneReader: ReviewPlatformReader = {
       authorLogin: aoneCommentAuthor(view.author),
       state: view.state ?? '',
       baseRefName: view.targetBranch ?? 'master',
-      // Under AGit-Flow the head is a bare SHA and sourceBranch carries it;
-      // rendering `target ← <sha>` is truthful and informative. A
-      // non-AGit-Flow MR's real branch name renders the same way. Both
-      // fields route through the provider's ONE head normalization — a
-      // padded server value must not diverge from the trimmed reads every
-      // other subcommand reports (aoneHeadSha's docstring names the read
-      // sites; this one joins them).
-      headRefName: aoneHeadSha(view),
-      headRefOid: aoneHeadSha(view),
+      headRefName: head.source,
+      headRefOid: head.sha,
       // Aone reports no diff stats; the context header degrades.
       comments,
       verdicts: [],
@@ -866,8 +896,7 @@ export function aoneAccountName(author: unknown): string {
   return '';
 }
 
-/** The MR's author account and live head SHA (`sourceBranch` IS the head
- *  under AGit-Flow), from ONE `mr view` fetch. One call answers both
+/** The MR's author account and live head SHA, from ONE `mr view` fetch. One call answers both
  *  halves presubmit and comment-status need (self-PR detection /
  *  authorReplied + drift). A missing author (deleted account) reports '',
  *  which fails the self-PR comparison soft, like the GitHub path's
@@ -878,9 +907,16 @@ export function getMrAuthorAndHead(
 ): { author: string; headSha: string } {
   checkOwnerRepo(ownerRepo);
   const view = mrView(prNumber, ownerRepo);
+  const head = aoneHeadFacts(prNumber, ownerRepo, view);
+  if (head.source !== '' && head.sha === '') {
+    throw new Error(
+      `cannot resolve the live head SHA for branch ${JSON.stringify(head.source)} ` +
+        `of MR ${prNumber} in the current clone`,
+    );
+  }
   return {
     author: aoneAccountName(view.author),
-    headSha: aoneHeadSha(view),
+    headSha: head.sha,
   };
 }
 
@@ -1212,9 +1248,13 @@ function headMovedSinceCompose(
   commitId: string,
 ): boolean | undefined {
   try {
-    const afterHead = aoneHeadSha(mrView(prNumber, ownerRepo));
+    const afterHead = aoneHeadFacts(
+      prNumber,
+      ownerRepo,
+      mrView(prNumber, ownerRepo),
+    ).sha;
     if (afterHead === '') return undefined;
-    return afterHead !== commitId;
+    return afterHead !== commitId.toLowerCase();
   } catch {
     return undefined;
   }
@@ -1245,12 +1285,19 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
   // here. Under AGit-Flow an update AMENDS the single commit: posting a
   // review composed against the orphaned head would pin every inline
   // comment at code the author already replaced. An empty sourceBranch
-  // cannot gate — nothing to compare against — and posts unanchored.
-  const liveHead = aoneHeadSha(view);
-  if (liveHead !== '' && liveHead !== req.commitId) {
+  // cannot gate — nothing to compare against — and posts unanchored. A
+  // known branch whose MR ref cannot be resolved fails closed instead.
+  const head = aoneHeadFacts(req.prNumber, req.ownerRepo, view);
+  if (head.source !== '' && head.sha === '') {
+    throw new Error(
+      `refusing to post: cannot resolve the live head SHA for branch ` +
+        `${JSON.stringify(head.source)} of MR ${req.prNumber} in the current clone.`,
+    );
+  }
+  if (head.sha !== '' && head.sha !== req.commitId.toLowerCase()) {
     throw new Error(
       `refusing to post: the MR head moved — the review was composed ` +
-        `against ${req.commitId}, but the live head is ${liveHead}. ` +
+        `against ${req.commitId}, but the live head is ${head.sha}. ` +
         `Re-review the new head before posting.`,
     );
   }
