@@ -128,25 +128,15 @@ describe('Hosted real-process gates', () => {
     expect(java.jobs['mysql-integration'].services.mariadb.image).toMatch(
       /^mariadb:/,
     );
-    for (const event of ['pull_request', 'push']) {
-      for (const path of [
-        'packages/sdk-java/**',
-        'packages/cli/src/serve/**',
-        'packages/cli/src/commands/channel/**',
-        'packages/cli/src/commands/channel.ts',
-        'packages/channels/email/**',
-        'packages/channels/base/**',
-        'packages/core/src/managed-runtime/**',
-        'packages/cli/src/config/**',
-        'packages/core/src/config/**',
-        'packages/core/src/core/**',
-        'pnpm-lock.yaml',
-        'scripts/check-failsafe-reports.js',
-        '**/.mvn/**',
-      ]) {
-        expect(java.on[event].paths).toContain(path);
-      }
-    }
+    // #14205 moved the whole SDK Java workflow off pull_request/push: these
+    // MySQL lanes no longer run per change to the SDK or its embedding
+    // surfaces — the daily schedule is the only live trigger, and a
+    // regression in them surfaces through the next daily run (filed by the
+    // main-failure watcher) instead of on the pull request.
+    expect(Object.keys(java.on).sort()).toEqual([
+      'schedule',
+      'workflow_dispatch',
+    ]);
     const run = job.steps.find(
       (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
     );
