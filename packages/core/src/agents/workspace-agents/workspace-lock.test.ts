@@ -185,10 +185,16 @@ describe('agent workspace lock', () => {
 
   it('keeps the workspace lock retry budget CI needs', () => {
     // The contention test above stays green down to 19 retries — its 1.5s
-    // hold fits inside any budget that long — so pin the configured value
-    // itself: a trim below the documented CI sizing must go red here.
-    const retries = LOCK_OPTIONS.retries;
-    const count = typeof retries === 'number' ? retries : retries?.retries;
-    expect(count).toBeGreaterThanOrEqual(30);
+    // hold fits inside any budget that long — so pin the configured sizing
+    // itself, as the whole knob set: trimming minTimeout/maxTimeout/factor
+    // shortens the budget while retries stays 30, and an oversized retries
+    // would outlast the lock's own stale window and let a waiter steal a
+    // live holder's lock.
+    expect(LOCK_OPTIONS.retries).toMatchObject({
+      retries: 30,
+      minTimeout: 5,
+      maxTimeout: 100,
+      factor: 2,
+    });
   });
 });
