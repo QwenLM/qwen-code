@@ -185,13 +185,14 @@ report. Explicit keys must match the document synchronization lookup (the
 lowercase extension, with or without its leading dot). This change does not
 introduce whitespace normalization; mapping values still contribute recognized
 language aliases. The diagnostics-local tables include common secondary
-extensions such as `.mts`, `.h`, and `.pyi`, while a separate allowlist credits
-real self-naming IDs such as `prisma` without making arbitrary queried
-extensions attributable. Unrecognized language IDs are not guessed to be
-extensions. Without any recognized declaration or explicit mapping, a server
-remains unknown and keeps its conservative veto. Unknown extensions without an
-explicit mapping retain the fallback above. Workspace-symbol warmup selection
-is unchanged.
+extensions such as `.mts`, `.h`, and `.pyi`. A non-empty, whitespace-free
+language ID outside those tables owns its same-named extension unless it is also
+the configured server name; that distinction admits live language IDs without
+maintaining a closed allowlist while preserving the conservative treatment of
+malformed declarations and server-name keys. Without any recognized declaration
+or explicit mapping, a server-name key remains unknown and keeps its
+conservative veto. Unknown extensions without an explicit mapping retain the
+fallback above. Workspace-symbol warmup selection is unchanged.
 
 The consumers are diagnostic ownership accounting, failure and unsupported
 attribution, initial unavailable-server reporting, newly-ready selection, and
@@ -294,8 +295,9 @@ late-ready retry adds one: dropping either leg's `pending.push` of
 diagnostics query before deciding` for the document leg, its
 `workspaceDiagnostics` twin for the sweep).
 
-Explicit ownership adds six focused mutations: removing the self-naming ID set
-(`accepts self-naming ownership omitted from the attribution allowlist`);
+Explicit ownership adds six focused mutations: restoring a closed self-naming
+ID allowlist (`accepts self-naming ownership omitted from the attribution
+allowlist`);
 restoring inherited-prone mapping reads (`does not treat inherited mapping key`);
 removing the secondary TypeScript, JavaScript, C/C++, or Python rows (`keeps a
 failed owner as a veto for mapped` and the `.mts` refusal case); restoring the

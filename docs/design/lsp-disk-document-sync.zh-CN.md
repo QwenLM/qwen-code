@@ -124,10 +124,11 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
 替代归属方缺失的答案，而失败的外部服务器也不能否决归属方的干净报告。
 显式键必须匹配文档同步的查找方式（小写扩展名，可带前导点）。本改动不引入
 空白归一化；映射值仍贡献已识别的语言别名。
-诊断专用表包含 `.mts`、`.h` 和 `.pyi` 等常见的次要扩展名；另一个独立的允许列表
-会认可 `prisma` 等真实的同名语言 ID，但不会因此让任意被查询扩展名变得可归属。
-不把无法识别的语言 ID 猜成扩展名。没有任何已识别声明或显式映射的服务器仍被视为
-未知，并保留保守的否决权。没有显式映射的未知扩展名保留上述回退行为。
+诊断专用表包含 `.mts`、`.h` 和 `.pyi` 等常见的次要扩展名。表外的非空且不含空白字符
+的语言 ID 会拥有同名扩展名，除非该 ID 同时也是配置中的服务器名称；这一判定无需
+维护封闭的允许列表即可接纳实时语言 ID，同时仍保守处理格式错误的声明和服务器名称键。
+没有任何已识别声明或显式映射的服务器名称键仍被视为未知，并保留保守的否决权。
+没有显式映射的未知扩展名保留上述回退行为。
 工作区符号预热的文件选择保持不变。
 
 使用这些归属证据的路径包括诊断归属计数、失败与不支持响应的归属、初始不可用
@@ -205,8 +206,8 @@ own`，身份映射各行一同变红）。晚就绪重试另增一项：删掉�
 that became ready during the diagnostics query before deciding`，工作区分支对应其
 `workspaceDiagnostics` 孪生用例）。
 
-显式归属另增六个聚焦变异：移除同名语言 ID 集合（`accepts self-naming ownership
-omitted from the attribution allowlist`）；恢复会读取继承属性的映射访问（`does not
+显式归属另增六个聚焦变异：恢复封闭的同名语言 ID 允许列表（`accepts self-naming
+ownership omitted from the attribution allowlist`）；恢复会读取继承属性的映射访问（`does not
 treat inherited mapping key`）；移除 TypeScript、JavaScript、C/C++ 或 Python 的次要
 扩展名行（`keeps a failed owner as a veto for mapped` 及 `.mts` 拒绝用例）；恢复映射键
 的 trim 过滤（`matches ownership to an untrimmed mapping key`）；删除无点映射查找

@@ -196,6 +196,7 @@ const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
 const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
   typescript: ['ts', 'tsx', 'mts', 'cts'],
   javascript: ['js', 'jsx', 'mjs', 'cjs'],
+  javascriptreact: ['js', 'jsx', 'mjs', 'cjs'],
   python: ['py', 'pyi'],
   c: ['c', 'h'],
   cpp: ['cpp', 'h', 'hpp', 'cc', 'cxx', 'cu'],
@@ -210,8 +211,8 @@ const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
   perl: ['pl', 'pm'],
   terraform: ['tf'],
   fortran: ['f', 'for', 'f90', 'f95'],
-  'objective-c': ['m', 'mm'],
-  objectivec: ['m', 'mm'],
+  'objective-c': ['m', 'mm', 'h'],
+  objectivec: ['m', 'mm', 'h'],
   shellscript: ['sh', 'bash'],
   protobuf: ['proto'],
   xml: ['xml'],
@@ -220,7 +221,7 @@ const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
   lua: ['lua'],
   r: ['r'],
   dart: ['dart'],
-  swift: ['swift'],
+  swift: ['swift', 'h'],
   scala: ['scala', 'sc'],
   groovy: ['groovy', 'gvy'],
   clojure: ['clj', 'cljs'],
@@ -240,10 +241,11 @@ const KNOWN_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set(
  * Language IDs the table above omits because the ID already names the
  * language, so `?? [id]` is not a guess for them: `cpp` serves `.cpp`, `go`
  * serves `.go`. A `.lsp.json` key in this set declares a real language, which
- * is what makes a veto decision possible; a key that is a server name
- * (`pyright`, `remote-lsp`) is in neither set and still proves nothing. The
- * table itself must not be widened to carry these: the set derived from it
- * also gates which queried files get a relevance decision at all.
+ * is what makes a veto decision possible even when the configured server has
+ * the same name. An unknown ID that equals the server name still proves
+ * nothing, nor does a malformed ID containing whitespace. The table itself
+ * must not be widened to carry more IDs: the set derived from it also gates
+ * which queried files get a relevance decision at all.
  */
 const DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'c',
@@ -259,22 +261,6 @@ const DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'rust',
   'swift',
   'yaml',
-]);
-
-/**
- * Real language IDs that name their own extension but must not make an
- * arbitrary queried extension attributable. This remains separate from the
- * attribution set so an unrecognized ID such as `custom` is never guessed.
- */
-const SELF_NAMING_DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
-  'cmake',
-  'graphql',
-  'less',
-  'nix',
-  'prisma',
-  'scss',
-  'sql',
-  'toml',
 ]);
 
 /**
@@ -926,8 +912,10 @@ export class NativeLspService {
       }
       for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
         LANGUAGE_ID_TO_EXTENSIONS[id] ??
-        (SELF_NAMING_DIAGNOSTIC_LANGUAGE_IDS.has(id) ||
-        ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(id)
+        (id.length > 0 &&
+        !/\s/u.test(id) &&
+        (ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(id) ||
+          id !== handle.config.name.toLowerCase())
           ? [id]
           : [])) {
         owned.add(ext);

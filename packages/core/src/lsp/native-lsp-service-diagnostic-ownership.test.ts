@@ -99,6 +99,7 @@ function connection(diagnosticProvider: unknown = fullPull) {
 
 async function start(
   rows: Array<{
+    name?: string;
     language: string;
     connection: ReturnType<typeof connection>;
     mapping?: Record<string, string>;
@@ -109,7 +110,7 @@ async function start(
   manager.setServerConfigs(
     rows.map(
       (row, index): LspServerConfig => ({
-        name: `server-${index}`,
+        name: row.name ?? `server-${index}`,
         languages: [row.language],
         transport: 'socket',
         socket: { port: 12000 + index },
@@ -120,7 +121,7 @@ async function start(
   );
   await manager.startAll();
   for (const [index, row] of rows.entries()) {
-    const handle = manager.getHandles().get(`server-${index}`)!;
+    const handle = manager.getHandles().get(row.name ?? `server-${index}`)!;
     expect(handle.status).toBe('READY');
     if (row.failed) {
       handle.status = 'FAILED';
@@ -187,7 +188,18 @@ describe('diagnostic ownership from explicit declarations', () => {
     },
   );
 
-  it.each(['cmake', 'graphql', 'less', 'nix', 'prisma', 'scss', 'sql', 'toml'])(
+  it.each([
+    'bicep',
+    'cmake',
+    'graphql',
+    'less',
+    'nim',
+    'nix',
+    'prisma',
+    'scss',
+    'sql',
+    'toml',
+  ])(
     'accepts self-naming %s ownership omitted from the attribution allowlist',
     async (language) => {
       const unsupported = connection();
@@ -237,6 +249,11 @@ describe('diagnostic ownership from explicit declarations', () => {
     ['cpp', 'main.cu'],
     ['c', 'main.h'],
     ['python', 'main.pyi'],
+    ['objective-c', 'main.h'],
+    ['objectivec', 'main.h'],
+    ['swift', 'main.h'],
+    ['javascriptreact', 'main.mjs'],
+    ['javascriptreact', 'main.cjs'],
   ])(
     'keeps a failed %s owner as a veto for mapped %s',
     async (language, fileName) => {
@@ -249,6 +266,22 @@ describe('diagnostic ownership from explicit declarations', () => {
         },
       ]);
       expect((await document(fileName)).error?.message).toContain('server-0');
+    },
+  );
+
+  it.each([
+    ['objective-c', 'main.h'],
+    ['objectivec', 'main.h'],
+    ['swift', 'main.h'],
+    ['javascriptreact', 'main.mjs'],
+    ['javascriptreact', 'main.cjs'],
+  ])(
+    'keeps a clean answer from the real %s owner for %s',
+    async (language, fileName) => {
+      await start([{ language, connection: connection() }]);
+      const result = await document(fileName);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('No diagnostics found');
     },
   );
 
@@ -313,6 +346,17 @@ describe('diagnostic ownership from explicit declarations', () => {
     ]);
     expect((await document('main.ts')).error?.message).toContain('server-1');
   });
+
+  it.each([' Python', 'Py thon', 'Python\t'])(
+    'keeps malformed whitespace language declaration %j conservative',
+    async (language) => {
+      await start([
+        { language: 'typescript', connection: connection() },
+        { language, connection: connection(), failed: true },
+      ]);
+      expect((await document('main.ts')).error?.message).toContain('server-1');
+    },
+  );
 
   it('does not let a failed explicitly mapped server veto the TypeScript owner', async () => {
     await start([
@@ -390,16 +434,21 @@ describe('diagnostic ownership from explicit declarations', () => {
         mapping: { '.custom': 'custom' },
         connection: connection(),
       },
-      { language: 'unknown-server', connection: connection(), failed: true },
+      {
+        name: 'unknown-server',
+        language: 'unknown-server',
+        connection: connection(),
+        failed: true,
+      },
     ]);
     expect((await document('main.custom')).error?.message).toContain(
-      'server-1',
+      'unknown-server',
     );
   });
 
   it('does not infer custom ownership from an unrecognized language ID', async () => {
     await start([
-      { language: 'custom', connection: connection() },
+      { name: 'custom', language: 'custom', connection: connection() },
       {
         language: 'remote-lsp',
         mapping: { '.custom': 'custom' },
@@ -411,9 +460,7 @@ describe('diagnostic ownership from explicit declarations', () => {
     const filePath = path.join(directory, 'main.custom');
     fs.writeFileSync(filePath, 'fixture');
     await expect(
-      settle(
-        service.diagnostics(pathToFileURL(filePath).toString(), 'server-0'),
-      ),
+      settle(service.diagnostics(pathToFileURL(filePath).toString(), 'custom')),
     ).rejects.toThrow('could not be attributed');
   });
 
