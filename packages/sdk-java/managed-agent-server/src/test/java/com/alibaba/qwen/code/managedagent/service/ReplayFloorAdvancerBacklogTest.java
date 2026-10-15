@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * A backlog bigger than one batch: the candidate query orders by
- * {@code updated_at}, which the advance never moves, so a Session that keeps
+ * {@code gmt_modified}, which the advance never moves, so a Session that keeps
  * appending sorts last of every full batch and starves unless the pass
  * drains past the first batch (#12380). The scheduled passes are pinned an
  * hour out so the test drives the pass itself.
@@ -54,7 +54,7 @@ class ReplayFloorAdvancerBacklogTest {
                 "backlog-busy-" + UUID.randomUUID(), "digest", "qwen-code",
                 null, null, List.of(), "payload").sessionId();
         append(tenant, busy, 5);
-        // The Session that keeps appending sorts last on updated_at, out of
+        // The Session that keeps appending sorts last on gmt_modified, out of
         // the first batch.
         long busyCoverage = append(tenant, busy, 1);
         for (String sessionId : quiet) {

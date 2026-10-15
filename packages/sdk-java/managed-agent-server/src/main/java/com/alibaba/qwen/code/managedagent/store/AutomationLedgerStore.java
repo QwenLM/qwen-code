@@ -4,6 +4,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -121,27 +123,27 @@ public class AutomationLedgerStore {
                     result.getBoolean("enabled"), result.getString("state"),
                     result.getString("blocked_reason"),
                     result.getLong("armed_at"),
-                    (Long) result.getObject("watermark_slot"),
+                    result.getObject("watermark_slot", Long.class),
                     result.getString("lease_owner"),
-                    (Long) result.getObject("lease_until"),
-                    result.getLong("fence"), result.getLong("created_at"),
-                    result.getLong("updated_at"));
+                    result.getObject("lease_until", Long.class),
+                    result.getLong("fence"), result.getLong("gmt_create"),
+                    result.getLong("gmt_modified"));
 
     private static final RowMapper<OccurrenceRow> OCCURRENCE = (result, row) ->
             new OccurrenceRow(result.getString("tenant_id"),
                     result.getString("schedule_id"),
                     result.getString("occurrence_key"),
                     result.getString("run_id"), result.getString("session_id"),
-                    (Long) result.getObject("slot"),
+                    result.getObject("slot", Long.class),
                     result.getString("trigger_kind"),
                     result.getString("outcome"), result.getString("reason"),
                     result.getLong("definition_revision"),
                     result.getLong("fence"), result.getInt("attempts"),
                     result.getLong("next_retry_at"),
                     result.getString("last_error"),
-                    result.getLong("created_at"), result.getLong("updated_at"));
+                    result.getLong("gmt_create"), result.getLong("gmt_modified"));
 
-    private static final String OCCURRENCE_SELECT = "SELECT o.* FROM"
+    private static final String OCCURRENCE_SELECT = "SELECT " + ManagedSchemaProjection.SCHEDULE_OCCURRENCE.columns("o") + " FROM"
             + " ma_schedule_occurrence o"
             + " WHERE o.tenant_id = ? AND o.schedule_id = ?";
 
@@ -236,7 +238,7 @@ public class AutomationLedgerStore {
 
     public Optional<ScheduleRow> findSchedule(String tenantId,
             String scheduleId) {
-        return jdbc.query("SELECT * FROM ma_schedule"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule"
                         + " WHERE tenant_id = ? AND schedule_id = ?", SCHEDULE,
                 tenantId, scheduleId).stream().findFirst();
     }
@@ -285,8 +287,7 @@ public class AutomationLedgerStore {
                         0,
                         now,
                         now);
-        Optional<ScheduleRow> existing = jdbc.query("SELECT * FROM ma_schedule"
-                        + " WHERE tenant_id = ? AND schedule_id = ? FOR UPDATE", SCHEDULE,
+        Optional<ScheduleRow> existing = jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule WHERE tenant_id = ? AND schedule_id = ? FOR UPDATE", SCHEDULE,
                 next.tenantId(), next.scheduleId()).stream().findFirst();
         if (existing.isEmpty()) {
             jdbc.update("INSERT INTO ma_schedule"
@@ -296,7 +297,7 @@ public class AutomationLedgerStore {
                             + " cron, timezone, session_mode, overlap, catch_up,"
                             + " catch_up_limit, enabled, state, blocked_reason,"
                             + " armed_at, watermark_slot, lease_owner,"
-                            + " lease_until, fence, created_at, updated_at)"
+                            + " lease_until, fence, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
                             + " ?, ?, ?, NULL, ?, NULL, NULL, NULL, 0, ?, ?)",
                     next.tenantId(), next.scheduleId(), next.sessionId(),
@@ -326,7 +327,7 @@ public class AutomationLedgerStore {
                         + " timezone = ?, session_mode = ?, overlap = ?,"
                         + " catch_up = ?, catch_up_limit = ?, enabled = ?,"
                         + " state = ?, blocked_reason = NULL, armed_at = ?,"
-                        + " updated_at = ? WHERE tenant_id = ? AND schedule_id = ?"
+                        + " gmt_modified = ? WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND record_revision < ?",
                 next.recordRevision(), next.definitionRevision(),
                 next.definitionDigest(), next.goal(), next.cron(),
@@ -352,26 +353,14 @@ public class AutomationLedgerStore {
             return new SchedulePage(List.of(), false);
         }
         String select =
-                "WITH RECURSIVE readable_workspace (tenant_identity, workspace_identity) AS ("
-                    + " SELECT CONCAT(w.tenant_id, '!'), CONCAT(w.workspace_id, '!') FROM"
-                    + " ma_workspace w JOIN ma_workspace_access a ON a.tenant_id = w.tenant_id AND"
-                    + " a.workspace_id = w.workspace_id WHERE w.tenant_id = ? AND w.workspace_kind"
-                    + " = 'ROOT' AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
-                    + " UNION ALL SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!') FROM"
-                    + " ma_workspace c JOIN readable_workspace p ON CONCAT(c.tenant_id, '!') ="
-                    + " p.tenant_identity AND CONCAT(c.parent_workspace_id, '!') ="
-                    + " p.workspace_identity WHERE c.tenant_id = ? AND c.workspace_kind ="
-                    + " 'CHILD_GIT') SELECT s.* FROM ma_schedule s WHERE s.tenant_id = ? AND EXISTS"
-                    + " (SELECT 1 FROM readable_workspace r WHERE r.tenant_identity ="
-                    + " CONCAT(s.tenant_id, '!') AND r.workspace_identity = CONCAT(s.workspace_id,"
-                    + " '!'))";
+                "WITH RECURSIVE readable_workspace (tenant_identity, workspace_identity) AS ( SELECT CONCAT(w.tenant_id, '!'), CONCAT(w.workspace_id, '!') FROM ma_workspace w JOIN ma_workspace_access a ON a.tenant_id = w.tenant_id AND a.workspace_id = w.workspace_id WHERE w.tenant_id = ? AND w.workspace_kind = 'ROOT' AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER') UNION ALL SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!') FROM ma_workspace c JOIN readable_workspace p ON CONCAT(c.tenant_id, '!') = p.tenant_identity AND CONCAT(c.parent_workspace_id, '!') = p.workspace_identity WHERE c.tenant_id = ? AND c.workspace_kind = 'CHILD_GIT') SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s") + " FROM ma_schedule s WHERE s.tenant_id = ? AND EXISTS (SELECT 1 FROM readable_workspace r WHERE r.tenant_identity = CONCAT(s.tenant_id, '!') AND r.workspace_identity = CONCAT(s.workspace_id, '!'))";
         List<ScheduleRow> rows = cursor == null
-                ? jdbc.query(select + " ORDER BY s.created_at DESC,"
+                ? jdbc.query(select + " ORDER BY s.gmt_create DESC,"
                         + " s.schedule_id DESC LIMIT ?", SCHEDULE, tenantId,
                         actorKey, tenantId, tenantId, limit + 1)
-                : jdbc.query(select + " AND (s.created_at < ?"
-                        + " OR (s.created_at = ? AND s.schedule_id < ?))"
-                        + " ORDER BY s.created_at DESC, s.schedule_id DESC"
+                : jdbc.query(select + " AND (s.gmt_create < ?"
+                        + " OR (s.gmt_create = ? AND s.schedule_id < ?))"
+                        + " ORDER BY s.gmt_create DESC, s.schedule_id DESC"
                         + " LIMIT ?", SCHEDULE, tenantId, actorKey, tenantId, tenantId,
                         cursor.createdAt(), cursor.createdAt(),
                         cursor.scheduleId(), limit + 1);
@@ -392,11 +381,11 @@ public class AutomationLedgerStore {
 
     /** Live, enabled, unblocked definitions whose lease is free or expired. */
     public List<ScheduleRow> findArmed(long now, int limit) {
-        return jdbc.query("SELECT * FROM ma_schedule"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule"
                         + " WHERE state = ? AND enabled = TRUE"
                         + " AND blocked_reason IS NULL"
                         + " AND (lease_until IS NULL OR lease_until < ?)"
-                        + " ORDER BY updated_at, schedule_id LIMIT ?", SCHEDULE,
+                        + " ORDER BY gmt_modified, schedule_id LIMIT ?", SCHEDULE,
                 STATE_LIVE, now, limit);
     }
 
@@ -405,14 +394,14 @@ public class AutomationLedgerStore {
      * expired: a disabled or retired definition's lost answer is still obtained.
      */
     public List<ScheduleRow> findFiringSchedules(long now, int limit) {
-        return jdbc.query("SELECT s.* FROM ma_schedule s"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s") + " FROM ma_schedule s"
                         + " WHERE (s.lease_until IS NULL OR s.lease_until < ?)"
                         + " AND EXISTS (SELECT 1 FROM"
                         + " ma_schedule_occurrence o"
                         + " WHERE o.tenant_id = s.tenant_id"
                         + " AND o.schedule_id = s.schedule_id"
                         + " AND o.outcome = ? AND o.next_retry_at <= ?)"
-                        + " ORDER BY s.updated_at, s.schedule_id LIMIT ?",
+                        + " ORDER BY s.gmt_modified, s.schedule_id LIMIT ?",
                 SCHEDULE, now, OUTCOME_FIRING, now, limit);
     }
 
@@ -425,7 +414,7 @@ public class AutomationLedgerStore {
             long leaseUntil, long now) {
         int claimed = jdbc.update("UPDATE ma_schedule"
                         + " SET lease_owner = ?, lease_until = ?,"
-                        + " fence = fence + 1, updated_at = ?"
+                        + " fence = fence + 1, gmt_modified = ?"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND (lease_until IS NULL OR lease_until < ?)",
                 owner, leaseUntil, now, tenantId, scheduleId, now);
@@ -443,7 +432,7 @@ public class AutomationLedgerStore {
             long fence, long now) {
         jdbc.update("UPDATE ma_schedule"
                         + " SET lease_owner = NULL, lease_until = NULL,"
-                        + " updated_at = ? WHERE tenant_id = ? AND schedule_id = ?"
+                        + " gmt_modified = ? WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND lease_owner = ? AND fence = ?",
                 now, tenantId, scheduleId, owner, fence);
     }
@@ -452,7 +441,7 @@ public class AutomationLedgerStore {
     public boolean advanceWatermark(String tenantId, String scheduleId,
             String owner, long fence, long slot, long now) {
         return jdbc.update("UPDATE ma_schedule"
-                        + " SET watermark_slot = ?, updated_at = ?"
+                        + " SET watermark_slot = ?, gmt_modified = ?"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND lease_owner = ? AND fence = ?"
                         + " AND (watermark_slot IS NULL OR watermark_slot < ?)",
@@ -462,7 +451,7 @@ public class AutomationLedgerStore {
     public void block(String tenantId, String scheduleId, String owner,
             long fence, String reason, long now) {
         jdbc.update("UPDATE ma_schedule"
-                        + " SET blocked_reason = ?, updated_at = ?"
+                        + " SET blocked_reason = ?, gmt_modified = ?"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND lease_owner = ? AND fence = ?",
                 StringUtils.truncate(Objects.requireNonNull(reason), 1024), now,
@@ -471,7 +460,7 @@ public class AutomationLedgerStore {
 
     public void retire(String tenantId, String scheduleId, long now) {
         jdbc.update("UPDATE ma_schedule SET state = ?,"
-                        + " updated_at = ?"
+                        + " gmt_modified = ?"
                         + " WHERE tenant_id = ? AND schedule_id = ?",
                 STATE_RETIRED, now, tenantId, scheduleId);
     }
@@ -491,7 +480,7 @@ public class AutomationLedgerStore {
                         + " (tenant_id, schedule_id, occurrence_key, run_id,"
                         + " session_id, slot, trigger_kind, outcome, reason,"
                         + " definition_revision, fence, attempts,"
-                        + " next_retry_at, last_error, created_at, updated_at)"
+                        + " next_retry_at, last_error, gmt_create, gmt_modified)"
                         + " SELECT s.tenant_id, s.schedule_id, ?, ?, ?, ?, ?,"
                         + " ?, ?, ?, s.fence, 0, 0, NULL, ?, ?"
                         + " FROM ma_schedule s"
@@ -507,7 +496,7 @@ public class AutomationLedgerStore {
 
     public Optional<OccurrenceRow> findOccurrence(String tenantId,
             String scheduleId, String occurrenceKey) {
-        return jdbc.query("SELECT * FROM ma_schedule_occurrence"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE_OCCURRENCE.columns() + " FROM ma_schedule_occurrence"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND occurrence_key = ?", OCCURRENCE, tenantId,
                 scheduleId, occurrenceKey).stream().findFirst();
@@ -521,7 +510,7 @@ public class AutomationLedgerStore {
             String occurrenceKey, String outcome, String reason, String owner,
             long fence, long now) {
         return jdbc.update("UPDATE ma_schedule_occurrence o"
-                        + " SET o.outcome = ?, o.reason = ?, o.updated_at = ?"
+                        + " SET o.outcome = ?, o.reason = ?, o.gmt_modified = ?"
                         + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
                         + " AND o.occurrence_key = ? AND o.outcome = ?" + HELD,
                 outcome, reason, now, tenantId, scheduleId, occurrenceKey,
@@ -533,7 +522,7 @@ public class AutomationLedgerStore {
             String occurrenceKey, long definitionRevision, String owner,
             long fence, long now) {
         return jdbc.update("UPDATE ma_schedule_occurrence o"
-                        + " SET o.definition_revision = ?, o.updated_at = ?"
+                        + " SET o.definition_revision = ?, o.gmt_modified = ?"
                         + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
                         + " AND o.occurrence_key = ? AND o.outcome = ?" + HELD,
                 definitionRevision, now, tenantId, scheduleId, occurrenceKey,
@@ -547,7 +536,7 @@ public class AutomationLedgerStore {
         String error = StringUtils.truncate(lastError, 1024);
         return jdbc.update("UPDATE ma_schedule_occurrence o"
                         + " SET o.attempts = ?, o.next_retry_at = ?,"
-                        + " o.last_error = ?, o.updated_at = ?"
+                        + " o.last_error = ?, o.gmt_modified = ?"
                         + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
                         + " AND o.occurrence_key = ? AND o.outcome = ?" + HELD,
                 attempts, nextRetryAt, error, now, tenantId, scheduleId,
@@ -558,10 +547,10 @@ public class AutomationLedgerStore {
     /** The definition's claims due for re-drive at {@code now}. */
     public List<OccurrenceRow> findFiring(String tenantId, String scheduleId,
             long now) {
-        return jdbc.query("SELECT * FROM ma_schedule_occurrence"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE_OCCURRENCE.columns() + " FROM ma_schedule_occurrence"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND outcome = ? AND next_retry_at <= ?"
-                        + " ORDER BY created_at, occurrence_key", OCCURRENCE,
+                        + " ORDER BY gmt_create, occurrence_key", OCCURRENCE,
                 tenantId, scheduleId, OUTCOME_FIRING, now);
     }
 
@@ -616,7 +605,7 @@ public class AutomationLedgerStore {
         while (blocking.size() < limit) {
             List<OccurrenceRow> page = jdbc.query(OCCURRENCE_SELECT
                             + " AND o.outcome = ?"
-                            + " ORDER BY o.created_at, o.occurrence_key"
+                            + " ORDER BY o.gmt_create, o.occurrence_key"
                             + " LIMIT ? OFFSET ?",
                     OCCURRENCE, tenantId, scheduleId, OUTCOME_FIRED, 256,
                     offset);
@@ -670,12 +659,12 @@ public class AutomationLedgerStore {
     public OccurrencePage listOccurrences(String tenantId, String scheduleId,
             OccurrenceCursor cursor, int limit) {
         List<OccurrenceRow> rows = cursor == null
-                ? jdbc.query(OCCURRENCE_SELECT + " ORDER BY o.created_at DESC,"
+                ? jdbc.query(OCCURRENCE_SELECT + " ORDER BY o.gmt_create DESC,"
                         + " o.occurrence_key DESC LIMIT ?", OCCURRENCE,
                         tenantId, scheduleId, limit + 1)
-                : jdbc.query(OCCURRENCE_SELECT + " AND (o.created_at < ? OR"
-                        + " (o.created_at = ? AND o.occurrence_key < ?))"
-                        + " ORDER BY o.created_at DESC, o.occurrence_key DESC"
+                : jdbc.query(OCCURRENCE_SELECT + " AND (o.gmt_create < ? OR"
+                        + " (o.gmt_create = ? AND o.occurrence_key < ?))"
+                        + " ORDER BY o.gmt_create DESC, o.occurrence_key DESC"
                         + " LIMIT ?", OCCURRENCE, tenantId, scheduleId,
                         cursor.createdAt(), cursor.createdAt(),
                         cursor.occurrenceKey(), limit + 1);
@@ -696,8 +685,7 @@ public class AutomationLedgerStore {
             String idempotencyKey) {
         return jdbc
                 .query(
-                        "SELECT * FROM ma_request_receipt WHERE receipt_key = ? AND namespace ="
-                                + " 'AUTOMATION' AND tenant_id = ? AND idempotency_key = ?",
+                        "SELECT " + ManagedSchemaProjection.REQUEST_RECEIPT.columns() + " FROM ma_request_receipt WHERE receipt_key = ? AND namespace = 'AUTOMATION' AND tenant_id = ? AND idempotency_key = ?",
                         (result, row) ->
                                 new CommandRow(
                                         result.getString("tenant_id"),
@@ -741,7 +729,7 @@ public class AutomationLedgerStore {
     public boolean settleCommand(String tenantId, String idempotencyKey,
             String requestDigest, String actorId, String resultJson) {
         return jdbc.update(
-                        "UPDATE ma_request_receipt SET result_json = ?, state = 'COMPLETED' WHERE"
+                        "UPDATE ma_request_receipt SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", result_json = ?, state = 'COMPLETED' WHERE"
                             + " receipt_key = ? AND namespace = 'AUTOMATION' AND tenant_id = ? AND"
                             + " idempotency_key = ? AND request_digest = ? AND actor_id = ? AND"
                             + " result_json = ''",
@@ -780,11 +768,7 @@ public class AutomationLedgerStore {
 
     private int insertCommand(CommandRow command, long now, String result) {
         return jdbc.update(
-                "INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_key,"
-                        + " tenant_id, scope_kind, scope_key, scope_id, idempotency_key,"
-                        + " idempotency_digest, actor_id, request_digest, schedule_id, state,"
-                        + " result_json, created_at, updated_at) VALUES (?, 'AUTOMATION', ?, ?,"
-                        + " 'TENANT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id, scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, actor_id, request_digest, schedule_id, state, result_json, gmt_create, gmt_modified) VALUES (?, 'AUTOMATION', ?, ?, 'TENANT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 receiptKey(command.tenantId(), command.idempotencyKey()),
                 ManagedSchemaKeys.key(command.tenantId()),
                 command.tenantId(),

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -32,7 +33,7 @@ final class WorkspaceRecoveryReader {
     JsonNode transaction(JsonNode source, long revision) {
         JsonNode head = head(source);
         check(revision <= head.path("journalRevision").asLong(), "transaction_out_of_cut");
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT * FROM ma_session_journal_tx"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx"
                 + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
                 text(head, "tenantId"), text(head, "sessionId"), revision);
         check(rows.size() == 1, "transaction_missing");
@@ -59,7 +60,7 @@ final class WorkspaceRecoveryReader {
         JsonNode head = head(source);
         String sessionScope = ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
         String resourceKey = ManagedSessionStore.resourceKey(sessionScope, text(ref, "resourceId"));
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT * FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND tenant_id = ?"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND tenant_id = ?"
                 + " AND workspace_id = ? AND session_id = ? AND resource_id = ?",
                 resourceKey, sessionScope, text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
         byte[] bytes;
@@ -144,7 +145,7 @@ final class WorkspaceRecoveryReader {
     JsonNode publicationObject(JsonNode source, String publicationId, String slot) {
         JsonNode head = head(source);
         publication(source, publicationId);
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT r.*, r.kind AS resource_kind, r.capture_state AS state, CASE WHEN r.inline_bytes IS NULL THEN r.capture_object_key ELSE NULL END AS object_key"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns("r") + ", r.kind AS resource_kind, r.capture_state AS state, CASE WHEN r.inline_bytes IS NULL THEN r.capture_object_key ELSE NULL END AS object_key"
                 + " FROM ma_resource r WHERE scope_key = ?"
                 + " AND publication_id = ? AND slot_key = ?", scope(head), publicationId, slot);
         check(rows.size() == 1, "publication_object_missing");
@@ -259,7 +260,7 @@ final class WorkspaceRecoveryReader {
     }
 
     private void verifyExecution(JsonNode binding) {
-        var executions = WorkspaceOperations.rows(jdbc, "SELECT e.*, b.tenant_id AS original_tenant, b.workspace_id AS original_workspace,"
+        var executions = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns("e") + ", b.tenant_id AS original_tenant, b.workspace_id AS original_workspace,"
                 + " b.runtime_generation AS original_generation FROM ma_tool_execution e JOIN ma_runtime_binding b"
                 + " ON b.binding_id = e.binding_id WHERE e.execution_call_id = ? AND b.binding_id = ?",
                 text(binding, "executionCallId"), text(binding, "runtimeBindingId"));
@@ -284,7 +285,7 @@ final class WorkspaceRecoveryReader {
 
     private Map<String, Object> publication(JsonNode source, String publication) {
         JsonNode head = head(source);
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT * FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?"
                 + " AND tenant_id = ? AND workspace_id = ? AND session_id = ?", scope(head), publication,
                 text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"));
         check(rows.size() == 1, "publication_scope_conflict");

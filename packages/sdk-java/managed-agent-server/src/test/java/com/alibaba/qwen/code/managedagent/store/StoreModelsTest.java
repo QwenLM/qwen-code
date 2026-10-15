@@ -88,10 +88,10 @@ class StoreModelsTest {
                 "digest", "session", "turn", "COMPLETED", null,
                 ManagedWorkspaceRegistry.actorKey("tenant", "actor-a"), 1);
 
-        byte[] unattributed = (byte[]) ManagedReceipts.command(jdbc, "tenant",
-                "CANCEL_TURN", "server-keyed", false).get("actor_id");
-        byte[] stamped = (byte[]) ManagedReceipts.command(jdbc, "tenant",
-                "SUBMIT_TURN", "stamped", false).get("actor_id");
+        byte[] unattributed = ManagedReceipts.command(jdbc, "tenant",
+                "CANCEL_TURN", "server-keyed", false).actorKey();
+        byte[] stamped = ManagedReceipts.command(jdbc, "tenant",
+                "SUBMIT_TURN", "stamped", false).actorKey();
 
         assertThat(unattributed).isNotNull().isEmpty();
         assertThat(command(unattributed).admitsReplayBy("actor-b")).isFalse();

@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -22,8 +24,40 @@ class ManagedArtifactServiceTest {
                 .isEqualTo(new ManagedArtifactService.Selection(7, 2, true));
         assertThat(ManagedArtifactService.select("bytes=-999", 9))
                 .isEqualTo(new ManagedArtifactService.Selection(0, 9, true));
+        assertThat(ManagedArtifactService.select(" \tbytes=0007-0008\r\n", 9))
+                .isEqualTo(new ManagedArtifactService.Selection(7, 2, true));
+        assertThat(ManagedArtifactService.select("bytes=7-9223372036854775807", 9))
+                .isEqualTo(new ManagedArtifactService.Selection(7, 2, true));
+        assertThat(ManagedArtifactService.select("bytes=-9223372036854775807", 9))
+                .isEqualTo(new ManagedArtifactService.Selection(0, 9, true));
         assertThat(ManagedArtifactService.select("bytes=0-1048575", 2_000_000).length())
                 .isEqualTo(1_048_576);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bytes=+0-1", "bytes=0-+1", "bytes=-+1", "bytes=\u0660-1", "bytes=-\uFF11",
+            "bytes= 0-1", "bytes=0 -1", "bytes=0- 1", "Bytes=0-1", "bytes=0-1\u00a0",
+            "bytes=9223372036854775808-", "bytes=0-9223372036854775808",
+            "bytes=-9223372036854775808", "bytes=2-1", "bytes=-", "bytes="})
+    void preservesAsciiSyntaxAndInvalidRangeErrorsEvenForEmptyArtifacts(String range) {
+        for (long size : new long[] {0, 9}) {
+            assertThatThrownBy(() -> ManagedArtifactService.select(range, size))
+                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                        assertThat(error.getCode()).isEqualTo("invalid_range");
+                        assertThat(error.getMessage()).isEqualTo("Invalid byte range.");
+                    });
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bytes=0-1,2-3", "bytes=0-1,", "bytes=,0-1", "bytes=,", ","})
+    void refusesEveryCommaBeforeParsingRanges(String range) {
+        assertThatThrownBy(() -> ManagedArtifactService.select(range, 0))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode()).isEqualTo("unsupported_range");
+                });
     }
 
     @Test
@@ -55,14 +89,18 @@ class ManagedArtifactServiceTest {
         for (String range : new String[] {"bytes=0-0", "bytes=0-", "bytes=-1"}) {
             assertThatThrownBy(() -> ManagedArtifactService.select(range, 0))
                     .isInstanceOfSatisfying(ApiException.class,
-                            error -> assertThat(error.getStatus())
-                                    .isEqualTo(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE));
+                            error -> {
+                                assertThat(error.getStatus()).isEqualTo(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE);
+                                assertThat(error.getCode()).isEqualTo("range_not_satisfiable");
+                            });
         }
         for (String range : new String[] {"bytes=9-", "bytes=99-100", "bytes=-0"}) {
             assertThatThrownBy(() -> ManagedArtifactService.select(range, 9))
                     .isInstanceOfSatisfying(ApiException.class,
-                            error -> assertThat(error.getStatus())
-                                    .isEqualTo(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE));
+                            error -> {
+                                assertThat(error.getStatus()).isEqualTo(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE);
+                                assertThat(error.getCode()).isEqualTo("range_not_satisfiable");
+                            });
         }
     }
 

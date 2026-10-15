@@ -17,7 +17,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.apache.commons.lang3.StringUtils;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -85,7 +84,7 @@ public final class WorkspaceCsiRuntimeMain {
         ManagedCsiFilesProtocol.authority(authorityOrigin);
         var source = new DriverManagerDataSource(required("K2_JDBC_URL"), required("K2_JDBC_USER"),
                 required("K2_JDBC_PASSWORD"));
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision(required("K2_AGENT_REVISION"));
