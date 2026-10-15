@@ -1,17 +1,11 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ChildResultRelay;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -20,6 +14,14 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.Scheduled;
+
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedAgentPropertiesTest {
     private static final String DURABLE_KEY = "qwen.managed-agent.runtime-broker.durable-local-process";
@@ -92,14 +94,15 @@ class ManagedAgentPropertiesTest {
         return values;
     }
 
-    // The only fields whose declared unit is MILLIS; every other Duration
-    // field binds suffix-less numbers as seconds.
+    // Retention.maxAge uses DAYS; these fields use MILLIS, and every other
+    // Duration field binds suffix-less numbers as seconds.
     private static final java.util.Set<String> MILLIS_BINDINGS =
             java.util.Set.of(
                     "Auth.allowedDrift",
                     "Events.batchInterval",
                     "Events.materializeInterval",
                     "RuntimeBroker.childWorkspaceGitTimeout",
+                    "Retention.scanDelay",
                     "Automation.scanDelay",
                     "Automation.lease",
                     "Automation.lateTolerance",
@@ -138,7 +141,9 @@ class ManagedAgentPropertiesTest {
                             org.springframework.boot.convert.DurationUnit.class);
                     assertThat(unit).as(name).isNotNull();
                     assertThat(unit.value()).as(name).isEqualTo(
-                            MILLIS_BINDINGS.contains(name)
+                            name.equals("Retention.maxAge")
+                                    ? java.time.temporal.ChronoUnit.DAYS
+                                    : MILLIS_BINDINGS.contains(name)
                                     ? java.time.temporal.ChronoUnit.MILLIS
                                     : java.time.temporal.ChronoUnit.SECONDS);
                 }
@@ -147,10 +152,10 @@ class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 31 is the current field
+        // exceptions would go unchecked. 34 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(31);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(34);
     }
 
     @Test
@@ -474,7 +479,8 @@ class ManagedAgentPropertiesTest {
                 "child-workspace.scan-delay",
                 "dispatch.scan-delay",
                 "events.replay-floor-interval",
-                "message-relay.scan-delay");
+                "message-relay.scan-delay",
+                "runtime-broker.retention.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
         for (String key : swept) {
             if (!hasTypedField(key)) {
@@ -490,7 +496,7 @@ class ManagedAgentPropertiesTest {
         // The unit rule's millisecond exceptions are only true while the
         // sentence names every MILLIS-bound field, so derive the expected
         // set from the properties graph instead of pinning names: dropping
-        // `automation.lookback` from the sentence, annotating a ninth field
+        // `automation.lookback` from the sentence, annotating another field
         // MILLIS without documenting it, or naming a seconds-bound key in
         // the span all turn this red.
         var millisKeys = new java.util.TreeSet<String>();

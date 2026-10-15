@@ -189,6 +189,7 @@ export interface CliArgs {
   telemetryLogPrompts: boolean | undefined;
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
+  disableMcpServer: string[] | undefined;
   mcpConfig: string | undefined;
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
@@ -677,6 +678,15 @@ export async function parseArguments(): Promise<CliArgs> {
             // Handle comma-separated values
             mcpServerNames.flatMap((mcpServerName) =>
               mcpServerName.split(',').map((m) => m.trim()),
+            ),
+        })
+        .option('disable-mcp-server', {
+          ...DEFAULT_COMMAND_OPTIONS['disable-mcp-server'],
+          string: true,
+          coerce: (disabledServerNames: string[]) =>
+            // Handle comma-separated values
+            disabledServerNames.flatMap((disabledServerName) =>
+              disabledServerName.split(',').map((m) => m.trim()),
             ),
         })
         .option('mcp-config', DEFAULT_COMMAND_OPTIONS['mcp-config'])
@@ -2190,6 +2200,22 @@ export async function loadCliConfig(
     excludedMcpServers = settings.mcp?.excluded
       ? new Set(settings.mcp.excluded.filter(Boolean))
       : undefined;
+  }
+  // `--disable-mcp-server` is an explicit per-invocation argument, not local
+  // state, so it unions into the exclude set in its OWN block after the
+  // if/else-if chain above. Folding it into the `else if (!bareMode &&
+  // !safeMode)` branch would silently drop it twice over: under `--safe-mode`
+  // that branch does not run at all, and next to `--allowed-mcp-server-names`
+  // the first branch wins and leaves the set undefined. Precedence is
+  // allow-then-deny — a server named by both flags ends up disabled.
+  // Boot-time only: the settings-watcher and ACP reload paths rebuild the
+  // exclude set from settings alone, so a later settings.json edit drops these
+  // entries. Durable fix tracked in #14009.
+  if (argv.disableMcpServer) {
+    excludedMcpServers = new Set([
+      ...(excludedMcpServers ?? []),
+      ...argv.disableMcpServer.filter(Boolean),
+    ]);
   }
 
   const selectedAuthType =

@@ -1,29 +1,31 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.List;
-import java.util.UUID;
-import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.List;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The W2 execution pivot: after a cwd change commits, the exact resolution
@@ -49,9 +51,8 @@ class WorkspaceRuntimeResolutionPivotTest {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:pivot-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        ManagedSchema.initialize(dataSource);
+        JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(dataSource);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getRuntimeBroker().setProvisioner("local-process");
@@ -60,8 +61,7 @@ class WorkspaceRuntimeResolutionPivotTest {
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                         TENANT, STORAGE, root.toString())));
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
-                new ObjectMapper(), Clock.systemUTC(), ignored -> {
-                }, new ManagedWorkspaceRegistry(jdbc), properties);
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         WorkspaceRuntimeResolver resolver = new WorkspaceRuntimeResolver(
                 store, new WorkspaceExecutionStore(jdbc,
                         new DataSourceTransactionManager(dataSource)),
@@ -70,7 +70,7 @@ class WorkspaceRuntimeResolutionPivotTest {
         String sessionId = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource))
                 .execute(status -> {
-                    jdbc.update("INSERT INTO managed_workspace_registry"
+                    jdbc.update("INSERT INTO ma_workspace"
                             + " (tenant_id, workspace_id,"
                             + " workspace_generation, storage_id,"
                             + " display_name, config_ref, policy_ref,"
@@ -78,7 +78,7 @@ class WorkspaceRuntimeResolutionPivotTest {
                             + " 'ACTIVE')", TENANT, WS, STORAGE, WS,
                             WorkspaceExecutionProfile.CONFIG_REF,
                             WorkspaceExecutionProfile.POLICY_REF);
-                    jdbc.update("INSERT INTO managed_workspace_access"
+                    jdbc.update("INSERT INTO ma_workspace_access"
                             + " (tenant_id, workspace_id, actor_id, role)"
                             + " VALUES (?, ?, ?, 'OPERATOR')", TENANT, WS,
                             ACTOR.getBytes(java.nio.charset

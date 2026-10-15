@@ -199,7 +199,6 @@ export const legacyFilenames = [
   'LspConfigLoader',
   'LspConnectionFactory',
   'LspResponseNormalizer',
-  'markdownUtilities',
   'matcherGrouping',
   'mcpCommand',
   'McpPromptLoader',

@@ -10,6 +10,12 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -18,10 +24,6 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
 
 /** Child JVM for the Managed Session store process-loss proof. */
 public final class ManagedSessionStoreProcessFixtureMain {
@@ -47,7 +49,7 @@ public final class ManagedSessionStoreProcessFixtureMain {
         TransactionTemplate transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         ManagedSessionStore store = new ManagedSessionStore(
-                new JdbcTemplate(dataSource));
+                new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource));
         String action = required("D1_PROCESS_ACTION");
         switch (action) {
             case "commit-and-crash" -> commitAndCrash(store, transactions);
@@ -73,19 +75,11 @@ public final class ManagedSessionStoreProcessFixtureMain {
             receipt = inTransaction(transactions,
                     () -> store.commit(TENANT, SESSION, TOKEN_A, genesis()));
         } catch (ApiException error) {
-            JdbcTemplate jdbc = new JdbcTemplate(new DriverManagerDataSource(
+            JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(
                     required("D1_MYSQL_URL"), required("D1_MYSQL_USER"),
                     System.getenv().getOrDefault("D1_MYSQL_PASSWORD", "")));
             Map<String, Object> head = jdbc.queryForMap(
-                    "SELECT state, writer_generation, writer_id,"
-                            + " writer_lease_until,"
-                            + " CURRENT_TIMESTAMP(6) AS observed_now,"
-                            + " lease_token_hash = ? AS token_matches,"
-                            + " TIMESTAMPDIFF(MICROSECOND,"
-                            + " CURRENT_TIMESTAMP(6), writer_lease_until)"
-                            + " AS lease_remaining_micros FROM"
-                            + " qwen_managed_session_journal_head WHERE"
-                            + " tenant_id = ? AND session_id = ?",
+                    "SELECT state, writer_generation, writer_id, writer_lease_until, " + ManagedSchemaTime.SQL_NOW + " AS observed_now, lease_token_hash = ? AS token_matches, (CAST(writer_lease_until AS SIGNED) - (" + ManagedSchemaTime.SQL_NOW + ")) * 1000 AS lease_remaining_micros FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                     sha256(TOKEN_A.getBytes(StandardCharsets.UTF_8)),
                     TENANT, SESSION);
             System.err.println("Writer diagnostic: " + head);

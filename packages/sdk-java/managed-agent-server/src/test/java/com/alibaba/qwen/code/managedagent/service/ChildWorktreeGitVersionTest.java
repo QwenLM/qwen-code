@@ -1,18 +1,19 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.DisabledOnOs;
-import org.junit.jupiter.api.condition.OS;
-import org.junit.jupiter.api.io.TempDir;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The Git version floor of decision 12 (#13753 I1), against stub
@@ -57,6 +58,16 @@ class ChildWorktreeGitVersionTest {
                     .hasMessageContaining("exit 127").hasMessageContaining("no such libexec");
         } finally {
             broken.close();
+        }
+    }
+
+    @Test
+    void ignoresEmptyLfLinesWithoutSplittingCarriageReturns() throws Exception {
+        ChildWorktreeGit stub = stub("printf '\\n\\ngit version 2.45.0\\rcustom build\\n\\ngit version 1.0.0\\n'");
+        try {
+            assertThat(stub.requireSupportedVersion()).isEqualTo("git version 2.45.0\rcustom build");
+        } finally {
+            stub.close();
         }
     }
 

@@ -592,10 +592,9 @@ describe('reconcileNeverStartedChildRuns', () => {
     expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
   });
 
-  it('admits a shell when the production kind gate is restored', async () => {
+  it('admits a shell through the enabled production kind gate', async () => {
     await open();
     await createManagedHarnessHandle(session!).ensureRunnable();
-    enablement.childRun = false;
 
     await expect(
       orchestratorOf(session!).admit({

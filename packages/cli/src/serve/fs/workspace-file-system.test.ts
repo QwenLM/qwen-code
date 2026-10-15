@@ -24,6 +24,7 @@ import {
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { canonicalizeWorkspace } from './paths.js';
 import { isFsError } from './errors.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 interface Harness {
   factory: WorkspaceFileSystemFactory;
@@ -1365,32 +1366,33 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(await fsp.readFile(target, 'utf-8')).toBe('tiny');
   });
 
-  it('writeTextOverwrite succeeds over an existing 0o000 (unreadable) file', async () => {
-    // wenshao #4334 review: EACCES on the best-effort meta-read must
-    // NOT block the overwrite. Pre-PR the inline BridgeClient proxy
-    // never read the existing file, so the daemon could always
-    // overwrite an unreadable target (subject only to the parent dir's
-    // write permission). The 0o000 case also matters as a probing
-    // defense — bubbling EACCES on overwrite would let agents probe
-    // file readability indirectly.
-    // Skipped on Windows + when running as root (root bypasses mode bits).
-    if (process.platform === 'win32') return;
-    if (process.getuid && process.getuid() === 0) return;
-    const target = path.join(h.workspace, 'unreadable-secret.txt');
-    await fsp.writeFile(target, 'old-secret', { mode: 0o000 });
-    await fsp.chmod(target, 0o000);
-    try {
-      const r = await h.fs.resolve('unreadable-secret.txt', 'write');
-      const out = await h.fs.writeTextOverwrite(r, 'new-content');
-      expect(out.created).toBe(false);
-      // Restore mode so the test can read back the content for verification.
-      await fsp.chmod(target, 0o600);
-      expect(await fsp.readFile(target, 'utf-8')).toBe('new-content');
-    } finally {
-      // Best-effort restore so afterEach rm doesn't trip on a 0o000 file.
-      await fsp.chmod(target, 0o600).catch(() => {});
-    }
-  });
+  // wenshao #4334 review: EACCES on the best-effort meta-read must
+  // NOT block the overwrite. Pre-PR the inline BridgeClient proxy
+  // never read the existing file, so the daemon could always
+  // overwrite an unreadable target (subject only to the parent dir's
+  // write permission). The 0o000 case also matters as a probing
+  // defense — bubbling EACCES on overwrite would let agents probe
+  // file readability indirectly. Skipped where permission bits do not
+  // bind (Windows, or root bypassing mode bits).
+  it.skipIf(!arePermissionBitsEnforced())(
+    'writeTextOverwrite succeeds over an existing 0o000 (unreadable) file',
+    async () => {
+      const target = path.join(h.workspace, 'unreadable-secret.txt');
+      await fsp.writeFile(target, 'old-secret', { mode: 0o000 });
+      await fsp.chmod(target, 0o000);
+      try {
+        const r = await h.fs.resolve('unreadable-secret.txt', 'write');
+        const out = await h.fs.writeTextOverwrite(r, 'new-content');
+        expect(out.created).toBe(false);
+        // Restore mode so the test can read back the content for verification.
+        await fsp.chmod(target, 0o600);
+        expect(await fsp.readFile(target, 'utf-8')).toBe('new-content');
+      } finally {
+        // Best-effort restore so afterEach rm doesn't trip on a 0o000 file.
+        await fsp.chmod(target, 0o600).catch(() => {});
+      }
+    },
+  );
 
   it('writeTextOverwrite succeeds over an existing binary file', async () => {
     // Sibling of the >MAX_READ_BYTES regression: existing binary
@@ -2311,7 +2313,9 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits).toHaveLength(3);
   });
 
-  it.skipIf(process.platform === 'win32')(
+  // Where permission bits do not bind, the mode-000 root stays readable
+  // and the failing-root branch is never taken.
+  it.skipIf(!arePermissionBitsEnforced())(
     'returns healthy root glob results when one workspace root fails',
     async () => {
       await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
@@ -2326,7 +2330,9 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
+  // Where permission bits do not bind, both mode-000 roots stay readable
+  // and both globs succeed.
+  it.skipIf(!arePermissionBitsEnforced())(
     'throws AggregateError when every workspace root glob fails',
     async () => {
       await fsp.chmod(h.workspace, 0o000);

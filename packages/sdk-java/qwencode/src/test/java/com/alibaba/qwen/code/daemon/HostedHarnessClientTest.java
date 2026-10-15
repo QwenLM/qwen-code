@@ -242,6 +242,52 @@ class HostedHarnessClientTest {
         }
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
+    void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\"],"));
+        createSessionRoute();
+        AtomicInteger calls = new AtomicInteger();
+        AtomicBoolean wrongPhase = new AtomicBoolean();
+        server.createContext("/session/" + SESSION_ID + "/lifecycle", exchange -> {
+            calls.incrementAndGet();
+            var request = JsonSupport.parseObject(readBody(exchange), "lifecycle");
+            var receipt = new java.util.LinkedHashMap<>(request);
+            receipt.remove("authority");
+            receipt.put("operationId", "close-2");
+            if (wrongPhase.get()) receipt.put("phase", "other");
+            sendSessionJson(exchange, 200, JsonSupport.encode(receipt));
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            var request = Map.<String, Object>of("protocolVersion", 2, "phase", phase,
+                    "toolProfile", "hosted-workspace-shell/1", "kind", "close",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", SESSION_ID),
+                    "authority", Map.of("operationId", "close-2", "claimGeneration", 3));
+            assertEquals("close-2", client.settleLifecycle(session, request).get("operationId"));
+            wrongPhase.set(true);
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, request));
+            var unsupported = new java.util.LinkedHashMap<>(request);
+            unsupported.put("toolProfile", "hosted-workspace-shell/2");
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
+            unsupported.put("protocolVersion", 3);
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
+            assertEquals(2, calls.get());
+        }
+    }
+
+    @Test
+    void oldHarnessDoesNotAdvertiseLifecycleV2() {
+        createSessionRoute();
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            assertTrue(client.capabilities().getLifecycleV2Profiles().isEmpty());
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session,
+                    Map.of("protocolVersion", 2, "toolProfile", "hosted-workspace-shell/1")));
+        }
+    }
+
     @Test
     void successorLifecycleDetachNeedsNoNewAttachmentOrLifecycleDispatch() {
         AtomicReference<Map<String, Object>> detach = new AtomicReference<>();
@@ -818,6 +864,29 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void parsesAnAbandonedRuntimeRecoveryAsCancellable() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithAbandonedRuntimeRecovery()));
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
+
+            // A terminally fenced record keeps its distinction: the report
+            // parses, and the coordinator may drive the cancellation over it.
+            assertNotNull(recovery);
+            assertEquals("await_runtime", recovery.getPhase());
+            assertFalse(recovery.hasUnknownOutcome());
+            assertTrue(recovery.isCancellationReady());
+            assertFalse(recovery.isContinuationReady());
+            assertEquals("abandoned", recovery.getExecutions().get(0)
+                    .getStatus().get("state"));
+        }
+    }
+
+    @Test
     void cancelsRecoveredRuntimeWithExactWireRequest() {
         AtomicReference<String> method = new AtomicReference<>();
         AtomicReference<String> body = new AtomicReference<>();
@@ -1118,6 +1187,38 @@ class HostedHarnessClientTest {
         }
 
         assertEquals(1, closes.get());
+    }
+
+    @ParameterizedTest
+    @MethodSource("captureByteBudgets")
+    void createCarriesOptionalCaptureByteBudget(Long budget) {
+        AtomicReference<Map<String, Object>> payload = new AtomicReference<>();
+        server.createContext("/session", exchange -> {
+            payload.set(JsonSupport.parseObject(readBody(exchange), "Capture create request"));
+            sendSessionJson(exchange, 200, sessionJson());
+        });
+        CreateHarnessSession.Builder request = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .toolProfile("hosted-workspace-shell/1");
+        if (budget != null) request.captureBytes(budget);
+        try (HostedHarnessClient client = newClient()) {
+            client.createSession(request.build());
+        }
+        if (budget == null) assertFalse(payload.get().containsKey("captureBytes"));
+        else assertEquals(budget.longValue(), ((Number) payload.get().get("captureBytes")).longValue());
+    }
+
+    private static Stream<Arguments> captureByteBudgets() {
+        return Stream.of(Arguments.of((Long) null), Arguments.of(1L),
+                Arguments.of(1048576L), Arguments.of(1L << 41));
+    }
+
+    @Test
+    void rejectsCaptureByteBudgetsOutsideTheHarnessContract() {
+        for (long value : new long[] {-1, 0, (1L << 41) + 1, Long.MAX_VALUE}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> CreateHarnessSession.builder().captureBytes(value));
+        }
     }
 
     @Test
@@ -1557,6 +1658,24 @@ class HostedHarnessClientTest {
                 + "\"progressCursor\":\"cursor-2\","
                 + "\"outcome\":\"known\","
                 + "\"status\":{\"state\":\"settled\"}}]}}}";
+    }
+
+    private static String sessionJsonWithAbandonedRuntimeRecovery() {
+        return "{\"sessionId\":\"" + SESSION_ID
+                + "\",\"workspaceCwd\":\"/control\","
+                + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
+                + "\",\"lastEventId\":0,\"eventEpoch\":\""
+                + EVENT_EPOCH
+                + "\",\"_meta\":{\"qwen.daemon.managedRuntimeRecovery\":{"
+                + "\"phase\":\"await_runtime\","
+                + "\"checkpointId\":\"checkpoint-1\","
+                + "\"activationId\":\"activation-1\",\"executions\":[{"
+                + "\"functionCallId\":\"function-1\","
+                + "\"toolName\":\"write_file\","
+                + "\"executionCallId\":\"execution-1\","
+                + "\"runtimeSessionId\":\"runtime-1\","
+                + "\"progressCursor\":null,\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"abandoned\"}}]}}}";
     }
 
     private static String terminalEvent(long id, String promptId) {

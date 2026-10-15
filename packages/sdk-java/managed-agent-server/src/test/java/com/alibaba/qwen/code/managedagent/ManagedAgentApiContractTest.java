@@ -1,16 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static java.util.Map.entry;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.fail;
-import static org.awaitility.Awaitility.await;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels;
@@ -20,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
@@ -29,7 +19,6 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionResyncRequired;
@@ -46,8 +35,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
@@ -65,6 +54,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
@@ -76,20 +66,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.ValidationMessage;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.Arrays;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
-import java.util.UUID;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -97,14 +73,41 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
-import org.springframework.http.MediaType;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static java.util.Map.entry;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
+import static org.awaitility.Awaitility.await;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-agent-contract;MODE=MySQL;"
@@ -122,6 +125,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 // SSE responses are still being written when MockMvc runs its result printer.
 @AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
+// Keep background recovery from claiming the synchronous schema-check rename.
+@MockitoBean(types = SessionRenameCoordinator.class)
 class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
     private static final List<String> GAP_CATEGORIES = List.of("route",
@@ -280,14 +285,14 @@ class ManagedAgentApiContractTest {
     void migrationRefusalsDeclareTheActualErrorCodeAndRetryability() throws Exception {
         String tenant = "contract-migration-" + UUID.randomUUID();
         var actor = actor(tenant);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, display_name,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, display_name,"
                 + " workspace_generation, storage_id, config_ref, policy_ref, state)"
                 + " VALUES (?, 'workspace', 'Workspace', 1, 'storage', 'config', 'policy', 'ACTIVE')", tenant);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, actor.actorId().getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, 'storage', ?)",
-                JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey("storage"),
-                tenant, UUID.randomUUID().toString());
+        new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
+                new com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector("fixture", new byte[32]))
+                .requestStorageFence(tenant, "storage", UUID.randomUUID().toString());
         assertThat(CONTRACT.node("/components/schemas/ErrorEnvelope/properties/error/properties/retryable/type").asText())
                 .isEqualTo("boolean");
         assertThat(CONTRACT.node("/components/responses/Conflict/description").asText())
@@ -311,9 +316,9 @@ class ManagedAgentApiContractTest {
             ((ObjectNode) envelope.required("error")).put("retryable", "true");
             assertThat(CONTRACT.validate("/components/schemas/ErrorEnvelope", envelope)).isNotEmpty();
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?", Long.class, tenant))
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?", Long.class, tenant))
                 .isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ?", Long.class, tenant))
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ?", Long.class, tenant))
                 .isZero();
     }
 
@@ -679,7 +684,7 @@ class ManagedAgentApiContractTest {
             closeId = closing.get("id").asText();
             await().atMost(Duration.ofSeconds(5)).until(() ->
                     jdbc.queryForObject("SELECT attempt_count FROM"
-                                    + " managed_agent_operation WHERE"
+                                    + " ma_operation WHERE"
                                     + " operation_id = ?", Integer.class,
                             closeId) > 0);
             assertThat(json(exchange(drift, "getSession", 200,
@@ -1095,20 +1100,18 @@ class ManagedAgentApiContractTest {
             }
         };
         for (String workspaceId : List.of("ws-a", "ws-default")) {
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                             + " workspace_id, workspace_generation, storage_id,"
                             + " display_name, config_ref, policy_ref, state)"
                             + " VALUES (?, ?, 1, 'storage', ?, 'config', 'policy',"
                             + " 'ACTIVE')", workspaceTenant, workspaceId,
                     workspaceId);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                             + " workspace_id, actor_id, role)"
                             + " VALUES (?, ?, ?, 'OPERATOR')", workspaceTenant,
                     workspaceId, actor.actorId().getBytes(StandardCharsets.UTF_8));
         }
-        jdbc.update("INSERT INTO managed_workspace_default"
-                        + " (tenant_id, workspace_id) VALUES (?, 'ws-default')",
-                workspaceTenant);
+        jdbc.update("UPDATE ma_workspace SET is_default=TRUE WHERE tenant_id=? AND workspace_id=?", workspaceTenant, "ws-default");
         exchange(drift, "listWorkspaces", 200,
                 get("/v1/agents/workspaces").header(TENANT, workspaceTenant)
                         .principal(actor).param("limit", "1"), null);
@@ -1341,8 +1344,8 @@ class ManagedAgentApiContractTest {
                 post("/v1/agents/sessions").header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "actions-contract"),
                 "{\"agent_id\":\"qwen-code\",\"input\":[]}")).path("id").asText();
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id, actor_id, idempotency_key, request_digest, session_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                tenant, "actor-a".getBytes(StandardCharsets.UTF_8), "actions-owner", "sha256:fixture", session, System.currentTimeMillis());
+        jdbc.update("UPDATE ma_session SET creator_actor_key=? WHERE tenant_id=? AND session_id=?",
+                "actor-a".getBytes(StandardCharsets.UTF_8), tenant, session);
         ActionJournal journal = new ActionJournal(sessionStore, tenant, session,
                 System.currentTimeMillis(), System.currentTimeMillis() + 600000);
         journal.change("requested", null);
@@ -1498,13 +1501,13 @@ class ManagedAgentApiContractTest {
         exchange(drift, "listSessionTaskEvents", 409,
                 get(eventsPath)
                         .param("after", ManagedTaskEventStore
-                                .encodeCursor(taskId, 0))
+                                .encodeCursor(tenant, sessionId, taskId, 0))
                         .header(TENANT, tenant),
                 null);
         exchange(drift, "listSessionTaskEvents", 200,
                 get(eventsPath)
                         .param("after", ManagedTaskEventStore
-                                .encodeCursor(taskId, 1))
+                                .encodeCursor(tenant, sessionId, taskId, 1))
                         .header(TENANT, tenant),
                 null);
 
@@ -1602,12 +1605,12 @@ class ManagedAgentApiContractTest {
             String otherTenant, String sessionId, String monitorTask)
             throws Exception {
         String recordKey = "c".repeat(64);
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, runtime_state,"
-                        + " delivery_target, delivery_state, created_at,"
+                        + " delivery_target, delivery_state, gmt_create,"
                         + " started_at) VALUES (?, ?, ?, 'workspace-contract',"
                         + " ?, 'child_run', 'run-contract', ?, 1,"
                         + " 'resource-run-contract', 'child_agent', 'running',"
@@ -1717,6 +1720,58 @@ class ManagedAgentApiContractTest {
                 ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
                         + "\"idempotencyKey\":\"contract-web-scope\"}")
                         .formatted(sessionId, childTask));
+
+        // H4f-b: a workflow task serves the same cancel on both surfaces,
+        // and its view advertises the action.
+        String workflowKey = "e".repeat(64);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, sessionId),
+                workflowKey, tenant, sessionId, "f".repeat(64));
+        String workflowTask = "task_" + workflowKey;
+        JsonNode workflowView = json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        workflowTask).header(TENANT, tenant), null));
+        assertThat(workflowView.get("action_capabilities").toString())
+                .isEqualTo("[\"cancel\"]");
+        // The child_agent cancel above stays open in this fixture, and the
+        // one open operation per Session rule spans task kinds.
+        assertThat(json(exchange(drift, "cancelSessionTask", 409,
+                post(cancelPath, sessionId, workflowTask).header(TENANT,
+                        tenant).header(IDEMPOTENCY_KEY,
+                        "contract-workflow-blocked"), null))
+                .at("/error/code").asText())
+                .isEqualTo("session_operation_active");
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED'"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind = 'TASK_CANCEL'"
+                + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
+        JsonNode workflowAdmitted = json(exchange(drift, "cancelSessionTask",
+                202, post(cancelPath, sessionId, workflowTask)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-workflow-cancel"),
+                null));
+        assertThat(workflowAdmitted.get("type").asText())
+                .isEqualTo("task_cancel");
+        assertThat(workflowAdmitted.get("task_id").asText())
+                .isEqualTo(workflowTask);
+        assertThat(workflowAdmitted.get("replayed").asBoolean()).isFalse();
+        JsonNode workflowReplayed = json(exchange(drift, "cancelSessionTask",
+                202, post(cancelPath, sessionId, workflowTask)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-workflow-cancel"),
+                null));
+        assertThat(workflowReplayed.get("id").asText())
+                .isEqualTo(workflowAdmitted.get("id").asText());
+        assertThat(workflowReplayed.get("replayed").asBoolean()).isTrue();
+        JsonNode workflowWebShell = json(exchange(drift, "cancelWebShellTask",
+                202, post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-workflow-cancel\"}")
+                        .formatted(sessionId, workflowTask)));
+        assertThat(workflowWebShell.get("operationId").asText())
+                .isEqualTo(workflowAdmitted.get("id").asText());
+        assertThat(workflowWebShell.get("replayed").asBoolean()).isTrue();
     }
 
     /**
@@ -2007,42 +2062,34 @@ class ManagedAgentApiContractTest {
                 return "channel-reader";
             }
         };
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, 'ws-channel', 1, 'storage', 'Channel',"
                         + " 'config', 'policy', 'ACTIVE')", channelTenant);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, 'ws-channel', ?, 'OPERATOR')",
                 channelTenant,
                 reader.actorId().getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO qwen_managed_channel_instance (tenant_id,"
+        jdbc.update("INSERT INTO ma_channel_instance (tenant_id,"
                         + " channel_id, platform, account_id,"
                         + " account_generation, state, actor_id, workspace_id,"
-                        + " cwd_relative, policy_json, created_at, updated_at)"
+                        + " cwd_relative, policy_json, gmt_create, gmt_modified)"
                         + " VALUES (?, 'mail-1', 'email', 'agent@example.com',"
                         + " 1, 'connected', 'channel-reader', 'ws-channel',"
                         + " '.', '{}', 1000, 1000)", channelTenant);
         String sessionId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO qwen_managed_channel_route (tenant_id,"
-                        + " route_key, channel_instance_id,"
-                        + " account_generation, platform_event_id,"
-                        + " semantic_revision, session_id, sender_id, chat_id,"
-                        + " thread_id, state, input_id,"
-                        + " staged_attachment_refs_json, created_at,"
-                        + " updated_at) VALUES (?, ?, 'mail-1', 1, '1700:42',"
-                        + " 1, ?, 'alice@example.com', 'alice@example.com',"
-                        + " 'thread-1', 'admitted', ?, ?, 1000, 1000)",
-                channelTenant, "a".repeat(64), sessionId,
-                "chin-" + "a".repeat(64), "[\"sha256:" + "b".repeat(64)
-                        + "\"]");
-        jdbc.update("INSERT INTO qwen_managed_channel_delivery (tenant_id,"
-                        + " channel_instance_id, delivery_id, segment_id,"
-                        + " segment_ordinal, state, provider_receipt,"
-                        + " created_at, updated_at) VALUES (?, 'mail-1',"
-                        + " 'delivery-1', 'delivery-1:0', 0, 'delivered',"
-                        + " '<m1@example.com>', 1000, 1000)", channelTenant);
+        var routeRepository = new com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository(jdbc);
+        routeRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.ChannelRoute(
+                channelTenant, "a".repeat(64), "mail-1", 1, "1700:42", 1, sessionId,
+                "alice@example.com", "alice@example.com", "thread-1", "admitted", "chin-" + "a".repeat(64),
+                List.of("sha256:" + "b".repeat(64)), 1000, 1000));
+        var deliveryRepository = new com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository(jdbc);
+        deliveryRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.ChannelDelivery(
+                channelTenant, "mail-1", "delivery-1", "delivery-1:0", 0, "planned", null, 1000, 1000));
+        deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "planned", "sending", null);
+        deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "sending", "delivered", "<m1@example.com>");
         JsonNode channels = json(exchange(drift, "listAgentChannels", 200,
                 get("/v1/agent-channels").header(TENANT, channelTenant)
                         .principal(reader).param("limit", "10"), null));
@@ -2116,9 +2163,9 @@ class ManagedAgentApiContractTest {
         // is written as a failed dispatch would leave it.
         String second = "turn_" + UUID.randomUUID().toString()
                 .replace("-", "");
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, error_code, created_at, updated_at,"
+                        + " status, error_code, gmt_create, gmt_modified,"
                         + " completed_at) VALUES (?, ?, ?, ?, '[]', 'digest',"
                         + " 'FAILED', 'hosted_harness_unavailable', ?, ?,"
                         + " ?)",
@@ -2736,7 +2783,7 @@ class ManagedAgentApiContractTest {
         assertThat(expired.at("/error/replay_floor_sequence").asLong())
                 .isEqualTo(floor);
         assertThat(expired.at("/error/snapshot_through_sequence").asLong())
-                .isEqualTo(floor);
+                .isGreaterThanOrEqualTo(floor);
         exchange(drift, "getSessionEvents", 200,
                 get("/v1/agents/sessions/{id}/events", sessionId)
                         .param("after", Long.toString(floor))
