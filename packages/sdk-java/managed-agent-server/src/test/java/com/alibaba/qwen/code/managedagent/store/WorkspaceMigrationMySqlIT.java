@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -93,9 +94,9 @@ class WorkspaceMigrationMySqlIT {
                                     "SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND"
                                             + " operation_kind = 'STORAGE_MIGRATION'", Integer.class, tenant)).isOne();
         }
-        var before = jdbc.queryForList("SELECT * FROM ma_operation ORDER BY operation_key");
+        var before = jdbc.queryForList("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation ORDER BY operation_key");
         ManagedSchema.initialize(data);
-        assertThat(jdbc.queryForList("SELECT * FROM ma_operation ORDER BY operation_key")).isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation ORDER BY operation_key")).isEqualTo(before);
     }
 
     @Test
@@ -239,13 +240,7 @@ class WorkspaceMigrationMySqlIT {
         String operationKey = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.DELETE, scopeKey, targetKey, "delete");
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_key,"
-                    + " target_kind, request_json, phase, tenant_id, session_id, operation_id,"
-                    + " operation_kind, request_digest, state, admission_stage, delivery_state,"
-                    + " session_status_before, available_at, created_at, updated_at, completed_at)"
-                    + " VALUES (?, ?, ?, ?, 'SESSION', '{}', 'COMPLETED', ?, ?, 'delete', 'DELETE',"
-                    + " 'digest', 'COMPLETED', 'HARNESS_CONFIRMED', 'CONFIRMED', 'CLOSED', 1, 1, 1,"
-                    + " 1)",
+                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_key, target_kind, request_json, phase, tenant_id, session_id, operation_id, operation_kind, request_digest, state, admission_stage, delivery_state, session_status_before, available_at, gmt_create, gmt_modified, completed_at) VALUES (?, ?, ?, ?, 'SESSION', '{}', 'COMPLETED', ?, ?, 'delete', 'DELETE', 'digest', 'COMPLETED', 'HARNESS_CONFIRMED', 'CONFIRMED', 'CLOSED', 1, 1, 1, 1)",
                 operationKey, scopeKey, scopeKey, targetKey, "tenant-a", "headless");
         var manager = new DataSourceTransactionManager(data);
         var transaction = new TransactionTemplate(manager);
@@ -291,20 +286,14 @@ class WorkspaceMigrationMySqlIT {
 
     private void seed(String tenant, String session, String state) {
         jdbc.update(
-                "INSERT INTO ma_session (tenant_key, session_key, session_scope_key, tenant_id,"
-                    + " session_id, agent_id, status, created_at, updated_at, workspace_id,"
-                    + " workspace_generation, workspace_storage_id, cwd_relative,"
-                    + " context_config_ref, context_revision, workspace_config_ref,"
-                    + " workspace_policy_ref, deleted_at) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 1,"
-                    + " 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?, ?)",
+                "INSERT INTO ma_session (tenant_key, session_key, session_scope_key, tenant_id, session_id, agent_id, status, gmt_create, gmt_modified, workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, deleted_at) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?, ?)",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(session),
                 ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, state, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF, "DELETED".equals(state) ? 1L : null);
         ManagedReceipts.insertCreation(jdbc, tenant, new byte[]{1}, session, "digest", session, null, 1);
         jdbc.update(
-                "INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
-                        + " updated_at) VALUES (?, ?, 'SESSION', ?, 1)",
+                "INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, gmt_modified) VALUES (?, ?, 'SESSION', ?, 1)",
                 tenant, session, new byte[0]);
     }
 

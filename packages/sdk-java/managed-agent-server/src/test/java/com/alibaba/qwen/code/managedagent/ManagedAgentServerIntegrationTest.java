@@ -1532,6 +1532,98 @@ class ManagedAgentServerIntegrationTest {
                                         "recovery epoch changed"));
     }
 
+    // #12952 Q2, binding half, at the store: once a former owner's claim has
+    // lapsed and a successor adopted the Session's Harness generation, the
+    // former owner's stale claim moves neither the binding nor the epoch —
+    // through either bind call — and a terminal Turn cannot be claimed or
+    // bound again. The frozen control-plane E2E arm shows a woken owner never
+    // gets this far; this pins the guards it would meet if it did.
+    @Test
+    void aFormerOwnerCannotRebindAfterItsClaimLapsed() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-harness-stale-owner-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "stale-owner-create",
+                "sha256:" + "4".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        String sessionId = session.sessionId();
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "stale-owner-turn", "sha256:" + "5".repeat(64), sessionId,
+                List.of(Map.of("type", "text", "text", "stale")),
+                "sha256:" + "6".repeat(64));
+        String turnId = turn.turnId();
+        String former = "stale-former-owner";
+        String successor = "stale-successor-owner";
+        assertThat(store.claimTurn(tenant, sessionId, turnId, former,
+                Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, sessionId, turnId, former,
+                "boot-former")).isTrue();
+        store.markSubmissionAttempted(tenant, sessionId, turnId, former);
+        store.recordAdmission(tenant, sessionId, turnId, former,
+                "epoch-former", 1);
+        // The former owner stops renewing: its lease ends now, and the
+        // successor's claim waits for it to lapse as a scan would.
+        assertThat(store.renewTurn(tenant, sessionId, turnId, former,
+                Duration.ZERO)).isTrue();
+        await().atMost(Duration.ofSeconds(5)).until(() -> store.claimTurn(
+                tenant, sessionId, turnId, successor, Duration.ofMinutes(1))
+                .isPresent());
+        assertThat(store.bindRecoveredHarness(tenant, sessionId, turnId,
+                successor, "boot-former", "boot-successor")).isTrue();
+        store.recordRecoveryAdmission(tenant, sessionId, turnId, successor,
+                "epoch-former", "epoch-former", "epoch-successor", 1);
+
+        assertThat(store.renewTurn(tenant, sessionId, turnId, former,
+                Duration.ofMinutes(1))).isFalse();
+        assertThat(store.bindHarness(tenant, sessionId, turnId, former,
+                "boot-former")).isFalse();
+        assertThat(store.bindHarness(tenant, sessionId, turnId, former,
+                "boot-successor")).isFalse();
+        assertThat(store.bindRecoveredHarness(tenant, sessionId, turnId,
+                former, "boot-successor", "boot-former")).isFalse();
+        assertThatThrownBy(() -> store.recordAdmission(tenant, sessionId,
+                turnId, former, "epoch-former", 1))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Turn dispatch lease was lost");
+        // The epochs it expects are the ones that stand now, so only the
+        // owner check can refuse this recovery admission.
+        assertThatThrownBy(() -> store.recordRecoveryAdmission(tenant,
+                sessionId, turnId, former, "epoch-successor",
+                "epoch-successor", "epoch-former-retry", 2))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Turn dispatch lease was lost");
+        assertThat(store.requireSession(tenant, sessionId))
+                .satisfies(record -> {
+                    assertThat(record.harnessBootId())
+                            .isEqualTo("boot-successor");
+                    assertThat(record.harnessEventEpoch())
+                            .isEqualTo("epoch-successor");
+                });
+
+        // A code unique to this run keys the row below in the shared H2.
+        String settledCode = "test_done_" + UUID.randomUUID();
+        store.failTurn(tenant, sessionId, turnId, successor, settledCode,
+                "The successor settled the Turn.");
+        assertThat(store.claimTurn(tenant, sessionId, turnId, former,
+                Duration.ofMinutes(1))).isEmpty();
+        // Settling clears the owner, which alone would refuse a bind; put a
+        // live claim back so only the terminal status stands in the way.
+        assertThat(jdbc.update("UPDATE ma_turn SET dispatch_owner = ?,"
+                + " dispatch_lease_until = ? WHERE status = 'FAILED' AND"
+                + " error_code = ? AND dispatch_owner IS NULL", successor,
+                System.currentTimeMillis() + 60_000, settledCode))
+                .isEqualTo(1);
+        // The current boot too: binding to it is otherwise an early yes.
+        assertThat(store.bindHarness(tenant, sessionId, turnId, successor,
+                "boot-successor")).isFalse();
+        assertThat(store.bindHarness(tenant, sessionId, turnId, successor,
+                "boot-later")).isFalse();
+        assertThat(store.bindRecoveredHarness(tenant, sessionId, turnId,
+                successor, "boot-successor", "boot-later")).isFalse();
+        assertThat(store.requireSession(tenant, sessionId).harnessBootId())
+                .isEqualTo("boot-successor");
+    }
+
     // A lost admission reply leaves the Turn epoch NULL while the Session
     // still carries an earlier generation's: the adoption CAS must expect
     // each as it stands (R10-4). The epoch predicates are null-safe, not

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -480,13 +481,12 @@ class HostedProcessCrashIT {
         }
 
         private List<Map<String, Object>> executions() {
-            return jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?",
+            return jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?",
                     ready.path("sessionId").asText());
         }
 
         private Map<String, Object> owner() throws Exception {
-            return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
-                            + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+            return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
                     tenant, "storage");
         }
@@ -532,7 +532,7 @@ class HostedProcessCrashIT {
                 assertThat(execution.get("result_json")).isNull();
             }
             assertOwner(execution);
-            var session = jdbc.queryForMap("SELECT * FROM ma_runtime_session WHERE harness_session_id = ?",
+            var session = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.RUNTIME_SESSION.columns() + " FROM ma_runtime_session WHERE harness_session_id = ?",
                     ready.path("sessionId").asText());
             assertThat(session.get("session_state")).isEqualTo("READY");
             assertThat(session.get("runtime_session_id")).isEqualTo(execution.get("runtime_session_id"));
@@ -548,8 +548,7 @@ class HostedProcessCrashIT {
 
         private void assertJournal(JsonNode report, boolean prepared) throws Exception {
             String session = ready.path("sessionId").asText();
-            var journal = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
-                    + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, session);
+            var journal = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, session);
             var transactionIds = new HashSet<String>();
             var eventIds = new HashSet<String>();
             var events = new ArrayList<JsonNode>();
@@ -571,7 +570,7 @@ class HostedProcessCrashIT {
                     events.add(event);
                 }
             }
-            var head = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
+            var head = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                     tenant, session);
             assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
             assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);

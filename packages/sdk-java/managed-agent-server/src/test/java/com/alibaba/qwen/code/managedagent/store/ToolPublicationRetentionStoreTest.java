@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.h2.jdbcx.JdbcDataSource;
@@ -213,7 +214,8 @@ public class ToolPublicationRetentionStoreTest {
         var opens = new java.util.concurrent.atomic.AtomicInteger();
         var faultJdbc = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override public int update(String sql, Object... arguments) {
-                if (sql.startsWith("UPDATE ma_operation SET state = 'RETURNED', completed_at")
+                if (sql.startsWith("UPDATE ma_operation SET ")
+                        && sql.contains("state = 'RETURNED', completed_at")
                         && failed.compareAndSet(false, true)) {
                     throw new org.springframework.dao.DataAccessResourceFailureException("lost SQL receipt");
                 }
@@ -499,11 +501,7 @@ public class ToolPublicationRetentionStoreTest {
     protected void addCaptureObject(String captureScope, String publication, String captureSession,
             String slot, String resourceId, String objectKey, byte[] inline, String captureState) {
         String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, captureSession);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
-                        + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key,"
-                        + " publication_id, slot_key, capture_state, capture_object_key, inline_bytes, operation_id, created_at)"
-                        + " VALUES (?, ?, ?, 'workspace-1', ?, ?, 'managed-tool-result-content', 1, ?, ?, ?, 'PUBLISHED',"
-                        + " ?, ?, ?, ?, ?, ?, 'op', CURRENT_TIMESTAMP(6))",
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key, publication_id, slot_key, capture_state, capture_object_key, inline_bytes, operation_id, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, 'managed-tool-result-content', 1, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, 'op', " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSchemaKeys.key(resourceScope, resourceId), resourceScope, tenant, captureSession, resourceId,
                 inline == null ? 1 : inline.length, ToolPublicationRetentionStore.hash(slot),
                 inline == null ? "TOOL_PUBLICATION" : "MYSQL_INLINE", captureScope, publication, slot,
@@ -517,7 +515,7 @@ public class ToolPublicationRetentionStoreTest {
         long time = ToolPublicationRetentionStore.now(jdbc);
         jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
                         + " tenant_id, workspace_id, session_id, publication_id, target_kind, target_key, request_digest,"
-                        + " request_json, state, phase, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'workspace-1', ?, ?,"
+                        + " request_json, state, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'workspace-1', ?, ?,"
                         + " 'OUTPUT_CAPTURE', ?, ?, '{}', ?, 'TEST', ?, ?)",
                 operationKey, ManagedSessionStore.sessionScopeKey(tenant, targetSession), opScope, kind.name(), id,
                 tenant, targetSession, publication, target, "b".repeat(64), state, time, time);

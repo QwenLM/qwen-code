@@ -59,8 +59,11 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
   不会对已 attach 的会话重新 load），owner 变更后的接管则幂等重 acquire。
   在已接管、但会话尚未注册成功就被拒绝的 load 上，欠账的接管会被按身份记录并报告——
   因为不存在可供退役的已注册会话；该记录在下一次成功加载同一会话时清除，其余情形仍只有
-  会话退休才会清偿一次遗弃。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
-  `managed_runtime_recovery_blocked`，什么都不重放。
+  会话退休才会清偿一次遗弃。Broker 仍无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
+  `managed_runtime_recovery_blocked`，什么都不重放。被 Broker 永久围栏的记录则上报
+  `known` 且 `status.state` 为 `"abandoned"`——这是客户端校验器接受的一个独立的线上状态——
+  协调器因此可以驱动对它的取消：stop 接受该围栏而无需观察到停止，settle
+  则把该执行的结局如实记为不可观测，而不是断言一次无人见证的取消。
 - **continue 从 `results_ready` 起跑模型；cancel 不做新工作直接结算。**
   `managed-runtime/continue` 校验 prompt、checkpoint 与 activation 身份，以 200 回执准入
   continuation，随后用 journaled 工具结果重发模型请求并跑正常的可带工具循环直至终态记录。

@@ -7,20 +7,19 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.codec.digest.HmacAlgorithms;
+import org.apache.commons.codec.digest.HmacUtils;
 import org.springframework.core.Ordered;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.Principal;
-import java.util.HexFormat;
 
 /**
  * Authenticates the tenant/actor header pair with an HMAC signature so the
@@ -276,11 +275,9 @@ public class SignatureAuthFilter extends OncePerRequestFilter
                 + "\n" + actorId + "\n" + timestamp + "\n" + sha256Hex(body)
                 + "\n" + (idempotencyKey == null ? "" : idempotencyKey);
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(security.getSigningKey(),
-                    "HmacSHA256"));
-            return HexFormat.of().formatHex(
-                    mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
+            return new HmacUtils(HmacAlgorithms.HMAC_SHA_256,
+                    security.getSigningKey()).hmacHex(
+                            canonical.getBytes(StandardCharsets.UTF_8));
         } catch (Exception error) {
             throw new IllegalStateException("HmacSHA256 is unavailable",
                     error);
@@ -289,8 +286,7 @@ public class SignatureAuthFilter extends OncePerRequestFilter
 
     private static String sha256Hex(byte[] body) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance(
-                    "SHA-256").digest(body));
+            return DigestUtils.sha256Hex(body);
         } catch (Exception error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }

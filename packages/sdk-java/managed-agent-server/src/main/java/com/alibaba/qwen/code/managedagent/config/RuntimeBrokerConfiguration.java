@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.SecretProtector;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -116,7 +117,7 @@ public class RuntimeBrokerConfiguration {
     }
 
     private static void require(String value, String name) {
-        if (value == null || value.isBlank()) {
+        if (StringUtils.isBlank(value)) {
             throw new IllegalStateException(name + " is required");
         }
     }

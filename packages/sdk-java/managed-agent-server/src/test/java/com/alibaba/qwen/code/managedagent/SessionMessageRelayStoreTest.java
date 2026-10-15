@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.JournalTur
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.MessageRow;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.PendingMessage;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -65,7 +66,7 @@ class SessionMessageRelayStoreTest {
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " delivery_target, delivery_state, created_at,"
+                        + " delivery_target, delivery_state, gmt_create,"
                         + " first_sequence)"
                         + " VALUES (?, ?, ?, 'workspace', ?, ?, ?,"
                         + " 'h', 1, ?, 'session', ?, ?, ?)",
@@ -88,7 +89,7 @@ class SessionMessageRelayStoreTest {
     private void session(String sessionId, String status) {
         String scope = com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, tenant_key, session_key, session_scope_key, agent_id, status,"
-                        + " created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 0, 0)"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 0, 0)"
                         + " ON DUPLICATE KEY UPDATE status = VALUES(status)", TENANT, sessionId,
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(TENANT),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(sessionId), scope, status);
@@ -96,10 +97,7 @@ class SessionMessageRelayStoreTest {
 
     private void resource(String sessionId, String resourceId, byte[] bytes) {
         String scope = com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
-                        + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                        + " VALUES (?, ?, ?, 'workspace', ?, ?, 'managed-message', 1, ?, ?, 'MYSQL_INLINE', ?, 'command',"
-                        + " 'REFERENCED', CURRENT_TIMESTAMP(6))",
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, 'managed-message', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, resourceId), scope,
                 TENANT, sessionId, resourceId, bytes.length, "a".repeat(64), bytes);
     }
@@ -112,17 +110,7 @@ class SessionMessageRelayStoreTest {
                     + "\"managedSession\":").append(event).append("}\n");
         }
         byte[] bytes = lines.toString().getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id,"
-                        + " workspace_id, session_id, journal_revision,"
-                        + " command_key_hash, transaction_id, operation,"
-                        + " command_id, content_digest, first_sequence,"
-                        + " last_sequence, event_count, writer_generation,"
-                        + " writer_id, writer_token_hash, activation_epoch,"
-                        + " record_encoding, record_bytes, byte_length,"
-                        + " record_digest, created_at) VALUES (?, 'workspace',"
-                        + " ?, ?, ?, 'tx', 'op', 'command', ?, 1, 1, ?, 1,"
-                        + " 'writer', ?, 1, 'jsonl', ?, ?, ?,"
-                        + " CURRENT_TIMESTAMP)",
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES (?, 'workspace', ?, ?, ?, 'tx', 'op', 'command', ?, 1, 1, ?, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 TENANT, sessionId, revision, hash(sessionId + revision),
                 "c".repeat(64), events.length, "t".repeat(64), bytes,
                 bytes.length, "d".repeat(64));
@@ -341,7 +329,7 @@ class SessionMessageRelayStoreTest {
         String sender = UUID.randomUUID().toString();
         message(sender, "msg_z_first", "planned", outbound("to_child", "r"));
         message(sender, "msg_a_second", "planned", outbound("to_child", "r"));
-        jdbc.update("UPDATE ma_session_record SET created_at = 5"
+        jdbc.update("UPDATE ma_session_record SET gmt_create = 5"
                 + " WHERE session_scope_key = ?",
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
                         .sessionScopeKey(TENANT, sender));
@@ -406,14 +394,14 @@ class SessionMessageRelayStoreTest {
         String child = UUID.randomUUID().toString();
         String parent = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session (tenant_id,"
-                        + " session_id, agent_id, status, created_at,"
-                        + " updated_at, parent_session_id, root_session_id,"
+                        + " session_id, agent_id, status, gmt_create,"
+                        + " gmt_modified, parent_session_id, root_session_id,"
                         + " parent_child_run_id, child_depth) VALUES (?, ?,"
                         + " 'qwen-code', 'ACTIVE', 0, 0, ?, ?, 'run-1', 1)",
                 TENANT, child, parent, parent);
         jdbc.update("INSERT INTO ma_session (tenant_id,"
-                        + " session_id, agent_id, status, created_at,"
-                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE',"
+                        + " session_id, agent_id, status, gmt_create,"
+                        + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE',"
                         + " 0, 0)", TENANT, parent);
         assertThat(store.lineage(TENANT, child)).isEqualTo(
                 new SessionMessageRelayStore.Lineage(parent, "run-1"));
@@ -483,7 +471,7 @@ class SessionMessageRelayStoreTest {
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " delivery_target, delivery_state, created_at)"
+                        + " delivery_target, delivery_state, gmt_create)"
                         + " VALUES (?, ?, ?, 'workspace', ?,"
                         + " 'session_message', 'msg_x', 'h', 1, 'missing',"
                         + " 'session', 'planned', 1)",
@@ -593,14 +581,7 @@ class SessionMessageRelayStoreTest {
     void refusesToProveTurnsFromACompactedJournal() {
         String child = UUID.randomUUID().toString();
         journal(child, 1, input("turn-api", "hosted-harness"));
-        jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, harness_session_id, tenant_id,"
-                        + " workspace_id, session_id, storage_version, state,"
-                        + " writer_generation, journal_revision,"
-                        + " committed_sequence, activation_epoch,"
-                        + " compacted_through_revision, recovery_status,"
-                        + " created_at, updated_at) VALUES ('MANAGED_SESSION', ?, ?, ?, ?, 'workspace', ?,"
-                        + " 1, 'ACTIVE', 1, 1, 1, 1, 1, 'NONE',"
-                        + " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, harness_session_id, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES ('MANAGED_SESSION', ?, ?, ?, ?, 'workspace', ?, 1, 'ACTIVE', 1, 1, 1, 1, 1, 'NONE', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(TENANT),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(child), child, TENANT, child);
         assertThatThrownBy(() -> records.journalTurns(TENANT, child))
