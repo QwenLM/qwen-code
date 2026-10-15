@@ -2200,7 +2200,7 @@ describe('MemoryManager', () => {
       // and the resumed id runs its next turn instead of inheriting the skip.
       mgr.discardExtractCadence('other', 'sess');
       expect((await turn(mgr, 6)).skippedReason).toBeUndefined();
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
     });
 
@@ -2258,12 +2258,12 @@ describe('MemoryManager', () => {
       await turn(mgr, 4);
       await turn(mgr, 6);
 
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
       expect(
         vi.mocked(runAutoMemoryExtract).mock.calls[1][0].history,
       ).toHaveLength(6);
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
 
       // The flush's own bypass run re-armed the cadence under this session id,
@@ -2286,11 +2286,11 @@ describe('MemoryManager', () => {
         ...engagedNoop(),
         skippedReason: 'session_mismatch',
       });
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(false);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(false);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
 
       // Nothing consumed the skipped turn, so a later boundary retries it.
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
       expect(
         vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
@@ -2311,8 +2311,8 @@ describe('MemoryManager', () => {
           }),
       );
       const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
-      const first = mgr.flushPendingExtract('sess');
-      const second = mgr.flushPendingExtract('sess');
+      const first = mgr.flushPendingExtract('sess', 1_000);
+      const second = mgr.flushPendingExtract('sess', 1_000);
       await tick();
 
       // The second boundary joins the first one's run instead of passing on an
@@ -2351,12 +2351,12 @@ describe('MemoryManager', () => {
       // mutated the live Config this snapshot points at, so both sides of the
       // cache-safe mismatch guard would move together.
       liveSessionId = 'next';
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(false);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(false);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
 
       // The departed session's snapshot is dropped, not kept for a retry no
       // boundary will ever ask for.
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
 
@@ -2383,12 +2383,12 @@ describe('MemoryManager', () => {
       // turns against the old project's memory and write into the old
       // project's memory from them.
       projectRoot = path.join(tmp.tempDir, 'relocated');
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(false);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(false);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
 
       // The relocated session's snapshot is dropped, not kept for a retry no
       // boundary will ever ask for.
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
 
@@ -2433,7 +2433,7 @@ describe('MemoryManager', () => {
 
       // Without the guard the snapshot is gone and this resolves `true` having
       // forked nothing, certifying turns as extracted that never were.
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       const flush = vi.mocked(runAutoMemoryExtract).mock.calls.at(-1)![0];
       expect(flush.projectRoot).toBe(relocated);
       expect(flush.history).toHaveLength(6);
@@ -2481,7 +2481,7 @@ describe('MemoryManager', () => {
       await expect(parkedFlush).resolves.toBe(false);
 
       const before = vi.mocked(runAutoMemoryExtract).mock.calls.length;
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(vi.mocked(runAutoMemoryExtract).mock.calls.length).toBe(
         before + 1,
       );
@@ -2564,7 +2564,7 @@ describe('MemoryManager', () => {
           .mocked(runAutoMemoryExtract)
           .mock.calls.map((call) => call[0].history.length),
       ).not.toContain(6);
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(
         vi
           .mocked(runAutoMemoryExtract)
@@ -2598,7 +2598,7 @@ describe('MemoryManager', () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(
         vi
           .mocked(runAutoMemoryExtract)
@@ -2628,7 +2628,7 @@ describe('MemoryManager', () => {
       releases[1]();
       await mgr.drain();
 
-      await mgr.flushPendingExtract('sess');
+      await mgr.flushPendingExtract('sess', 1_000);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
       expect(
         vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
@@ -2662,7 +2662,7 @@ describe('MemoryManager', () => {
       await mgr.drain();
 
       // The direct run is the older request here too, so the skip survives it.
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
       expect(
         vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
@@ -2680,7 +2680,7 @@ describe('MemoryManager', () => {
       // snapshot predates the shrink and must not be carried or replayed.
       await turn(mgr, 2);
 
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
       expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
     });
@@ -2699,7 +2699,7 @@ describe('MemoryManager', () => {
 
       // Carrying it would keep the gate shut until the history regrew past 13,
       // and a close would replay it into a cursor no live history can match.
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
       expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
     });
@@ -2771,7 +2771,7 @@ describe('MemoryManager', () => {
       ).not.toContain(6);
 
       // The snapshot the live history parked is the one still owed a run.
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(
         vi.mocked(runAutoMemoryExtract).mock.calls.at(-1)![0].history,
       ).toHaveLength(4);
@@ -2802,7 +2802,7 @@ describe('MemoryManager', () => {
       oldRootRun.resolve(engagedNoop());
       await run;
 
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(
         vi
           .mocked(runAutoMemoryExtract)
@@ -2831,7 +2831,7 @@ describe('MemoryManager', () => {
       activeRun.resolve(engagedNoop());
       await run;
 
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(
         vi
           .mocked(runAutoMemoryExtract)
@@ -2866,7 +2866,7 @@ describe('MemoryManager', () => {
       expect(wrote.skippedReason).toBe('memory_tool');
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
 
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
 
@@ -2910,7 +2910,7 @@ describe('MemoryManager', () => {
           }),
       );
       const other = turn(mgr, 2, 'other');
-      const flushed = mgr.flushPendingExtract('sess');
+      const flushed = mgr.flushPendingExtract('sess', 1_000);
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
 
@@ -2952,7 +2952,7 @@ describe('MemoryManager', () => {
       ).not.toContain(4);
 
       // The skipped turn is still recorded, and the next boundary extracts it.
-      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(
         vi
           .mocked(runAutoMemoryExtract)

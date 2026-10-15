@@ -565,7 +565,7 @@ export * from './utils/toolResultDisplayCompaction.js';
 // Production code: config.getMemoryManager().method(...)
 // Tests: new MemoryManager()
 export * from './memory/manager.js';
-export * from './memory/extract-cadence.js';
+export { getExtractNoopSkipTurns } from './memory/extract-cadence.js';
 
 // Foundational utilities (paths, storage scaffold, type definitions, constants)
 // that are legitimately needed by UI code (MemoryDialog, commands, etc.)

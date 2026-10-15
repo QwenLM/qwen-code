@@ -67,7 +67,6 @@ import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtract } from './extract.js';
 import {
   EXTRACT_CADENCE_MAX_PENDING_ENTRIES,
-  EXTRACT_FLUSH_TIMEOUT_MS,
   getExtractNoopSkipTurns,
 } from './extract-cadence.js';
 import {
@@ -1444,7 +1443,7 @@ export class MemoryManager {
    */
   async flushPendingExtract(
     sessionId: string,
-    timeoutMs: number = EXTRACT_FLUSH_TIMEOUT_MS,
+    timeoutMs: number,
   ): Promise<boolean> {
     const pending = this.extractCadence.get(sessionId)?.pending;
     if (!pending) return true;
@@ -1575,9 +1574,7 @@ export class MemoryManager {
         this.extractCadence.delete(sessionId);
         return false;
       }
-      const result:
-        | Awaited<ReturnType<typeof runAutoMemoryExtract>>
-        | undefined = await this.scheduleExtract(pending, {
+      const result = await this.scheduleExtract(pending, {
         bypassCadence: true,
       });
       // Nothing was extracted (session mismatch, memory pressure, a queued
