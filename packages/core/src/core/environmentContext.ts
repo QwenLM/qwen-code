@@ -557,6 +557,10 @@ export interface InitialChatHistoryOptions {
   // that excludes the Skill tool, so announcing skills they can't invoke wastes
   // turns — mirrors includeDeferredToolsReminder).
   includeAvailableSkillsReminder?: boolean;
+  // Main-session git snapshot. It lives in the prelude instead of the system
+  // prompt so a repository change between sessions does not invalidate the
+  // provider-cached system prompt. Subagents leave it unset.
+  gitStatus?: string | null;
 }
 
 /**
@@ -603,6 +607,7 @@ export async function getInitialChatHistory(
     buildMcpServerInstructionsReminder(toolRegistry),
     skillsResult?.reminder ?? null,
     startupReminder,
+    options.gitStatus ? wrapSystemReminder(options.gitStatus) : null,
     includeDeferredToolsReminder
       ? buildDeferredToolsReminder(toolRegistry)
       : null,
