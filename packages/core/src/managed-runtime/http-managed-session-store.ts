@@ -873,10 +873,11 @@ class ManagedSessionStoreHttpClient {
       resources: commitResources,
     };
     let committed: unknown;
-    // One contention budget for the whole commit: the guard retries inside
-    // json() stop at this deadline, and a contended refusal past it is not
-    // retried again below, so three attempts cannot each spend a fresh
-    // requestTimeoutMs behind one held tenant guard (#13800).
+    // One contention budget shared by the whole commit: the guard retries
+    // inside json() stop at this deadline, an uncertain restart past it is
+    // not started either, and each request's own timeout shrinks to it —
+    // so three attempts cannot each spend a fresh requestTimeoutMs behind
+    // one held tenant guard (#13800).
     const contentionDeadline = Date.now() + this.requestTimeoutMs;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -923,11 +924,11 @@ class ManagedSessionStoreHttpClient {
           error instanceof TypeError ||
           (error instanceof DOMException &&
             ['AbortError', 'TimeoutError'].includes(error.name));
-        const contentionSpent =
-          error instanceof ManagedSessionStoreHttpError &&
-          error.status === 503 &&
-          error.remoteCode === 'tenant_guard_contended' &&
-          contentionDeadline - Date.now() <= 250;
+        // The shared budget gates on time, not on the final error's
+        // shape: the retry that burned it may end in a deadline abort (a
+        // transport error) instead of the guard's 503, and either way no
+        // new attempt may start once the budget is spent (#13800 P2).
+        const contentionSpent = contentionDeadline - Date.now() <= 250;
         if (!uncertain || attempt === 2 || contentionSpent) throw error;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
@@ -1377,7 +1378,11 @@ class ManagedSessionStoreHttpClient {
     for (;;) {
       attempt++;
       try {
-        return await run(Math.max(1, deadline - Date.now()));
+        // The shared contention deadline is also the request budget: a
+        // slower guard answer must abort on the caller's deadline rather
+        // than each attempt restarting the full requestTimeoutMs (#13800
+        // P2).
+        return await run(Math.max(1, guardDeadline - Date.now()));
       } catch (error) {
         // A bounded tenant-guard wait is a definite non-commit: the store
         // rolled the transaction back before writing anything. Keep retrying

@@ -3431,6 +3431,59 @@ describe('HTTP Managed Session store', () => {
     await session.close().catch(() => undefined);
   });
 
+  it('lets a deadline abort after a slow guard answer close the shared commit budget', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server, 1_200);
+    const defaultImpl = server.fetch.getMockImplementation()!;
+    let attempts = 0;
+    // The guard holds its answer for 500 ms, slower than an instant 503:
+    // the second attempt aborts at the shared deadline instead of
+    // returning a contended refusal the outer loop would recognize.
+    server.fetch.mockImplementation(async (input, init) => {
+      if (requestUrl(input).endsWith('/transactions:commit')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'message.commit') {
+          attempts++;
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              resolve(
+                jsonResponse(
+                  {
+                    error: { code: 'tenant_guard_contended', message: 'held' },
+                  },
+                  503,
+                ),
+              );
+            }, 500);
+            const signal = init?.signal;
+            signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(signal.reason as Error);
+            });
+          });
+        }
+      }
+      return defaultImpl(input, init);
+    });
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      MESSAGE_BODY,
+    );
+    const started = Date.now();
+    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+      /POST \/transactions:commit failed after \d+ attempts/,
+    );
+    const elapsedMs = Date.now() - started;
+    // The deadline abort arrives as a transport error, so the outer commit
+    // loop used to restart a fresh 1 200 ms attempt behind the spent budget
+    // (a third fetch at ~1 450 ms and the settle at ~1 950 ms). Once the
+    // shared deadline governs restarts, the loop stops at the first abort.
+    expect(elapsedMs).toBeGreaterThanOrEqual(1_000);
+    expect(elapsedMs).toBeLessThan(1_600);
+    expect(attempts).toBe(2);
+    await session.close().catch(() => undefined);
+  });
+
   it('surfaces a typed 409 for a resource missing server-side and keeps staged bytes for retry', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
