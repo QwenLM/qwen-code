@@ -70,6 +70,7 @@ interface MessageItemProps {
    * owns the edit lifecycle — then the inline editor stays closed.
    */
   onEditUserMessage?: () => boolean | void;
+  onDeleteMessage?: () => void;
   /**
    * Send the text the user confirmed in the inline editor. Resolves `false`
    * when the resend was refused or failed; the editor stays open then.
@@ -114,6 +115,7 @@ export const MessageItem = memo(function MessageItem({
   sendFailed = false,
   onRetrySend,
   onEditUserMessage,
+  onDeleteMessage,
   onSubmitUserMessageEdit,
   onBranchSession,
   branchRecordId,
@@ -428,6 +430,8 @@ export const MessageItem = memo(function MessageItem({
           : undefined
       }
       editTitle={t('userMessage.edit')}
+      onDelete={onDeleteMessage}
+      deleteTitle={t('messageDelete.entry')}
       onOpenTurnCalls={
         openTurnCalls && turnCallsTurnId
           ? () => openTurnCalls(turnCallsTurnId)
@@ -485,6 +489,7 @@ function areMessageItemPropsEqual(
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onDeleteMessage !== next.onDeleteMessage) return false;
   if (prev.onSubmitUserMessageEdit !== next.onSubmitUserMessageEdit)
     return false;
   if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;

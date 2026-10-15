@@ -272,8 +272,10 @@ import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { getStartupContextLength } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
+  buildSessionHistoryFromConversation,
   getLastApiHistoryPromptId,
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
@@ -2375,6 +2377,7 @@ export class Session implements SessionContext {
   private closing = false;
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
+  private historyMutationFailure: RequestError | undefined;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
@@ -4428,6 +4431,7 @@ export class Session implements SessionContext {
   }
 
   async assertCanStartTurn(): Promise<void> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -4491,6 +4495,10 @@ export class Session implements SessionContext {
       this.channelTaskCaptures.size === 0 &&
       !this.#hasActiveTurn()
     );
+  }
+
+  assertHistoryContextAvailable(): void {
+    if (this.historyMutationFailure) throw this.historyMutationFailure;
   }
 
   isIdle(): boolean {
@@ -5015,6 +5023,62 @@ export class Session implements SessionContext {
     return { targetTurnIndex, apiTruncateIndex };
   }
 
+  async deleteMessageGroups(request: { snapshot: string; groupIds: string[] }) {
+    const release = this.beginHistoryMutation();
+    let persisted = false;
+    let installed = false;
+    let deletedGroupIds: string[] = [];
+    let deletedPromptIds: string[] = [];
+    try {
+      const recording = this.config.getChatRecordingService();
+      if (!recording?.supportsMessageGroupDeletion())
+        throw new RequestError(-32602, 'History recording is unavailable', {
+          errorKind: 'session_message_deletion_unsupported',
+        });
+      const result = await recording.deleteMessageGroups(request);
+      persisted = true;
+      deletedGroupIds = result.deletedGroupIds;
+      deletedPromptIds = result.deletedPromptIds;
+      const removed = new Set(result.removedApiPromptIds);
+      const records = await recording.readActiveTranscriptChain();
+      const restored = buildSessionHistoryFromConversation({
+        messages: records,
+      });
+      const current = this.captureHistorySnapshot();
+      const prelude = current.slice(0, getStartupContextLength(current));
+      const llmClient = this.config.getLlmClient()!;
+      llmClient.setHistory([...prelude, ...restored.apiHistory]);
+      llmClient
+        .getChat()
+        .setCompletedToolCallIds(restored.completedToolCallIds);
+      const fileHistory = this.config.getFileHistoryService();
+      fileHistory.restoreFromSnapshots(
+        fileHistory
+          .getSnapshots()
+          .filter((snapshot) => !removed.has(snapshot.promptId)),
+      );
+      installed = true;
+      return { deletedGroupIds, deletedPromptIds };
+    } catch (error) {
+      if (persisted) {
+        this.historyMutationFailure = new RequestError(
+          -32000,
+          'Messages were deleted, but the session must be reopened before sending another message',
+          {
+            errorKind: 'message_deletion_context_unavailable',
+            deletedGroupIds,
+            deletedPromptIds,
+          },
+        );
+        throw this.historyMutationFailure;
+      }
+      throw error;
+    } finally {
+      // A committed deletion must never resume automatic work on stale context.
+      if (!persisted || installed) release();
+    }
+  }
+
   captureHistorySnapshot(): Content[] {
     return this.config.getLlmClient()!.getChat().getHistoryShallow();
   }
@@ -5425,6 +5489,7 @@ export class Session implements SessionContext {
     turnRecording: InFlightTurnRecording | null,
     channelTask?: ChannelTaskResponseCapture,
   ): Promise<PromptResponse> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }

@@ -19,6 +19,8 @@ import {
   type MessageListProps,
 } from './MessageList';
 import { Button } from './ui/button';
+import { useMessageDeletion } from '../hooks/useMessageDeletion';
+import { MessageDeletionToolbar } from './MessageDeletionToolbar';
 import { GlobalTurnNavigation } from './GlobalTurnNavigation';
 import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
@@ -80,6 +82,13 @@ export const TranscriptViewport = forwardRef<
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
+  const deletion = useMessageDeletion(
+    viewport.messages,
+    props.isResponding === true ||
+      props.loadingTranscript === true ||
+      props.catchingUp === true ||
+      props.pendingApproval !== null,
+  );
   const openTurnCalls = useOpenTurnCalls();
   const openViewportTurnCalls = useCallback(
     (turnId: string) => {
@@ -534,6 +543,7 @@ export const TranscriptViewport = forwardRef<
               key={viewport.viewKey}
               ref={list}
               messages={viewport.messages}
+              deletion={deletion}
               mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
               timelineAction={
                 globalNavigation || !navigationVisible
@@ -583,6 +593,7 @@ export const TranscriptViewport = forwardRef<
                 : {})}
             />
           </TurnCallsProvider>
+          {deletion && <MessageDeletionToolbar controls={deletion} />}
           {historical && !onCanScrollToBottomChange && (
             <Button
               className="absolute bottom-3 left-1/2 -translate-x-1/2"

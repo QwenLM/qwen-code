@@ -27,6 +27,32 @@ async function collect(
 }
 
 describe('EventBus', () => {
+  it('discards stale replay even when the compaction engine cannot reset', () => {
+    const old = {
+      id: 1,
+      v: 1 as const,
+      type: 'session_update',
+      data: { text: 'deleted' },
+    };
+    const bus = new EventBus(10, 10, {
+      ingest: () => undefined,
+      seedReplayEvents: () => {
+        throw new Error('reset failure');
+      },
+      snapshot: () => ({
+        compactedTurns: [old],
+        liveJournal: [],
+        lastEventId: 1,
+      }),
+      close: () => undefined,
+    });
+    bus.publish({ type: 'session_update', data: { text: 'deleted' } });
+    bus.resetReplay();
+    expect(bus.snapshotReplay()).toBeUndefined();
+    expect(bus.lastEventId).toBe(1);
+    bus.close();
+  });
+
   beforeEach(() => {
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
   });

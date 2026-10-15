@@ -440,7 +440,7 @@ export class EventBus {
   constructor(
     private readonly ringSize: number = DEFAULT_RING_SIZE,
     private readonly maxSubscribers: number = DEFAULT_MAX_SUBSCRIBERS,
-    private readonly compactionEngine?: CompactionEngine,
+    private compactionEngine?: CompactionEngine,
     opts: EventBusOptions = {},
   ) {
     this.maxQueuedBytes = normalizeMaxQueuedBytes(opts.maxQueuedBytes);
@@ -504,6 +504,16 @@ export class EventBus {
   /** Snapshot of the live subscriber count. */
   get subscriberCount(): number {
     return this.subs.size;
+  }
+
+  resetReplay(): void {
+    try {
+      this.compactionEngine?.seedReplayEvents([]);
+    } catch (error) {
+      this.markCompactionDegraded(error);
+      this.compactionEngine = undefined;
+    }
+    this.ring.length = 0;
   }
 
   seedReplayEvents(

@@ -11879,3 +11879,55 @@ describe('workspace runtime stop', () => {
     });
   });
 });
+
+describe('message group deletion', () => {
+  it('uses owner-aware REST, encodes session ids, and sends snapshot and client identity', async () => {
+    const { fetch, calls } = recordingFetch((req) =>
+      req.method === 'GET'
+        ? jsonResponse(200, {
+            snapshot: 'v1',
+            groups: [{ id: 'group', recordIds: ['group'] }],
+          })
+        : jsonResponse(200, {
+            deletedGroupIds: ['group'],
+            deletedPromptIds: ['prompt'],
+          }),
+    );
+    const transportFetch = vi.fn();
+    const transport: DaemonTransport = {
+      type: 'acp-http',
+      supportsReplay: true,
+      connected: true,
+      fetch: transportFetch,
+      async *subscribeEvents() {},
+      dispose() {},
+    };
+    const client = new DaemonClient({
+      baseUrl: 'http://daemon',
+      token: 'secret',
+      fetch,
+      transport,
+    });
+    await expect(client.getMessageGroups('with/slash')).resolves.toMatchObject({
+      snapshot: 'v1',
+    });
+    await expect(
+      client.deleteMessageGroups('with/slash', 'v1', ['group'], 'client-1'),
+    ).resolves.toEqual({
+      deletedGroupIds: ['group'],
+      deletedPromptIds: ['prompt'],
+    });
+    expect(transportFetch).not.toHaveBeenCalled();
+    expect(calls[0]!.url).toBe(
+      'http://daemon/session/with%2Fslash/message-groups',
+    );
+    expect(calls[1]!.url).toBe(
+      'http://daemon/session/with%2Fslash/messages/delete',
+    );
+    expect(calls[1]!.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[1]!.body!)).toEqual({
+      snapshot: 'v1',
+      groupIds: ['group'],
+    });
+  });
+});

@@ -742,6 +742,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'permission_mediation',
   'non_blocking_prompt',
   'session_language',
+  'session_message_deletion',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -3518,6 +3519,15 @@ describe('createServeApp', () => {
       // predicate must be false, otherwise the tag would fail the
       // "default-off" property baseline tags get for free.
       for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
+        if (feature === 'session_message_deletion') {
+          expect(predicate({ hostedHarness: true })).toBe(false);
+          expect(predicate({})).toBe(true);
+          expect(
+            getAdvertisedServeFeatures(undefined, { hostedHarness: true }),
+          ).not.toContain(feature);
+          expect(getAdvertisedServeFeatures()).toContain(feature);
+          continue;
+        }
         if (
           feature === 'hosted_harness_private_v1' ||
           feature === 'managed_session_journal_delta_v1'
