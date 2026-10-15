@@ -76,7 +76,7 @@ describe('main CI failure issue workflow', () => {
       "github.event.workflow_run.event == 'schedule' &&",
     );
     expect(workflow).toContain(
-      'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow_run.name)',
+      'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow.name)',
     );
     expect(workflow).not.toContain(
       "github.event.workflow_run.event == 'pull_request'",
@@ -92,6 +92,17 @@ describe('main CI failure issue workflow', () => {
     );
     expect(sdkJava.name).toBe('SDK Java');
     expect(yml.on.workflow_run.workflows).toContain(sdkJava.name);
+  });
+
+  it('uses the workflow name rather than the rendered Desktop run title', () => {
+    const desktop = parse(
+      readFileSync('.github/workflows/desktop-packaging-check.yml', 'utf8'),
+    );
+    expect(desktop['run-name']).toBeDefined();
+    expect(jobs.analyze.if).toContain('github.event.workflow.name');
+    expect(jobs.analyze.if).not.toContain('github.event.workflow_run.name');
+    const plan = jobs.analyze.steps.find((step) => step.id === 'plan');
+    expect(plan.env.WORKFLOW_NAME).toBe('${{ github.event.workflow.name }}');
   });
 
   it('creates an issue that the existing autofix worker can pick up', () => {
