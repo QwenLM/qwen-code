@@ -693,6 +693,7 @@ class ManagedExtensionRecordStoreTest {
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 sessionId);
         ExtensionRecordJournal journal = journal(sessionId);
+        openSessionStream(sessionId);
         String taskId = ManagedExtensionProjection.taskId(
                 ManagedExtensionProjection.recordKey(sessionId, "child_run",
                         "run-x"));
@@ -779,6 +780,7 @@ class ManagedExtensionRecordStoreTest {
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 sessionId);
         ExtensionRecordJournal journal = journal(sessionId);
+        openSessionStream(sessionId);
         String taskId = ManagedExtensionProjection.taskId(
                 ManagedExtensionProjection.recordKey(sessionId, "child_run",
                         "run-x"));
@@ -2012,6 +2014,13 @@ class ManagedExtensionRecordStoreTest {
                 .put("schemaVersion", resource.schemaVersion()).put("byteLength", resource.byteLength()).put("digest", resource.digest());
     }
 
+    private void openSessionStream(String sessionId) {
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id,"
+                + " session_id, stream_kind, stream_id, covered_sequence, updated_at)"
+                + " VALUES (?, ?, 'SESSION', X'', 0, 1)",
+                TENANT, sessionId);
+    }
+
     private ExtensionRecordJournal journal(String sessionId) {
         return new ExtensionRecordJournal(sessionStore, TENANT, WORKSPACE,
                 sessionId).open();
@@ -2122,6 +2131,7 @@ class ManagedExtensionRecordStoreTest {
                         + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 TENANT, sessionId);
         ExtensionRecordJournal journal = journal(sessionId);
+        openSessionStream(sessionId);
         JsonNode monitor = first.required("monitorRun");
         journal.commitMonitor("race-0", monitor,
                 first.required("occurredAt").longValue());
@@ -2170,6 +2180,7 @@ class ManagedExtensionRecordStoreTest {
                         + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 TENANT, sessionId);
         ExtensionRecordJournal journal = journal(sessionId);
+        openSessionStream(sessionId);
         JsonNode monitor = first.required("monitorRun");
         journal.commitMonitor("fresh-0", monitor,
                 first.required("occurredAt").longValue());
