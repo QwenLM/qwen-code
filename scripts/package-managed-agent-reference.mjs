@@ -144,7 +144,7 @@ async function writeChecksums(directory, files, destination) {
 async function verifyChecksums(directory, checksumFile) {
   const lines = (await readFile(checksumFile, 'utf8')).trim().split('\n');
   for (const line of lines) {
-    const found = line.match(/^([0-9a-f]{64})  (.+)$/);
+    const found = line.match(/^([0-9a-f]{64}) {2}(.+)$/);
     if (!found) throw new Error(`Invalid checksum line: ${line}`);
     const actual = await sha256(path.join(directory, found[2]));
     if (actual !== found[1]) {
