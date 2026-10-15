@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -78,15 +79,7 @@ public final class ManagedSessionStoreProcessFixtureMain {
                     required("D1_MYSQL_URL"), required("D1_MYSQL_USER"),
                     System.getenv().getOrDefault("D1_MYSQL_PASSWORD", "")));
             Map<String, Object> head = jdbc.queryForMap(
-                    "SELECT state, writer_generation, writer_id,"
-                            + " writer_lease_until,"
-                            + " CURRENT_TIMESTAMP(6) AS observed_now,"
-                            + " lease_token_hash = ? AS token_matches,"
-                            + " TIMESTAMPDIFF(MICROSECOND,"
-                            + " CURRENT_TIMESTAMP(6), writer_lease_until)"
-                            + " AS lease_remaining_micros FROM"
-                            + " ma_session_head WHERE"
-                            + " tenant_id = ? AND session_id = ?",
+                    "SELECT state, writer_generation, writer_id, writer_lease_until, " + ManagedSchemaTime.SQL_NOW + " AS observed_now, lease_token_hash = ? AS token_matches, (CAST(writer_lease_until AS SIGNED) - (" + ManagedSchemaTime.SQL_NOW + ")) * 1000 AS lease_remaining_micros FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                     sha256(TOKEN_A.getBytes(StandardCharsets.UTF_8)),
                     TENANT, SESSION);
             System.err.println("Writer diagnostic: " + head);

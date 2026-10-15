@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -64,14 +66,14 @@ public class ChannelInstanceStore {
                     row.getLong("account_generation"), row.getString("state"),
                     row.getString("actor_id"), row.getString("workspace_id"),
                     row.getString("cwd_relative"),
-                    row.getString("policy_json"), row.getLong("created_at"),
-                    row.getLong("updated_at"));
+                    row.getString("policy_json"), row.getLong("gmt_create"),
+                    row.getLong("gmt_modified"));
     private static final RowMapper<ChannelBinding> BINDING = (row, index) ->
             new ChannelBinding(row.getString("tenant_id"),
                     row.getString("channel_id"), row.getString("route_id"),
                     row.getString("session_id"), row.getString("scope_kind"),
                     row.getString("sender_id"), row.getString("chat_id"),
-                    row.getString("thread_id"), row.getLong("created_at"));
+                    row.getString("thread_id"), row.getLong("gmt_create"));
     private static final RowMapper<ChannelClaim> CLAIM = (row, index) ->
             new ChannelClaim(row.getString("tenant_id"),
                     row.getString("channel_id"), row.getString("delivery_id"),
@@ -93,7 +95,7 @@ public class ChannelInstanceStore {
                             + " channel_id, platform, account_id,"
                             + " account_generation, state, actor_id,"
                             + " workspace_id, cwd_relative, policy_json,"
-                            + " created_at, updated_at)"
+                            + " gmt_create, gmt_modified)"
                             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     candidate.tenantId(), candidate.channelId(),
                     candidate.platform(), candidate.accountId(),
@@ -136,7 +138,7 @@ public class ChannelInstanceStore {
                                 + " SET account_generation = ?, state = ?,"
                                 + " actor_id = ?, workspace_id = ?,"
                                 + " cwd_relative = ?, policy_json = ?,"
-                                + " updated_at = ?"
+                                + " gmt_modified = ?"
                                 + " WHERE tenant_id = ? AND channel_id = ?"
                                 + " AND account_generation <= ?"
                                 + " AND (SELECT COUNT(*) FROM"
@@ -158,7 +160,7 @@ public class ChannelInstanceStore {
                                 + " SET account_generation = ?, state = ?,"
                                 + " actor_id = ?, workspace_id = ?,"
                                 + " cwd_relative = ?, policy_json = ?,"
-                                + " updated_at = ?"
+                                + " gmt_modified = ?"
                                 + " WHERE tenant_id = ? AND channel_id = ?"
                                 + " AND account_generation <= ?",
                         candidate.accountGeneration(), candidate.state(),
@@ -179,7 +181,7 @@ public class ChannelInstanceStore {
     public Optional<ChannelInstance> setState(String tenantId,
             String channelId, String state) {
         jdbc.update("UPDATE ma_channel_instance SET state = ?,"
-                        + " updated_at = ? WHERE tenant_id = ?"
+                        + " gmt_modified = ? WHERE tenant_id = ?"
                         + " AND channel_id = ?",
                 state, databaseNow(), tenantId, channelId);
         return findInstance(tenantId, channelId);
@@ -187,7 +189,7 @@ public class ChannelInstanceStore {
 
     public Optional<ChannelInstance> findInstance(String tenantId,
             String channelId) {
-        return jdbc.query("SELECT * FROM ma_channel_instance"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.CHANNEL_INSTANCE.columns() + " FROM ma_channel_instance"
                         + " WHERE tenant_id = ? AND channel_id = ?",
                 INSTANCE, tenantId, channelId).stream().findFirst();
     }
@@ -199,7 +201,7 @@ public class ChannelInstanceStore {
         arguments.add(tenantId);
         String cursor = "";
         if (before != null) {
-            cursor = " AND (created_at < ? OR created_at = ?"
+            cursor = " AND (gmt_create < ? OR gmt_create = ?"
                     + " AND channel_id < ?)";
             arguments.add(before.createdAt());
             arguments.add(before.createdAt());
@@ -207,9 +209,9 @@ public class ChannelInstanceStore {
         }
         arguments.add(limit + 1);
         List<ChannelInstance> rows = jdbc.query(
-                "SELECT * FROM ma_channel_instance"
+                "SELECT " + ManagedSchemaProjection.CHANNEL_INSTANCE.columns() + " FROM ma_channel_instance"
                         + " WHERE tenant_id = ?" + cursor
-                        + " ORDER BY created_at DESC, channel_id DESC LIMIT ?",
+                        + " ORDER BY gmt_create DESC, channel_id DESC LIMIT ?",
                 INSTANCE, arguments.toArray());
         boolean hasMore = rows.size() > limit;
         return new InstancePage(hasMore ? rows.subList(0, limit) : rows,
@@ -218,7 +220,7 @@ public class ChannelInstanceStore {
 
     public Optional<ChannelBinding> findBinding(String tenantId,
             String channelId, String routeId) {
-        return jdbc.query("SELECT * FROM ma_channel_binding"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.CHANNEL_BINDING.columns() + " FROM ma_channel_binding"
                         + " WHERE tenant_id = ? AND channel_id = ?"
                         + " AND route_id = ?",
                 BINDING, tenantId, channelId, routeId).stream().findFirst();
@@ -229,7 +231,7 @@ public class ChannelInstanceStore {
         jdbc.update("INSERT IGNORE INTO ma_channel_binding"
                         + " (tenant_id, channel_id, route_id, session_id,"
                         + " scope_kind, sender_id, chat_id, thread_id,"
-                        + " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        + " gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 candidate.tenantId(), candidate.channelId(),
                 candidate.routeId(), candidate.sessionId(),
                 candidate.scopeKind(), candidate.senderId(),
@@ -246,7 +248,7 @@ public class ChannelInstanceStore {
      */
     public List<String> listSessionsWithPendingDeliveries(String tenantId,
             String channelId, int limit) {
-        return jdbc.query("SELECT r.session_id, MIN(r.created_at) AS"
+        return jdbc.query("SELECT r.session_id, MIN(r.gmt_create) AS"
                         + " oldest_due"
                         + " FROM ma_session_record r"
                         + " JOIN ma_channel_binding b"
@@ -292,7 +294,7 @@ public class ChannelInstanceStore {
                         + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
                         + " AND domain = 'channel_delivery'"
                         + " AND delivery_state IN ('planned', 'partial')"
-                        + " ORDER BY created_at, record_key LIMIT ?",
+                        + " ORDER BY gmt_create, record_key LIMIT ?",
                 (row, index) -> new PendingDelivery(row.getString("session_id"),
                         row.getString("record_id"), row.getLong("revision"),
                         row.getString("delivery_state"),
@@ -318,7 +320,7 @@ public class ChannelInstanceStore {
             String deliveryId, String sessionId) {
         long now = databaseNow();
         jdbc.update("UPDATE ma_delivery SET source_session_id = ?, claimed_at = ?,"
-                        + " claim_generation = claim_generation + 1, updated_at = ?"
+                        + " claim_generation = claim_generation + 1, gmt_modified = ?"
                         + " WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
                         + " AND channel_id = ? AND delivery_id = ? AND claimed_at IS NULL",
                 sessionId, now, now,
@@ -337,7 +339,7 @@ public class ChannelInstanceStore {
             String deliveryId) {
         long now = databaseNow();
         jdbc.update("UPDATE ma_delivery SET claimed_at = ?, claim_generation = claim_generation + 1,"
-                        + " reconcile_operation_id = NULL, updated_at = ? WHERE delivery_key = ? AND delivery_kind = 'CHANNEL'"
+                        + " reconcile_operation_id = NULL, gmt_modified = ? WHERE delivery_key = ? AND delivery_kind = 'CHANNEL'"
                         + " AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND claimed_at IS NOT NULL",
                 now, now, JdbcChannelDeliveryRepository.deliveryKey(tenantId, channelId, deliveryId),
                 tenantId, channelId, deliveryId);
@@ -361,10 +363,7 @@ public class ChannelInstanceStore {
     }
 
     public boolean reserveReconciliation(ChannelClaim claim) {
-        return jdbc.update("UPDATE ma_delivery SET reconcile_operation_id = ? WHERE delivery_key = ?"
-                        + " AND delivery_kind = 'CHANNEL' AND tenant_id = ? AND channel_id = ? AND delivery_id = ?"
-                        + " AND source_session_id = ? AND claimed_at = ? AND claim_generation = ?"
-                        + " AND transport_state IN ('planned','sending','partial')",
+        return jdbc.update("UPDATE ma_delivery SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", reconcile_operation_id = ? WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND source_session_id = ? AND claimed_at = ? AND claim_generation = ? AND transport_state IN ('planned','sending','partial')",
                 reconciliationOperationId(claim), JdbcChannelDeliveryRepository.deliveryKey(claim.tenantId(), claim.channelId(), claim.deliveryId()),
                 claim.tenantId(), claim.channelId(), claim.deliveryId(), claim.sessionId(), claim.claimedAt(), claim.claimGeneration()) == 1;
     }

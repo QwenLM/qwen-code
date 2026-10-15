@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
@@ -73,7 +74,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
 
     private Map<String, Object> check(Map<String, Object> session, String phase) throws Exception {
         String id = session.get("sessionId").toString();
-        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", id);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", id);
         assertThat(rows).hasSize(1);
         var execution = rows.getFirst();
         String binding = execution.get("binding_id").toString();
