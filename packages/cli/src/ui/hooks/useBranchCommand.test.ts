@@ -10,6 +10,7 @@ import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
 import { makeSwapSlotClient } from '../../test-utils/mock-swap-slot-client.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 
 const mockSettings = {
   merged: { ui: { history: { collapseOnResume: false } } },
@@ -190,6 +191,38 @@ describe('useBranchCommand', () => {
     expect(blockedItem.text).toContain('running background tasks');
     expect(blockedItem.text).toContain('[bg_ab12cd34]');
   });
+
+  it.each([false, true])(
+    'synchronizes Mods only after a committed branch (failed: %s)',
+    async (failed) => {
+      const syncSession = vi.fn().mockResolvedValue(undefined);
+      const binding = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          syncSession,
+        } as unknown as interactiveMods.InteractiveModSession);
+      if (failed)
+        getGoalRuntimeReady.mockRejectedValueOnce(new Error('invalid branch'));
+      try {
+        const { result } = renderHook(() => useBranchCommand(makeOptions()));
+        await act(async () => {
+          await result.current.handleBranch('mod-lifecycle');
+        });
+        if (failed) {
+          expect(syncSession).not.toHaveBeenCalled();
+          expect(startNewSessionUI).not.toHaveBeenCalled();
+        } else {
+          expect(binding).toHaveBeenCalledWith(config);
+          expect(syncSession).toHaveBeenCalledExactlyOnceWith('resume');
+          expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
+            syncSession.mock.invocationCallOrder[0],
+          );
+        }
+      } finally {
+        binding.mockRestore();
+      }
+    },
+  );
 
   it('seeds the prompt counter past the forked transcript claims', async () => {
     // The fork's records are remapped to the new session id by forkSession;

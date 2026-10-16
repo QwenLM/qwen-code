@@ -6,7 +6,7 @@
 
 ## 问题
 
-仓库已经能够构建 `qwen-managed-agent-server` 和 `qwen-managed-runtime-broker`，但受保护的 Java 发布流程只发布 `qwencode-sdk`。因此 Hosted 验收仍依赖临时源码构建。运维人员无法下载一个经过评审的 server 产物、核验其源码 revision、判断兼容的 Harness 与数据库 schema，也没有明确的升级路径。
+仓库已经能够构建包含 Runtime Broker 源码的 `qwen-managed-agent-server`，但受保护的 Java SDK 发布流程只发布 `qwencode-sdk`。因此 Hosted 验收需要应用分发产物。运维人员必须能够下载经过评审的 server 产物、核验其源码 revision、判断兼容的 Harness 与数据库 schema，并遵循明确的升级路径。
 
 ## 目标
 
@@ -14,7 +14,7 @@
 - 将每个分发版本绑定到一个精确源码 revision 和明确的兼容性元数据。
 - 让 pull request CI 与不发布的手工 dry run 构建同一产物。
 - 为单 Java 控制面、单可信 Linux 主机的首版范围提供完整部署和升级步骤。
-- 让嵌入式 Broker 作为带版本的组件可见，但不把它变成独立服务。
+- 将嵌入式 Broker 包含在带版本的 Server 组件中。
 
 ## 非目标
 
@@ -32,7 +32,6 @@ bin/qwen-managed-agent-server
 bin/qwen-managed-agent-operator-recovery
 lib/qwen-managed-agent-server-<component-version>.jar
 lib/qwen-managed-agent-server-<component-version>-operator-recovery.jar
-lib/qwen-managed-runtime-broker-<component-version>.jar
 docs/deployment.md
 docs/deployment.zh-CN.md
 docs/server-reference.md
@@ -43,7 +42,7 @@ SHA256SUMS
 LICENSE
 ```
 
-启动脚本只使用 bundle 内的相对 JAR 路径，并把参数原样传给 Java。Broker JAR 用于来源核验与检查；server 继续嵌入 Broker，不引入独立 Broker 进程。
+启动脚本只使用 bundle 内的相对 JAR 路径，并把参数原样传给 Java。Server JAR 包含 Broker 类和资源，不另行提供 Broker 产物或进程。
 
 发布页同时提供独立的 `manifest.json` 副本与 `SHA256SUMS.txt`。外层校验和覆盖压缩包和独立 manifest；bundle 内的校验和覆盖全部载荷文件以及 `manifest.json`。
 
@@ -63,7 +62,7 @@ LICENSE
 
 ## 发布流程
 
-修改分发输入的 pull request 会运行打包单测、构建三个 Java 模块、组装真实 bundle、核验校验和，并上传为短期 Actions artifact。
+修改分发输入的 pull request 会运行打包单测、构建 Java SDK 和合并后的 Server 模块、组装真实 bundle、核验校验和，并上传为短期 Actions artifact。
 
 手工触发接收 `0.1.0-alpha.1` 一类实验性 SemVer 和 `dry_run` 参数。Dry run 执行相同构建与校验，但不修改 GitHub。非 dry run 只允许从 `main` 执行：先创建不可见的 draft，上传并核对精确资产集合，再在 manifest revision 上原子创建 tag，最后才发布 prerelease。已有 tag 或 release、并发 tag 竞争、上传不完整时都失败关闭。产物永不原地覆盖，不完整的 draft 不会公开。
 
@@ -87,7 +86,7 @@ LICENSE
 ## 验证计划
 
 1. 使用合成组件产物运行打包单测并检查解压内容。
-2. 构建真实 SDK、Broker 和 server JAR，创建 bundle 并核验内外两层校验和。
+2. 构建真实 SDK 和 server JAR，创建 bundle 并核验内外两层校验和。
 3. 解压精确压缩包，使用匹配 Hosted Harness 和 MySQL 启动，检查健康状态并完成一个无工具 Session/Turn。
 4. 使用同一解压 bundle 重启部署，确认原 Session 仍可读取且后续 Turn 成功。
 5. 审查完整分支 diff，执行 ponytail 简化检查，并校验 workflow 语法与受影响的 Java 构建门禁。

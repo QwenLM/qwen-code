@@ -20,6 +20,8 @@ import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
 import { DownloadIcon } from 'lucide-react';
 import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
   ChevronRightIcon,
   CirclePlusIcon,
   Code2Icon,
@@ -72,6 +74,9 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import {
@@ -413,6 +418,7 @@ export interface SideTaskListItem {
   title: string;
   workspaceCwd?: string;
   updatedAt?: string;
+  archivable?: boolean;
 }
 
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
@@ -465,9 +471,17 @@ interface ArtifactPanelProps {
   items?: readonly WebShellRightPanelItem[];
   sideTaskAvailable?: boolean;
   sideTasks?: readonly SideTaskListItem[];
+  archivedSideTasks?: readonly SideTaskListItem[];
   sideTasksLoading?: boolean;
   onCreateSideTask?: () => void;
   onOpenSideTask?: (sideTask: SideTaskListItem) => void;
+  onArchiveSideTasks?: (
+    sideTasks: readonly SideTaskListItem[],
+  ) => void | Promise<void>;
+  onUnarchiveSideTasks?: (
+    sideTasks: readonly SideTaskListItem[],
+  ) => void | Promise<void>;
+  onSideTaskMenuOpen?: () => void;
   onCreateSideTaskSession?: (
     tabId: string,
     parentSessionId: string,
@@ -585,7 +599,11 @@ function WorkspaceFilesPane({
   return (
     <ErrorBoundary label="workspace file browser" fallback={failure}>
       <Suspense
-        fallback={<div className={styles.empty}>{t('common.loading')}</div>}
+        fallback={
+          <div className={`${styles.empty} text-center`} role="status">
+            {t('common.loading')}
+          </div>
+        }
       >
         <WorkspaceFileBrowser
           key={`${tab.workspaceCwd}:${tab.workspaceId ?? ''}`}
@@ -654,9 +672,13 @@ export function ArtifactPanel({
   items = DEFAULT_RIGHT_PANEL_ITEMS,
   sideTaskAvailable = false,
   sideTasks = [],
+  archivedSideTasks = [],
   sideTasksLoading = false,
   onCreateSideTask,
   onOpenSideTask,
+  onArchiveSideTasks,
+  onUnarchiveSideTasks,
+  onSideTaskMenuOpen,
   onCreateSideTaskSession,
   onSideTaskCreated,
   onSideTaskTitleChange,
@@ -706,6 +728,9 @@ export function ArtifactPanel({
       sideTaskMenuCloseTimerRef.current = null;
     }, 120);
   }, []);
+  useEffect(() => {
+    if (sideTaskMenuOpen) onSideTaskMenuOpen?.();
+  }, [onSideTaskMenuOpen, sideTaskMenuOpen]);
   useEffect(
     () => () => {
       if (sideTaskMenuCloseTimerRef.current) {
@@ -743,6 +768,9 @@ export function ArtifactPanel({
     items.includes('sideTask') &&
     sideTaskAvailable &&
     Boolean(onCreateSideTask);
+  const hasArchivableSideTasks = sideTasks.some(
+    (sideTask) => sideTask.archivable === true,
+  );
   const showTerminalMenuItem = Boolean(onOpenTerminal);
   const showWebPreviewMenuItem =
     items.includes('webPreview') && Boolean(onOpenWebPreview);
@@ -1204,7 +1232,7 @@ export function ArtifactPanel({
             {items.includes('sideTask') &&
               sideTaskAvailable &&
               onCreateSideTask &&
-              (sideTasks.length === 0 ? (
+              (sideTasks.length === 0 && archivedSideTasks.length === 0 ? (
                 <button
                   type="button"
                   className={styles.emptyAction}
@@ -1266,22 +1294,115 @@ export function ArtifactPanel({
                     onMouseEnter={openSideTaskMenu}
                     onMouseLeave={scheduleSideTaskMenuClose}
                   >
-                    {sideTasks.map((sideTask) => (
-                      <DropdownMenuItem
-                        key={sideTask.sessionId}
-                        onSelect={() => onOpenSideTask?.(sideTask)}
-                      >
-                        <span className={styles.sideTaskListTitle}>
-                          {sideTask.title}
-                        </span>
-                        {sideTask.updatedAt && (
-                          <span className={styles.sideTaskListTime}>
-                            {formatRelativeTime(sideTask.updatedAt, t)}
+                    {sideTasks.map((sideTask) => {
+                      const content = (
+                        <>
+                          <span className={styles.sideTaskListTitle}>
+                            {sideTask.title}
                           </span>
-                        )}
+                          {sideTask.updatedAt && (
+                            <span className={styles.sideTaskListTime}>
+                              {formatRelativeTime(sideTask.updatedAt, t)}
+                            </span>
+                          )}
+                        </>
+                      );
+                      if (!onArchiveSideTasks) {
+                        return (
+                          <DropdownMenuItem
+                            key={sideTask.sessionId}
+                            onSelect={() => onOpenSideTask?.(sideTask)}
+                          >
+                            {content}
+                          </DropdownMenuItem>
+                        );
+                      }
+                      return (
+                        <DropdownMenuSub key={sideTask.sessionId}>
+                          <DropdownMenuSubTrigger>
+                            {content}
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent
+                            onMouseEnter={openSideTaskMenu}
+                            onMouseLeave={scheduleSideTaskMenuClose}
+                          >
+                            <DropdownMenuItem
+                              onSelect={() => onOpenSideTask?.(sideTask)}
+                            >
+                              <EyeIcon />
+                              {t('common.open')}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={sideTask.archivable !== true}
+                              title={
+                                sideTask.archivable === true
+                                  ? undefined
+                                  : t('sideTask.archiveUnavailable')
+                              }
+                              onSelect={() => {
+                                void onArchiveSideTasks([sideTask]);
+                              }}
+                            >
+                              <ArchiveIcon />
+                              {t('sidebar.archive')}
+                            </DropdownMenuItem>
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                      );
+                    })}
+                    {onArchiveSideTasks && sideTasks.length > 0 && (
+                      <DropdownMenuSeparator />
+                    )}
+                    {onArchiveSideTasks && sideTasks.length > 0 && (
+                      <DropdownMenuItem
+                        disabled={!hasArchivableSideTasks}
+                        onSelect={() => {
+                          void onArchiveSideTasks(sideTasks);
+                        }}
+                      >
+                        <ArchiveIcon />
+                        <span className={styles.sideTaskListTitle}>
+                          {t('sideTask.archiveCompleted')}
+                        </span>
                       </DropdownMenuItem>
-                    ))}
-                    <DropdownMenuSeparator />
+                    )}
+                    {onUnarchiveSideTasks && archivedSideTasks.length > 0 && (
+                      <>
+                        {sideTasks.length > 0 && <DropdownMenuSeparator />}
+                        <DropdownMenuSub>
+                          <DropdownMenuSubTrigger>
+                            <ArchiveRestoreIcon />
+                            <span className={styles.sideTaskListTitle}>
+                              {t('sidebar.archivedTitle')} (
+                              {archivedSideTasks.length})
+                            </span>
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent
+                            className="max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto"
+                            onMouseEnter={openSideTaskMenu}
+                            onMouseLeave={scheduleSideTaskMenuClose}
+                          >
+                            {archivedSideTasks.map((sideTask) => (
+                              <DropdownMenuItem
+                                key={sideTask.sessionId}
+                                onSelect={() => {
+                                  void onUnarchiveSideTasks([sideTask]);
+                                }}
+                              >
+                                <ArchiveRestoreIcon />
+                                <span className={styles.sideTaskListTitle}>
+                                  {sideTask.title}
+                                </span>
+                                <span className={styles.sideTaskListTime}>
+                                  {t('sidebar.unarchive')}
+                                </span>
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                      </>
+                    )}
+                    {sideTasks.length > 0 && <DropdownMenuSeparator />}
                     <DropdownMenuItem onSelect={onCreateSideTask}>
                       <CirclePlusIcon
                         className={styles.sideTaskNewIcon}
