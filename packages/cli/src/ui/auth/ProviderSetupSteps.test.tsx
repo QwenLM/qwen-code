@@ -7,8 +7,14 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { AuthType, customProvider } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  customProvider,
+  qwencloudStandardProvider,
+  qwencloudTokenPlanProvider,
+} from '@qwen-code/qwen-code-core';
 import type { ModelSpec } from '@qwen-code/qwen-code-core';
+import { setLanguageAsync } from '../../i18n/index.js';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -841,6 +847,48 @@ describe('ProviderSetupSteps', () => {
     });
     unmount();
   });
+
+  it.each([
+    {
+      provider: qwencloudStandardProvider,
+      key: 'sk-sp-dummy',
+      errorText: '无效的 API Key。按量付费 Key',
+    },
+    {
+      provider: qwencloudTokenPlanProvider,
+      key: 'sk-dummy',
+      errorText: '无效的 API Key。Token Plan API Key',
+    },
+  ])(
+    'translates $provider.id key validation errors into Chinese',
+    async ({ provider, key, errorText }) => {
+      let flow: ProviderSetupFlow | undefined;
+      const ApiKeyFlowHarness = () => {
+        flow = useProviderSetupFlow(async () => {});
+        return <ProviderSetupSteps flow={flow} />;
+      };
+      const { lastFrame, unmount } = renderWithProviders(<ApiKeyFlowHarness />);
+
+      try {
+        await setLanguageAsync('zh');
+        await act(async () => {
+          flow?.start(provider);
+        });
+        await act(async () => {
+          flow?.selectBaseUrl(flow.state.baseUrl);
+        });
+        await act(async () => {
+          expect(flow?.submitApiKey(key)).toBe(false);
+        });
+
+        expect(flow?.state.step).toBe('apiKey');
+        expect(lastFrame()).toContain(errorText);
+      } finally {
+        unmount();
+        await setLanguageAsync('en');
+      }
+    },
+  );
 
   it('clears the model-ids error on edit after an empty discovery submit', async () => {
     discoverProviderModelsMock.mockResolvedValue([{ id: 'served-model' }]);

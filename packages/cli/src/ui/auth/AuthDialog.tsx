@@ -123,11 +123,11 @@ function getStepLabel(step: string | null, p: ProviderConfig): string {
 // View titles
 // ---------------------------------------------------------------------------
 
-const VIEW_TITLES: Record<string, string> = {
-  main: t('Connect a Provider'),
-  'qwencloud-select': t('QwenCloud · Access Method'),
-  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
-  'thirdparty-select': t('Third-party Providers · Provider'),
+const VIEW_TITLES: Record<string, () => string> = {
+  main: () => t('Connect a Provider'),
+  'qwencloud-select': () => t('QwenCloud · Access Method'),
+  'alibaba-select': () => t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': () => t('Third-party Providers · Provider'),
 };
 
 // ---------------------------------------------------------------------------
@@ -337,7 +337,7 @@ export function AuthDialog(): React.JSX.Element {
 
   const viewTitle = useMemo(() => {
     if (viewLevel !== 'provider-setup') {
-      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
+      return (VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'])();
     }
     const p = setupFlow.state.provider;
     if (!p) return t('Provider Setup');

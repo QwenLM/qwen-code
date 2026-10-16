@@ -99,7 +99,7 @@ describe('advanced form replacement', () => {
 });
 
 describe('buildAuthProviderCatalog', () => {
-  it('lists QwenCloud first with both of its access methods', () => {
+  it('lists QwenCloud first and pins every group membership', () => {
     const catalog = buildAuthProviderCatalog('/tmp/workspace');
     expect(catalog.workspaceCwd).toBe('/tmp/workspace');
     expect(catalog.groups[0]).toMatchObject({
@@ -113,5 +113,27 @@ describe('buildAuthProviderCatalog', () => {
       'third-party',
       'custom',
     ]);
+    expect(catalog.groups[1]).toMatchObject({
+      id: 'alibaba',
+      providerIds: ['coding-plan', 'token-plan', 'alibabaStandard'],
+    });
+    expect(catalog.groups[2]).toMatchObject({
+      id: 'third-party',
+      providerIds: [
+        'deepseek',
+        'grok',
+        'minimax',
+        'zai',
+        'moonshot',
+        'idealab',
+        'modelscope',
+        'openrouter',
+        'requesty',
+      ],
+    });
+    expect(catalog.groups[3]).toMatchObject({
+      id: 'custom',
+      providerIds: ['custom-openai-compatible'],
+    });
   });
 });

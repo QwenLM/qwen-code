@@ -174,11 +174,11 @@ const PROTOCOL_ITEMS: RadioItem[] = [
   },
 ];
 
-const VIEW_TITLES: Record<string, string> = {
-  main: t('Connect a Provider'),
-  'qwencloud-select': t('QwenCloud · Access Method'),
-  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
-  'thirdparty-select': t('Third-party Providers · Provider'),
+const VIEW_TITLES: Record<string, () => string> = {
+  main: () => t('Connect a Provider'),
+  'qwencloud-select': () => t('QwenCloud · Access Method'),
+  'alibaba-select': () => t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': () => t('Third-party Providers · Provider'),
 };
 
 function providerToItem(config: ProviderConfig): RadioItem {
@@ -1514,7 +1514,7 @@ function AuthDialogFlow({
   const contentWidth = dialogContentWidth(width);
   const viewTitle = useMemo(() => {
     if (viewLevel !== 'provider-setup') {
-      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
+      return (VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'])();
     }
     const p = setupFlow.state.provider;
     if (!p) return t('Provider Setup');

@@ -50,7 +50,7 @@ export const QWENCLOUD_MODELS: ModelSpec[] = [
         disableField: 'enable_thinking',
       },
     },
-    modalities: { image: true },
+    modalities: { image: true, video: true },
   },
   {
     id: 'qwen3.8-flash',

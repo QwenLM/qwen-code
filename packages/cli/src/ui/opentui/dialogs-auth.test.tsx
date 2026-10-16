@@ -123,6 +123,7 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import * as coreRuntime from '@qwen-code/qwen-code-core';
 import { ICON } from '../constants.js';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -661,6 +662,30 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     } finally {
       build.mockRestore();
     }
+  });
+
+  it('renders QwenCloud flow title in Chinese when locale is zh (T1)', async () => {
+    await setLanguageAsync('zh');
+    try {
+      renderDialog();
+      await press('return'); // main: QwenCloud → qwencloud-select
+      expect(screen.getByText('千问AI平台 · 接入方式')).toBeTruthy();
+      await press('return'); // Token Plan → provider-setup
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain('千问AI平台');
+      });
+      expect(document.body.textContent).not.toContain('QwenCloud · Step');
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
+  it('shows Token Plan and Standard API Key in QwenCloud sub-menu but not Coding Plan (T3+T4)', async () => {
+    renderDialog();
+    await press('return'); // main: QwenCloud → qwencloud-select
+    expect(screen.getByText('Token Plan')).toBeTruthy();
+    expect(screen.getByText('Standard API Key')).toBeTruthy();
+    expect(screen.queryByText('Coding Plan')).toBeNull();
   });
 });
 

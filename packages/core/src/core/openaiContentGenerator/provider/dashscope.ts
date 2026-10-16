@@ -198,6 +198,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * Covers the official regional hosts (DASHSCOPE_REGIONAL_HOSTS),
    * Model Studio endpoints under *.maas.aliyuncs.com (workspace-dedicated
    * <WorkspaceId>.<region>, trial.<region> and token-plan.<region> hosts),
+   * QwenCloud MaaS hosts (QWENCLOUD_MAAS_HOSTS),
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
    * Alibaba Cloud API Gateway domains (*.alicloudapi.com),
    * and proxy matches.

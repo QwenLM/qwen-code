@@ -325,6 +325,10 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'should return true for QwenCloud Token Plan URL',
         'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
       ],
+      [
+        'should return true for QwenCloud Global Token Plan URL',
+        'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
+      ],
     ])('%s', (_title, baseUrl) => {
       expect(isDashScope(baseUrl)).toBe(true);
     });
@@ -386,6 +390,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://notmaas.qianwenaiapi.com/v1',
         'https://maas.qianwenaiapi.com.evil.com/v1',
         'https://maas.qwencloudapi.com.evil.com/v1',
+        'https://notmaas.qwencloudapi.com/v1',
+        'https://token-plan.maas.qwencloudapi.com.evil.com/v1',
       ].forEach((baseUrl) => {
         expect(isDashScope(baseUrl)).toBe(false);
       });
