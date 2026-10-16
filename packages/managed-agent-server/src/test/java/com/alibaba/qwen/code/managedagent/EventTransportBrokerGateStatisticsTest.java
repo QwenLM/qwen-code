@@ -28,6 +28,8 @@ class EventTransportBrokerGateStatisticsTest {
             EventTransportBrokerGate.ROUNDS - EventTransportBrokerGate.ROUNDS / 4;
     private static final long BUDGET =
             EventTransportBrokerGate.GROWTH_BUDGET_NANOS;
+    private static final long STALL_BUDGET =
+            EventTransportBrokerGate.GROWTH_STALL_BUDGET_NANOS;
     // The recorded #14197 incident: hubDeliveryP95Micros {on: 2040, off: 72}.
     private static final long INCIDENT_ON_NANOS = 2_040_740;
     private static final long INCIDENT_OFF_NANOS = 72_144;
@@ -42,6 +44,7 @@ class EventTransportBrokerGateStatisticsTest {
         assertThat(SAMPLES).isEqualTo(225);
         assertThat(STALLS).isEqualTo(12);
         assertThat(BUDGET).isEqualTo(1_000_000);
+        assertThat(STALL_BUDGET).isEqualTo(20_000_000);
     }
 
     @Test
@@ -122,6 +125,11 @@ class EventTransportBrokerGateStatisticsTest {
                 .isTrue();
         assertThat(EventTransportBrokerGate.roundsOverBudget(growth, BUDGET))
                 .isEqualTo(STALLS);
+        assertThat(EventTransportBrokerGate.roundsOverBudget(growth,
+                STALL_BUDGET))
+                .as("the recorded incident's stalls stay under the stall"
+                        + " budget")
+                .isZero();
     }
 
     @Test
@@ -144,6 +152,30 @@ class EventTransportBrokerGateStatisticsTest {
                 .isEqualTo(SAMPLES / 10 + 1);
         assertThat(EventTransportBrokerGate.growthWithinBudget(growth, BUDGET))
                 .as("a recurring minority breaches the frequency bound")
+                .isFalse();
+    }
+
+    @Test
+    void aRecurringMinorityBeyondTheStallBudgetGoesRed() {
+        // Exactly at the frequency cap, so the count bound passes, and the
+        // median stays on the floor: only the stall budget can go red.
+        List<Long> on = new ArrayList<>(Collections.nCopies(SAMPLES, 20_000L));
+        List<Long> off = Collections.nCopies(SAMPLES, 20_000L);
+        for (int index = 0; index < SAMPLES / 10; index++) {
+            on.set(index, on.get(index) + 500_000_000L);
+        }
+
+        List<Long> growth = EventTransportBrokerGate.deltas(on, off, 0);
+
+        assertThat(EventTransportBrokerGate.median(growth))
+                .as("the median alone still passes")
+                .isLessThanOrEqualTo(BUDGET);
+        assertThat(EventTransportBrokerGate.roundsOverBudget(growth, BUDGET))
+                .as("exactly at the frequency cap")
+                .isEqualTo(SAMPLES / 10);
+        assertThat(EventTransportBrokerGate.growthWithinBudget(growth, BUDGET))
+                .as("a half-second growth in a tenth of the rounds breaches"
+                        + " the stall budget")
                 .isFalse();
     }
 
@@ -178,7 +210,8 @@ class EventTransportBrokerGateStatisticsTest {
                 .containsExactly("p50", "p95", "p99", "max");
         assertThat(EventTransportBrokerGate.growthMicros(
                 Collections.nCopies(SAMPLES, 20_000L), BUDGET).keySet())
-                .containsExactly("median", "p95", "roundsOverBudget", "budget");
+                .containsExactly("median", "p95", "max", "roundsOverBudget",
+                        "budget");
         assertThat(EventTransportBrokerGate.metricMicros(Map.of("on", 1L),
                 Map.of("off", 2L), Map.of("growth", 3L)).keySet())
                 .containsExactly("on", "off", "growth");
@@ -215,6 +248,7 @@ class EventTransportBrokerGateStatisticsTest {
                 EventTransportBrokerGate.growthMicros(ramp, BUDGET);
         assertThat(growth.get("median")).isEqualTo(112L);
         assertThat(growth.get("p95")).isEqualTo(213L);
+        assertThat(growth.get("max")).isEqualTo(224L);
         assertThat(growth.get("roundsOverBudget")).isEqualTo(0L);
         assertThat(growth.get("budget")).isEqualTo(BUDGET / 1000);
     }

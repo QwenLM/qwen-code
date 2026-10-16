@@ -108,6 +108,8 @@ class EventTransportBrokerGate {
     private static final String WRITER = "gate-writer";
     static final int ROUNDS = 300;
     static final long GROWTH_BUDGET_NANOS = Duration.ofMillis(1).toNanos();
+    // The journal hand-off's own bound: a round past it is no runner stall.
+    static final long GROWTH_STALL_BUDGET_NANOS = Duration.ofMillis(20).toNanos();
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
     private static final Duration DELIVERY = Duration.ofSeconds(60);
@@ -427,11 +429,13 @@ class EventTransportBrokerGate {
      * size, but it moves one round, not the median; a cost the flag adds to
      * every round shifts the median in full, and a recurring minority that
      * escapes the median is bounded separately: no more than a tenth of the
-     * retained rounds may exceed the budget. The budget is one millisecond
-     * in every environment — the median is the scheduler-noise mitigation,
-     * so CI takes no widened allowance. The journal wire's after-commit
-     * hand-off is measured alongside. The figures are written to target/ for
-     * the record.
+     * retained rounds may exceed the budget, and no round may exceed the
+     * stall budget — a stalled minority is scheduler noise, but one round
+     * tens of milliseconds over budget is a regression however rare. The
+     * budget is one millisecond in every environment — the median is the
+     * scheduler-noise mitigation, so CI takes no widened allowance. The
+     * journal wire's after-commit hand-off is measured alongside. The
+     * figures are written to target/ for the record.
      */
     @Test
     void thePostCommitPathDoesNotRegress() throws Exception {
@@ -487,6 +491,8 @@ class EventTransportBrokerGate {
         long offDeliveryP95 = p95(offDelivery.subList(ROUNDS / 4, ROUNDS));
         long publishGrowthP95 = p95(publishGrowth);
         long deliveryGrowthP95 = p95(deliveryGrowth);
+        long publishGrowthMax = Collections.max(publishGrowth);
+        long deliveryGrowthMax = Collections.max(deliveryGrowth);
         long journalP95 = p95(journalHandOff.subList(ROUNDS / 4, ROUNDS));
         Map<String, Object> record = new LinkedHashMap<>();
         record.put("rounds", ROUNDS);
@@ -507,15 +513,16 @@ class EventTransportBrokerGate {
         assertThat(growthWithinBudget(publishGrowth, GROWTH_BUDGET_NANOS))
                 .as("publish growth within budget (on p95 %,d ns,"
                         + " off p95 %,d ns, growth p95 %,d ns,"
-                        + " rounds over budget %d)",
-                        onP95, offP95, publishGrowthP95,
+                        + " growth max %,d ns, rounds over budget %d)",
+                        onP95, offP95, publishGrowthP95, publishGrowthMax,
                         roundsOverBudget(publishGrowth, GROWTH_BUDGET_NANOS))
                 .isTrue();
         assertThat(growthWithinBudget(deliveryGrowth, GROWTH_BUDGET_NANOS))
                 .as("hub delivery growth within budget (on p95 %,d ns,"
                         + " off p95 %,d ns, growth p95 %,d ns,"
-                        + " rounds over budget %d)",
+                        + " growth max %,d ns, rounds over budget %d)",
                         onDeliveryP95, offDeliveryP95, deliveryGrowthP95,
+                        deliveryGrowthMax,
                         roundsOverBudget(deliveryGrowth, GROWTH_BUDGET_NANOS))
                 .isTrue();
         assertThat(journalP95).as("journal hand-off p95 (ns)")
@@ -814,7 +821,7 @@ class EventTransportBrokerGate {
     }
 
     /**
-     * The growth's median and p95, in microseconds, the count of its
+     * The growth's median, p95 and max, in microseconds, the count of its
      * rounds over the budget, and the budget itself, so the record states
      * the threshold the count was taken against.
      */
@@ -823,6 +830,7 @@ class EventTransportBrokerGate {
         Map<String, Long> stats = new LinkedHashMap<>();
         stats.put("median", median(growth) / 1000);
         stats.put("p95", p95(growth) / 1000);
+        stats.put("max", Collections.max(growth) / 1000);
         stats.put("roundsOverBudget", roundsOverBudget(growth, budgetNanos));
         stats.put("budget", budgetNanos / 1000);
         return stats;
@@ -843,14 +851,16 @@ class EventTransportBrokerGate {
 
     /**
      * The post-commit gate's verdict: the growth's median within the
-     * budget, and no more than a tenth of the retained rounds over it. The
-     * median absorbs a stalled minority of rounds; the frequency bound
-     * keeps a recurring minority regression below the median's notice
-     * visible.
+     * budget, no more than a tenth of the retained rounds over it, and no
+     * round beyond the stall budget. The median absorbs a stalled minority
+     * of rounds; the frequency bound keeps a recurring minority regression
+     * below the median's notice visible; the stall budget refuses a round
+     * too large for a descheduling stall to explain, however rare it is.
      */
     static boolean growthWithinBudget(List<Long> growth, long budgetNanos) {
         return median(growth) <= budgetNanos
-                && roundsOverBudget(growth, budgetNanos) <= growth.size() / 10;
+                && roundsOverBudget(growth, budgetNanos) <= growth.size() / 10
+                && roundsOverBudget(growth, GROWTH_STALL_BUDGET_NANOS) == 0;
     }
 
     /** Retained rounds whose growth exceeded the budget. */
