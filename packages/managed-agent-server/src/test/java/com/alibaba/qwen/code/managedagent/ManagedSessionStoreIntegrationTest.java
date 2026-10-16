@@ -14,6 +14,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
@@ -25,6 +26,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -34,6 +37,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -83,6 +87,73 @@ class ManagedSessionStoreIntegrationTest {
 
     @Autowired
     private ManagedSessionStore sessionStore;
+
+    @Test
+    void acceptsClientBuiltCensusAfterTheDefinitionIsCommitted(@TempDir Path directory) throws Exception {
+        ArrayNode fixtures = objectMapper.createArrayNode();
+        for (String mode : List.of("none", "instructions", "skills", "both")) {
+            String session = "definition-census-" + UUID.randomUUID();
+            String base = "/internal/managed-session-store/v1/sessions/" + session;
+            mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_A).toString()))
+                    .andExpect(status().isOk());
+            ObjectNode fixture = fixtures.addObject();
+            fixture.putObject("sessionKey").put("tenantId", TENANT).put("workspaceId", WORKSPACE).put("sessionId", session);
+            ObjectNode nested = fixture.putObject("nested");
+            ArrayNode published = fixture.putArray("published");
+            List<ManagedSessionStoreModels.ToolResultResourceRef> pins = new ArrayList<>();
+            if (mode.equals("instructions") || mode.equals("both")) {
+                var ref = sessionStore.publishAgentInstructions(TENANT, WORKSPACE, session, "Pinned instructions.");
+                nested.set("instructionsRef", objectMapper.valueToTree(ref));
+                pins.add(ref);
+            }
+            if (mode.equals("skills") || mode.equals("both")) {
+                var ref = sessionStore.publishAgentSkills(TENANT, WORKSPACE, session,
+                        List.of(Map.of("name", "review", "description", "Review", "body", "Read the diff.")));
+                nested.set("skillsRef", objectMapper.valueToTree(ref));
+                pins.add(ref);
+            }
+            for (var ref : pins) {
+                var resource = sessionStore.readResource(TENANT, WORKSPACE, session, ref.resourceId(), TOKEN_A);
+                published.addObject().put("resourceId", ref.resourceId())
+                        .put("bytesBase64", Base64.getEncoder().encodeToString(resource.bytes()));
+            }
+        }
+        Path input = directory.resolve("input.json");
+        Path output = directory.resolve("output.json");
+        Path script = directory.resolve("census.mjs");
+        Path log = directory.resolve("node.log");
+        objectMapper.writeValue(input.toFile(), fixtures);
+        try (var stream = getClass().getResourceAsStream("/hosted-definition-census.mjs")) {
+            assertThat(stream).isNotNull();
+            Files.copy(stream, script);
+        }
+        Process process = new ProcessBuilder(System.getProperty("node.executable", "node"),
+                script.toString(), input.toString(), output.toString()).directory(Path.of("../..").toRealPath().toFile())
+                .redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        try {
+            assertThat(process.waitFor(30, TimeUnit.SECONDS)).as("client census generator finishes").isTrue();
+            assertThat(process.exitValue()).as(Files.readString(log)).isZero();
+        } finally {
+            if (process.isAlive()) {
+                process.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+            }
+        }
+        for (JsonNode fixture : objectMapper.readTree(output.toFile())) {
+            String base = "/internal/managed-session-store/v1/sessions/" + fixture.path("sessionKey").path("sessionId").asText();
+            for (String stage : List.of("create", "later")) {
+                ObjectNode commit = ((ObjectNode) fixture.required(stage)).deepCopy()
+                        .put("workspaceId", WORKSPACE).put("writerId", WRITER_A).put("writerGeneration", 1)
+                        .put("expectedJournalRevision", stage.equals("create") ? 0 : 1).put("expectedCommittedSequence", 0);
+                MvcResult result = mvc.perform(post(base + "/transactions:commit-v2").header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                        .header("X-Qwen-Managed-Max-Readable-Storage-Version", "2")
+                        .contentType(MediaType.APPLICATION_JSON).content(commit.toString())).andReturn();
+                assertThat(result.getResponse().getStatus()).as(result.getResponse().getContentAsString()).isEqualTo(200);
+            }
+        }
+    }
 
     @Test
     void publishesStaticSkillsAsImmutableSessionScopedResources() throws Exception {

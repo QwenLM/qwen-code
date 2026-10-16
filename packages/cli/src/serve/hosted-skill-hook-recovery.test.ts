@@ -32,6 +32,7 @@ import {
 let root: string;
 let session: ManagedSession;
 let output: HookOutput;
+let hookCommand: string;
 let hookControl: ReturnType<typeof vi.fn<HostedWorkspaceBroker['hookControl']>>;
 let broker: HostedWorkspaceBroker;
 const pin = {
@@ -54,6 +55,7 @@ const skills = new HostedSkillCatalog([
 ]);
 
 beforeEach(async () => {
+  hookCommand = '';
   root = await mkdtemp(path.join(tmpdir(), 'hosted-skill-hook-'));
   const sessionKey = {
     tenantId: 'tenant',
@@ -76,7 +78,12 @@ beforeEach(async () => {
     create: {
       definitionRef: await resources.publish(
         'managed-definition',
-        Buffer.from('{}'),
+        Buffer.from(
+          JSON.stringify({
+            approvalMode: 'default',
+            approvalTimeoutMs: 60_000,
+          }),
+        ),
       ),
       rootSnapshotRef: await resources.publish(
         'managed-root',
@@ -101,7 +108,7 @@ beforeEach(async () => {
                 async: false,
                 failClosed: true,
                 onceKey: null,
-                config: { type: 'command' },
+                config: { type: 'command', command: hookCommand },
               },
             ],
           },
@@ -158,7 +165,9 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-async function firePreTool(): Promise<void> {
+async function firePreTool(
+  fields: Record<string, unknown> = {},
+): Promise<void> {
   const hooks = new HostedHookSession(options, session, pin, broker);
   await hooks.fire(
     HookEventName.PreToolUse,
@@ -169,6 +178,7 @@ async function firePreTool(): Promise<void> {
       tool_use_id: 'call',
       permission_mode: 'default',
       prompt_id: 'prompt',
+      ...fields,
     },
     new AbortController().signal,
   );
@@ -244,7 +254,86 @@ it('uses the saved Hook updatedInput after replacement instead of the original S
   expect(hookControl).toHaveBeenCalledTimes(controls);
 });
 
-it('blocks recovery while the original PreToolUse aggregate is uncommitted', async () => {
+it('durably refuses an interrupted Skill call before its PreToolUse marker committed', async () => {
+  const original = session.authority.commitExtensionRecord.bind(
+    session.authority,
+  );
+  vi.spyOn(session.authority, 'commitExtensionRecord').mockImplementation(
+    async (...args) => {
+      if ((args[1].record as { hookId?: string }).hookId === '__plan__')
+        throw new Error('Original marker write failed.');
+      return original(...args);
+    },
+  );
+  await expect(firePreTool()).rejects.toThrow('Original marker write failed.');
+  const controls = hookControl.mock.calls.length;
+  expect(await recover()).toBe(1);
+  const history = await session.sink.project();
+  expect(history.map((entry) => entry.type)).toEqual([
+    'assistant',
+    'tool_result',
+  ]);
+  expect(
+    history.at(-1)?.message?.parts?.[0].functionResponse?.response,
+  ).toEqual({
+    error:
+      'This Skill call did not run: no PreToolUse Hook decision was recorded before the Harness was interrupted.',
+  });
+  expect(JSON.stringify(history.at(-1))).not.toContain('Original secret body.');
+  expect(await recover()).toBe(0);
+  expect(await session.sink.project()).toEqual(history);
+  expect(hookControl).toHaveBeenCalledTimes(controls);
+});
+
+it('replays the committed byte-limit refusal after the Hook input was stripped', async () => {
+  hookCommand = 'x'.repeat(70 * 1024);
+  await firePreTool();
+  expect(
+    hookControl.mock.calls.some(
+      ([operation]) => operation.kind === 'hook-execute',
+    ),
+  ).toBe(false);
+  const controls = hookControl.mock.calls.length;
+  expect(await recover()).toBe(1);
+  const history = await session.sink.project();
+  expect(history.map((entry) => entry.type)).toEqual([
+    'assistant',
+    'tool_result',
+  ]);
+  expect(
+    history.at(-1)?.message?.parts?.[0].functionResponse?.response,
+  ).toEqual({
+    error:
+      'Hook data exceeds the 60 KiB resource or 8 MiB control/transaction limit.',
+  });
+  expect(JSON.stringify(history.at(-1))).not.toContain('Original secret body.');
+  expect(await recover()).toBe(0);
+  expect(await session.sink.project()).toEqual(history);
+  expect(hookControl).toHaveBeenCalledTimes(controls);
+});
+
+it.each([
+  { tool_input: { skill: 'testing' } },
+  { tool_use_id: 'another-call' },
+  { prompt_id: 'another-prompt' },
+  { permission_mode: 'yolo' },
+])(
+  'rejects a stripped Hook input bound to different fields: %j',
+  async (fields) => {
+    hookCommand = 'x'.repeat(70 * 1024);
+    await firePreTool(fields);
+    const controls = hookControl.mock.calls.length;
+    await expect(recover()).rejects.toBeInstanceOf(
+      HostedHookRecoveryRequiredError,
+    );
+    expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+      'assistant',
+    ]);
+    expect(hookControl).toHaveBeenCalledTimes(controls);
+  },
+);
+
+it('blocks recovery while the original PreToolUse result is uncommitted', async () => {
   output = { decision: 'allow' };
   const original = session.authority.commitExtensionRecord.bind(
     session.authority,

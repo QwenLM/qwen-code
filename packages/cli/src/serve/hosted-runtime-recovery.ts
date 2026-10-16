@@ -47,6 +47,7 @@ import {
 import {
   hostedHookOccurrenceId,
   HostedHookRecoveryRequiredError,
+  semanticInputDigest,
   type HostedHookSession,
 } from './hosted-hook-session.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
@@ -91,6 +92,7 @@ import {
 import {
   endHostedAction,
   readHostedActionOptions,
+  readHostedApprovalDefinition,
 } from './hosted-tool-approval.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -888,30 +890,64 @@ async function hostedSkillResponse(
       'hook_execution',
       hostedHookOccurrenceId(HookEventName.PreToolUse, `${promptId}:${callId}`),
     );
-    if (!marker) throw new HostedHookRecoveryRequiredError();
+    if (!marker)
+      return refused(
+        'This Skill call did not run: no PreToolUse Hook decision was recorded before the Harness was interrupted.',
+      );
     const record = parseHookExecution(marker.record);
     if (record.run.execution === 'not_started_proven')
       return refused('The turn was cancelled before this tool call ran.');
     if (!record.resultRef) throw new HostedHookRecoveryRequiredError();
-    const original = JSON.parse(
-      new TextDecoder('utf-8', { fatal: true }).decode(
-        await session.resources.read(record.inputRef),
-      ),
-    ) as {
-      tool_name?: string;
-      tool_use_id?: string;
-      prompt_id?: string;
-      tool_input?: unknown;
-    };
     if (
       record.hookId !== '__plan__' ||
-      record.eventName !== HookEventName.PreToolUse ||
-      original.tool_name !== 'skill' ||
-      original.tool_use_id !== callId ||
-      original.prompt_id !== promptId ||
-      !isDeepStrictEqual(original.tool_input, args)
+      record.eventName !== HookEventName.PreToolUse
     )
       throw new HostedHookRecoveryRequiredError();
+    const plan = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(
+        await session.resources.read(record.planRef),
+      ),
+    ) as { refusedInputDigest?: unknown };
+    if (plan.refusedInputDigest !== undefined) {
+      const definition = JSON.parse(
+        new TextDecoder('utf-8', { fatal: true }).decode(
+          await session.resources.read(
+            session.authority.sessionHeader.definitionRef,
+          ),
+        ),
+      ) as Record<string, unknown>;
+      const approval = readHostedApprovalDefinition(definition);
+      if (
+        !approval ||
+        plan.refusedInputDigest !==
+          semanticInputDigest({
+            tool_name: 'skill',
+            tool_input: args,
+            tool_use_id: callId,
+            permission_mode: approval.mode,
+            prompt_id: promptId,
+          })
+      )
+        throw new HostedHookRecoveryRequiredError();
+    } else {
+      const original = JSON.parse(
+        new TextDecoder('utf-8', { fatal: true }).decode(
+          await session.resources.read(record.inputRef),
+        ),
+      ) as {
+        tool_name?: string;
+        tool_use_id?: string;
+        prompt_id?: string;
+        tool_input?: unknown;
+      };
+      if (
+        original.tool_name !== 'skill' ||
+        original.tool_use_id !== callId ||
+        original.prompt_id !== promptId ||
+        !isDeepStrictEqual(original.tool_input, args)
+      )
+        throw new HostedHookRecoveryRequiredError();
+    }
     const saved = JSON.parse(
       new TextDecoder('utf-8', { fatal: true }).decode(
         await session.resources.read(record.resultRef),

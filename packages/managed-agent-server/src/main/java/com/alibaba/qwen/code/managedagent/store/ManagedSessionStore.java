@@ -1661,7 +1661,9 @@ public class ManagedSessionStore {
         }
         requireResourceScope(resource, tenantId, workspaceId, sessionId,
                 resourceId);
-        if (!"REFERENCED".equals(resource.state())) {
+        if (!"REFERENCED".equals(resource.state())
+                && !("PUBLISHED".equals(resource.state())
+                    && Set.of("managed-agent-instructions", "managed-agent-skills").contains(resource.kind()))) {
             throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                     "A referenced Managed Session resource is missing.");
         }
