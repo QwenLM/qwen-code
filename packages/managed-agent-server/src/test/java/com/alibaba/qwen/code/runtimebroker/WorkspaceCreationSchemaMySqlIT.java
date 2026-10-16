@@ -75,7 +75,7 @@ class WorkspaceCreationSchemaMySqlIT {
         }
         assertEquals(1, ManagedSchema.schemaVersion(source));
         ManagedSchema.initialize(source);
-        assertEquals(6, ManagedSchema.schemaVersion(source));
+        assertEquals(7, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection();
                 var statement = connection.createStatement();
                 var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
@@ -121,7 +121,7 @@ class WorkspaceCreationSchemaMySqlIT {
         assertEquals(4, ManagedSchema.schemaVersion(source));
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
-        assertEquals(6, ManagedSchema.schemaVersion(source));
+        assertEquals(7, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
             receipt(

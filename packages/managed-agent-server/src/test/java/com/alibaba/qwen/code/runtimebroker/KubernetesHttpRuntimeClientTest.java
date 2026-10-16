@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -15,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
@@ -38,6 +40,7 @@ class KubernetesHttpRuntimeClientTest {
     private final AtomicReference<String> path = new AtomicReference<>();
     private final AtomicReference<String> method = new AtomicReference<>();
     private final AtomicReference<String> requestBody = new AtomicReference<>();
+    private final AtomicReference<String> contentType = new AtomicReference<>();
     private final AtomicReference<byte[]> response = new AtomicReference<>("{\"kind\":\"Pod\"}".getBytes(StandardCharsets.UTF_8));
     private final AtomicInteger status = new AtomicInteger(200);
     private final AtomicInteger calls = new AtomicInteger();
@@ -57,6 +60,7 @@ class KubernetesHttpRuntimeClientTest {
             authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
             path.set(exchange.getRequestURI().toString());
             method.set(exchange.getRequestMethod());
+            contentType.set(exchange.getRequestHeaders().getFirst("Content-Type"));
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             exchange.getResponseHeaders().set("Location", origin.resolve("/redirected").toString());
             exchange.sendResponseHeaders(status.get(), response.get().length);
@@ -80,6 +84,7 @@ class KubernetesHttpRuntimeClientTest {
     @AfterEach
     void stop() {
         releaseBody.countDown();
+        client.close();
         server.stop(0);
         executor.shutdownNow();
     }
@@ -132,19 +137,141 @@ class KubernetesHttpRuntimeClientTest {
             assertEquals("/apis/admissionregistration.k8s.io/v1/" + resource + "/workspace.one", path.get());
             assertEquals("GET", method.get());
         }
+        client.getCluster("runtimeclasses", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS).toCompletableFuture().join();
+        assertEquals("/apis/node.k8s.io/v1/runtimeclasses/qwen-k2-runc-v1", path.get());
+        assertEquals("GET", method.get());
         status.set(404);
         assertNull(client.getCluster("persistentvolumes", "absent").toCompletableFuture().join());
+        assertNull(client.getCluster("runtimeclasses", "absent").toCompletableFuture().join());
         int original = calls.get();
         for (String name : new String[] {"../pv", ".", "pv..name", "pv?name", "pv/name", "x".repeat(254)}) {
             assertThrows(IllegalArgumentException.class, () -> client.getCluster("persistentvolumes", name));
         }
         assertThrows(IllegalArgumentException.class, () -> client.getCluster("namespaces", "namespace.with.dots"));
         assertThrows(IllegalArgumentException.class, () -> client.getCluster("clusterroles", "admin"));
+        assertThrows(IllegalArgumentException.class, () -> client.getCluster("runtimeclasses", "runtime.with.dots"));
+        assertThrows(IllegalArgumentException.class, () -> client.get("runtimeclasses", "runtimes", "qwen-k2-runc-v1"));
+        assertThrows(IllegalArgumentException.class,
+                () -> client.create("runtimeclasses", "runtimes", Map.of("kind", "RuntimeClass")));
         assertThrows(IllegalArgumentException.class,
                 () -> client.create("persistentvolumeclaims", "runtimes", Map.of("kind", "PersistentVolumeClaim")));
         assertThrows(IllegalArgumentException.class,
                 () -> client.create("validatingadmissionpolicies", "runtimes", Map.of("kind", "ValidatingAdmissionPolicy")));
         assertEquals(original, calls.get());
+    }
+
+    @Test
+    void removesOnlyTheSourceGateWithUidVersionAndWholeSpecPreconditions() {
+        String uid = "aa36d481-0995-4060-8ce7-f3d42c3e408f";
+        var spec = Map.<String, Object>of("restartPolicy", "Never", "schedulingGates",
+                List.of(Map.of("name", KubernetesHttpRuntimeClient.CSI_SOURCE_GATE)));
+        client.releaseCsiSchedulingGate("runtimes", "original", uid, "314", spec).toCompletableFuture().join();
+        assertEquals("PATCH", method.get());
+        assertEquals("application/json-patch+json", contentType.get());
+        assertEquals("/api/v1/namespaces/runtimes/pods/original", path.get());
+        var patch = parseArray(requestBody.get());
+        assertEquals(List.of(Map.of("op", "test", "path", "/metadata/uid", "value", uid),
+                Map.of("op", "test", "path", "/metadata/resourceVersion", "value", "314"),
+                Map.of("op", "test", "path", "/spec", "value", spec),
+                Map.of("op", "remove", "path", "/spec/schedulingGates")), patch);
+        status.set(409);
+        assertEquals(409, failure(client.releaseCsiSchedulingGate("runtimes", "original", uid, "314", spec)
+                .toCompletableFuture()).getStatusCode());
+        assertEquals(2, calls.get());
+        var invalid = new java.util.LinkedHashMap<>(spec);
+        invalid.put("nodeName", "bypass");
+        assertThrows(IllegalArgumentException.class,
+                () -> client.releaseCsiSchedulingGate("runtimes", "original", uid, "314", invalid));
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void sendsPreparedNormalDeletionAndPreservesEveryObservedReply() {
+        String uid = "aa36d481-0995-4060-8ce7-f3d42c3e408f";
+        var request = CsiPodDeletion.prepare("runtimes", "original", uid, "opaque:315");
+        byte[] originalBytes = ("{\"apiVersion\":\"v1\",\"kind\":\"DeleteOptions\",\"gracePeriodSeconds\":30,"
+                + "\"propagationPolicy\":\"Background\",\"preconditions\":{\"uid\":\"" + uid + "\",\"resourceVersion\":\"opaque:315\"}}")
+                .getBytes(StandardCharsets.UTF_8);
+        assertArrayEquals(originalBytes, request.bytes());
+        byte[] callerCopy = request.bytes();
+        callerCopy[0] = 0;
+        assertArrayEquals(originalBytes, request.bytes());
+        assertEquals("runtimes", request.namespace());
+        assertEquals("original", request.name());
+        assertEquals(uid, request.uid());
+        assertEquals("opaque:315", request.resourceVersion());
+        byte[] reply = "{\n \"kind\": \"Status\", \"status\": \"Success\"\n}".getBytes(StandardCharsets.UTF_8);
+        response.set(reply);
+        for (int code : new int[] {200, 202}) {
+            status.set(code);
+            var result = client.deleteCsiPod(request).toCompletableFuture().join();
+            assertTrue(result.accepted());
+            assertEquals(code, result.statusCode());
+            assertEquals(request, result.request());
+            assertArrayEquals(reply, result.responseBytes());
+            byte[] copy = result.responseBytes();
+            copy[0] = 0;
+            assertArrayEquals(reply, result.responseBytes());
+            assertEquals("DELETE", method.get());
+            assertEquals("application/json", contentType.get());
+            assertArrayEquals(originalBytes, requestBody.get().getBytes(StandardCharsets.UTF_8));
+            assertEquals("/api/v1/namespaces/runtimes/pods/original", path.get());
+            var options = JsonCodec.parseObject(requestBody.get().getBytes(StandardCharsets.UTF_8), "delete options");
+            assertEquals(Map.of("uid", uid, "resourceVersion", "opaque:315"), options.get("preconditions"));
+            assertEquals(30, options.get("gracePeriodSeconds"));
+            assertEquals("Background", options.get("propagationPolicy"));
+            assertEquals(5, options.size());
+        }
+        for (int code : new int[] {404, 409, 302, 429, 500}) {
+            status.set(code);
+            var result = client.deleteCsiPod(request).toCompletableFuture().join();
+            assertFalse(result.accepted());
+            assertEquals(code, result.statusCode());
+            assertArrayEquals(reply, result.responseBytes());
+            assertArrayEquals(originalBytes, requestBody.get().getBytes(StandardCharsets.UTF_8));
+        }
+        assertEquals(7, calls.get());
+        assertThrows(IllegalArgumentException.class, () -> client.deleteCsiPod(null));
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.prepare("runtimes", "original", uid, ""));
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.prepare("runtimes", "../original", uid, "315"));
+        assertEquals(7, calls.get());
+    }
+
+    @Test
+    void restoresOnlyTheExactSavedDeletionRequest() {
+        String uid = "aa36d481-0995-4060-8ce7-f3d42c3e408f";
+        var prepared = CsiPodDeletion.prepare("runtimes", "original", uid, "opaque:315");
+        byte[] saved = prepared.bytes();
+        var restored = CsiPodDeletion.restore("runtimes", "original", uid, "opaque:315", saved);
+        saved[0] = 0;
+        assertArrayEquals(prepared.bytes(), restored.bytes());
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.restore("runtimes", "original", uid, "316", prepared.bytes()));
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.restore("runtimes", "original", uid, "opaque:315", saved));
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.restore("runtimes", "original", uid, "opaque:315", null));
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    void oversizedDeleteReplyNeverCreatesAnAcceptedResult() {
+        response.set(new byte[1024 * 1024 + 1]);
+        var request = CsiPodDeletion.prepare("runtimes", "original", "aa36d481-0995-4060-8ce7-f3d42c3e408f", "315");
+        assertEquals(502, failure(client.deleteCsiPod(request).toCompletableFuture()).getStatusCode());
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void stalledDeleteBodyRemainsUnknownDespiteAnAcceptedHeader() {
+        stallBody = true;
+        var request = CsiPodDeletion.prepare("runtimes", "original", "aa36d481-0995-4060-8ce7-f3d42c3e408f", "315");
+        try (var bounded = new KubernetesHttpRuntimeClient(origin, token, HttpClient.newHttpClient(), Duration.ofMillis(500))) {
+            assertEquals(503, failure(bounded.deleteCsiPod(request).toCompletableFuture()).getStatusCode());
+        }
+        assertEquals(1, calls.get());
+    }
+
+    private static Object parseArray(String value) {
+        try { return new com.fasterxml.jackson.databind.ObjectMapper().readValue(value, Object.class); }
+        catch (java.io.IOException invalid) { throw new AssertionError(invalid); }
     }
 
     @Test

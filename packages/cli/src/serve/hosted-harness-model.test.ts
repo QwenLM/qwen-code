@@ -24,9 +24,10 @@ import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+import { createHostedChatRecord } from './hosted-harness-turn.js';
+import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedModelUnavailableError } from './hosted-agent-definition.js';
 import { HostedSkillCatalog } from './hosted-skill-catalog.js';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 
 const state = vi.hoisted(() => ({
@@ -225,15 +226,8 @@ describe('Hosted Harness model boundary', () => {
       ['user', answered],
       ['assistant', visible],
     ];
-    const history = pairs.map(
-      ([type, parts], index): ChatRecord => ({
-        uuid: `history-${index}`,
-        parentUuid: index === 0 ? null : `history-${index - 1}`,
-        sessionId: input.sessionId,
-        timestamp: '2026-10-09T00:00:00.000Z',
-        type,
-        cwd: input.cwd,
-        version: 'hosted-harness/1',
+    const history = pairs.map(([type, parts]) =>
+      createHostedChatRecord({ cwd: input.cwd }, input.sessionId, type, null, {
         message: {
           role: type === 'assistant' ? 'model' : 'user',
           parts,
@@ -1644,6 +1638,73 @@ describe('Hosted Harness resume and retraction', () => {
     expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
     expect(toolTurn.execute).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    'persists complete final Parts before consuming CSI results (answer loss=%s)',
+    async (answerLoss) => {
+      const model = config([
+        { type: LlmEventType.Content, value: 'answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { usageMetadata: { candidatesTokenCount: 30 } },
+        },
+      ]);
+      const parts: Part[] = [
+        { text: 'thought', thought: true, thoughtSignature: 'signature' },
+        { text: 'answer' },
+      ];
+      model.getHistory.mockReturnValue([{ role: 'model', parts }]);
+      const complete = Object.assign(
+        vi.fn(async () => undefined),
+        { attemptId: 'original-attempt' },
+      );
+      const toolTurn = {
+        execute: vi.fn(),
+        consumeResults: vi.fn(),
+        declarations: async () => [],
+      };
+      const atomic = vi.fn(async () => {
+        expect(toolTurn.consumeResults).not.toHaveBeenCalled();
+        if (answerLoss) throw new Error('commit response lost');
+      });
+      const run = runHostedHarnessTextTurn({
+        ...input,
+        toolTurn,
+        resumeFromToolResults: [
+          {
+            functionResponse: {
+              id: 'original-call',
+              name: 'read_file',
+              response: { original: true },
+            },
+          },
+        ],
+        modelScope: {
+          bindBudget: vi.fn(),
+          evaluate: vi.fn(),
+          beginMainAttempt: vi.fn().mockResolvedValue(complete),
+        },
+        completeFinalOutput: atomic,
+      });
+      if (answerLoss) {
+        await expect(run).rejects.toBeInstanceOf(
+          HostedToolRecoveryRequiredError,
+        );
+        expect(toolTurn.consumeResults).not.toHaveBeenCalled();
+      } else {
+        await expect(run).resolves.toMatchObject({ parts });
+        expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
+      }
+      expect(atomic).toHaveBeenCalledExactlyOnceWith(
+        complete,
+        [{ candidatesTokenCount: 30 }],
+        parts,
+        'test-model',
+      );
+      expect(complete).not.toHaveBeenCalled();
+      expect(toolTurn.execute).not.toHaveBeenCalled();
+    },
+  );
 
   it('retracts a published model attempt before the replay resumes', async () => {
     const model = config([

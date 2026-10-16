@@ -141,7 +141,7 @@ class CsiNativeActivationProofTest {
 
     @Test
     void acceptsUnmodifiedNativeProducerBytesAndRenewalWithChangedLease() {
-        assertEquals("330caa04e1ed716cd590b066d5501b0480d29279419d93c3bc9e051014a3a032",
+        assertEquals("6e576ea3a0b44449a5679a6fb22be154f6ea3116f6ee8de1c49b9db90e1c8889",
                 CsiNativeActivationProof.sha256(fixtureBytes()));
         var genesis = genesis();
         var installTransaction = transaction(1, genesis.lastRecordUuid());
@@ -165,7 +165,7 @@ class CsiNativeActivationProofTest {
     }
 
     @Test
-    void rejectsReplacementActivationAndKeepsOriginalRenewal() throws Exception {
+    void successorAdvancesInstalledEpochAcrossSkippedWriterClaimsAndFencesRenewal() throws Exception {
         var genesis = genesis();
         var originalInstall = transaction(1, genesis.lastRecordUuid());
         var previous = activation(originalInstall, request(1), genesis, null, resources);
@@ -188,11 +188,27 @@ class CsiNativeActivationProofTest {
         metadata.put("writerId", successor).put("writerGeneration", 3).put("activationEpoch", 2)
                 .put("firstSequence", 2).put("commandId", activationId + ":active");
         var parsed = new CsiNativeActivationProof.Transaction(List.of(event), originalInstall.lastRecordUuid());
-        var successorMetadata = digestForEvents(metadata, parsed.events());
-        rejected(() -> CsiNativeActivationProof.activation(parsed, successorMetadata,
-                original, successor, genesis.definitionDigest(), previous, ignored -> bytes));
+        var accepted = CsiNativeActivationProof.activation(parsed, digestForEvents(metadata, parsed.events()),
+                original, successor, genesis.definitionDigest(), previous, ignored -> bytes);
+        assertEquals(2, accepted.epoch());
+        assertEquals(3, accepted.writerGeneration());
+        assertEquals(0, accepted.renewalSequence());
+        for (String field : List.of("writerGeneration", "activationEpoch")) {
+            ObjectNode changed = metadata.deepCopy();
+            changed.put(field, 1);
+            JsonNode changedMetadata = digestForEvents(changed, parsed.events());
+            rejected(() -> CsiNativeActivationProof.activation(parsed, changedMetadata,
+                    original, successor, genesis.definitionDigest(), previous, ignored -> bytes));
+        }
+        ObjectNode early = event.deepCopy();
+        early.put("occurredAt", previous.expiresAt() - 1);
+        var earlyTransaction = new CsiNativeActivationProof.Transaction(List.of(early), parsed.lastRecordUuid());
+        var earlyMetadata = digestForEvents(metadata, earlyTransaction.events());
+        rejected(() -> CsiNativeActivationProof.activation(earlyTransaction,
+                earlyMetadata, original, successor,
+                genesis.definitionDigest(), previous, ignored -> bytes));
         var renewal = transaction(2, originalInstall.lastRecordUuid());
-        assertEquals(1, activation(renewal, request(2), genesis, previous, resources).epoch());
+        rejected(() -> activation(renewal, request(2), genesis, accepted, resources));
     }
 
     @Test

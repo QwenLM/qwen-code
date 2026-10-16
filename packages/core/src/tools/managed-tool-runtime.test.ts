@@ -354,8 +354,8 @@ describe('ManagedToolRuntime', () => {
       }) as unknown as ReturnType<Config['getToolRegistry']>;
     config.isLsToolEnabled = () => false;
     const childConfig = Object.assign(Object.create(config) as Config, {
-      getTargetDir: () => '/managed-child',
       getFileSystemService: () => new StandardFileSystemService(),
+      getTargetDir: () => '/managed-child',
       getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
       getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
       getPlansDir: () => '/managed-child/plans',

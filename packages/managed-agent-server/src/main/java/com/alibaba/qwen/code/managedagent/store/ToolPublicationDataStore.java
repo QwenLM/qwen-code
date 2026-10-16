@@ -242,7 +242,7 @@ public final class ToolPublicationDataStore {
                 ? a.decimalValue().compareTo(b.decimalValue()) : a.equals(b) ? 0 : 1, right);
     }
 
-    private static boolean validAdmissionHistory(JsonNode history) {
+    static boolean validAdmissionHistory(JsonNode history) {
         return history.isObject() && history.size() == 4
                 && text(history, "messageId").matches(
                         "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")

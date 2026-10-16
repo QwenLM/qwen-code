@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -60,9 +59,9 @@ class ManagedSessionNativeReadTest {
     void setUp() {
         var raw = new DriverManagerDataSource("jdbc:h2:mem:native-read-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(raw).locations("classpath:db/managed-schema").load().migrate();
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(raw);
         source = new FaultSource(raw);
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         transactions = new TransactionTemplate(manager);
         reservations = new WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
@@ -119,26 +118,39 @@ class ManagedSessionNativeReadTest {
     }
 
     @Test
+    void readsWithSuccessorWriterAndPriorActivationWithoutInstallingAnything() {
+        jdbc.update("UPDATE ma_session_head SET writer_generation = 2, writer_id = 'successor',"
+                + " activation_id = 'prior-activation', activation_epoch = 9");
+        assertThat(read().bytes()).isEqualTo(BYTES);
+        var history = readReceipts().getFirst();
+        assertThat(((Number) history.get("writer_generation")).longValue()).isEqualTo(2);
+        assertThat(history.get("writer_id")).isEqualTo("successor");
+        assertThat(history.get("activation_id")).isEqualTo("prior-activation");
+        assertThat(jdbc.queryForObject("SELECT activation_id FROM ma_session_head", String.class))
+                .isEqualTo("prior-activation");
+    }
+
+    @Test
     void sealingRefusesNonCheckpointReadsBeforeHistoryOrFetch() {
         retire();
         source.onFetch = () -> { throw new AssertionError("sealed read reached fetch"); };
         assertThatThrownBy(this::read).isInstanceOfSatisfying(RuntimeBrokerException.class,
-                error -> assertThat(error.getCode()).isEqualTo("runtime_admission_closed"));
+                error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
         assertThat(count("ma_request_receipt")).isZero();
         assertThat(count("ma_read_lease")).isZero();
     }
 
     @Test
-    void admittedFetchRunsOutsideSqlAndRetainsEvidenceAfterOriginalSeal() {
+    void admittedFetchRunsOutsideSqlAndCanFinishAfterOriginalSeal() {
         source.onFetch = () -> {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             assertThat(readReceipts().getFirst().get("state")).isEqualTo("OPEN");
             assertThat(count("ma_read_lease")).isEqualTo(1);
             retire();
         };
-        assertThatThrownBy(this::read).isInstanceOf(RuntimeBrokerException.class);
-        assertThat(readReceipts().getFirst().get("state")).isEqualTo("OPEN");
-        assertThat(count("ma_read_lease")).isEqualTo(1);
+        assertThat(read().bytes()).isEqualTo(BYTES);
+        assertThat(readReceipts().getFirst().get("state")).isEqualTo("RETURNED");
+        assertThat(count("ma_read_lease")).isZero();
         assertThat(reservations.inspect(registration).phase()).isEqualTo("DRAINING");
     }
 
@@ -155,11 +167,7 @@ class ManagedSessionNativeReadTest {
         assertThat(verifiedAt()).isEqualTo(java.time.Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
         source.closeFailure = "";
         assertThat(read().bytes()).isEqualTo(BYTES);
-        assertThat(
-                        readReceipts().stream()
-                                .filter(row -> old.get("read_id").equals(row.get("read_id")))
-                                .findFirst()
-                                .orElseThrow())
+        assertThat(readReceipts().stream().filter(row -> old.get("read_id").equals(row.get("read_id"))).findFirst().orElseThrow())
                 .isEqualTo(old);
         assertThat(count("ma_request_receipt")).isEqualTo(2);
         assertThat(count("ma_read_lease")).isEqualTo(1);
@@ -170,7 +178,7 @@ class ManagedSessionNativeReadTest {
         source.onFetch = () -> jdbc.update("UPDATE ma_read_lease SET expires_at = 0");
         assertCode(this::read, "tool_output_read_expired");
         assertThat(readReceipts().getFirst().get("state")).isEqualTo("RETURNED");
-        assertThat((String) readReceipts().getFirst().get("outcome_code"))
+        assertThat(readReceipts().getFirst().get("outcome_code"))
                 .isEqualTo("tool_output_read_expired");
         assertThat(count("ma_read_lease")).isZero();
         assertThat(verifiedAt()).isEqualTo(java.time.Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
@@ -178,9 +186,7 @@ class ManagedSessionNativeReadTest {
 
     @Test
     void writerTakeoverRecordsOldEndWithoutDeliveringOldBytes() {
-        source.onFetch = () -> jdbc.update(
-                                "UPDATE ma_session_head SET writer_generation = 2, writer_id ="
-                                        + " 'successor'");
+        source.onFetch = () -> jdbc.update("UPDATE ma_session_head SET writer_generation = 2, writer_id = 'successor'");
         assertThatThrownBy(this::read).isInstanceOf(ApiException.class);
         assertThat(readReceipts().getFirst().get("state")).isEqualTo("RETURNED");
         assertThat(verifiedAt()).isEqualTo(java.time.Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
@@ -210,9 +216,7 @@ class ManagedSessionNativeReadTest {
     @Test
     void ownerBoundaryRefusesAmbientTransactionAndObjectStorage() {
         assertThatThrownBy(() -> transactions.execute(status -> read())).isInstanceOf(IllegalStateException.class);
-        jdbc.update(
-                "UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', object_key ="
-                        + " 'historical'");
+        jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', object_key = 'historical'");
         assertCode(this::read, "csi_inline_resource_required");
         assertThat(count("ma_request_receipt")).isZero();
         assertThat(count("ma_read_lease")).isZero();
@@ -250,6 +254,26 @@ class ManagedSessionNativeReadTest {
         return store.readOwnerResource("tenant", "workspace", session, "resource", TOKEN);
     }
 
+    private void tamperReadWriter() {
+        String body =
+                jdbc.queryForObject(
+                        "SELECT result_json FROM ma_request_receipt WHERE operation ="
+                                + " 'CSI_RESOURCE_READ'",
+                        String.class);
+        try {
+            var changed =
+                    (com.fasterxml.jackson.databind.node.ObjectNode)
+                            new com.fasterxml.jackson.databind.ObjectMapper().readTree(body);
+            changed.put("writer_id", "forged");
+            jdbc.update(
+                    "UPDATE ma_request_receipt SET result_json = ? WHERE operation ="
+                            + " 'CSI_RESOURCE_READ'",
+                    changed.toString());
+        } catch (java.io.IOException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
     private java.util.List<java.util.Map<String, Object>> readReceipts() {
         return jdbc
                 .queryForList(
@@ -285,26 +309,6 @@ class ManagedSessionNativeReadTest {
                             }
                         })
                 .toList();
-    }
-
-    private void tamperReadWriter() {
-        String body =
-                jdbc.queryForObject(
-                        "SELECT result_json FROM ma_request_receipt WHERE operation ="
-                                + " 'CSI_RESOURCE_READ'",
-                        String.class);
-        try {
-            var changed =
-                    (com.fasterxml.jackson.databind.node.ObjectNode)
-                            new com.fasterxml.jackson.databind.ObjectMapper().readTree(body);
-            changed.put("writer_id", "forged");
-            jdbc.update(
-                    "UPDATE ma_request_receipt SET result_json = ? WHERE operation ="
-                            + " 'CSI_RESOURCE_READ'",
-                    changed.toString());
-        } catch (java.io.IOException error) {
-            throw new IllegalStateException(error);
-        }
     }
 
     private int count(String table) {

@@ -172,14 +172,13 @@ class ManagedAgentCsiMutationMySqlIT {
         }
         String user = System.getProperty("mysql.user");
         String password = System.getProperty("mysql.password", "");
-        var admin = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(url, user, password));
+        var admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
         String schema = "csi_managed_mutation_" + UUID.randomUUID().toString().replace("-", "");
         admin.execute("CREATE DATABASE " + schema + " CHARACTER SET utf8mb4");
         try {
             var data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
-            Flyway.configure().dataSource(data).locations("classpath:db/managed-schema").load().migrate();
-            var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(data);
-            String lockWaitQuery = lockWaitQuery(jdbc);
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(data);
+            var jdbc = new ManagedSchemaJdbcTemplate(data);
             var manager = new DataSourceTransactionManager(data);
             var json = new ObjectMapper();
             var properties = new ManagedAgentProperties();
@@ -187,14 +186,12 @@ class ManagedAgentCsiMutationMySqlIT {
             var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
                     "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
             new WorkspaceCsiReservationStore(jdbc, manager, json).register(registration);
-            jdbc.update(
-                    "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
-                            + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                    + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
                     + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                     CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-            jdbc.update(
-                    "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
             var store = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
                     new ManagedWorkspaceRegistry(jdbc), properties);
             var transaction = new TransactionTemplate(manager);
@@ -205,9 +202,7 @@ class ManagedAgentCsiMutationMySqlIT {
             var session = new java.util.concurrent.atomic.AtomicReference<String>();
             try (var pool = Executors.newSingleThreadExecutor(); var originalLock = data.getConnection()) {
                 var mutation = pool.submit(() -> transaction.executeWithoutResult(status -> {
-                    assertThat(jdbc.queryForObject(
-                                                                            "SELECT COUNT(*) FROM"
-                                                                                    + " ma_session", Integer.class)).isZero();
+                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isZero();
                     warmed.countDown();
                     try {
                         assertThat(created.await(10, TimeUnit.SECONDS)).isTrue();
@@ -226,10 +221,9 @@ class ManagedAgentCsiMutationMySqlIT {
                     session.set(original.sessionId());
                     var before = allTables(jdbc, json);
                     originalLock.setAutoCommit(false);
-                    try (var query = originalLock.prepareStatement(
-                                    "SELECT csi_guard FROM ma_session FORCE INDEX"
-                                        + " (ma_session_csi_guard_idx) WHERE tenant_id = 'tenant'"
-                                        + " AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
+                    try (var query = originalLock.prepareStatement("SELECT csi_guard FROM ma_session"
+                            + " FORCE INDEX (ma_session_csi_guard_idx)"
+                            + " WHERE tenant_id = 'tenant' AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
                         query.setQueryTimeout(5);
                         query.setString(1, original.sessionId());
                         try (var rows = query.executeQuery()) {
@@ -239,10 +233,12 @@ class ManagedAgentCsiMutationMySqlIT {
                     }
                     created.countDown();
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while (jdbc.queryForObject(lockWaitQuery, Integer.class, "ma_session") == 0) {
+                    while (jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.PROCESSLIST"
+                            + " WHERE DB = DATABASE() AND COMMAND = 'Query'"
+                            + " AND INFO LIKE 'SELECT csi_guard FROM ma_session%FOR UPDATE'", Integer.class) == 0) {
                         assertThat(mutation).isNotDone();
                         assertThat(System.nanoTime()).isLessThan(deadline);
-                        Thread.sleep(150);
+                        Thread.sleep(20);
                     }
                     assertThatThrownBy(() -> mutation.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
                     originalLock.rollback();
@@ -280,7 +276,7 @@ class ManagedAgentCsiMutationMySqlIT {
         admin.execute("CREATE DATABASE " + schema + " CHARACTER SET utf8mb4");
         try {
             var data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
-            Flyway.configure().dataSource(data).locations("classpath:db/managed-schema").load().migrate();
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(data);
             var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(data);
             var manager = new DataSourceTransactionManager(data);
             var json = new ObjectMapper();
@@ -443,17 +439,14 @@ class ManagedAgentCsiMutationMySqlIT {
 
     private static Map<String, JsonNode> allTables(JdbcTemplate jdbc, ObjectMapper json) {
         var result = new TreeMap<String, JsonNode>();
-        for (String table : jdbc.queryForList(
-                        "SELECT table_name FROM information_schema.tables WHERE table_schema ="
-                                + " DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name", String.class)) {
+        for (String table : jdbc.queryForList("SELECT table_name FROM information_schema.tables"
+                + " WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name", String.class)) {
             var rows = jdbc.queryForList("SELECT * FROM " + table).stream().map(row -> json.<JsonNode>valueToTree(row))
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).containsKeys("flyway_schema_history",
-                        "ma_session",
-                        "ma_session_head",
-                        "ma_request_receipt");
+        assertThat(result).containsKeys("ma_session",
+                "ma_session_head", "ma_request_receipt");
         return result;
     }
 }

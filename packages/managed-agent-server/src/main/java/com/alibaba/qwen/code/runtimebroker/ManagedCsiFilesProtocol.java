@@ -23,8 +23,10 @@ public final class ManagedCsiFilesProtocol {
     public static final String ATTEST_PATH = PREFIX + "/attest";
     public static final String CONTEXT_ATTEST_PATH = PREFIX + "/context-attest";
     public static final String CONTEXT_PATH = PREFIX + "/context";
+    public static final String FINALIZATION_FORMAT = "qwen-csi-file-finalize/1";
     private static final Set<String> BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage");
     private static final Set<String> AUTHORITY_BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage", "authority");
+    private static final Set<String> FINALIZATION_BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage", "authority", "finalization");
     private static final ObjectMapper JSON = new ObjectMapper(com.fasterxml.jackson.core.JsonFactory.builder()
             .streamReadConstraints(com.fasterxml.jackson.core.StreamReadConstraints.builder()
                     .maxNestingDepth(64).maxStringLength(32 * 1024 * 1024).build()).build())
@@ -67,6 +69,16 @@ public final class ManagedCsiFilesProtocol {
             validateAuthority(authority);
             value.put("authority", BrokerValues.immutableMap(authority));
         }
+        validateBoot(value);
+        return BrokerValues.immutableMap(value);
+    }
+
+    public static Map<String, Object> finalizationBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Map<String, Object> storage, Map<String, Object> authority) {
+        require(authority != null);
+        var value = new LinkedHashMap<>(boot(request, seed, storage, authority));
+        value.put("version", 6);
+        value.put("finalization", FINALIZATION_FORMAT);
         validateBoot(value);
         return BrokerValues.immutableMap(value);
     }
@@ -156,9 +168,13 @@ public final class ManagedCsiFilesProtocol {
     public static void validateBoot(Map<String, Object> boot) {
         require(boot != null);
         Long version = BrokerValues.exactLong(boot.get("version"));
-        boolean authorityBoot = Long.valueOf(5).equals(version);
-        require(boot.keySet().equals(authorityBoot ? AUTHORITY_BOOT_KEYS : BOOT_KEYS) && "boot".equals(boot.get("type"))
+        boolean finalizationBoot = Long.valueOf(6).equals(version);
+        boolean authorityBoot = Long.valueOf(5).equals(version) || finalizationBoot;
+        require(boot.keySet().equals(finalizationBoot ? FINALIZATION_BOOT_KEYS : authorityBoot ? AUTHORITY_BOOT_KEYS : BOOT_KEYS) && "boot".equals(boot.get("type"))
                 && (authorityBoot || Long.valueOf(4).equals(version)) && PROTOCOL.equals(boot.get("managedCsi")));
+        if (finalizationBoot) {
+            require(FINALIZATION_FORMAT.equals(boot.get("finalization")));
+        }
         if (authorityBoot) {
             validateAuthority(map(boot.get("authority")));
         }

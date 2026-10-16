@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_AUTHORITY_VERSION;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_FINALIZATION_VERSION;
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_VERSION;
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.VERSION;
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.bytes;
@@ -71,6 +72,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     private final Duration timeout;
     private final RuntimeTransport transport;
     private final Map<String, Object> authority;
+    private final WorkspaceCsiNodeEvidence evidence;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final ThreadLocal<Long> deadline = new ThreadLocal<>();
     private final Map<RuntimeProvisionSeed, RuntimeBindingRecord> claims = new ConcurrentHashMap<>();
@@ -110,6 +112,14 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                 timeout, artifacts, new HttpRuntimeTransport(), ManagedCsiFilesProtocol.authority(authorityOrigin));
     }
 
+    public WorkspaceCsiRuntimeProvisioner(WorkspaceCsiReservationStore storage,
+            JdbcRuntimeBindingRepository bindings, WorkspaceCsiRegistration registration, KubernetesRuntimeClient api,
+            WorkspaceCsiResourceGuard guard, String image, List<String> command, Duration timeout,
+            List<WorkerArtifact> artifacts, String authorityOrigin, WorkspaceCsiNodeEvidence evidence) {
+        this(storage, bindings, registration, Objects.requireNonNull(api), Objects.requireNonNull(guard), image, command,
+                timeout, artifacts, new HttpRuntimeTransport(), ManagedCsiFilesProtocol.authority(authorityOrigin), Objects.requireNonNull(evidence));
+    }
+
     WorkspaceCsiRuntimeProvisioner(WorkspaceCsiReservationStore storage,
             JdbcRuntimeBindingRepository bindings, WorkspaceCsiRegistration registration, KubernetesRuntimeClient api,
             WorkspaceCsiResourceGuard guard, String image, List<String> command, Duration timeout,
@@ -121,6 +131,13 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             JdbcRuntimeBindingRepository bindings, WorkspaceCsiRegistration registration, KubernetesRuntimeClient api,
             WorkspaceCsiResourceGuard guard, String image, List<String> command, Duration timeout,
             List<WorkerArtifact> artifacts, RuntimeTransport transport, Map<String, Object> authority) {
+        this(storage, bindings, registration, api, guard, image, command, timeout, artifacts, transport, authority, null);
+    }
+
+    private WorkspaceCsiRuntimeProvisioner(WorkspaceCsiReservationStore storage,
+            JdbcRuntimeBindingRepository bindings, WorkspaceCsiRegistration registration, KubernetesRuntimeClient api,
+            WorkspaceCsiResourceGuard guard, String image, List<String> command, Duration timeout,
+            List<WorkerArtifact> artifacts, RuntimeTransport transport, Map<String, Object> authority, WorkspaceCsiNodeEvidence evidence) {
         this.storage = Objects.requireNonNull(storage);
         this.bindings = Objects.requireNonNull(bindings);
         this.registration = Objects.requireNonNull(registration);
@@ -132,6 +149,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         this.timeout = Objects.requireNonNull(timeout);
         this.transport = Objects.requireNonNull(transport);
         this.authority = authority == null ? null : ManagedCsiFilesProtocol.authority((String) authority.get("origin"));
+        this.evidence = evidence;
         require(authority == null || same(authority, this.authority));
         require(!timeout.isZero() && !timeout.isNegative() && timeout.compareTo(Duration.ofMinutes(5)) <= 0);
         if (api != null) {
@@ -182,26 +200,36 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             var original = admitted(request, seed);
             var reservation = storage.inspect(registration);
             var boot = ManagedCsiFilesProtocol.selects(request) && authority != null
-                    ? ManagedCsiFilesProtocol.boot(request, seed, storageTuple(reservation), authority)
+                    ? ManagedCsiFilesProtocol.finalizationBoot(request, seed, storageTuple(reservation), authority)
                     : WorkspaceCsiRuntimeIdentity.boot(request, seed, storageTuple(reservation));
             require(bytes(boot).length <= 32 * 1024);
             var protection = protection(await(guard.verify()));
             verifyArtifacts();
             require(get("secrets", name(seed)) == null && get("pods", name(seed)) == null);
             admitted(request, seed, original);
+            if (evidence != null) {
+                evidence.arm(original, reservation, () -> admitted(request, seed, original));
+                admitted(request, seed, original);
+            }
             var secret = create("secrets", secret(seed, boot));
             checkObject(secret, secret(seed, boot), null);
             String secretUid = uid(secret);
             admitted(request, seed, original);
-            var pod = create("pods", pod(request, seed));
-            checkObject(pod, pod(request, seed), null);
+            var pod = create("pods", pod(request, seed, evidence != null));
+            checkObject(pod, pod(request, seed, evidence != null), null);
             String podUid = uid(pod);
+            if (evidence != null) {
+                admitted(request, seed, original);
+                pod = evidence.bindAndOpen(original, reservation, pod, () -> admitted(request, seed, original));
+                checkObject(pod, pod(request, seed), podUid);
+            }
             while (true) {
                 admitted(request, seed, original);
                 pod = get("pods", name(seed));
                 checkObject(pod, pod(request, seed), podUid);
                 var running = running(pod);
-                if (running != null) {
+                if (running != null && (evidence == null || evidence.publication(original, reservation, pod,
+                        () -> admitted(request, seed, original)))) {
                     var placement = placement(seed, pod, secretUid, running, protection);
                     var value = new LinkedHashMap<String, Object>();
                     value.put("bindingId", original.getBindingId());
@@ -221,9 +249,12 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                         if (boot.containsKey("authority")) {
                             value.put("authority", boot.get("authority"));
                         }
+                        if (boot.containsKey("finalization")) {
+                            value.put("finalization", boot.get("finalization"));
+                        }
                     }
                     value.put("identity", digest(value));
-                    var handle = new RuntimeResourceHandle(kind(), files ? boot.containsKey("authority") ? FILES_AUTHORITY_VERSION : FILES_VERSION : VERSION, value);
+                    var handle = new RuntimeResourceHandle(kind(), files ? boot.containsKey("finalization") ? FILES_FINALIZATION_VERSION : boot.containsKey("authority") ? FILES_AUTHORITY_VERSION : FILES_VERSION : VERSION, value);
                     ownedHandle.set(handle);
                     observe(request, seed, handle, true);
                     admitted(request, seed, original);
@@ -269,7 +300,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     @Override
     public boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
         return api != null && handle != null && kind().equals(handle.getKind())
-                && handle.getVersion() == VERSION;
+                && (handle.getVersion() == VERSION || handle.getVersion() == FILES_VERSION || handle.getVersion() == FILES_AUTHORITY_VERSION || handle.getVersion() == FILES_FINALIZATION_VERSION);
     }
 
     @Override
@@ -294,6 +325,9 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     @Override
     public void close() {
         executor.shutdownNow();
+        if (evidence != null) {
+            evidence.close();
+        }
         claims.clear();
         placements.clear();
     }
@@ -320,8 +354,10 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                 && List.of(RuntimeBindingRecord.State.PROVISIONING, RuntimeBindingRecord.State.READY,
                         RuntimeBindingRecord.State.RECOVERY_BLOCKED).contains(original.getState())
                 && (fresh && original.getResourceHandle() == null || handle.equals(original.getResourceHandle())));
+        if (evidence != null) {
+            evidence.verifyPublished(original, placement, () -> remainingMillis());
+        }
         var expectedStorage = storageTuple(reserved);
-        expectedStorage.put("reservationRevision", "1");
         require(same(expectedStorage, value.get("storage")));
         checkObservation(request, seed, handle);
         var receipt = attest(request, seed, placement, WorkspaceCsiRuntimeIdentity.boot(request, seed, handle));
@@ -392,6 +428,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             throw closed();
         }
         require(request != null && seed != null && request.isManagedContext() && kind().equals(request.getProvisionerKind())
+                && (evidence == null || ManagedCsiFilesProtocol.selects(request))
                 && (ManagedCsiFilesProtocol.selects(request)
                         || "workspace".equals(request.getScope().getIsolationClass()) && request.getIsolationKey() == null)
                 && registration.tenantId().equals(request.getScope().getTenantId())
@@ -445,6 +482,10 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     }
 
     private Map<String, Object> pod(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        return pod(request, seed, false);
+    }
+
+    private Map<String, Object> pod(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, boolean gated) {
         var args = new ArrayList<>(command);
         args.addAll(List.of("managed-runtime-worker", "--container-boot", BOOT_PATH));
         var mounts = new ArrayList<>(List.of(Map.of("name", "boot", "mountPath", "/var/run/qwen-runtime", "readOnly", true),
@@ -476,10 +517,24 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         var spec = new LinkedHashMap<String, Object>();
         spec.putAll(Map.of("restartPolicy", "Never", "automountServiceAccountToken", false,
                 "enableServiceLinks", false, "nodeSelector", Map.of("kubernetes.io/os", "linux")));
-        spec.put("securityContext", Map.of("runAsNonRoot", true, "runAsUser", 1000, "runAsGroup", 1000, "fsGroup", 1000,
+        var security = new LinkedHashMap<String, Object>(Map.of("runAsNonRoot", true, "runAsUser", 1000, "runAsGroup", 1000, "fsGroup", 1000,
                 "seccompProfile", Map.of("type", "RuntimeDefault")));
+        spec.put("securityContext", security);
         spec.put("containers", List.of(container));
         spec.put("volumes", volumes);
+        if (evidence != null) {
+            spec.put("serviceAccountName", "qwen-k2-worker");
+            spec.put("runtimeClassName", com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS);
+            security.put("appArmorProfile", Map.of("type", "Localhost", "localhostProfile", "qwen-k2-worker-v1"));
+            spec.put("affinity", evidence.affinity());
+            spec.put("tolerations", List.of(
+                    Map.of("key", "qwen-code.io/k2-evidence", "operator", "Equal", "value", "isolated", "effect", "NoSchedule"),
+                    Map.of("key", "node.kubernetes.io/not-ready", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300),
+                    Map.of("key", "node.kubernetes.io/unreachable", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300)));
+            if (gated) {
+                spec.put("schedulingGates", List.of(Map.of("name", com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient.CSI_SOURCE_GATE)));
+            }
+        }
         return Map.of("apiVersion", "v1", "kind", "Pod", "metadata", metadata(seed), "spec", spec);
     }
 
@@ -545,12 +600,36 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         uid(actual);
         if ("Pod".equals(actual.get("kind"))) {
             var spec = map(actual.get("spec"));
+            var expectedSpec = map(expected.get("spec"));
+            if (expectedSpec.containsKey("serviceAccountName")) {
+                require(expectedSpec.get("serviceAccountName").equals(spec.get("serviceAccountName"))
+                        && (spec.get("serviceAccount") == null || expectedSpec.get("serviceAccountName").equals(spec.get("serviceAccount"))));
+                require(same(map(expectedSpec.get("securityContext")).get("appArmorProfile"),
+                        map(spec.get("securityContext")).get("appArmorProfile")));
+                require(empty(spec.get("imagePullSecrets")));
+                if (metadata.get("annotations") != null) {
+                    var annotations = map(metadata.get("annotations"));
+                    require(annotations.get("container.apparmor.security.beta.kubernetes.io/runtime") == null
+                            || "localhost/qwen-k2-worker-v1".equals(annotations.get("container.apparmor.security.beta.kubernetes.io/runtime")));
+                    require(List.of("kubernetes.io/config.mirror", "kubernetes.io/config.source", "kubernetes.io/config.hash")
+                            .stream().noneMatch(annotations::containsKey));
+                }
+            }
             require(Set.of("restartPolicy", "automountServiceAccountToken", "enableServiceLinks", "nodeSelector",
                     "securityContext", "containers", "volumes", "nodeName", "serviceAccountName", "serviceAccount",
                     "schedulerName", "priority", "preemptionPolicy", "dnsPolicy", "dnsConfig", "terminationGracePeriodSeconds",
                     "tolerations", "hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace",
-                    "initContainers", "ephemeralContainers", "imagePullSecrets", "priorityClassName").containsAll(spec.keySet()));
+                    "initContainers", "ephemeralContainers", "imagePullSecrets", "priorityClassName", "schedulingGates", "affinity", "runtimeClassName").containsAll(spec.keySet()));
             checkDnsConfig(spec.get("dnsConfig"));
+            require(expectedSpec.containsKey("runtimeClassName") ? expectedSpec.get("runtimeClassName").equals(spec.get("runtimeClassName"))
+                    : !spec.containsKey("runtimeClassName"));
+            for (String field : List.of("affinity", "schedulingGates")) {
+                require(map(expected.get("spec")).containsKey(field) ? same(spec.get(field), map(expected.get("spec")).get(field))
+                        : spec.get(field) == null || field.equals("schedulingGates") && empty(spec.get(field)));
+            }
+            if (map(expected.get("spec")).containsKey("tolerations")) {
+                require(same(spec.get("tolerations"), map(expected.get("spec")).get("tolerations")));
+            }
             require(map(map(expected.get("spec")).get("securityContext")).keySet()
                     .containsAll(map(spec.get("securityContext")).keySet()));
             require(empty(spec.get("initContainers")) && empty(spec.get("ephemeralContainers"))

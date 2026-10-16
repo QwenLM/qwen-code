@@ -182,16 +182,6 @@ public final class InMemoryRuntimeBindingRepository
     }
 
     @Override
-    public synchronized RuntimeSessionRecord createSessionTombstone(
-            RuntimeSessionRepository sessions, RuntimeSessionRecord candidate) {
-        if (candidate.getState() != RuntimeSessionRecord.State.RELEASED) {
-            throw new IllegalArgumentException("Tombstone must be RELEASED");
-        }
-        RuntimeAdmission.requireRelease(findById(candidate.getBindingId()), candidate);
-        return sessions.findOrCreate(candidate);
-    }
-
-    @Override
     public synchronized RuntimeSessionRecord requireSessionAdmission(RuntimeSessionRepository sessions,
             RuntimeSessionRecord expected) {
         if (expected == null || expected.getState() != RuntimeSessionRecord.State.READY) {
@@ -213,6 +203,16 @@ public final class InMemoryRuntimeBindingRepository
             }
             return current;
         }
+    }
+
+    @Override
+    public synchronized RuntimeSessionRecord createSessionTombstone(
+            RuntimeSessionRepository sessions, RuntimeSessionRecord candidate) {
+        if (candidate.getState() != RuntimeSessionRecord.State.RELEASED) {
+            throw new IllegalArgumentException("Tombstone must be RELEASED");
+        }
+        RuntimeAdmission.requireRelease(findById(candidate.getBindingId()), candidate);
+        return sessions.findOrCreate(candidate);
     }
 
     @Override

@@ -473,18 +473,19 @@ public final class ToolPublicationStore {
             long allocation = bytes + ToolPublicationContract.PRODUCER_BYTES
                     + ToolPublicationContract.ADMISSION_BYTES;
             jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'FENCED', expires_at = NULL,"
-                    + " capture_held_bytes = capture_used_bytes, producer_held_bytes ="
-                        + " producer_used_bytes, admission_held_bytes = CASE WHEN producer_phase IN"
-                        + " ('FINISHED', 'REFERENCED') THEN admission_held_bytes ELSE"
-                        + " admission_used_bytes END WHERE tenant_key = ? AND state = 'OPEN' AND"
-                        + " expires_at <= ?", tenantKey, writer.now());
-            var totals = jdbc.query(
-                                    "SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes +"
-                                        + " admission_held_bytes), 0) AS reserved,"
-                                        + " COALESCE(SUM(CASE WHEN state = 'OPEN' AND"
-                                        + " producer_phase IN ('OPEN', 'FINISHING') THEN 1 ELSE 0"
-                                        + " END), 0) AS captures FROM ma_output_capture WHERE"
-                                        + " tenant_key = ? AND state <> 'NOT_STARTED'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), tenantKey).getFirst();
+                    + " capture_held_bytes = capture_used_bytes, producer_held_bytes = producer_used_bytes,"
+                    + " admission_held_bytes = CASE WHEN producer_phase IN ('FINISHED', 'REFERENCED')"
+                    + " THEN admission_held_bytes ELSE admission_used_bytes END"
+                    + " WHERE tenant_key = ? AND state = 'OPEN' AND expires_at <= ?"
+                    + " AND NOT EXISTS (SELECT 1 FROM ma_session s"
+                    + " WHERE s.tenant_id = ma_output_capture.tenant_id"
+                    + " AND s.session_id = ma_output_capture.session_id AND s.csi_guard = TRUE)",
+                    tenantKey, writer.now());
+            var totals = jdbc.query("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
+                    + " + admission_held_bytes), 0) AS reserved,"
+                    + " COALESCE(SUM(CASE WHEN state = 'OPEN' AND producer_phase IN ('OPEN', 'FINISHING')"
+                    + " THEN 1 ELSE 0 END), 0) AS captures"
+                    + " FROM ma_output_capture WHERE tenant_key = ? AND state <> 'NOT_STARTED'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), tenantKey).getFirst();
             long reserved = ((Number) totals.get("reserved")).longValue();
             long count = ((Number) totals.get("captures")).longValue();
             Long sessionReserved = jdbc.queryForObject("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"

@@ -61,6 +61,35 @@ public final class CsiNativeActivationProof {
             long leaseDurationMs, long expiresAt, long renewalSequence, long epoch, long writerGeneration) {
     }
 
+    public record TerminalProof(Activation predecessorActivation, Prefix predecessorPrefix, JsonNode boundaryRef,
+            long predecessorSequence, String predecessorLastRecordUuid, String predecessorCommitDigest,
+            long terminalSequence, String lastRecordUuid) {
+        public TerminalProof {
+            predecessorActivation = snapshot(predecessorActivation, Activation.class);
+            predecessorPrefix = snapshot(predecessorPrefix, Prefix.class);
+            boundaryRef = boundaryRef.deepCopy();
+        }
+
+        @Override
+        public Activation predecessorActivation() {
+            return snapshot(predecessorActivation, Activation.class);
+        }
+
+        @Override
+        public Prefix predecessorPrefix() {
+            return snapshot(predecessorPrefix, Prefix.class);
+        }
+
+        @Override
+        public JsonNode boundaryRef() {
+            return boundaryRef.deepCopy();
+        }
+
+        private static <T> T snapshot(T value, Class<T> type) {
+            return JSON.convertValue(JSON.valueToTree(value).deepCopy(), type);
+        }
+    }
+
     public record Input(String inputId, String text, String userMessageId, boolean noDeadline) {
     }
 
@@ -1127,7 +1156,8 @@ public final class CsiNativeActivationProof {
         }
     }
 
-    private static JsonNode toolOutcomeBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
+    /** Reassembles the bounded outcome; the reader must enforce the resource owner's scope. */
+    public static JsonNode toolOutcomeBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
         if ("managed-tool-outcome".equals(ref.path("kind").textValue())) {
             byte[] bytes = reference(ref, "managed-tool-outcome", resources);
             require(bytes.length <= 64 * 1024);
@@ -1154,7 +1184,8 @@ public final class CsiNativeActivationProof {
         return readObject(bytes.toByteArray());
     }
 
-    private static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
+    /** Reassembles the declared message format; the reader must enforce the resource owner's scope. */
+    public static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
         if ("managed-message".equals(ref.path("kind").textValue())) {
             byte[] bytes = reference(ref, "managed-message", resources);
             require(bytes.length <= 64 * 1024);
@@ -1278,6 +1309,31 @@ public final class CsiNativeActivationProof {
         }
         require(sha256(utf8(digestInput.toString())).equals(text(metadata, "contentDigest")));
         return messageRecord(message, messagePayload, original, completed, resources, true);
+    }
+
+    static Set<String> completeOutputTail(Prefix prefix, long sequence) {
+        require(prefix.input() != null && prefix.input().noDeadline() && prefix.pendingBatch() == null
+                && prefix.batches().size() == 1 && prefix.checkpoint() != null && prefix.attempt() != null
+                && "output_committed".equals(prefix.attempt().stage()) && prefix.attempt().finalMessageRef() != null
+                && prefix.assistantCommitted() && prefix.stream() == null && prefix.fileHistory() != null
+                && prefix.fileHistory().body().path("preparation").isNull()
+                && "results_ready".equals(prefix.checkpoint().state().path("continuation").path("phase").textValue())
+                && canonical(prefix.attempt().checkpointRef()).equals(canonical(prefix.checkpoint().ref())));
+        Set<String> executions = new HashSet<>();
+        JsonNode items = prefix.checkpoint().state().path("tools").path("items");
+        require(items.isArray() && !items.isEmpty());
+        String batchId = prefix.batches().keySet().iterator().next();
+        for (JsonNode item : items) {
+            String execution = id(item, "executionCallId");
+            ToolReceipt receipt = prefix.receipts().get(execution);
+            require(executions.add(execution) && "settled".equals(text(item, "state"))
+                    && item.path("consumed").isBoolean() && !item.path("consumed").booleanValue()
+                    && batchId.equals(id(item, "modelMessageId")) && receipt != null
+                    && receipt.messageSequence() > 0 && receipt.messageSequence() <= sequence
+                    && canonical(item.path("outcomeRef")).equals(canonical(receipt.ref())));
+        }
+        require(executions.equals(prefix.intents().keySet()) && executions.equals(prefix.receipts().keySet()));
+        return Set.copyOf(executions);
     }
 
     private static void usage(JsonNode usage, JsonNode route, String stage) {
@@ -1412,13 +1468,9 @@ public final class CsiNativeActivationProof {
         }
         byte[] inputBytes = reference(payload.path("contentRef"), "managed-input", resources);
         require(inputBytes.length <= 64 * 1024 && sha256(inputBytes).equals(text(metadata, "contentDigest")));
-        JsonNode blocks = readJson(inputBytes);
-        require(blocks != null && blocks.isArray() && !blocks.isEmpty());
+        JsonNode blocks = inputBlocks(inputBytes);
         List<String> texts = new ArrayList<>();
         for (JsonNode block : blocks) {
-            closed(block, Set.of("type", "text"));
-            require("text".equals(text(block, "type")) && block.path("text").isTextual()
-                    && !block.path("text").textValue().isEmpty());
             texts.add(block.path("text").textValue());
         }
         byte[] admissionBytes = reference(payload.path("admissionRef"), "managed-admission", resources);
@@ -1587,7 +1639,10 @@ public final class CsiNativeActivationProof {
             require(install && generation == 1 && epoch == 1 && number(metadata.get("firstSequence")) == 1
                     && number(body.get("leaseDurationMs")) == lease);
         } else if (install) {
-            throw invalid();
+            require(generation > previous.writerGeneration() && epoch == previous.epoch() + 1
+                    && !id.equals(previous.activationId()) && !writerId.equals(previous.workerId())
+                    && time(event.get("occurredAt")) >= previous.expiresAt()
+                    && number(body.get("leaseDurationMs")) == lease);
         } else {
             require(id.equals(previous.activationId()) && writerId.equals(previous.workerId())
                     && generation == previous.writerGeneration() && epoch == previous.epoch()
@@ -1601,6 +1656,106 @@ public final class CsiNativeActivationProof {
 
     public static boolean hasActivation(Transaction transaction) {
         return transaction.events().stream().anyMatch(event -> "activation.changed".equals(event.path("kind").textValue()));
+    }
+
+    /** Validates the uncommitted candidate against an already verified original predecessor. */
+    public static TerminalProof preparedTerminal(JsonNode metadata, RuntimeProvisionRequest original,
+            Genesis genesis, Activation activation, Prefix prefix, long previousRevision,
+            long previousSequence, String previousUuid, String previousCommitDigest) {
+        require(original != null && original.getScope().getWorkspaceId().equals(text(metadata, "workspaceId"))
+                && previousRevision > 1 && previousRevision < 4096
+                && number(metadata.get("expectedJournalRevision")) == previousRevision
+                && number(metadata.get("expectedCommittedSequence")) == previousSequence);
+        JsonNode candidates = metadata.path("resources");
+        require(candidates.isArray() && candidates.size() == 1);
+        JsonNode candidate = candidates.get(0);
+        closed(candidate, Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest", "bytesBase64"));
+        byte[] resourceBytes = canonicalBase64(candidate, "bytesBase64", 16 * 1024);
+        byte[] raw = canonicalBase64(metadata, "recordBytesBase64", 128 * 1024);
+        require(sha256(raw).equals(text(metadata, "recordDigest")));
+        var records = records(raw);
+        require(records.size() == 2 && number(metadata.get("recordCount")) == records.size());
+        return terminal(records, metadata, original, genesis, activation, prefix, previousSequence,
+                previousUuid, previousCommitDigest, ref -> {
+                    for (String field : List.of("resourceId", "kind", "schemaVersion", "byteLength", "digest")) {
+                        require(canonical(ref.path(field)).equals(canonical(candidate.path(field))));
+                    }
+                    return resourceBytes;
+                });
+    }
+
+    private static byte[] canonicalBase64(JsonNode value, String field, int limit) {
+        String encoded = text(value, field);
+        require(encoded.length() <= ((limit + 2) / 3) * 4);
+        try {
+            byte[] bytes = java.util.Base64.getDecoder().decode(encoded);
+            require(bytes.length > 0 && bytes.length <= limit
+                    && java.util.Base64.getEncoder().encodeToString(bytes).equals(encoded));
+            return bytes;
+        } catch (IllegalArgumentException malformed) {
+            throw invalid();
+        }
+    }
+
+    /** Decodes facts from a validated, unmodified parser continuation; grants no live authority. */
+    public static TerminalProof terminal(List<JsonNode> records, JsonNode metadata,
+            RuntimeProvisionRequest original, Genesis genesis, Activation previous, Prefix prefix,
+            long previousSequence, String previousUuid, String previousCommitDigest,
+            Function<JsonNode, byte[]> resources) {
+        require(genesis != null && previous != null && prefix != null
+                && previous.writerGeneration() == 1 && previous.epoch() == 1
+                && prefix.checkpoint() != null && prefix.input() == null && prefix.attempt() == null
+                && prefix.stream() == null && prefix.pendingBatch() == null
+                && previousSequence > 0 && previousSequence < MAX_SAFE
+                && "releaseActivation".equals(text(metadata, "operation"))
+                && (previous.activationId() + ":released").equals(id(metadata, "commandId"))
+                && genesis.definitionDigest().equals(text(metadata, "contentDigest"))
+                && number(metadata.get("eventCount")) == 1
+                && number(metadata.get("firstSequence")) == previousSequence + 1
+                && previousCommitDigest != null && previousCommitDigest.equals(text(metadata, "previousCommitDigest"))
+                && previous.workerId().equals(text(metadata, "writerId"))
+                && number(metadata.get("writerGeneration")) == 1 && number(metadata.get("activationEpoch")) == 1
+                && metadata.path("latestCheckpointResourceId").isNull());
+        uuid(previousUuid);
+        Transaction transaction = transaction(records, metadata, original, previousUuid);
+        JsonNode event = transaction.events().getFirst();
+        closed(event, Set.of("v", "sequence", "eventId", "sessionKey", "kind", "occurredAt", "payload"));
+        require("activation.changed".equals(text(event, "kind"))
+                && ("activation:" + previous.activationId() + ":released").equals(id(event, "eventId")));
+        time(event.get("occurredAt"));
+        JsonNode payload = event.path("payload");
+        closed(payload, PAYLOAD);
+        require(previous.activationId().equals(id(payload, "activationId")) && number(payload.get("epoch")) == 1
+                && previous.workerId().equals(text(payload, "workerId"))
+                && "released".equals(text(payload, "phase")) && payload.path("leaseDurationMs").isNull()
+                && time(payload.get("expiresAt")) == previous.expiresAt() && payload.path("installRef").isNull());
+        JsonNode subject = payload.path("subject");
+        closed(subject, Set.of("type", "scopeId", "activationId", "epoch"));
+        require("activation".equals(text(subject, "type"))
+                && previous.activationId().equals(text(subject, "scopeId"))
+                && previous.activationId().equals(text(subject, "activationId")) && number(subject.get("epoch")) == 1);
+        JsonNode ref = payload.path("boundaryRef");
+        byte[] bytes = reference(ref, "managed-activation-boundary", resources);
+        require(bytes.length <= 16 * 1024);
+        JsonNode boundary = readObject(bytes);
+        closed(boundary, Set.of("version", "activationId", "epoch", "committedSequence", "lastRecordUuid"));
+        require(number(boundary.get("version")) == 1 && previous.activationId().equals(id(boundary, "activationId"))
+                && number(boundary.get("epoch")) == 1 && number(boundary.get("committedSequence")) == previousSequence
+                && previousUuid.equals(text(boundary, "lastRecordUuid")));
+        return new TerminalProof(previous, prefix, ref, previousSequence, previousUuid, previousCommitDigest,
+                previousSequence + 1, transaction.lastRecordUuid());
+    }
+
+    public static JsonNode inputBlocks(byte[] bytes) {
+        require(bytes != null && bytes.length > 0 && bytes.length <= 64 * 1024);
+        JsonNode blocks = readJson(bytes);
+        require(blocks != null && blocks.isArray() && !blocks.isEmpty());
+        for (JsonNode block : blocks) {
+            closed(block, Set.of("type", "text"));
+            require("text".equals(text(block, "type")) && block.path("text").isTextual()
+                    && !block.path("text").textValue().isEmpty());
+        }
+        return blocks;
     }
 
     public static JsonNode readObject(byte[] bytes) {

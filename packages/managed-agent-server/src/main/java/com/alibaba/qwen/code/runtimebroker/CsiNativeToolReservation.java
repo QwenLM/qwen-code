@@ -52,65 +52,34 @@ final class CsiNativeToolReservation {
 
     static Map<String, Resource> inventory(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
             throws SQLException {
+        return inventory(connection, original, JdbcCsiActivationAdmission.JournalRead.LIVE);
+    }
+
+    static Map<String, Resource> inventory(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         Map<String, Resource> result = new HashMap<>();
         String cursor = "";
         while (true) {
             int count = 0;
-            try (PreparedStatement statement = statement(connection,
-                            "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id > ? ORDER BY resource_id LIMIT 100 FOR UPDATE")) {
-                JdbcRepositorySupport.setStringParameter(statement, 1, scope(original));
-                JdbcRepositorySupport.setStringParameter(statement, 2, cursor);
+            try (PreparedStatement statement = read.statement(connection,
+                    "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id > ?"
+                            + " ORDER BY resource_id LIMIT 100")) {
+                statement.setString(1, scope(original));
+                JdbcRepositorySupport.setIdentity(statement, 2, cursor);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
                         require(result.size() < LIMIT
-                                && original.request().getScope().getTenantId().equals(
-                                                        com.alibaba.qwen.code.runtimebroker
-                                                                .managedschema.ManagedSchemaRows
-                                                                .identity(rows, "tenant_id"))
-                                && original.request().getScope().getWorkspaceId().equals(
-                                                        com.alibaba.qwen.code.runtimebroker
-                                                                .managedschema.ManagedSchemaRows
-                                                                .identity(rows, "workspace_id"))
-                                && original.request().getIsolationKey().equals(
-                                                        com.alibaba.qwen.code.runtimebroker
-                                                                .managedschema.ManagedSchemaRows
-                                                                .identity(rows, "session_id")));
-                        cursor =
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(rows, "resource_id");
-                        ObjectNode ref = JSON.createObjectNode().put("resourceId", cursor).put("kind",
-                                                com.alibaba.qwen.code.runtimebroker.managedschema
-                                                        .ManagedSchemaRows.identity(rows, "kind"))
+                                && original.request().getScope().getTenantId().equals(rows.getString("tenant_id"))
+                                && original.request().getScope().getWorkspaceId().equals(rows.getString("workspace_id"))
+                                && original.request().getIsolationKey().equals(rows.getString("session_id")));
+                        cursor = rows.getString("resource_id");
+                        ObjectNode ref = JSON.createObjectNode().put("resourceId", cursor).put("kind", rows.getString("kind"))
                                 .put("schemaVersion", rows.getLong("schema_version"))
                                 .put("byteLength", rows.getLong("byte_length")).put("digest", rows.getString("sha256"));
                         require(result.put(cursor, new Resource(ref, rows.getBytes("inline_bytes"),
-                                rows.getString("state"), rows.getString("storage_kind"),
-                                                        com.alibaba.qwen.code.runtimebroker
-                                                                .managedschema.ManagedSchemaRows
-                                                                .identity(
-                                                                        rows, "publish_command_id"),
-                                                        com.alibaba.qwen.code.runtimebroker
-                                                                                .managedschema
-                                                                                .ManagedSchemaRows
-                                                                                .identity(
-                                                                                        rows,
-                                                                                        "object_key")
-                                                                        == null
-                                                                && com.alibaba.qwen.code
-                                                                                .runtimebroker
-                                                                                .managedschema
-                                                                                .ManagedSchemaRows
-                                                                                .identity(
-                                                                                        rows,
-                                                                                        "object_version_id")
-                                                                        == null
-                                                                && com.alibaba.qwen.code
-                                                                                .runtimebroker
-                                                                                .managedschema
-                                                                                .ManagedSchemaRows
-                                                                                .identity(
-                                                                                        rows,
-                                                                                        "encryption_key_id") == null)) == null);
+                                rows.getString("state"), rows.getString("storage_kind"), rows.getString("publish_command_id"),
+                                rows.getString("object_key") == null && rows.getString("object_version_id") == null
+                                        && rows.getString("encryption_key_id") == null)) == null);
                         count++;
                     }
                 }
@@ -123,57 +92,57 @@ final class CsiNativeToolReservation {
 
     static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources) throws SQLException {
-        return complete(connection, original, prefix, resources, 0, 0);
+        return complete(connection, original, prefix, resources, false);
     }
 
     static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, boolean recovery) throws SQLException {
+        return complete(connection, original, prefix, resources, recovery, 0, 0);
+    }
+
+    static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, boolean recovery,
             long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
+        return complete(connection, original, prefix, resources, recovery, candidateHistorySequence,
+                candidateHistoryRevision, JdbcCsiActivationAdmission.JournalRead.LIVE);
+    }
+
+    static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, boolean recovery,
+            long candidateHistorySequence, long candidateHistoryRevision, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         require(candidateHistorySequence >= 0 && candidateHistoryRevision >= 0
                 && (candidateHistorySequence == 0) == (candidateHistoryRevision == 0));
         List<ToolExecutionRecord> result = new ArrayList<>();
-        Set<String> calls = new HashSet<>();
-        Set<String> ordinals = new HashSet<>();
-        Set<String> toolCalls = new HashSet<>();
+        long recoveryByteCount = 0;
         String cursor = "";
         while (true) {
             int count = 0;
-            try (PreparedStatement statement = statement(connection,
-                            "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE (binding_id = ? OR harness_session_id = ? OR runtime_session_id = ?) AND execution_call_id_hash > ? ORDER BY execution_call_id_hash LIMIT 100 FOR UPDATE")) {
-                JdbcRepositorySupport.setStringParameter(statement, 1, original.bindingId());
-                JdbcRepositorySupport.setStringParameter(
-                        statement, 2, original.request().getIsolationKey());
-                JdbcRepositorySupport.setStringParameter(
-                        statement, 3, original.request().getIsolationKey());
-                JdbcRepositorySupport.setStringParameter(statement, 4, cursor);
+            try (PreparedStatement statement = read.statement(connection,
+                    "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE (binding_id = ? OR harness_session_id = ?"
+                            + " OR runtime_session_id = ?) AND execution_call_id_hash > ?"
+                            + " ORDER BY execution_call_id_hash LIMIT 100")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
+                JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+                JdbcRepositorySupport.setIdentity(statement, 3, original.request().getIsolationKey());
+                statement.setString(4, cursor);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
                         require(result.size() < LIMIT);
+                        if (recovery) {
+                            recoveryByteCount += recoveryBytes(rows.getString("result_json")).length
+                                    + recoveryBytes(rows.getString("native_authorization_json")).length;
+                            require(recoveryByteCount <= 8 * 1024 * 1024);
+                        }
                         JsonNode stored = CsiNativeActivationProof.readObject(utf8(rows.getString("reference_json")));
                         ToolExecutionRecord execution = JdbcToolExecutionRepository.mapExecution(rows);
                         JsonNode ref = JSON.valueToTree(execution.getReference());
                         require(canonical(stored).equals(canonical(ref)));
                         String batchId = id(ref, "batchId");
                         byte[] input = bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId,
-                                ref.path("inputRef"), "managed-tool-input", candidateHistorySequence, candidateHistoryRevision);
+                                ref.path("inputRef"), "managed-tool-input", candidateHistorySequence, candidateHistoryRevision, read);
                         byte[] definition = bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId,
-                                ref.path("toolDefinitionRef"), "managed-tool-definition", candidateHistorySequence, candidateHistoryRevision);
-                        qualifyRelated(original, prefix, execution, input, definition);
-                        var intent = prefix.intents().get(execution.getExecutionCallId());
-                        if (intent != null) {
-                            qualifyIntent(execution, intent);
-                        }
-                        var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
-                        if (frozen != null) {
-                            require(frozen.invocations().stream().anyMatch(invocation ->
-                                    execution.getExecutionCallId().equals(id(invocation, "executionCallId"))
-                                            && canonical(ref).equals(canonical(CsiNativeActivationProof.historyExecutionReference(
-                                                    original.request(), JSON.createObjectNode().put("promptId", id(ref, "promptId"))
-                                                            .put("batchId", batchId), invocation)))));
-                        }
-                        require(calls.add(batchId + "\u0000" + id(ref, "functionCallId"))
-                                && ordinals.add(batchId + "\u0000" + number(ref.get("ordinal")))
-                                && toolCalls.add(execution.getToolCallId()));
+                                ref.path("toolDefinitionRef"), "managed-tool-definition", candidateHistorySequence, candidateHistoryRevision, read);
+                        qualifyMember(original, prefix, execution, input, definition);
                         result.add(execution);
                         cursor = rows.getString("execution_call_id_hash");
                         count++;
@@ -181,18 +150,64 @@ final class CsiNativeToolReservation {
                 }
             }
             if (count < 100) {
-                if (prefix.fileHistory() != null) {
-                    for (var entry : prefix.fileHistory().batches().entrySet()) {
-                        require(result.stream().filter(execution -> entry.getKey().equals(
-                                id(JSON.valueToTree(execution.getReference()), "batchId"))).count() == entry.getValue().invocations().size());
-                    }
-                }
-                for (String executionId : prefix.intents().keySet()) {
-                    require(result.stream().anyMatch(execution -> executionId.equals(execution.getExecutionCallId())));
-                }
+                requireMembers(prefix, result);
                 return List.copyOf(result);
             }
         }
+    }
+
+    /** Data membership only; the reader must separately establish complete scoped SQL rows and resource associations. */
+    static void verifyHistoricalMembers(JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, List<ToolExecutionRecord> members,
+            java.util.function.Function<JsonNode, byte[]> resourceReader) {
+        require(original != null && prefix != null && members != null && members.size() <= LIMIT && resourceReader != null);
+        for (var member : members) {
+            require(member != null);
+            JsonNode ref = JSON.valueToTree(member.getReference());
+            qualifyMember(original, prefix, member, resourceReader.apply(ref.path("inputRef")),
+                    resourceReader.apply(ref.path("toolDefinitionRef")));
+        }
+        requireMembers(prefix, members);
+    }
+
+    private static void qualifyMember(JdbcCsiFilesRetirementGuard.Original original, CsiNativeActivationProof.Prefix prefix,
+            ToolExecutionRecord execution, byte[] input, byte[] definition) {
+        qualifyRelated(original, prefix, execution, input, definition);
+        var intent = prefix.intents().get(execution.getExecutionCallId());
+        if (intent != null) {
+            qualifyIntent(execution, intent);
+        }
+        JsonNode ref = JSON.valueToTree(execution.getReference());
+        String batchId = id(ref, "batchId");
+        var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
+        if (frozen != null) {
+            require(frozen.invocations().stream().anyMatch(invocation ->
+                    execution.getExecutionCallId().equals(id(invocation, "executionCallId"))
+                            && canonical(ref).equals(canonical(CsiNativeActivationProof.historyExecutionReference(
+                                    original.request(), JSON.createObjectNode().put("promptId", id(ref, "promptId"))
+                                            .put("batchId", batchId), invocation)))));
+        }
+    }
+
+    private static void requireMembers(CsiNativeActivationProof.Prefix prefix, List<ToolExecutionRecord> members) {
+        Set<String> calls = new HashSet<>();
+        Set<String> ordinals = new HashSet<>();
+        Set<String> toolCalls = new HashSet<>();
+        Set<String> executionIds = new HashSet<>();
+        for (var member : members) {
+            JsonNode ref = JSON.valueToTree(member.getReference());
+            String batchId = id(ref, "batchId");
+            require(calls.add(batchId + "\u0000" + id(ref, "functionCallId"))
+                    && ordinals.add(batchId + "\u0000" + number(ref.get("ordinal")))
+                    && toolCalls.add(member.getToolCallId()) && executionIds.add(member.getExecutionCallId()));
+        }
+        if (prefix.fileHistory() != null) {
+            for (var entry : prefix.fileHistory().batches().entrySet()) {
+                require(members.stream().filter(execution -> entry.getKey().equals(
+                        id(JSON.valueToTree(execution.getReference()), "batchId"))).count() == entry.getValue().invocations().size());
+            }
+        }
+        require(executionIds.containsAll(prefix.intents().keySet()));
     }
 
     static ToolExecutionRecord prepare(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
@@ -224,11 +239,19 @@ final class CsiNativeToolReservation {
     }
 
     static Map<String, Object> read(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String promptId, String batchId) throws SQLException {
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String promptId, String batchId)
+            throws SQLException {
+        return read(connection, original, prefix, resources, promptId, batchId, false);
+    }
+
+    static Map<String, Object> read(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String promptId, String batchId,
+            boolean recovery) throws SQLException {
         require(prefix.input() != null && promptId.equals(prefix.input().inputId()) && prefix.pendingBatch() != null
                 && batchId.equals(prefix.pendingBatch().messageId()));
         List<Map<String, Object>> members = new ArrayList<>();
-        for (ToolExecutionRecord execution : complete(connection, original, prefix, resources)) {
+        long responseByteCount = 0;
+        for (ToolExecutionRecord execution : complete(connection, original, prefix, resources, recovery)) {
             JsonNode ref = JSON.valueToTree(execution.getReference());
             if (!batchId.equals(id(ref, "batchId"))) {
                 continue;
@@ -238,6 +261,22 @@ final class CsiNativeToolReservation {
                     "reference", execution.getReference(),
                     "inputBytesBase64", Base64.getEncoder().encodeToString(bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("inputRef"), "managed-tool-input")),
                     "toolDefinitionBytesBase64", Base64.getEncoder().encodeToString(bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("toolDefinitionRef"), "managed-tool-definition"))));
+            if (recovery) {
+                try (PreparedStatement statement = statement(connection,
+                        "SELECT execution_call_id, result_json, native_authorization_json FROM ma_tool_execution WHERE execution_call_id_hash = ? FOR UPDATE")) {
+                    statement.setString(1, JdbcRepositorySupport.valueKey(execution.getExecutionCallId()));
+                    try (ResultSet row = statement.executeQuery()) {
+                        require(row.next() && execution.getExecutionCallId().equals(row.getString(1)));
+                        member.put("resultBytesBase64", Base64.getEncoder().encodeToString(recoveryBytes(row.getString(2))));
+                        member.put("authorizationBytesBase64", Base64.getEncoder().encodeToString(recoveryBytes(row.getString(3))));
+                        require(!row.next());
+                    }
+                }
+            }
+            if (recovery) {
+                responseByteCount += JsonCodec.encode(member).length + 1;
+                require(responseByteCount <= 8 * 1024 * 1024);
+            }
             members.add(member);
         }
         members.sort(java.util.Comparator.comparingInt(member -> ((Number) ((Map<?, ?>) member.get("reference")).get("ordinal")).intValue()));
@@ -245,7 +284,16 @@ final class CsiNativeToolReservation {
         var result = Map.of("protocolVersion", 1, "harnessSessionId", session, "runtimeSessionId", session,
                 "promptId", promptId, "batchId", batchId, "runtimeBindingId", original.bindingId(),
                 "bindingGeneration", Long.toString(original.generation()), "members", List.copyOf(members));
+        require(!recovery || JsonCodec.encode(result).length <= 8 * 1024 * 1024);
         return result;
+    }
+
+    static byte[] recoveryBytes(String saved) {
+        require(saved != null);
+        byte[] bytes = utf8(saved);
+        require(bytes.length > 0 && bytes.length <= 64 * 1024);
+        CsiNativeActivationProof.readObject(bytes);
+        return bytes;
     }
 
     static void qualify(JdbcCsiFilesRetirementGuard.Original original, CsiNativeActivationProof.Prefix prefix,
@@ -380,6 +428,14 @@ final class CsiNativeToolReservation {
             CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String executionId, String batchId,
             JsonNode ref, String kind, long candidateHistorySequence, long candidateHistoryRevision)
             throws SQLException {
+        return bytesFor(connection, original, prefix, resources, executionId, batchId, ref, kind,
+                candidateHistorySequence, candidateHistoryRevision, JdbcCsiActivationAdmission.JournalRead.LIVE);
+    }
+
+    private static byte[] bytesFor(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String executionId, String batchId,
+            JsonNode ref, String kind, long candidateHistorySequence, long candidateHistoryRevision,
+            JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
         if (frozen == null) {
             var intent = prefix.intents().get(executionId);
@@ -390,7 +446,7 @@ final class CsiNativeToolReservation {
             require(resource != null && "REFERENCED".equals(resource.state) && "MYSQL_INLINE".equals(resource.storage)
                     && resource.inlineOnly && id(ref, "resourceId").equals(resource.commandId)
                     && canonical(ref).equals(canonical(resource.ref)));
-            byte[] associated = JdbcCsiActivationAdmission.resource(connection, original, ref, intent.revision());
+            byte[] associated = JdbcCsiActivationAdmission.resource(connection, original, ref, intent.revision(), read);
             require(Arrays.equals(resource.bytes, associated));
             return reference(ref, kind, ignored -> associated);
         }
@@ -402,8 +458,8 @@ final class CsiNativeToolReservation {
                 && resource.inlineOnly && id(ref, "resourceId").equals(resource.commandId)
                 && canonical(ref).equals(canonical(resource.ref)));
         byte[] associated = candidateHistorySequence > 0 && frozen.intentSequence() == candidateHistorySequence
-                ? JdbcCsiActivationAdmission.resource(connection, original, ref, candidateHistoryRevision)
-                : JdbcCsiActivationAdmission.frozenResource(connection, original, ref, frozen.intentSequence());
+                ? JdbcCsiActivationAdmission.resource(connection, original, ref, candidateHistoryRevision, read)
+                : JdbcCsiActivationAdmission.frozenResource(connection, original, ref, frozen.intentSequence(), read);
         require(Arrays.equals(resource.bytes, associated));
         return reference(ref, kind, ignored -> associated);
     }
@@ -496,10 +552,11 @@ final class CsiNativeToolReservation {
 
     private static void promote(Connection connection, JdbcCsiFilesRetirementGuard.Original original, JsonNode ref) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                        "UPDATE ma_resource SET state = 'REFERENCED' WHERE session_scope_key = ?"
-                                + " AND resource_id = ? AND state = 'PUBLISHED'")) {
-            JdbcRepositorySupport.setStringParameter(statement, 1, scope(original));
-            JdbcRepositorySupport.setStringParameter(statement, 2, id(ref, "resourceId"));
+                "UPDATE ma_resource SET state = 'REFERENCED'"
+                        + " WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED'")) {
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope(original), id(ref, "resourceId")));
+            statement.setString(2, scope(original));
+            JdbcRepositorySupport.setIdentity(statement, 3, id(ref, "resourceId"));
             require(statement.executeUpdate() == 1);
         }
     }
@@ -555,12 +612,11 @@ final class CsiNativeToolReservation {
                         continue;
                     }
                     try (PreparedStatement statement = statement(connection,
-                                    "UPDATE ma_resource SET state = 'REFERENCED' WHERE"
-                                        + " session_scope_key = ? AND resource_id = ? AND state ="
-                                        + " 'PUBLISHED'")) {
-                        JdbcRepositorySupport.setStringParameter(statement, 1, scope(original));
-                        JdbcRepositorySupport.setStringParameter(
-                                statement, 2, id(ref, "resourceId"));
+                            "UPDATE ma_resource SET state = 'REFERENCED'"
+                                    + " WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED'")) {
+                        statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope(original), id(ref, "resourceId")));
+                        statement.setString(2, scope(original));
+                        JdbcRepositorySupport.setIdentity(statement, 3, id(ref, "resourceId"));
                         require(statement.executeUpdate() == 1);
                     }
                 }
@@ -591,7 +647,7 @@ final class CsiNativeToolReservation {
             JdbcRepositorySupport.setStringParameter(statement, 6, id(ref, "resourceId"));
             JdbcRepositorySupport.setStringParameter(statement, 7, text(ref, "kind"));
             statement.setLong(8, bytes.length);
-            JdbcRepositorySupport.setStringParameter(statement, 9, text(ref, "digest"));
+            statement.setString(9, text(ref, "digest"));
             statement.setBytes(10, bytes);
             JdbcRepositorySupport.setStringParameter(statement, 11, id(ref, "resourceId"));
             var now = JdbcRepositorySupport.databaseNowPrecise(connection);

@@ -11,19 +11,21 @@ import java.util.regex.Pattern;
 
 import javax.sql.DataSource;
 
-/** Explicit initializer for the fresh 32-table database, independent of legacy bootstrap. */
+/** Explicit initializer for the fresh canonical database, independent of legacy bootstrap. */
 public final class ManagedSchema {
     public static final String FLYWAY_LOCATION = "classpath:db/managed-schema";
     public static final String RESOURCE = "/db/managed-schema/V1__managed_schema.sql";
     public static final String PRIVATE_AUTHORITY =
             "/db/managed-schema/V2__private_csi_authority.sql";
+    public static final String K2_RETIREMENT =
+            "/db/managed-schema/V7__k2_retirement_evidence.sql";
     public static final String SESSION_LIST =
             "/db/managed-schema/V3__session_list_created_at.sql";
     public static final String WORKSPACE_CREATION = "/db/managed-schema/V4__workspace_creation.sql";
     public static final String MODEL_SELECTION = "/db/managed-schema/V5__session_model_selection.sql";
     public static final String APPROVAL_SELECTION = "/db/managed-schema/V6__session_approval_selection.sql";
     // Additive migrations over the published V1 baseline, in version order.
-    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION, APPROVAL_SELECTION);
+    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION, APPROVAL_SELECTION, K2_RETIREMENT);
     private static final int CURRENT = EXTENSIONS.size() + 1;
 
     private ManagedSchema() {}
@@ -42,11 +44,7 @@ public final class ManagedSchema {
                 if (version < CURRENT) {
                     if (ManagedSchemaCatalog.hasHistory(connection)) {
                         throw new SQLException(
-                                "The canonical V"
-                                        + version
-                                        + " catalog requires the application's V"
-                                        + (version + 1)
-                                        + " migration");
+                                "The canonical V" + version + " catalog requires the application's V" + (version + 1) + " migration");
                     }
                     for (String extension : EXTENSIONS.subList(version - 1, EXTENSIONS.size())) {
                         execute(connection, read(extension));
@@ -75,6 +73,10 @@ public final class ManagedSchema {
         }
     }
 
+    public static void validate(Connection connection) throws SQLException {
+        ManagedSchemaCatalog.validate(Objects.requireNonNull(connection, "connection"), ddl());
+    }
+
     public static String ddl() {
         return ddl(CURRENT);
     }
@@ -88,23 +90,43 @@ public final class ManagedSchema {
     }
 
     private static String extend(String ddl, String extension) {
-        var namespace = Pattern.compile("ALTER TABLE ma_request_receipt ADD (CONSTRAINT"
-                + " ck_ma_request_namespace CHECK[^;]+);").matcher(extension);
-        if (namespace.find()) {
-            var previous = Pattern.compile("CONSTRAINT ck_ma_request_namespace CHECK[^\\n]+")
-                    .matcher(ddl);
-            if (!previous.find()) {
-                throw new IllegalStateException("Receipt namespace constraint is absent from the baseline");
+        for (String raw : extension.replaceAll("(?m)^--[^\\n]*", "").split(";")) {
+            String command = raw.trim();
+            if (command.isEmpty()) {
+                continue;
             }
-            ddl = previous.replaceFirst(java.util.regex.Matcher.quoteReplacement(namespace.group(1) + ","));
-            extension = extension.replace(namespace.group(), "");
-        }
-        var columns =
-                Pattern.compile("ALTER TABLE (ma_[a-z_]+) ADD (?:COLUMN )?([^;]+);").matcher(extension);
-        while (columns.find()) {
+            if (command.equals("ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace")) {
+                var constraint = Pattern.compile("(?m)^    CONSTRAINT ck_ma_request_namespace CHECK[^\\n]+\\n?")
+                        .matcher(ddl);
+                if (!constraint.find()) {
+                    throw new IllegalStateException("Receipt namespace constraint is absent from the baseline");
+                }
+                ddl = constraint.replaceFirst("");
+                continue;
+            }
+            var drop = Pattern.compile("DROP INDEX ([a-z_]+) ON (ma_[a-z_]+)").matcher(command);
+            if (drop.matches()) {
+                var index = Pattern.compile("\\nCREATE INDEX " + drop.group(1) + " ON " + drop.group(2)
+                        + " \\([^)]+\\);").matcher(ddl);
+                if (!index.find()) {
+                    throw new IllegalStateException("Dropped index is absent from the canonical baseline");
+                }
+                ddl = index.replaceFirst("");
+                continue;
+            }
+            var addition = Pattern.compile("ALTER TABLE (ma_[a-z_]+) ADD (?:COLUMN )?(.+)",
+                    Pattern.DOTALL).matcher(command);
+            if (!addition.matches()) {
+                if (!command.startsWith("CREATE TABLE ma_") && !command.startsWith("CREATE INDEX ")
+                        && !command.startsWith("CREATE UNIQUE INDEX ")) {
+                    throw new IllegalStateException("Unsupported canonical schema extension");
+                }
+                ddl += "\n" + command + ";\n";
+                continue;
+            }
             var table =
                     Pattern.compile(
-                                    "(CREATE TABLE " + columns.group(1) + " \\()(.*?)(\\) ENGINE=)",
+                                    "(CREATE TABLE " + addition.group(1) + " \\()(.*?)(\\) ENGINE=)",
                                     Pattern.DOTALL)
                             .matcher(ddl);
             if (!table.find()) {
@@ -117,29 +139,9 @@ public final class ManagedSchema {
                                     table.group(1)
                                             + table.group(2).stripTrailing()
                                             + ",\n    "
-                                            + columns.group(2)
+                                            + addition.group(2)
                                             + "\n"
                                             + table.group(3)));
-        }
-        var drops = Pattern.compile("DROP INDEX ([a-z_]+) ON (ma_[a-z_]+);").matcher(extension);
-        while (drops.find()) {
-            var index =
-                    Pattern.compile(
-                                    "\\nCREATE INDEX "
-                                            + drops.group(1)
-                                            + " ON "
-                                            + drops.group(2)
-                                            + " \\([^)]+\\);")
-                            .matcher(ddl);
-            if (!index.find()) {
-                throw new IllegalStateException(
-                        "Dropped index is absent from the canonical baseline");
-            }
-            ddl = index.replaceFirst("");
-        }
-        var indexes = Pattern.compile("CREATE INDEX [^;]+;").matcher(extension);
-        while (indexes.find()) {
-            ddl += "\n" + indexes.group();
         }
         return ddl;
     }
@@ -156,7 +158,11 @@ public final class ManagedSchema {
         SQLException current = null;
         for (int version = CURRENT; version >= 1; version--) {
             try {
-                ManagedSchemaCatalog.validate(connection, ddl(version));
+                if (version == CURRENT) {
+                    ManagedSchemaCatalog.validate(connection, ddl(version));
+                } else {
+                    ManagedSchemaCatalog.validateBaseline(connection, ddl(version));
+                }
                 return version;
             } catch (SQLException mismatch) {
                 if (current == null) {

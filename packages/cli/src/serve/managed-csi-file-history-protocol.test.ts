@@ -11,16 +11,15 @@ import {
   readCsiNativeRequest,
   readCsiNativeResponse,
 } from './managed-csi-native-readback.js';
-import {
-  csiHistoryPreparationFixture,
-  csiFileHistoryEnvelope,
-} from './__tests__/csi-history-preparation-fixture.js';
+import { csiHistoryPreparationFixture } from './__tests__/csi-history-preparation-fixture.js';
 import { parseManagedCsiFileBoot } from './managed-csi-file-envelope.js';
 import {
   readCsiFileHistoryEnvelope,
   readCsiFileHistoryObservation,
   readCsiFileHistoryOperation,
   readCsiPreparationEvidence,
+  csiFileHistoryEnvelope,
+  csiHistoryContentDigest,
 } from './managed-csi-file-history-protocol.js';
 
 const fixture = JSON.parse(
@@ -149,6 +148,28 @@ describe('preparation paths from original resource bytes', () => {
       expect(() => readCsiPreparationEvidence(sample.response)).toThrow();
     },
   );
+
+  it('uses a stable semantic digest across generated projection values', () => {
+    const sample = csiHistoryPreparationFixture();
+    const content = {
+      ...sample.observation,
+      preparation: sample.preparation,
+      record: { uuid: 'first', timestamp: 'first' },
+    };
+    const digest = csiHistoryContentDigest(content);
+    expect(
+      csiHistoryContentDigest({
+        ...content,
+        record: { uuid: 'second', timestamp: 'second' },
+      }),
+    ).toBe(digest);
+    expect(
+      csiHistoryContentDigest({
+        ...content,
+        preparation: { ...sample.preparation, paths: ['other.txt'] },
+      }),
+    ).not.toBe(digest);
+  });
 
   it('refuses a coherent intent whose request digest differs from the original payload bytes', () => {
     const sample = csiHistoryPreparationFixture();

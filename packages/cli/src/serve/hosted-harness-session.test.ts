@@ -13863,6 +13863,16 @@ describe('Hosted Harness no-tool session', () => {
       // #13803: and, behind its own kind gate, its Workflow tool.
       'workflow',
     ]);
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    const settled = journal.events.filter(
+      (event) =>
+        event.kind === 'turn.settled' && event.payload['turnId'] === PROMPT_ID,
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.payload['outcome']).toBe('completed');
     expect(acquire).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -25965,8 +25975,13 @@ describe('Hosted Harness Runtime turn takeover', () => {
         this: LocalManagedSessionAuthority,
         ...args: unknown[]
       ) {
-        commits.push(String((args[0] as { commandId?: string }).commandId));
-        return commitOriginal.apply(this, args);
+        const committed = (await commitOriginal.apply(this, args)) as {
+          receipt?: { commandId?: string };
+        };
+        // The command may be a deferred factory resolved inside the
+        // authority, so read the id from the committed receipt.
+        commits.push(String(committed.receipt?.commandId));
+        return committed;
       });
       const taken = await replacementHeaders(
         supertest(server).post(`/session/${SESSION_ID}/load`),

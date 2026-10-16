@@ -24,8 +24,11 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -40,6 +43,10 @@ class WorkspaceCsiRetirementStoreTest {
     private WorkspaceCsiRegistration registration;
     private RuntimeBindingRecord original;
     private WorkspaceCsiReservationStore.Reservation reservation;
+
+    private static final List<String> PROGRESS_COLUMNS = List.of("progress_format", "progress_version", "progress_stage",
+            "settlement_deadline_ms", "frozen_request_bytes", "frozen_request_sha256", "cut_bytes", "cut_sha256",
+            "finalize_receipt_bytes", "finalize_receipt_sha256");
 
     @BeforeEach
     void setUp() {
@@ -68,6 +75,130 @@ class WorkspaceCsiRetirementStoreTest {
         assertThat(store.inspect(registration).phase()).isEqualTo("DRAINING");
         assertThat(jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot", String.class))
                 .isEqualTo(original.getBindingId());
+    }
+
+    @Test
+    void unprovenLaterReservationCannotSealOrBecomePublicationAuthority() {
+        ready();
+        var binding = jdbc.queryForMap("SELECT * FROM ma_runtime_binding");
+        var slot = jdbc.queryForMap("SELECT * FROM ma_runtime_slot");
+        var rows = jdbc.queryForList("SELECT * FROM ma_operation");
+        var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
+        for (long revision : new long[] {4, 7}) {
+            jdbc.update("UPDATE ma_storage_owner SET csi_revision = ?", revision);
+            var holder = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+            var later = new WorkspaceCsiReservationStore.Reservation("RESERVED", revision,
+                    reservation.reservationId(), reservation.registrationKey(), reservation.registrationRevision(),
+                    reservation.bindingId(), reservation.runtimeGeneration(), reservation.provisionRequestId());
+            assertUnavailable(() -> store(source).beginRetirement(registration, bindings, original,
+                    later, UUID.randomUUID().toString()));
+            assertUnavailable(() -> store(source).inspectRetirement(registration, bindings, original));
+            assertUnavailable(() -> transaction.execute(status -> store.lockPublication(bindings, original)));
+            assertThat(jdbc.queryForList("SELECT * FROM ma_operation")).isEqualTo(rows);
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(holder);
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_binding")).isEqualTo(binding);
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_slot")).isEqualTo(slot);
+        }
+    }
+
+    @Test
+    void newRetirementInitializesSettlementAtTheExactDatabaseStartWithoutChangingItsIdentity() throws Exception {
+        ready();
+        var slot = jdbc.queryForMap("SELECT * FROM ma_runtime_slot");
+        var registered = jdbc.queryForMap("SELECT * FROM ma_storage");
+        var before = jdbc.queryForObject("SELECT " + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW + "", Timestamp.class).toInstant();
+        var intent = store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString());
+        var after = jdbc.queryForObject("SELECT " + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW + "", Timestamp.class).toInstant();
+        var row = jdbc.queryForMap("SELECT * FROM ma_operation");
+        var startedAt = Instant.parse(intent.startedAt());
+        assertThat(startedAt).isBetween(before, after);
+        assertThat(startedAt).isEqualTo(Instant.ofEpochMilli(startedAt.toEpochMilli()));
+        assertThat(row.get("progress_format")).isEqualTo("qwen-csi-application-retirement/1");
+        assertThat(row.get("progress_version")).isEqualTo(1L);
+        assertThat(row.get("progress_stage")).isEqualTo("SETTLING");
+        assertThat(row.get("settlement_deadline_ms")).isEqualTo(Math.addExact(startedAt.toEpochMilli(), 300_000L));
+        assertThat(row.get("phase")).isEqualTo("DRAINING");
+        assertThat(row.get("request_json")).isEqualTo(new ObjectMapper().writeValueAsString(intent));
+        for (String column : PROGRESS_COLUMNS.subList(4, PROGRESS_COLUMNS.size())) {
+            assertThat(row.get(column)).as(column).isNull();
+        }
+        var sealed = bindings.findById(original.getBindingId());
+        assertThat(sealed.getState()).isEqualTo(RuntimeBindingRecord.State.DRAINING);
+        assertThat(sealed.isDrainRequested()).isTrue();
+        assertThat(sealed.getOperationOwner()).isNull();
+        assertThat(sealed.getOperationLeaseUntil()).isNull();
+        assertThat(sealed.getOperationGeneration()).isEqualTo(original.getOperationGeneration() + 1);
+        assertThat(sealed.getResourceHandle()).isEqualTo(original.getResourceHandle());
+        assertThat(sealed.hasSameLease(original.getLease())).isTrue();
+        assertThat(store.inspect(registration)).isEqualTo(new WorkspaceCsiReservationStore.Reservation("DRAINING", 2,
+                reservation.reservationId(), reservation.registrationKey(), reservation.registrationRevision(),
+                reservation.bindingId(), reservation.runtimeGeneration(), reservation.provisionRequestId()));
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_slot")).isEqualTo(slot);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage")).isEqualTo(registered);
+    }
+
+    @Test
+    void originalRetryPreservesTheFixedDeadlineAndExactFrozenProgress() {
+        String operation = UUID.randomUUID().toString();
+        var intent = store.beginRetirement(registration, bindings, original, reservation, operation);
+        byte[] frozen = "{\"original\":\"frozen-request\"}".getBytes(StandardCharsets.UTF_8);
+        jdbc.update("UPDATE ma_operation SET progress_version = 2, progress_stage = 'FROZEN',"
+                        + " frozen_request_bytes = ?, frozen_request_sha256 = ?", frozen,
+                com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(frozen));
+        var before = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'");
+        var sealed = jdbc.queryForMap("SELECT * FROM ma_runtime_binding");
+        var holder = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var fresh = store(source);
+        assertThat(fresh.beginRetirement(registration, bindings(source), original, reservation, operation)).isEqualTo(intent);
+        assertThat(fresh.inspectRetirement(registration, bindings(source), original)).isEqualTo(intent);
+        var after = jdbc.queryForMap("SELECT * FROM ma_operation");
+        before.forEach((column, value) -> assertThat(after.get(column)).as(column).isEqualTo(value));
+        assertThat(jdbc.queryForObject("SELECT frozen_request_bytes FROM ma_operation", byte[].class))
+                .containsExactly(frozen);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_binding")).isEqualTo(sealed);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(holder);
+    }
+
+    @Test
+    void originalRetryDoesNotInitializeLegacyNullProgress() {
+        String operation = UUID.randomUUID().toString();
+        var intent = store.beginRetirement(registration, bindings, original, reservation, operation);
+        for (String column : PROGRESS_COLUMNS) {
+            jdbc.update("UPDATE ma_operation SET " + column + " = NULL");
+        }
+        var before = jdbc.queryForMap("SELECT * FROM ma_operation");
+        var fresh = store(source);
+        assertThat(fresh.beginRetirement(registration, bindings(source), original, reservation, operation)).isEqualTo(intent);
+        assertThat(fresh.inspectRetirement(registration, bindings(source), original)).isEqualTo(intent);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_operation")).isEqualTo(before);
+    }
+
+    @Test
+    void holderFailureRollsBackNewProgressTogetherWithTheOriginalBindingSeal() {
+        var before = jdbc.queryForMap("SELECT * FROM ma_runtime_binding");
+        var slot = jdbc.queryForMap("SELECT * FROM ma_runtime_slot");
+        var holder = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        jdbc.execute("ALTER TABLE ma_storage_owner ADD CONSTRAINT keep_reserved CHECK (csi_phase = 'RESERVED')");
+        assertThatThrownBy(() -> store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString()))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isZero();
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_binding")).isEqualTo(before);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_slot")).isEqualTo(slot);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(holder);
+    }
+
+    @Test
+    void freshInitializerRefusesLegacyRetirementWithoutChangingItsBytes() {
+        var legacy = dataSource();
+        var db = new JdbcTemplate(legacy);
+        db.execute("CREATE TABLE managed_workspace_csi_retirement (retirement_id CHAR(36) PRIMARY KEY, identity_json LONGTEXT)");
+        String operation = UUID.randomUUID().toString();
+        String identity = "{ \"phase\": \"DRAINING\", \"startedAt\": \"2026-10-01T12:34:56.123456Z\" }";
+        db.update("INSERT INTO managed_workspace_csi_retirement VALUES (?, ?)", operation, identity);
+        var before = db.queryForMap("SELECT * FROM managed_workspace_csi_retirement");
+        assertThatThrownBy(() -> ManagedSchema.initialize(legacy)).isInstanceOf(IllegalStateException.class);
+        assertThat(db.queryForMap("SELECT * FROM managed_workspace_csi_retirement")).isEqualTo(before);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND LEFT(table_name, 3) = 'ma_'", Integer.class)).isZero();
     }
 
     @Test
@@ -222,6 +353,29 @@ class WorkspaceCsiRetirementStoreTest {
         assertUnavailable(() -> store.beginRetirement(registration, bindings, original, reservation, operation));
         jdbc.update("UPDATE ma_runtime_binding SET runtime_endpoint = ?", original.getLease().getEndpoint().toString());
         assertThat(store.inspectRetirement(registration, bindings, original)).isEqualTo(intent);
+    }
+
+    @Test
+    void retainedIdentityUsesTheOriginalFullLeaseSnapshotWithoutReadingTheCurrentHolder() throws Exception {
+        ready();
+        var intent = store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString());
+        var sealed = bindings.findById(original.getBindingId());
+        var before = jdbc.queryForList("SELECT * FROM ma_storage_owner");
+        var json = new ObjectMapper();
+        WorkspaceCsiReservationStore.requireRetainedIdentity(json, intent, registration, sealed);
+        for (String digest : new String[]{"0".repeat(64), "1".repeat(64)}) {
+            var bytes = (com.fasterxml.jackson.databind.node.ObjectNode) json.valueToTree(intent);
+            bytes.put("leaseDigest", digest);
+            var altered = json.treeToValue(bytes, WorkspaceCsiReservationStore.Retirement.class);
+            assertUnavailable(() -> WorkspaceCsiReservationStore.requireRetainedIdentity(json, altered, registration, sealed));
+        }
+        var lease = sealed.getLease();
+        var changed = new RuntimeLease(lease.getRuntimeInstanceId(), URI.create("http://127.0.0.1:10"), lease.getToken(),
+                lease.getLeaseId(), lease.getEpoch());
+        var copy = sealed.withState(RuntimeBindingRecord.State.DRAINING, changed, Instant.now());
+        assertUnavailable(() -> WorkspaceCsiReservationStore.requireRetainedIdentity(json, intent, registration, copy));
+        assertThat(jdbc.queryForList("SELECT * FROM ma_storage_owner")).isEqualTo(before);
+        assertThat(bindings.findById(original.getBindingId()).getState()).isEqualTo(RuntimeBindingRecord.State.DRAINING);
     }
 
     @Test

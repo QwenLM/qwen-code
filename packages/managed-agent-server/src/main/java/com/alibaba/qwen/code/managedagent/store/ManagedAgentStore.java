@@ -115,6 +115,13 @@ public class ManagedAgentStore implements AgentStateStore {
                     TURN_SUMMARY_COLUMNS.split(", "));
     private final JdbcTemplate jdbc;
     private WorkspaceLifecycleStore lifecycle;
+    private JournalEventTransport journalEventTransport;
+    private final boolean journalEventTransportEnabled;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setJournalEventTransport(JournalEventTransport transport) {
+        this.journalEventTransport = transport;
+    }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     public void setWorkspaceLifecycleStore(WorkspaceLifecycleStore lifecycle) {
@@ -314,6 +321,7 @@ public class ManagedAgentStore implements AgentStateStore {
             return new WebShellModelOption(id, label);
         }).toList();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
+        this.journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         this.residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
@@ -475,24 +483,19 @@ public class ManagedAgentStore implements AgentStateStore {
                 existing.getFirst(), false);
     }
 
-    Admission insertCsiSessionCommand(
-            WorkspaceCsiRegistration registration,
-            String actorId,
-            String idempotencyKey,
-            String requestDigest,
-            String requestedRevision,
-            String title,
-            WorkspaceSelection selection) {
+    Admission insertCsiSessionCommand(WorkspaceCsiRegistration registration,
+            String actorId, String idempotencyKey, String requestDigest,
+            String requestedRevision, String title, WorkspaceSelection selection) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("Private CSI CREATE requires a transaction");
         }
+        requireCsiJournalIsolation();
         String tenantId = registration.tenantId();
         requireCreationScope(tenantId, idempotencyKey, true);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId, actorId, idempotencyKey);
         if (!existing.isEmpty()) {
-            Admission replay =
-                    replayWorkspaceCommand(
-                            tenantId, actorId, requestDigest, existing.getFirst(), false);
+            Admission replay = replayWorkspaceCommand(tenantId, actorId, requestDigest, existing.getFirst(),
+                    false);
             requireCsiRequest(registration, replay.sessionId());
             return replay;
         }
@@ -503,46 +506,38 @@ public class ManagedAgentStore implements AgentStateStore {
                 || !CsiFilesRetirementProfile.POLICY_REF.equals(workspace.policyRef())) {
             throw workspaceExecutionUnavailable();
         }
-        return insertSession(
-                tenantId,
-                "CREATE_SESSION",
-                idempotencyKey,
-                requestDigest,
-                "qwen-code",
-                title,
-                List.of(),
-                null,
-                workspace,
-                actorId,
+        return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
+                "qwen-code", title, List.of(), null, workspace, actorId,
                 pin,
                 registration);
     }
 
-    RuntimeProvisionRequest requireCsiRequest(
-            WorkspaceCsiRegistration registration, String sessionId) {
+    RuntimeProvisionRequest requireCsiRequest(WorkspaceCsiRegistration registration, String sessionId) {
         SessionRecord session = requireSessionForUpdate(registration.tenantId(), sessionId);
         if (!CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())
                 || session.workspace() == null
                 || !"qwen-code".equals(session.agentId())
-                || !CsiFilesRetirementProfile.CONTEXT_CONFIG_REF.equals(
-                        session.workspace().getContextConfigRef())
+                || !CsiFilesRetirementProfile.CONTEXT_CONFIG_REF.equals(session.workspace().getContextConfigRef())
                 || !registration.storageId().equals(session.workspace().getStorageId())) {
             throw workspaceExecutionUnavailable();
         }
-        RuntimeProvisionRequest request =
-                CsiFilesRetirementProfile.request(
-                        session.workspace(), registration.mountRoot(), session.sessionId());
-        String saved =
-                jdbc.queryForObject(
-                        "SELECT runtime_request_key FROM ma_session"
-                                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
-                        String.class,
-                        session.tenantId(),
-                        session.sessionId());
+        requireCsiJournalIsolation();
+        RuntimeProvisionRequest request = CsiFilesRetirementProfile.request(session.workspace(),
+                registration.mountRoot(), session.sessionId());
+        String saved = jdbc.queryForObject("SELECT runtime_request_key FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
+                session.tenantId(), session.sessionId());
         if (!request.requestKey().equals(saved)) {
             throw workspaceExecutionUnavailable();
         }
         return request;
+    }
+
+    private void requireCsiJournalIsolation() {
+        if (journalEventTransportEnabled || journalEventTransport != null) {
+            throw new ApiException(HttpStatus.CONFLICT, "csi_journal_transport_unsupported",
+                    "The private CSI lane requires an isolated journal without an event transport.");
+        }
     }
 
     private static String childActorOf(String parentSessionId) {
@@ -779,8 +774,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestDigest) {
         SessionRecord parent = requireSessionForUpdate(tenantId, parentSessionId);
         if (CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
-            throw new ApiException(
-                    HttpStatus.CONFLICT,
+            throw new ApiException(HttpStatus.CONFLICT,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
         }
@@ -822,6 +816,15 @@ public class ManagedAgentStore implements AgentStateStore {
                             result.getInt("child_depth"));
                 }, tenantId, sessionId);
         return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    // Called only for a new admission; a retry has already replayed.
+    private void requireAgentRevision(String requested) {
+        if (requested != null && !requested.equals(agentRevision)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "unsupported_feature",
+                    "Only the current agent revision can be selected.");
+        }
     }
 
     private Admission replayWorkspaceCommand(String tenantId, String actorId,
@@ -983,44 +986,21 @@ public class ManagedAgentStore implements AgentStateStore {
             String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved,
             String actorId, AgentPin pin) {
-        return insertSession(
-                tenantId,
-                operation,
-                idempotencyKey,
-                requestDigest,
-                agentId,
-                title,
-                input,
-                payloadDigest,
-                resolved,
-                actorId,
-                pin,
-                null);
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId,
+                title, input, payloadDigest, resolved, actorId, pin, null);
     }
 
-    private Admission insertSession(
-            String tenantId,
-            String operation,
-            String idempotencyKey,
-            String requestDigest,
-            String agentId,
-            String title,
-            List<Map<String, Object>> input,
-            String payloadDigest,
-            ResolvedBinding resolved,
-            String actorId,
-            AgentPin pin,
-            WorkspaceCsiRegistration registration) {
+    private Admission insertSession(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String title, List<Map<String, Object>> input,
+            String payloadDigest, ResolvedBinding resolved,
+            String actorId, AgentPin pin, WorkspaceCsiRegistration registration) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
-        String runtimeRequestKey =
-                registration == null
-                        ? null
-                        : CsiFilesRetirementProfile.request(
-                                        workspace, registration.mountRoot(), sessionId)
-                                .requestKey();
+        String runtimeRequestKey = registration == null ? null
+                : CsiFilesRetirementProfile.request(workspace, registration.mountRoot(), sessionId).requestKey();
         String turnId = input.isEmpty() ? null : publicId("turn");
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
@@ -1047,8 +1027,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 workspace == null ? null : workspace.getContextRevision(),
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
-                registration != null
-                        ? CsiFilesRetirementProfile.PROFILE
+                registration != null ? CsiFilesRetirementProfile.PROFILE
                         : workspace == null ? null : pin.toolProfile(),
                 actorKey, actorKey,
                 runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo");
@@ -1171,7 +1150,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
-        if (requireLegacySessionForUpdate(tenantId, sessionId).workspace() != null
+        requireLegacyMutation(tenantId, sessionId);
+        if (requireSessionForUpdate(tenantId, sessionId).workspace() != null
                 && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -1571,7 +1551,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
         }
@@ -1633,7 +1614,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
         }
@@ -1720,7 +1702,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId, OperationKind kind, String actorDigest,
             String idempotencyKey, String requestDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        if (requireLegacySessionForUpdate(tenantId, sessionId).workspace() != null) {
+        requireLegacyMutation(tenantId, sessionId);
+        if (requireSessionForUpdate(tenantId, sessionId).workspace() != null) {
             throw workspaceExecutionUnavailable();
         }
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, null, false);
@@ -1748,6 +1731,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean closeSupported) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         // H4b child close is the only production caller. Public lifecycle uses
         // the protocol overload and requires v2 for an active Shell or MCP Session.
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, closeSupported, 0, false);
@@ -1803,7 +1787,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         requireWorkspaceCreator(session, actorId);
         String namespace = "UNARCHIVE_WORKSPACE_SESSION";
         // Replay first, like every other mutation path: a recorded success
@@ -1973,6 +1958,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
             boolean publicLifecycle, boolean trustedChildClose) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         // A resumed admission pins the new operation to the failed one's
         // protocol (below), so the tenant lock keys on the prospect of
         // that pin too — otherwise the resumed lifecycle admission's
@@ -1987,6 +1973,9 @@ public class ManagedAgentStore implements AgentStateStore {
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !trustedChildClose) {
             requireWorkspaceCreator(session, actorId);
+        }
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            throw workspaceExecutionUnavailable();
         }
         Optional<OperationRecord> existing = replayOperation(tenantId, sessionId,
                 kind, actorDigest, idempotencyKey);
@@ -2198,7 +2187,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest,
             String targetCwdRelative, long expectedContextRevision) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         ContextBinding binding = session.workspace();
         if (binding == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
@@ -2321,7 +2311,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId, String operationId, String owner,
             long claimGeneration) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         OperationRecord operation = findSessionOperation(tenantId, sessionId, operationId, true)
                 .orElseThrow(() -> new IllegalStateException("Session operation is unavailable"));
         if (operation.kind() != OperationKind.CWD_CHANGE) {
@@ -2933,6 +2924,9 @@ public class ManagedAgentStore implements AgentStateStore {
         var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
         if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        }
+        requireLegacyMutation(tenantId, sessionId);
+        if (target.lifecycleProtocolVersion() == 1) {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         }
         if (target.kind() == OperationKind.DELETE && !WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
@@ -3029,6 +3023,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operationId, String owner, long claimGeneration,
             String failureCode) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
         // The same fencing as completeOperation, and deliberately no
         // Session effect beyond the claim-mirror release below: the Session
@@ -3783,13 +3778,12 @@ public class ManagedAgentStore implements AgentStateStore {
         StringBuilder pairs = new StringBuilder();
         for (TurnSummary turn : latestTurns.values()) {
             if (pairs.length() > 0) {
-                pairs.append(",");
+                pairs.append(" OR ");
             }
-            pairs.append(" (?, ?)");
-            // Bound as identity bytes: H2 types row-comparison parameters
-            // as VARCHAR, and a command it recompiles after binding (any
-            // new session or SET in between) refuses VARBINARY rows against
-            // VARCHAR ones. Bytes compare the same on MySQL and MariaDB.
+            pairs.append("(environment.session_id = ? AND environment.turn_id = ?)");
+            // Identity bytes keep parameters typed as VARBINARY even when
+            // H2 recompiles the command after binding. They compare the
+            // same on MySQL and MariaDB.
             arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
                     .identity(turn.sessionId()));
             arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
@@ -3804,7 +3798,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " MAX(environment.sequence_id) AS max_sequence FROM ma_public_event environment WHERE"
                             + " environment.stream_kind = 'SESSION' AND environment.stream_id = X'' AND environment.tenant_id = ? AND"
                             + " environment.event_type IN ('environment.provisioning', 'environment.ready',"
-                            + " 'environment.failed') AND (environment.session_id, environment.turn_id) IN ("
+                            + " 'environment.failed') AND ("
                                 + pairs
                                 + ") GROUP BY environment.session_id) latest ON latest.session_id ="
                                 + " event.session_id AND latest.max_sequence = event.sequence_id"
@@ -3943,7 +3937,8 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
             long floorSequence) {
-        requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        requireSessionForUpdate(tenantId, sessionId);
         ReplayWindow window = findReplayWindow(tenantId, sessionId);
         Long protectedSequence =
                 jdbc.queryForObject(
@@ -4000,11 +3995,12 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit) {
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
-        Long covered = jdbc.queryForObject(
-                        "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
-                            + " UPDATE",
+        requireLegacyMutation(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        Long covered = jdbc.queryForObject("SELECT covered_sequence FROM"
+                        + " ma_event_stream WHERE tenant_id"
+                        + " = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " FOR UPDATE",
                 Long.class, tenantId, sessionId);
         if (covered == null) {
             throw new IllegalStateException(
@@ -4198,7 +4194,8 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public boolean bindHarness(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId) {
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
@@ -4226,7 +4223,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean bindRecoveredHarness(String tenantId, String sessionId,
             String turnId, String owner, String expectedHarnessBootId,
             String harnessBootId) {
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
@@ -4343,7 +4341,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String turnId, String owner, String expectedTurnEventEpoch,
             String expectedSessionEventEpoch, String eventEpoch,
             long lastEventId) {
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
@@ -4402,7 +4401,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retractContinuationOutput(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId,
             String eventEpoch) {
-        requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
@@ -4487,6 +4487,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 || fromSourceId < 1 || throughSourceId < fromSourceId || throughSourceId >= retractionSourceId)) {
             throw new IllegalArgumentException("Invalid bounded Hosted retraction");
         }
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
@@ -4912,7 +4913,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public void appendPublicEventIfAbsent(String tenantId, String sessionId,
             String turnId, String type, Map<String, Object> data,
             boolean terminal, String sourceKey) {
-        requireLegacySessionForUpdate(tenantId, sessionId);
+        requireLegacyMutation(tenantId, sessionId);
+        requireSessionForUpdate(tenantId, sessionId);
         if (!hasSourceEvent(tenantId, sessionId, sourceKey)) {
             appendEvent(tenantId, sessionId, turnId, type, data, terminal,
                     sourceKey, clock.millis());

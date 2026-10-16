@@ -88,6 +88,7 @@ class CsiNativeReadbackProtocolTest {
         assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.request(new byte[16385]));
         assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.request(new byte[] {(byte) 0xff}));
     }
+
     @Test
     void acceptsWorkerSizedUnicodeResultsAndRejectsAnOverLimitBodyOrForeignSubject() throws Exception {
         var fixture = JsonCodec.parseObject(Files.readAllBytes(Path.of(
@@ -115,5 +116,4 @@ class CsiNativeReadbackProtocolTest {
     static Map<String, Object> executionResult(String text) {
         return Map.of("executionStatus", "success", "responseParts", List.of(Map.of("text", text)));
     }
-
 }

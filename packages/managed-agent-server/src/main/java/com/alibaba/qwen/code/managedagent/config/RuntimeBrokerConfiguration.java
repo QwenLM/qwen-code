@@ -27,6 +27,19 @@ import java.util.concurrent.CompletableFuture;
 @Configuration
 public class RuntimeBrokerConfiguration {
     @Bean
+    @ConditionalOnProperty(prefix = "qwen.managed-agent", name = {"session-store.enabled", "runtime-broker.enabled"}, havingValue = "true")
+    public com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationStore workspaceCsiApplicationStore(
+            org.springframework.jdbc.core.JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager manager,
+            com.alibaba.qwen.code.managedagent.store.ManagedSessionStore nativeStore,
+            RuntimeBindingRepository bindings, RuntimeSessionRepository sessions) {
+        if (!(bindings instanceof JdbcRuntimeBindingRepository jdbcBindings)
+                || !(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)) {
+            throw new IllegalStateException("Original JDBC repositories are required for CSI retirement");
+        }
+        return new com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, jdbcBindings, jdbcSessions);
+    }
+
+    @Bean
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
     public SecretProtector runtimeCredentialProtector(

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.managedschema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -36,7 +37,7 @@ class ManagedSchemaTest {
                     + "'prompt','[]','digest','COMPLETED',1,1)");
         }
         ManagedSchema.initialize(source);
-        assertEquals(6, ManagedSchema.schemaVersion(source));
+        assertEquals(7, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_session")) {
                 assertTrue(row.next());
@@ -59,16 +60,55 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void initializesExactly32TablesAndValidatesWithoutRewriting() throws Exception {
+    void initializesDeclaredTablesAndValidatesWithoutRewriting() throws Exception {
         DataSource source = source();
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
-        assertEquals(6, ManagedSchema.schemaVersion(source));
+        assertEquals(7, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
-            assertEquals(32, ManagedSchemaCatalog.tables(connection).size());
+            assertEquals(34, ManagedSchemaCatalog.tables(connection).size());
+            int columns = 0;
+            for (String table : ManagedSchemaContract.TABLES) {
+                try (var rows = connection.getMetaData().getColumns(null, null, table, null)) {
+                    while (rows.next()) {
+                        columns++;
+                    }
+                }
+            }
+            assertEquals(755, columns);
+        }
+    }
+
+    @Test
+    void csiGuardUsesThePersistedProfileOrRequestPin() throws Exception {
+        DataSource source = source();
+        ManagedSchema.initialize(source);
+        try (var connection = source.getConnection();
+                var insert = connection.prepareStatement("INSERT INTO ma_session (tenant_id, session_id, session_kind, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', 0, 0)")) {
+            insert.setBytes(1, ManagedSchemaKeys.identity("tenant"));
+            insert.setBytes(2, ManagedSchemaKeys.identity("session"));
+            insert.executeUpdate();
+            try (var statement = connection.createStatement();
+                    var rows = statement.executeQuery("SELECT csi_guard, runtime_request_key FROM ma_session")) {
+                assertTrue(rows.next());
+                assertFalse(rows.getBoolean(1));
+                assertNull(rows.getObject(2));
+            }
+            try (var statement = connection.createStatement()) {
+                statement.executeUpdate("UPDATE ma_session SET runtime_request_key = 'request'");
+                try (var rows = statement.executeQuery("SELECT csi_guard FROM ma_session")) {
+                    assertTrue(rows.next());
+                    assertTrue(rows.getBoolean(1));
+                }
+                statement.executeUpdate("UPDATE ma_session SET runtime_request_key = NULL, tool_profile = 'csi-files-retirement/1'");
+                try (var rows = statement.executeQuery("SELECT csi_guard FROM ma_session")) {
+                    assertTrue(rows.next());
+                    assertTrue(rows.getBoolean(1));
+                }
+            }
         }
     }
 
@@ -88,7 +128,7 @@ class ManagedSchemaTest {
                         () -> receipt(connection, "unsupported", "WORKSPACE_CREATE"));
             }
             ManagedSchema.initialize(source);
-            assertEquals(6, ManagedSchema.schemaVersion(source));
+            assertEquals(7, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(connection, "new", "WORKSPACE_CREATE");
@@ -533,9 +573,9 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void all63OriginalEntitiesHaveOnlyRealTargetDestinations() throws Exception {
+    void originalAndK2DomainsHaveOnlyRealTargetDestinations() throws Exception {
         var inventory = ManagedSchemaMapping.inventory();
-        assertEquals(63, inventory.size());
+        assertEquals(65, inventory.size());
         try (var source = getClass().getResourceAsStream("/original-managed-table-inventory.tsv")) {
             String original =
                     new String(
@@ -547,7 +587,9 @@ class ManagedSchemaTest {
                             .map(line -> line.split("\\t")[0])
                             .collect(java.util.stream.Collectors.toSet());
             assertEquals(63, originalNames.size());
-            assertEquals(originalNames, inventory.keySet());
+            var expectedNames = new java.util.HashSet<>(originalNames);
+            expectedNames.addAll(Set.of("managed_workspace_csi_source", "managed_workspace_csi_physical"));
+            assertEquals(expectedNames, inventory.keySet());
         }
         assertTrue(
                 inventory.values().stream()

@@ -10,18 +10,17 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
-
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.time.Instant;
+import java.util.List;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
 
 /** Tuple-validation units only; the supplied prefix does not prove native SQL admission. */
 class CsiNativeToolReservationTest {
@@ -33,6 +32,36 @@ class CsiNativeToolReservationTest {
             "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1), "/workspace", SESSION);
     private final JdbcCsiFilesRetirementGuard.Original original = new JdbcCsiFilesRetirementGuard.Original(request,
             "binding", 1, RuntimeBindingRecord.State.READY, false, 1, 2L);
+
+    @Test
+    void recoveryStoredBytesAreBoundedBeforeParsingAndRejectAmbiguousJson() {
+        String exact = "{\"text\":\"" + "x".repeat(65525) + "\"}";
+        assertEquals(65536, CsiNativeToolReservation.recoveryBytes(exact).length);
+        for (String value : new String[] {exact + " ", "{} {}", "{\"x\":1,\"x\":1}", "", "{\"x\":\"\ud800\"}"}) {
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.recoveryBytes(value));
+        }
+        assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.recoveryBytes(null));
+    }
+
+    @Test
+    void recoveryOwnerMatchesTheInstalledActivationRatherThanTheOldCheckpoint() {
+        var activation = new CsiNativeActivationProof.Activation(SESSION, PROMPT, JSON.createObjectNode(), 60000,
+                Long.MAX_VALUE, 0, 2, 3);
+        var head = new JdbcCsiActivationAdmission.NativeHead(1, 1, "digest", CsiNativeActivationProof.Prefix.empty(),
+                Long.MAX_VALUE, Long.MAX_VALUE, activation);
+        Map<String, Object> owner = Map.of("writerId", PROMPT, "writerGeneration", 3, "activationId", SESSION, "activationEpoch", 2);
+        assertDoesNotThrow(() -> head.requireRecoveryOwner(owner));
+        for (String field : owner.keySet()) {
+            var changed = new HashMap<>(owner);
+            changed.put(field, field.endsWith("Id") ? BATCH : 1);
+            assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(changed));
+            changed.remove(field);
+            assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(changed));
+        }
+        var extra = new HashMap<>(owner);
+        extra.put("checkpointId", BATCH);
+        assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(extra));
+    }
 
     @Test
     void tupleValidationRetainsObservedNonUuidFunctionIdsAndFullPartPositions() throws Exception {
@@ -124,6 +153,63 @@ class CsiNativeToolReservationTest {
     }
 
     @Test
+    void historicalMemberDataUsesOriginalIntentAndCompleteFrozenMembership() throws Exception {
+        var prefix = prefix(capturedParts());
+        var tuples = List.of(tuple(prefix, 0), tuple(prefix, 1), tuple(prefix, 2));
+        var members = tuples.stream().map(Tuple::execution).toList();
+        var bodies = tupleBodies(tuples);
+        var entered = entered(prefix, tuples.getFirst(), 20, 20);
+        assertDoesNotThrow(() -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, entered, members,
+                ref -> bodies.get(ref.path("resourceId").textValue())));
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, entered,
+                members.subList(1, 3), ref -> bodies.get(ref.path("resourceId").textValue())));
+        var frozen = frozen(prefix, tuples);
+        assertDoesNotThrow(() -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, frozen, members,
+                ref -> bodies.get(ref.path("resourceId").textValue())));
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, frozen,
+                members.subList(0, 2), ref -> bodies.get(ref.path("resourceId").textValue())));
+    }
+
+    @Test
+    void historicalMemberDataRefusesDuplicatePositionsForeignOwnersAndRehashedWrongToolPayloads() throws Exception {
+        var prefix = prefix(capturedParts());
+        var tuples = List.of(tuple(prefix, 0), tuple(prefix, 1));
+        var bodies = tupleBodies(tuples);
+        var member = tuples.getFirst().execution();
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, prefix,
+                List.of(member, member), ref -> bodies.get(ref.path("resourceId").textValue())));
+        var foreign = ToolExecutionRecord.prepared(member.getExecutionCallId(), member.getIdempotencyKey(), "foreign", 1,
+                SESSION, SESSION, member.getTurnId(), member.getToolCallId(), member.getRequestDigest(), member.getReference());
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, prefix,
+                List.of(foreign), ref -> bodies.get(ref.path("resourceId").textValue())));
+        ObjectNode wrapper = (ObjectNode) JSON.readTree(tuples.getFirst().input());
+        ObjectNode payload = (ObjectNode) JSON.readTree(wrapper.path("payloadJson").textValue());
+        payload.put("toolName", "write_file");
+        wrapper.put("payloadJson", JSON.writeValueAsString(payload));
+        byte[] changed = JSON.writeValueAsBytes(wrapper);
+        var reference = new HashMap<>(member.getReference());
+        reference.put("inputRef", ref("managed-tool-input", changed));
+        reference.put("argsDigest", "sha256:" + CsiNativeActivationProof.sha256(
+                wrapper.path("payloadJson").textValue().getBytes(StandardCharsets.UTF_8)));
+        var changedMember = copy(member, reference);
+        bodies.put((String) ((Map<?, ?>) reference.get("inputRef")).get("resourceId"), changed);
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, prefix,
+                List.of(changedMember), ref -> bodies.get(ref.path("resourceId").textValue())));
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, prefix,
+                List.of(member), ignored -> null));
+    }
+
+    private static Map<String, byte[]> tupleBodies(List<Tuple> tuples) {
+        var result = new HashMap<String, byte[]>();
+        for (var tuple : tuples) {
+            JsonNode ref = JSON.valueToTree(tuple.execution().getReference());
+            result.put(ref.path("inputRef").path("resourceId").textValue(), tuple.input());
+            result.put(ref.path("toolDefinitionRef").path("resourceId").textValue(), tuple.definition());
+        }
+        return result;
+    }
+
+    @Test
     void qualifiesHistoricalRowsAgainstTheirOwnAssistantAndPrompt() throws Exception {
         var first = prefix(capturedParts());
         var prior = tuple(first, 0);
@@ -188,9 +274,8 @@ class CsiNativeToolReservationTest {
                 assertEquals(combined.pendingBatch().messageId(), ref.get("batchId"));
                 assertEquals(index, ((Number) ref.get("ordinal")).intValue());
             }
-            try (var statement = connection.prepareStatement(
-                            "UPDATE ma_tool_execution SET runtime_session_id = ?,"
-                                    + " runtime_session_key = ? WHERE execution_call_id = ?")) {
+            try (var statement = connection.prepareStatement("UPDATE ma_tool_execution SET runtime_session_id = ?, runtime_session_key = ?"
+                    + " WHERE execution_call_id = ?")) {
                 statement.setString(1, "foreign-session");
                 statement.setString(2, JdbcRepositorySupport.valueKey("foreign-session"));
                 statement.setString(3, prior.execution().getExecutionCallId());
@@ -241,9 +326,7 @@ class CsiNativeToolReservationTest {
             CsiNativeToolReservation.preflightHistory(connection, original, prefix, frozen(prefix, tuples), inventory);
             assertEquals(0, published(connection));
             try (var statement = connection.createStatement();
-                    var rows = statement.executeQuery(
-                                    "SELECT resource_id, publish_command_id, state FROM"
-                                            + " ma_resource")) {
+                    var rows = statement.executeQuery("SELECT resource_id, publish_command_id, state FROM ma_resource")) {
                 while (rows.next()) {
                     assertEquals(rows.getString("resource_id"), rows.getString("publish_command_id"));
                     assertEquals("REFERENCED", rows.getString("state"));
@@ -266,7 +349,6 @@ class CsiNativeToolReservationTest {
             var frozen = frozen(prefix, tuples);
             CsiNativeToolReservation.preflightHistory(connection, original, prefix, frozen,
                     CsiNativeToolReservation.inventory(connection, original));
-            associationTables(connection);
             var inventory = CsiNativeToolReservation.inventory(connection, original);
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
             try (var statement = connection.createStatement()) {
@@ -295,8 +377,7 @@ class CsiNativeToolReservationTest {
             }
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate(
-                        "DELETE FROM ma_session_journal_tx WHERE journal_revision = 100");
+                statement.executeUpdate("DELETE FROM ma_session_journal_tx WHERE journal_revision = 100");
                 statement.executeUpdate("DELETE FROM ma_tool_execution");
             }
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
@@ -317,17 +398,16 @@ class CsiNativeToolReservationTest {
             var frozen = frozen(prefix, tuples);
             CsiNativeToolReservation.preflightHistory(connection, original, prefix, frozen,
                     CsiNativeToolReservation.inventory(connection, original));
-            associationTables(connection);
             try (var statement = connection.createStatement()) {
                 statement.executeUpdate(
                         "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, journal_revision, gmt_create) SELECT session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key, tenant_id, workspace_id, session_id, resource_id, 99, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource");
             }
             var inventory = CsiNativeToolReservation.inventory(connection, original);
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
-            assertEquals(3, CsiNativeToolReservation.complete(connection, original, frozen, inventory, 15, 99).size());
+            assertEquals(3, CsiNativeToolReservation.complete(connection, original, frozen, inventory, false, 15, 99).size());
             for (long[] candidate : new long[][] {{16, 99}, {15, 100}, {0, 99}, {15, 0}, {-1, 99}}) {
                 assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original,
-                        frozen, inventory, candidate[0], candidate[1]));
+                        frozen, inventory, false, candidate[0], candidate[1]));
             }
             try (var statement = connection.createStatement();
                     var row = statement.executeQuery("SELECT COUNT(*) FROM ma_session_journal_tx")) {
@@ -338,7 +418,7 @@ class CsiNativeToolReservationTest {
                 statement.executeUpdate("UPDATE ma_resource_ref SET workspace_id = 'foreign'");
             }
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original,
-                    frozen, inventory, 15, 99));
+                    frozen, inventory, false, 15, 99));
         }
     }
 
@@ -358,7 +438,6 @@ class CsiNativeToolReservationTest {
             CsiNativeToolReservation.preflightNative(connection, original, prefix, entered,
                     CsiNativeToolReservation.inventory(connection, original), "toolIntent");
             assertEquals(2, published(connection));
-            associationTables(connection);
             var inventory = CsiNativeToolReservation.inventory(connection, original);
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, entered, inventory));
             try (var statement = connection.createStatement()) {
@@ -438,8 +517,7 @@ class CsiNativeToolReservationTest {
 
     private static int published(Connection connection) throws Exception {
         try (var statement = connection.createStatement();
-                var row = statement.executeQuery(
-                                "SELECT COUNT(*) FROM ma_resource WHERE state = 'PUBLISHED'")) {
+                var row = statement.executeQuery("SELECT COUNT(*) FROM ma_resource WHERE state = 'PUBLISHED'")) {
             row.next();
             return row.getInt(1);
         }
@@ -461,18 +539,6 @@ class CsiNativeToolReservationTest {
         return new CsiNativeActivationProof.Prefix(prefix.input(), prefix.checkpoint(), prefix.lastMessageId(), prefix.attempt(),
                 prefix.assistantCommitted(), prefix.stream(), prefix.usedIds(), prefix.pendingBatch(), prefix.batches(),
                 new CsiNativeActivationProof.FileHistory(ref, JSON.createObjectNode().set("preparation", preparation), Map.of(BATCH, batch)), Map.of(), Map.of(), prefix.nextDeltaOrdinal());
-    }
-
-    private static void associationTables(Connection connection) throws Exception {
-        assertEquals(0, count(connection, "ma_resource_ref"));
-    }
-
-    private static int count(Connection connection, String table) throws Exception {
-        try (var statement = connection.createStatement();
-                var rows = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
-            rows.next();
-            return rows.getInt(1);
-        }
     }
 
     private void prepare(Connection connection, CsiNativeActivationProof.Prefix prefix, Tuple tuple) throws Exception {

@@ -151,6 +151,64 @@ class WorkspaceCsiReservationStoreTest {
     }
 
     @Test
+    void unprovenLaterReleasedRevisionsCannotReserveForEitherAlias() {
+        var registration = registration("tenant", "storage", "backend", "handle", 1);
+        var alias = registration("other-tenant", "alias", "backend", "handle", 1);
+        store.register(registration);
+        store.register(alias);
+        var binding = binding(registration, "workspace", "fresh-session");
+        var competing = binding(alias, "other-workspace", "other-session");
+        assertThat(binding.getGeneration()).isEqualTo(1);
+        var originalBindings = jdbc.queryForList("SELECT * FROM ma_runtime_binding ORDER BY binding_id");
+        for (long revision : new long[] {3, 6, 9_007_199_254_740_987L}) {
+            jdbc.update("UPDATE ma_storage_owner SET csi_revision = ?", revision);
+            var holders = jdbc.queryForList("SELECT * FROM ma_storage_owner");
+            assertUnavailable(() -> store.reserve(registration, bindings, binding, UUID.randomUUID().toString()));
+            assertUnavailable(() -> store(source).reserve(alias, bindings, competing, UUID.randomUUID().toString()));
+            assertUnavailable(() -> store(source).inspect(registration));
+            assertThat(jdbc.queryForList("SELECT * FROM ma_storage_owner")).isEqualTo(holders);
+            assertThat(jdbc.queryForList("SELECT * FROM ma_runtime_binding ORDER BY binding_id")).isEqualTo(originalBindings);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_physical", Integer.class)).isZero();
+        }
+    }
+
+    @Test
+    void unprovenLaterReservationsCannotReplayOrRegisterAnotherAlias() {
+        var registration = registration("tenant", "storage", "backend", "handle", 1);
+        store.register(registration);
+        var binding = binding(registration, "workspace", "fresh-session");
+        String reservationId = UUID.randomUUID().toString();
+        store.reserve(registration, bindings, binding, reservationId);
+        var originalBindings = jdbc.queryForList("SELECT * FROM ma_runtime_binding");
+        var registrations = jdbc.queryForList("SELECT * FROM ma_storage");
+        for (long revision : new long[] {4, 7}) {
+            jdbc.update("UPDATE ma_storage_owner SET csi_revision = ?", revision);
+            var holders = jdbc.queryForList("SELECT * FROM ma_storage_owner");
+            assertUnavailable(() -> store(source).reserve(registration, bindings, binding, reservationId));
+            assertUnavailable(() -> store.register(registration("other", "alias", "backend", "handle", 1)));
+            assertThat(jdbc.queryForList("SELECT * FROM ma_storage_owner")).isEqualTo(holders);
+            assertThat(jdbc.queryForList("SELECT * FROM ma_runtime_binding")).isEqualTo(originalBindings);
+            assertThat(jdbc.queryForList("SELECT * FROM ma_storage")).isEqualTo(registrations);
+        }
+    }
+
+    @Test
+    void anExhaustedOrWrongPhaseRevisionCannotReserveOrChangeTheBinding() {
+        var registration = registration("tenant", "storage", "backend", "handle", 1);
+        store.register(registration);
+        var binding = binding(registration, "workspace", "fresh-session");
+        var originalBinding = jdbc.queryForMap("SELECT * FROM ma_runtime_binding");
+        for (long revision : new long[] {-1, 1, 2, 9_007_199_254_740_990L, Long.MAX_VALUE}) {
+            jdbc.update("UPDATE ma_storage_owner SET csi_revision = ?", revision);
+            var holder = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+            assertUnavailable(() -> store.reserve(registration, bindings, binding, UUID.randomUUID().toString()));
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(holder);
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_binding")).isEqualTo(originalBinding);
+        }
+    }
+
+    @Test
     void sameOperationRenewalAdmitsTheEarlierSnapshotWithoutChangingTheReservation() {
         var registration = registration("tenant", "storage", "backend", "handle", 1);
         store.register(registration);

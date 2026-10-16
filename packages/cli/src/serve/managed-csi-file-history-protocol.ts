@@ -246,6 +246,25 @@ export function readCsiFileHistoryOperation(
   return structuredClone(operation) as unknown as CsiFileHistoryOperation;
 }
 
+export function csiFileHistoryEnvelope(
+  boot: ManagedCsiFileBoot,
+  installedContext: Record<string, unknown>,
+  operation: CsiFileHistoryOperation,
+) {
+  ensure(boot.version === 5 || boot.version === 6);
+  const result = {
+    protocolVersion: 2,
+    managedCsi: MANAGED_CSI_FILE_PROTOCOL,
+    identity: boot.identity,
+    context: createManagedContextAttestationResponse(boot.context),
+    installedContext,
+    operation: readCsiFileHistoryOperation(operation),
+  };
+  readCsiFileHistoryEnvelope(result, boot, installedContext);
+  ensure(Buffer.byteLength(JSON.stringify(result)) <= 16 * 1024);
+  return result;
+}
+
 export function readCsiFileHistoryEnvelope(
   value: unknown,
   boot: ManagedCsiFileBoot,
@@ -260,7 +279,7 @@ export function readCsiFileHistoryEnvelope(
     'operation',
   ]);
   ensure(
-    boot.version === 5 &&
+    (boot.version === 5 || boot.version === 6) &&
       body['protocolVersion'] === 2 &&
       body['managedCsi'] === MANAGED_CSI_FILE_PROTOCOL,
   );
@@ -382,6 +401,27 @@ function decimal(value: unknown): void {
   );
 }
 
+export function csiHistoryContentDigest(
+  content: Record<string, unknown>,
+): string {
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+    if (value !== null && typeof value === 'object')
+      return `{${Object.keys(value)
+        .sort()
+        .map(
+          (key) =>
+            `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`,
+        )
+        .join(',')}}`;
+    const result = JSON.stringify(value);
+    ensure(result !== undefined);
+    return result;
+  };
+  const semantic = { ...content };
+  delete semantic['record'];
+  return createHash('sha256').update(canonical(semantic)).digest('hex');
+}
 function object(value: unknown): Record<string, unknown> {
   ensure(value !== null && typeof value === 'object' && !Array.isArray(value));
   return value as Record<string, unknown>;

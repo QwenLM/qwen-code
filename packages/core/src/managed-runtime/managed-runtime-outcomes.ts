@@ -148,12 +148,14 @@ export class LocalManagedRuntimeOutcomes {
         }),
       );
       await authority.commitCheckpoint(
-        {
+        (assignedState, coveredSequence) => ({
           operation: 'commitCheckpoint',
-          commandId: `harness:next_turn_ready:${session.activation.activationId}:${promptId}:${authority.committedSequence}`,
+          commandId: `harness:next_turn_ready:${session.activation.activationId}:${promptId}:${coveredSequence}`,
           sessionKey: authority.sessionHeader.sessionKey,
-          contentDigest: createHash('sha256').update(state).digest('hex'),
-        },
+          contentDigest: createHash('sha256')
+            .update(assignedState)
+            .digest('hex'),
+        }),
         { state, boundary: HARNESS_TURN_COMPLETE_BOUNDARY },
         { class: 'harness', activation: session.activation },
       );

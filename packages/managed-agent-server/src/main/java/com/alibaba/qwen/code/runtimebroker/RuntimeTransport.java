@@ -60,6 +60,12 @@ public interface RuntimeTransport {
                 "csi_native_execution_unavailable", "Original CSI execution is unavailable.", false));
     }
 
+    default CompletionStage<byte[]> csiFileFinalize(RuntimeBindingRecord runtime, ContextBinding binding,
+            Map<String, Object> operation) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "csi_file_finalization_unavailable", "Original CSI file finalization is unavailable.", false));
+    }
+
     /** Explicit comparison inputs are component expectations, not trusted CSI placement provenance. */
     default CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,

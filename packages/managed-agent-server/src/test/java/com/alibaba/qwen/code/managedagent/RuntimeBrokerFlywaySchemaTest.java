@@ -38,13 +38,15 @@ class RuntimeBrokerFlywaySchemaTest {
         Map<String, TableShape> actual = describe(migrate(dataSource(), MigrationVersion.LATEST));
 
         assertThat(expected)
-                .hasSize(32)
+                .hasSize(34)
                 .containsKeys(
                         "ma_runtime_slot",
                         "ma_runtime_binding",
                         "ma_runtime_session",
                         "ma_tool_execution",
-                        "ma_workspace");
+                        "ma_workspace",
+                        "ma_csi_source",
+                        "ma_csi_physical");
         assertThat(actual).containsKeys(expected.keySet().toArray(String[]::new));
         SoftAssertions.assertSoftly(
                 softly ->
@@ -81,7 +83,7 @@ class RuntimeBrokerFlywaySchemaTest {
         JdbcRuntimeBrokerSchema.initialize(source);
         assertThat(executions.findByIdempotencyKey("retention-key")).usingRecursiveComparison().isEqualTo(settled);
         Map<String, TableShape> shape = describe(source);
-        assertThat(shape).hasSize(32);
+        assertThat(shape).hasSize(34).containsKeys("ma_csi_source", "ma_csi_physical");
         assertThat(shape.get("ma_runtime_binding").indexes()).contains(
                 "INDEX [binding_state, last_active_at, binding_id]", "INDEX [tenant_id, binding_state]");
         assertThat(shape.get("ma_storage_owner").indexes())

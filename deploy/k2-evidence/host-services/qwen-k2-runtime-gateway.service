@@ -1,0 +1,39 @@
+[Unit]
+Description=K2 restricted original runtime reader
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+AppArmorProfile=qwen-k2-gateway-v1
+UMask=0077
+ExecStart=/opt/qwen-k2/bin/k2-node-evidence gateway /etc/qwen-k2/gateway.json
+Restart=no
+TimeoutStopSec=15
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_PTRACE
+AmbientCapabilities=
+PrivateUsers=no
+PrivateMounts=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=default
+ProcSubset=all
+RestrictNamespaces=yes
+RestrictSUIDSGID=no
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=~@mount @module @reboot @swap @raw-io @obsolete ptrace process_vm_readv process_vm_writev pidfd_getfd pidfd_send_signal process_madvise process_mrelease

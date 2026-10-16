@@ -27,7 +27,7 @@ import static org.mockito.Mockito.when;
 class ManagedSchemaConfigurationTest {
     @Test
     void upgradesPublishedCatalogsWithoutChangingHistoryOrOrdinaryRows() throws Exception {
-        for (int version : new int[] {1, 2, 3, 4, 5}) {
+        for (int version : new int[] {1, 2, 3, 4, 5, 6}) {
             var source = source();
             Flyway.configure()
                     .dataSource(source)
@@ -41,6 +41,9 @@ class ManagedSchemaConfigurationTest {
                             + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                     "Tenant ",
                     "Session");
+            if (version >= 6) {
+                jdbc.update("UPDATE ma_session SET selected_approval_mode='auto-edit', approval_revision=2");
+            }
             var history =
                     jdbc.queryForList(
                             "SELECT * FROM \"flyway_schema_history\" ORDER BY \"installed_rank\"");
@@ -66,7 +69,7 @@ class ManagedSchemaConfigurationTest {
                             .locations(ManagedSchema.FLYWAY_LOCATION)
                             .load();
             new ManagedSchemaConfiguration().freshManagedSchema(source).migrate(current);
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(7);
             assertThat(sessionListColumns(source)).containsExactly("tenant_id", "gmt_create", "session_id");
             assertThat(
                             jdbc.queryForList(
@@ -80,8 +83,8 @@ class ManagedSchemaConfigurationTest {
                     .containsEntry("runtime_request_key", null)
                     .containsEntry("model_id", null)
                     .containsEntry("model_revision", 0L)
-                    .containsEntry("selected_approval_mode", null)
-                    .containsEntry("approval_revision", 0L);
+                    .containsEntry("selected_approval_mode", version >= 6 ? "auto-edit" : null)
+                    .containsEntry("approval_revision", version >= 6 ? 2L : 0L);
             assertThat(
                             jdbc.queryForObject(
                                     "SELECT COUNT(*) FROM \"flyway_schema_history\" WHERE"
@@ -95,9 +98,9 @@ class ManagedSchemaConfigurationTest {
 
     @Test
     void baselinesTheActualUnversionedCanonicalCatalog() throws Exception {
-        for (int version : new int[] {1, 2, 3, 4, 5, 6}) {
+        for (int version : new int[] {1, 2, 3, 4, 5, 6, 7}) {
             var source = source();
-            if (version < 6) {
+            if (version < 7) {
                 executeResource(source, ManagedSchema.RESOURCE);
                 if (version >= 2) {
                     executeResource(source, ManagedSchema.PRIVATE_AUTHORITY);
@@ -110,6 +113,9 @@ class ManagedSchemaConfigurationTest {
                 }
                 if (version >= 5) {
                     executeResource(source, ManagedSchema.MODEL_SELECTION);
+                }
+                if (version >= 6) {
+                    executeResource(source, ManagedSchema.APPROVAL_SELECTION);
                 }
             } else {
                 ManagedSchema.initialize(source);
@@ -129,7 +135,7 @@ class ManagedSchemaConfigurationTest {
                                             + " \"type\" = 'BASELINE'",
                                     String.class))
                     .isEqualTo(Integer.toString(version));
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(7);
             assertThat(sessionListColumns(source)).containsExactly("tenant_id", "gmt_create", "session_id");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class))
                     .isEqualTo(1);
@@ -192,7 +198,7 @@ class ManagedSchemaConfigurationTest {
                                 .locations(ManagedSchema.FLYWAY_LOCATION)
                                 .load());
 
-        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(7);
         assertThat(sessionListColumns(source))
                 .containsExactly("tenant_id", "gmt_create", "session_id");
         assertThat(
@@ -212,7 +218,8 @@ class ManagedSchemaConfigurationTest {
         List<List<String>> published =
                 List.of(
                         List.of(ManagedSchema.RESOURCE),
-                        List.of(ManagedSchema.RESOURCE, ManagedSchema.PRIVATE_AUTHORITY));
+                        List.of(ManagedSchema.RESOURCE, ManagedSchema.PRIVATE_AUTHORITY),
+                        List.of(ManagedSchema.RESOURCE, ManagedSchema.PRIVATE_AUTHORITY, ManagedSchema.SESSION_LIST));
         for (List<String> resources : published) {
             var source = source();
             try (var connection = source.getConnection();
@@ -234,11 +241,11 @@ class ManagedSchemaConfigurationTest {
             }
             assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(resources.size());
             assertThat(sessionListColumns(source))
-                    .containsExactly("tenant_id", "gmt_modified", "session_id");
+                    .containsExactly("tenant_id", resources.size() == 3 ? "gmt_create" : "gmt_modified", "session_id");
 
             ManagedSchema.initialize(source);
 
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(7);
             assertThat(sessionListColumns(source))
                     .containsExactly("tenant_id", "gmt_create", "session_id");
         }

@@ -83,9 +83,28 @@ class ManagedCsiFilesProtocolTest {
     }
 
     @Test
-    void refusesFinalizationBootOutsideTheOriginalReadyScope() throws Exception {
+    void sharesBoot6WithItsFixedFinalizationPinWithoutUpgradingEarlierFactories() throws Exception {
         var fixture = fixtures();
-        assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(map(fixture.get("finalizationBoot6"))));
+        var expected = map(fixture.get("finalizationBoot6"));
+        var boot = ManagedCsiFilesProtocol.finalizationBoot(request(fixture), seed(fixture), map(expected.get("storage")), map(expected.get("authority")));
+        assertTrue(BrokerValues.sameJsonMap(expected, boot));
+        assertTrue(BrokerValues.sameJsonMap(map(fixture.get("attestationRequest")), ManagedCsiFilesProtocol.attestationRequest(boot)));
+        ManagedCsiFilesProtocol.verifyAttestation(map(fixture.get("attestationResponse")), boot, map(fixture.get("expectedPod")));
+        for (Object finalization : List.of("qwen-csi-file-finalize/2", Map.of(), 1)) {
+            var changed = new LinkedHashMap<>(boot);
+            changed.put("finalization", finalization);
+            assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(changed));
+        }
+        var changed = new LinkedHashMap<>(boot);
+        changed.remove("finalization");
+        assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(changed));
+        for (int version : List.of(4, 5, 7)) {
+            var crossed = new LinkedHashMap<>(boot);
+            crossed.put("version", version);
+            assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(crossed));
+        }
+        assertEquals(4, ManagedCsiFilesProtocol.boot(request(fixture), seed(fixture), map(expected.get("storage"))).get("version"));
+        assertEquals(5, ManagedCsiFilesProtocol.boot(request(fixture), seed(fixture), map(expected.get("storage")), map(expected.get("authority"))).get("version"));
     }
 
     @Test

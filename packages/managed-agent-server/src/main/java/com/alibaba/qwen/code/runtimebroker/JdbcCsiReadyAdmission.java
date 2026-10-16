@@ -37,7 +37,7 @@ public final class JdbcCsiReadyAdmission {
         require(JdbcCsiFilesRetirementGuard.isProfile(original.request().getScope()) && original.generation() == 1);
         original.requireAdmission();
         lockReservation(connection, original);
-        JdbcCsiRetirementSeal.requireOpen(connection, original);
+        require(JdbcCsiRetirementSeal.lock(connection, original) == null);
         return new Admission(connection);
     }
 

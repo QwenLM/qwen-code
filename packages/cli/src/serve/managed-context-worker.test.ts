@@ -58,11 +58,11 @@ import {
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
   RESIDENT_WORKSPACE_PROFILE,
 } from './managed-workspace-activation.js';
-import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 import {
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
 } from './managed-runtime-provider-protocol.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const globWorkerAssets = vi.hoisted(() => ({ directory: '' }));
 vi.mock(

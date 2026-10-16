@@ -228,16 +228,20 @@ class WorkspaceSessionRetentionMySqlIT {
         publication(tenant, session);
         var deletion = deleteClaim(store, tenant, session);
         String digest = "c".repeat(64);
+        var receiptSource = new ManagedToolResultStore.Source("result-1", tenant,
+                "workspace", session, "execution", 1, 1, mapper.createObjectNode(), mapper.createObjectNode(),
+                mapper.createArrayNode(), digest);
         String projectionScope = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant, session);
         String projectionKey = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.TOOL_RESULT_PROJECTION,
                 projectionScope, digest, "result-1");
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, execution_key, request_json, request_digest, state, phase, claim_generation, claim_until, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_EXECUTION', ?, 'TOOL_RESULT_PROJECTION', 'result-1', ?, 'workspace', ?, ?, '{}', ?, 'LEASED', 'PROJECTING', 1, (" + ManagedSchemaTime.SQL_NOW + " + 60000), 0, 0)", projectionKey, projectionScope, projectionScope,
-                digest, tenant, session, digest, digest);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, operation_kind, operation_id,"
+                + " tenant_id, workspace_id, session_id, execution_key, request_json, request_digest, state, phase, claim_generation, claim_until, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'TOOL_EXECUTION', ?, 'TOOL_RESULT_PROJECTION', 'result-1', ?, 'workspace', ?, ?, ?, ?, 'LEASED', 'PROJECTING', 1,"
+                + " (" + ManagedSchemaTime.SQL_NOW + " + 60000), 0, 0)", projectionKey, projectionScope, projectionScope,
+                digest, tenant, session, digest, mapper.valueToTree(receiptSource).toString(), digest);
         var projection = new ManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store);
-        var claim = new ManagedToolResultStore.Claim(new ManagedToolResultStore.Source("result-1", tenant,
-                "workspace", session, "execution", 1, 1, mapper.createObjectNode(), mapper.createObjectNode(),
-                mapper.createArrayNode(), digest), 1);
+        var claim = new ManagedToolResultStore.Claim(receiptSource, 1);
         var result = new ManagedToolResultStore.Projection(mapper.createObjectNode(), "pub-1", mapper.createObjectNode(),
                 mapper.createObjectNode(), List.of(), "policy");
         var publicLocked = new CountDownLatch(1);

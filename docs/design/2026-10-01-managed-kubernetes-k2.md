@@ -2,16 +2,20 @@
 
 [English](2026-10-01-managed-kubernetes-k2.md) | [简体中文](2026-10-01-managed-kubernetes-k2.zh-CN.md)
 
-Status: the complete CSI development delta is integrated locally for draft PR
-#13289. Private reservation, pre-create admission, trusted API original Pod
-identity, sealing, original-result settlement, checkpoint and durable ACK
-components are implemented. The current trusted create/ACK entry is documented
-in the [durable ACK design](2026-10-03-csi-durable-worker-ack.md); earlier CREATE
-refusals below describe historical stage snapshots, and the legacy three-argument
-constructor remains closed. Public Kubernetes Workspace selection, complete
-physical retirement and volume handoff remain disabled. Historical stage results
-do not qualify the latest-main integration; its tests and review are in progress.
-This continues #12380's [K1](2026-10-01-managed-kubernetes-runtime.md).
+Status (2026-10-06): PR [#13289](https://github.com/QwenLM/qwen-code/pull/13289)
+merged as `69d5db2ff2424da01ac6f14e4c484773aae7204c`. Private reservation,
+pre-create admission, trusted API original Pod identity, sealing, original-result
+settlement, checkpoint and durable ACK components are implemented. The current
+trusted create/ACK entry is documented in the
+[durable ACK design](2026-10-03-csi-durable-worker-ack.md); the legacy
+three-argument constructor remains closed. Aggregate retirement, trusted physical
+stop/unpublish, safe volume handoff and public Kubernetes Workspace selection
+remain incomplete. The [K2 completion design](2026-10-06-kubernetes-k2-retirement-handoff.md)
+records the proposed next stages against main `4bffa678bced8b14c25c85e3ba4226b7b752414d`.
+Implementation and validation statements below are historical stage snapshots,
+not full K2 acceptance of later revisions. Track remaining work in
+[#13395](https://github.com/QwenLM/qwen-code/issues/13395). This continues
+#12380's [K1](2026-10-01-managed-kubernetes-runtime.md).
 
 ## Current evidence and gap
 

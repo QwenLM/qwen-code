@@ -71,6 +71,53 @@ class ManagedSessionStoreCredentialTest {
     }
 
     @Test
+    void historicalCredentialUsesOriginalPolicyAndRetainedHashWithoutSql() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.getDataSource()).thenReturn(new JdbcDataSource());
+        ManagedSessionStore store = new ManagedSessionStore(jdbc);
+        JournalEventTransport transport = mock(JournalEventTransport.class);
+        store.setJournalEventTransport(transport);
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getSessionStore().setBindingKey(KEY);
+        WriterCredentialPolicy policy = new WriterCredentialPolicy(properties);
+        store.setCredentials(policy);
+        reset(jdbc);
+        String token = policy.issue("tenant", "workspace", "session");
+        String hash = com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(
+                token.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        store.requireCsiHistoricalCredential("tenant", "workspace", "session", token, hash);
+        for (String wrong : new String[]{null, "0".repeat(64), hash.toUpperCase(java.util.Locale.ROOT)}) {
+            assertThatThrownBy(() -> store.requireCsiHistoricalCredential("tenant", "workspace", "session", token, wrong))
+                    .isInstanceOf(ApiException.class);
+        }
+        for (String foreign : new String[]{null, policy.issue("foreign", "workspace", "session"),
+                policy.issue("tenant", "other", "session"), policy.issue("tenant", "workspace", "other")}) {
+            assertThatThrownBy(() -> store.requireCsiHistoricalCredential("tenant", "workspace", "session", foreign, hash))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("writer_credential_invalid"));
+        }
+        verifyNoInteractions(jdbc, transport);
+    }
+
+    @Test
+    void unboundHistoricalCredentialStillUsesTheOriginalTokenGrammarAndHash() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.getDataSource()).thenReturn(new JdbcDataSource());
+        ManagedSessionStore store = new ManagedSessionStore(jdbc);
+        reset(jdbc);
+        String token = "a".repeat(32);
+        String hash = com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(
+                token.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        store.requireCsiHistoricalCredential("tenant", "workspace", "session", token, hash);
+        for (String malformed : new String[]{null, "a".repeat(31), "a".repeat(513), " ".repeat(32), "中".repeat(32)}) {
+            assertThatThrownBy(() -> store.requireCsiHistoricalCredential("tenant", "workspace", "session", malformed, hash))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("invalid_writer_token"));
+        }
+        assertThatThrownBy(() -> store.requireCsiHistoricalCredential("tenant", "workspace", "session", "b".repeat(32), hash))
+                .isInstanceOf(ApiException.class);
+        verifyNoInteractions(jdbc);
+    }
+
+    @Test
     void publicationWriterLockRequiresTheBoundCredential() {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:credential-check;MODE=MySQL");
