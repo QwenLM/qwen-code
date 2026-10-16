@@ -640,10 +640,16 @@ describe('post-merge push lane', () => {
     // the most common head_ref there is. Dropping the ref half entirely would
     // collapse every PR into one group and leave this suite green.
     //
-    // cancel-in-progress: flipping it to `true` was measured to be invisible
-    // to all 1854 test:scripts tests, while consecutive merges would cancel
-    // each other — the history this repo already recorded once, when 67 of
-    // 100 push runs were cancelled and only 25 ever reported.
+    // cancel-in-progress: `main` stays out of cancellation on purpose, not by
+    // accident. A shared group holds at most one running plus one pending run,
+    // and a newer pending run REPLACES the older one even while this reads
+    // `false`, so back-to-back merges still coalesce onto the newest tree —
+    // but the in-flight run always finishes and reports, which matters
+    // because with no merge queue this lane is the only fast witness of a
+    // merged tree and its coverage upload is `always()`-gated. The history of
+    // flipping it the other way is recorded once already: 67 of 100 push runs
+    // cancelled and only 25 ever reported (#5859). Pinning the literal keeps
+    // a later "make main cancellable" change from landing unnoticed.
     expect(String(ci.concurrency.group)).toBe(
       '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}',
     );
