@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.O
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.aliyun.oss.OSSException;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -544,7 +543,8 @@ public final class ToolPublicationDataStore {
                 || error instanceof ToolPublicationContract.ContractViolationException) {
             return new ApiException(HttpStatus.BAD_REQUEST, "invalid_request", "Publication verification failed");
         }
-        if (error instanceof OSSException storage && "AccessDenied".equals(storage.getErrorCode())) {
+        if (error instanceof ToolPublicationStorageException storage
+                && storage.getReason() == ToolPublicationStorageException.Reason.ACCESS_DENIED) {
             return new ApiException(HttpStatus.FORBIDDEN, "managed_tool_publication_storage_denied",
                     "Publication storage rejected verification");
         }
@@ -2143,7 +2143,7 @@ public final class ToolPublicationDataStore {
         VerificationTask task = verificationTask.get();
         Runnable guard = task == null ? () -> {} : verificationHeartbeat(task);
         guard.run();
-        objects.requireUnversioned();
+        objects.validateConfiguration();
         try (InputStream stream = retention.open(scope, publicationId, objectKey, objects, guard)) {
             var hash = DigestUtils.getSha256Digest();
             byte[] buffer = new byte[64 * 1024];
