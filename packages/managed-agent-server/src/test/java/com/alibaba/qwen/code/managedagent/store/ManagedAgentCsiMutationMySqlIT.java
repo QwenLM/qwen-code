@@ -14,6 +14,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.sql.Connection;
@@ -337,6 +338,91 @@ class ManagedAgentCsiMutationMySqlIT {
                 } finally {
                     created.countDown();
                 }
+            }
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + schema);
+        }
+    }
+
+    /**
+     * A CSI-pinned Session takes the tenant guards behind its root on paths
+     * that hold no tenant guard yet (renew, commit, recovery state). Those
+     * acquisitions are bounded and named like every other per-turn lane: a
+     * held guard answers tenant_guard_contended within the hot-path bound
+     * instead of out-waiting the caller on InnoDB's lock wait (#13800).
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"runtime_placement", "output_publication"})
+    void pinnedSessionBoundsItsTenantGuards(String domain) throws Exception {
+        String url = System.getProperty("mysql.url");
+        if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
+            throw new IllegalArgumentException("A MySQL test database URL is required");
+        }
+        String user = System.getProperty("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        var admin = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(url, user, password));
+        String schema = "csi_guard_bound_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + schema + " CHARACTER SET utf8mb4");
+        try {
+            var data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
+            Flyway.configure().dataSource(data).locations("classpath:db/managed-schema").load().migrate();
+            var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(data);
+            var manager = new DataSourceTransactionManager(data);
+            var json = new ObjectMapper();
+            var properties = new ManagedAgentProperties();
+            properties.setAgentRevision("reviewed-agent/1");
+            var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
+                    "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
+            new WorkspaceCsiReservationStore(jdbc, manager, json).register(registration);
+            jdbc.update(
+                    "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                            + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
+                    + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
+                    CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
+            jdbc.update(
+                    "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+            String session = WorkspaceCsiSessionMain.create(jdbc, manager, json, properties,
+                    new WorkspaceCsiSessionMain.Request(registration, "actor", "original", null, null,
+                            new WorkspaceSelection("workspace", "."))).sessionId();
+            var journal = new ManagedSessionStore(jdbc);
+            var transaction = new TransactionTemplate(manager);
+            var hold = manager.getTransaction(new DefaultTransactionDefinition());
+            try {
+                if ("runtime_placement".equals(domain)) {
+                    WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
+                } else {
+                    ToolPublicationRetentionStore.lockTenant(jdbc, "tenant");
+                }
+                long before = System.nanoTime();
+                try (var pool = Executors.newSingleThreadExecutor()) {
+                    var blocked = pool.submit(() -> transaction.execute(ignored -> {
+                        // Past the 20 s wait below: without the 5 s bound
+                        // the server's own lock wait cannot answer first
+                        // and pass for it, whatever the server's default
+                        // (#13800 R2-11).
+                        jdbc.execute("SET SESSION innodb_lock_wait_timeout = 30");
+                        return journal.blockRecovery("tenant",
+                                session, "csi-original-writer-token-for-test",
+                                new ManagedSessionStoreModels.BlockRecoveryRequest("workspace", "writer", 1,
+                                        "BLOCKED_RESOURCE", "guard-witness"));
+                    }));
+                    assertThatThrownBy(() -> blocked.get(20, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
+                            .satisfies(error -> {
+                                assertThat(error.getCause()).isInstanceOf(ApiException.class);
+                                var refusal = (ApiException) error.getCause();
+                                assertThat(refusal.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                                assertThat(refusal.getCode()).isEqualTo("tenant_guard_contended");
+                            });
+                }
+                // One bounded wait (5 s) plus slack; fixed numbers, so a
+                // raised bound fails here too, and the floor shows the
+                // refusal came from a wait on the held row that actually
+                // ran to the bound rather than from an earlier failure.
+                long elapsedMillis = (System.nanoTime() - before) / 1_000_000;
+                assertThat(elapsedMillis).isGreaterThanOrEqualTo(4_000).isLessThan(15_000);
+            } finally {
+                manager.rollback(hold);
             }
         } finally {
             admin.execute("DROP DATABASE IF EXISTS " + schema);

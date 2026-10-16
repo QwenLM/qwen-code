@@ -77,11 +77,13 @@ public class RuntimeBrokerConfiguration {
             ToolExecutionRepository executionRepository,
             WorkspaceExecutionStore workspaceExecutionStore,
             org.springframework.beans.factory.ObjectProvider<ToolPublicationStore> publications,
-            org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publicationData) {
+            org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publicationData,
+            org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.transaction.PlatformTransactionManager manager) {
         return new EmbeddedRuntimeBroker(store, properties,
                 bindingRepository, sessionRepository, executionRepository,
                 workspaceExecutionStore, publications.getIfAvailable(),
-                publicationData.getIfAvailable());
+                publicationData.getIfAvailable(), jdbc, manager);
     }
 
     // The child result relay and the close cascade probe bindings across

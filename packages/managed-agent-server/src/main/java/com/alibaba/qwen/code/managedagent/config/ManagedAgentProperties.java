@@ -46,6 +46,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private List<String> definitionToolProfiles =
             List.of("hosted-workspace-files/1");
     private List<String> definitionModels = List.of();
+    private List<ModelOption> modelCatalog = List.of();
     private String trustedActorHeader = "";
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
     private Environment environment;
@@ -121,6 +122,24 @@ public class ManagedAgentProperties implements EnvironmentAware {
         this.definitionModels = definitionModels;
     }
 
+    public List<ModelOption> getModelCatalog() {
+        return modelCatalog;
+    }
+
+    public void setModelCatalog(List<ModelOption> modelCatalog) {
+        this.modelCatalog = List.copyOf(modelCatalog);
+    }
+
+    public static class ModelOption {
+        private String modelId;
+        private String label;
+
+        public String getModelId() { return modelId; }
+        public void setModelId(String modelId) { this.modelId = modelId; }
+        public String getLabel() { return label; }
+        public void setLabel(String label) { this.label = label; }
+    }
+
     public String getTrustedActorHeader() {
         return trustedActorHeader;
     }
@@ -147,6 +166,19 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     + " a suffix-less number binds as seconds, so write 300s rather than 300000");
         }
         String mode = harness.getApprovalMode();
+        boolean residentFiles = "kubernetes-workspace".equals(runtimeBroker.getProvisioner())
+                && "workspace".equals(runtimeBroker.getIsolationClass())
+                && !runtimeBroker.getResidentWorkspaces().isEmpty() && runtimeBroker.getWorkspaceMounts().isEmpty()
+                && !runtimeBroker.isTrustedLocalRebootRecovery() && !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
+                && !runtimeBroker.isChildWorkspacesEnabled() && !harness.isWorkspaceShellEnabled()
+                && !runtimeBroker.getResidentKubernetesApiUrl().isBlank()
+                && !runtimeBroker.getResidentKubernetesTokenFile().isBlank() && !runtimeBroker.getResidentKubernetesCaFile().isBlank();
+        if (!runtimeBroker.getResidentWorkspaces().isEmpty()) {
+            new com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces(runtimeBroker.getResidentWorkspaces());
+            if (!residentFiles || !harness.isWorkspaceFilesEnabled()) {
+                throw new IllegalStateException("Resident Workspaces require exclusive CSI/files configuration");
+            }
+        }
         if (harness.isWorkspaceShellEnabled()
                 && (!harness.isWorkspaceFilesEnabled()
                         || mode == null
@@ -158,9 +190,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                        || !residentFiles && (!LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
-                        || runtimeBroker.getWorkspaceMounts().isEmpty()
+                        || (runtimeBroker.getWorkspaceMounts().isEmpty()
+                                && runtimeBroker.getWorkspaceCreationRoot().isBlank()))
                         || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
                                 .contains(
@@ -169,6 +202,13 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     "Hosted Workspace files require"
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
+        }
+        if (!runtimeBroker.getWorkspaceCreationRoot().isBlank()
+                && (!harness.isWorkspaceFilesEnabled()
+                        || !runtimeBroker.isDurableLocalProcess()
+                        || !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled())) {
+            throw new IllegalStateException("Workspace creation requires Workspace files, durable"
+                    + " local-process execution and verified Workspace recovery");
         }
         // A definition Session publishes its instructions through the
         // Session Store at Harness create, so the Harness implies the
@@ -197,6 +237,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         "Automation scan-delay, lease, late-tolerance and lookback must be positive durations.");
             }
         }
+        // Snapshot children (#13753 I3) are read-only child Workspaces: they
+        // need the capability itself. Their switch is separate so it can be
+        // turned on once every replica runs a relay that knows the mode.
+        if (runtimeBroker.isChildSnapshotsEnabled() && !runtimeBroker.isChildWorkspacesEnabled()) {
+            throw new IllegalStateException("Child snapshots require child Workspaces");
+        }
         // The child Workspace capability (#13753 I1) runs Git in this
         // control plane against an administrator mount, so it needs the
         // local-process Broker that mounts the storage here.
@@ -207,7 +253,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                     || !"session".equals(runtimeBroker.getIsolationClass())
                     || !runtimeBroker.isDurableLocalProcess()
-                    || runtimeBroker.getWorkspaceMounts().isEmpty()) {
+                    || (runtimeBroker.getWorkspaceMounts().isEmpty()
+                                && runtimeBroker.getWorkspaceCreationRoot().isBlank())) {
                 throw new IllegalStateException("Child Workspaces require a Session-isolated"
                         + " durable local-process Broker with Workspace mounts");
             }
@@ -910,6 +957,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
         private List<WorkspaceMount> workspaceMounts = List.of();
+        private List<ResidentWorkspace> residentWorkspaces = List.of();
+        private String residentKubernetesApiUrl = "";
+        private String residentKubernetesTokenFile = "";
+        private String residentKubernetesCaFile = "";
+        private String workspaceCreationRoot = "";
         private String isolationClass = "session";
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
@@ -929,6 +981,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
         private boolean childWorkspacesEnabled;
+        private boolean childSnapshotsEnabled;
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
@@ -1057,8 +1110,50 @@ public class ManagedAgentProperties implements EnvironmentAware {
             this.workspaceMounts = workspaceMounts;
         }
 
+        public String getWorkspaceCreationRoot() {
+            return workspaceCreationRoot;
+        }
+
+        public void setWorkspaceCreationRoot(String workspaceCreationRoot) {
+            this.workspaceCreationRoot = workspaceCreationRoot;
+        }
+
         public record WorkspaceMount(String tenantId, String storageId, String root) {
         }
+
+        public record ResidentWorkspace(String workspaceId, long workspaceGeneration,
+                com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration registration,
+                com.alibaba.qwen.code.managedagent.service.WorkspaceCsiResourceGuard.ProtectionIdentity protection,
+                String image, List<String> command,
+                List<com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeProvisioner.WorkerArtifact> artifacts) {
+            public ResidentWorkspace {
+                if (registration == null || protection == null || workspaceId == null || workspaceId.isBlank()
+                        || workspaceGeneration < 1 || image == null || !image.matches("[^\\s]+@sha256:[0-9a-f]{64}")
+                        || command == null || command.isEmpty() || command.size() > 32
+                        || command.stream().anyMatch(value -> value == null || value.isBlank()
+                                || value.length() > 8192 || value.indexOf('\0') >= 0)
+                        || artifacts == null || artifacts.size() > 48
+                        || artifacts.stream().anyMatch(java.util.Objects::isNull)
+                        || artifacts.stream().map(com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeProvisioner.WorkerArtifact::configMapName)
+                                .distinct().count() != artifacts.size()) {
+                    throw new IllegalArgumentException("Invalid resident Workspace configuration");
+                }
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(registration.tenantId(),
+                        workspaceId, workspaceGeneration, registration.storageId(), ".",
+                        com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+                command = List.copyOf(command);
+                artifacts = List.copyOf(artifacts);
+            }
+        }
+
+        public List<ResidentWorkspace> getResidentWorkspaces() { return residentWorkspaces; }
+        public void setResidentWorkspaces(List<ResidentWorkspace> value) { residentWorkspaces = List.copyOf(value); }
+        public String getResidentKubernetesApiUrl() { return residentKubernetesApiUrl; }
+        public void setResidentKubernetesApiUrl(String value) { residentKubernetesApiUrl = value; }
+        public String getResidentKubernetesTokenFile() { return residentKubernetesTokenFile; }
+        public void setResidentKubernetesTokenFile(String value) { residentKubernetesTokenFile = value; }
+        public String getResidentKubernetesCaFile() { return residentKubernetesCaFile; }
+        public void setResidentKubernetesCaFile(String value) { residentKubernetesCaFile = value; }
 
         public void setIsolationClass(String isolationClass) {
             this.isolationClass = isolationClass;
@@ -1098,6 +1193,20 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {
             this.childWorkspacesEnabled = childWorkspacesEnabled;
+        }
+
+        /**
+         * Whether hosted Sessions may launch read-only snapshot children
+         * (#13753 I3). A relay from before snapshots would create one as a
+         * shared writer, so this is turned on only after every control-plane
+         * replica runs this version.
+         */
+        public boolean isChildSnapshotsEnabled() {
+            return childSnapshotsEnabled;
+        }
+
+        public void setChildSnapshotsEnabled(boolean childSnapshotsEnabled) {
+            this.childSnapshotsEnabled = childSnapshotsEnabled;
         }
 
         public String getChildWorkspaceGit() {
