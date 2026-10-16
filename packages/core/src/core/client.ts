@@ -4601,6 +4601,7 @@ export class LlmClient {
             getPlanModeSystemReminder(
               shouldUsePlanOnlyReminderInSubagentContext() ||
                 this.config.getSdkMode(),
+              this.config.isSessionWorkflowTodoContextActive?.() === true,
             ),
           );
         }

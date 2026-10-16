@@ -14181,7 +14181,10 @@ export class Session implements SessionContext {
 
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
       reminders.push({
-        text: getPlanModeSystemReminder(this.config.getSdkMode?.()),
+        text: getPlanModeSystemReminder(
+          this.config.getSdkMode?.(),
+          this.config.isSessionWorkflowTodoContextActive?.() === true,
+        ),
       });
     }
 
