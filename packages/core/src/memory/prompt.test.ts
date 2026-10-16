@@ -218,30 +218,55 @@ describe('managed auto-memory prompt helpers', () => {
         mtimeMs: 0,
       });
       // Legal path components can expand into long percent-encoded targets.
-      // The final component's space run is tuned so the retained body (capped
-      // at MAX_INDEX_CHARS) plus the appended truncation notice lands just over
-      // MAX_INDEX_CHARS — the writer-budget path this test exercises. It was 250
-      // spaces before the index title was budgeted against the line (issue
-      // #13910); the shorter title shrinks each long line, so the run grew to
-      // keep the fixture over budget. It is split across two components rather
-      // than one 293-byte run: a single component is capped at 255 bytes
-      // (NAME_MAX), which the 14 above already sit on exactly.
-      const longDocs = ['A', 'B', 'C'].map((label) =>
-        doc(
-          `reference/${[
-            ...Array.from(
-              { length: 14 },
-              (_, i) => `${label}${' '.repeat(253)}${i % 10}`,
-            ),
-            `${label}${' '.repeat(250)}b.md`,
-            `${label}${' '.repeat(37)}c.md`,
-          ].join('/')}`,
-          label.repeat(120),
-        ),
-      );
+      // The retained body (capped at MAX_INDEX_CHARS) plus the appended
+      // truncation notice has to land just over MAX_INDEX_CHARS — the
+      // writer-budget path this test exercises. Every component stays within
+      // NAME_MAX (255 bytes): the 14 siblings and `b.md` sit on it exactly.
+      //
+      // The tail run is derived rather than encoded as a literal. Its width is
+      // coupled to how much the index title budget shrank each long line, so a
+      // hard-coded run needed a retune (250 -> 288 -> …) every time an
+      // unrelated constant moved the line length (issue #13910). Growing it
+      // until the cap is first exceeded keeps the fixture over budget without a
+      // magic number.
+      const longDocsFor = (tailRun: number) =>
+        ['A', 'B', 'C'].map((label) =>
+          doc(
+            `reference/${[
+              ...Array.from(
+                { length: 14 },
+                (_, i) => `${label}${' '.repeat(253)}${i % 10}`,
+              ),
+              `${label}${' '.repeat(250)}b.md`,
+              `${label}${' '.repeat(tailRun)}c.md`,
+            ].join('/')}`,
+            label.repeat(120),
+          ),
+        );
       const ordinaryDocs = Array.from({ length: 12 }, (_, i) =>
         doc(`reference/normal-${i}.md`, `Normal ${i}`),
       );
+      const indexLengthFor = (tailRun: number): number =>
+        buildManagedAutoMemoryIndex([...longDocsFor(tailRun), ...ordinaryDocs])
+          .length;
+      // Derive the tail run from the code under test rather than encoding it as
+      // a literal: it only has to push the retained body just past
+      // MAX_INDEX_CHARS, and how many characters that takes moves whenever an
+      // unrelated constant changes a line's length (issue #13910 retuned a
+      // literal here twice). The smallest run whose index exceeds the cap is
+      // used, keeping the overshoot thin — the assertions below depend on the
+      // writer still retaining all 14 long entries.
+      const perRunChars = indexLengthFor(1) - indexLengthFor(0);
+      const tailRun =
+        perRunChars > 0
+          ? Math.ceil((25_000 + 1 - indexLengthFor(0)) / perRunChars)
+          : 0;
+      const longDocs = longDocsFor(tailRun);
+      for (const longDoc of longDocs) {
+        for (const part of longDoc.relativePath.split('/')) {
+          expect(part.length).toBeLessThanOrEqual(255);
+        }
+      }
       const generated = buildManagedAutoMemoryIndex([
         ...longDocs,
         ...ordinaryDocs,

@@ -198,11 +198,7 @@ function docIndexLine(
   others: ScannedAutoMemoryDocument[] = [],
 ): string {
   const target = encodeIndexPathTarget(doc.relativePath);
-  // The title shares the line budget with the link. Cap it so the assembled
-  // `- [title](target)` fits MAX_INDEX_LINE_CHARS whenever the encoded path
-  // leaves room for even MIN_INDEX_TITLE_CHARS; beyond that the line runs long
-  // instead, with the title clamped to the floor (a resolving long link beats a
-  // short dead one).
+  // Derived from the encoded target, not the raw path.
   const titleLimit = Math.max(
     MIN_INDEX_TITLE_CHARS,
     MAX_INDEX_LINE_CHARS - INDEX_LINK_AFFIX_CHARS - target.length,
