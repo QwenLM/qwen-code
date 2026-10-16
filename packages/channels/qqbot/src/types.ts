@@ -95,7 +95,12 @@ export interface QQChannelConfig {
   bufferFlushLength?: number;
   /** Max reconnect attempts before giving up. Default 20. 0 = unlimited. */
   maxReconnectAttempts?: number;
-  /** Max flush retries for streaming message delivery. Default 3. 0 = unlimited. */
+  /**
+   * Max flush retries for streaming message delivery. Default 3. 0 =
+   * unlimited on the background/fire-and-forget flush paths; the final
+   * segment of a completed turn is awaited inside that turn, so it is capped
+   * at 3 attempts, then reports the loss rather than holding the turn lock.
+   */
   maxFlushRetries?: number;
   /** Max gateway retries per reconnect cycle. Default 5. 0 = unlimited. */
   maxGwRetries?: number;
