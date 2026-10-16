@@ -26,6 +26,7 @@ import {
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_TEAM_AGENT_TOOL,
   HOSTED_TEAM_AGENT_WORKTREE_TOOL,
+  HOSTED_TEAM_AGENT_SNAPSHOT_TOOL,
   HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL,
   hostedTeamMessageInput,
 } from './hosted-workspace-tool-turn.js';
@@ -134,6 +135,7 @@ function createTurn(
     hookEvents?: string[];
     funnel?: HostedTeamSession;
     childWorkspaces?: boolean;
+    childSnapshots?: boolean;
     messages?: boolean;
     /** H4e-b2: another Turn of the same Session. */
     promptId?: string;
@@ -177,6 +179,7 @@ function createTurn(
         funnel: children,
         depth: options.depth ?? 0,
         childWorkspaces: options.childWorkspaces === true,
+        childSnapshots: options.childSnapshots === true,
         queueConsumption: () => undefined,
       },
       teams: options.funnel ?? teams,
@@ -494,6 +497,116 @@ it('composes worktree isolation with team membership', async () => {
     workspaceMode: 'worktree',
     completion: 'sent',
   });
+});
+
+// #13753 I3: a member trades messages with its leader, which a snapshot
+// cannot, so the team's snapshot declaration says so and a snapshot member
+// is refused before anything commits; a plain snapshot child is not.
+it('refuses a snapshot member and admits a plain snapshot child', async () => {
+  const signal = new AbortController().signal;
+  const capable = createTurn({ childWorkspaces: true, childSnapshots: true });
+  expect(await capable.declarations(signal)).toContain(
+    HOSTED_TEAM_AGENT_SNAPSHOT_TOOL,
+  );
+  // The snapshot flag counts only beside child Workspaces.
+  const flagOnly = await createTurn({ childSnapshots: true }).declarations(
+    signal,
+  );
+  expect(flagOnly).toContain(HOSTED_TEAM_AGENT_TOOL);
+  expect(flagOnly).not.toContain(HOSTED_TEAM_AGENT_SNAPSHOT_TOOL);
+  expect(HOSTED_TEAM_AGENT_SNAPSHOT_TOOL.description).toContain(
+    'A team member (name) cannot run as a snapshot.',
+  );
+  await execute(capable, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  const refused = await execute(capable, [
+    member('bob', 'call-bob', { isolation: 'snapshot' }),
+  ]);
+  expect(refused).toContain('Hosted team member cannot run as a snapshot');
+  expect(refused).toContain(
+    'with isolation \\"worktree\\" or without isolation, or launch the snapshot without name.',
+  );
+  expect(children.record('prompt:call-bob')).toBeUndefined();
+  expect(roster()).toEqual([]);
+  // The remedies name only the isolation the host serves.
+  const worktreeOnly = await execute(createTurn({ childWorkspaces: true }), [
+    member('bob', 'call-bob-worktree', { isolation: 'snapshot' }),
+  ]);
+  expect(worktreeOnly).toContain(
+    'Launch the member with isolation \\"worktree\\" or without isolation.',
+  );
+  expect(worktreeOnly).not.toContain('snapshot without name');
+  expect(
+    await execute(createTurn(), [
+      member('bob', 'call-bob-shared', { isolation: 'snapshot' }),
+    ]),
+  ).toContain('Launch the member without isolation.');
+
+  await execute(capable, [
+    call(
+      'agent',
+      { description: 'reader', prompt: 'review', isolation: 'snapshot' },
+      'call-reader',
+    ),
+  ]);
+  expect(children.record('prompt:call-reader')).toMatchObject({
+    workspaceMode: 'snapshot',
+  });
+  expect(roster()).toEqual([]);
+  // Serving snapshots changes no default: a member naming no isolation
+  // still joins, shared.
+  expect(await execute(capable, [member('carol', 'call-carol')])).toContain(
+    'joined team \\"review\\" as \\"carol\\"',
+  );
+  expect(children.record('prompt:call-carol')?.workspaceMode).toBe('shared');
+  expect(roster()).toEqual([
+    { name: 'carol', childRunId: 'prompt:call-carol', planModeRequired: false },
+  ]);
+});
+
+// #13753 I3: a send to a running snapshot child is refused, and one after
+// it completes continues it as a new snapshot, through both forms of
+// send_message (the team's and the plain one).
+it('continues a completed snapshot child through either send_message', async () => {
+  for (const teamsOn of [true, false]) {
+    enablement.teamState = teamsOn;
+    enablement.teamTask = teamsOn;
+    const turn = createTurn({
+      childWorkspaces: true,
+      childSnapshots: true,
+      messages: true,
+    });
+    const launch = `call-reader-${teamsOn}`;
+    await execute(turn, [
+      call(
+        'agent',
+        { description: 'reader', prompt: 'review', isolation: 'snapshot' },
+        launch,
+      ),
+    ]);
+    const task = children.taskIdOf(`prompt:${launch}`);
+    const running = await execute(turn, [
+      call(
+        'send_message',
+        { task_id: task, message: 'more' },
+        `run-${teamsOn}`,
+      ),
+    ]);
+    expect(running).toContain('is a read-only snapshot');
+    await finish(`prompt:${launch}`);
+    await execute(turn, [
+      call(
+        'send_message',
+        { task_id: task, message: 'more' },
+        `more-${teamsOn}`,
+      ),
+    ]);
+    expect(children.record(`prompt:more-${teamsOn}`)).toMatchObject({
+      workspaceMode: 'snapshot',
+      predecessorChildRunId: `prompt:${launch}`,
+    });
+  }
 });
 
 // With the team on, `name` is a supported argument, so the refusal of

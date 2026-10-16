@@ -72,6 +72,7 @@ export interface ManagedRuntimeProviderContext {
   readonly directory: string;
   readonly workspaceRoot: string;
   readonly preapproved: boolean;
+  readonly filesOnly?: boolean;
   readonly isActive?: () => boolean;
 }
 
@@ -409,7 +410,8 @@ export class ManagedRuntimeProviderWorker {
       context.isActive?.() === false ||
       context.directory !== value.context.directory ||
       context.workspaceRoot !== value.context.workspaceRoot ||
-      context.preapproved !== value.context.preapproved
+      context.preapproved !== value.context.preapproved ||
+      context.filesOnly !== value.context.filesOnly
     ) {
       throw new ManagedToolUnavailableError(
         'Managed context directory is unavailable.',
@@ -454,7 +456,7 @@ export class ManagedRuntimeProviderWorker {
         new ReadFileTool(toolConfig),
         new WriteFileTool(toolConfig),
         new EditTool(toolConfig),
-        shell,
+        ...(context.filesOnly ? [] : [shell]),
       ];
       const policyRevision = randomUUID();
       const runtime = new ManagedToolRuntime(

@@ -40,6 +40,7 @@ import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import * as stdio from '../utils/stdioHelpers.js';
 
@@ -159,7 +160,7 @@ function headers<T extends supertest.Test>(request: T): T {
 
 function store() {
   return {
-    baseUrl: 'http://store.test',
+    baseUrl: 'https://store.test',
     tenantId: 'tenant',
     workspaceId: 'workspace',
     writerId: BOOT_ID,
@@ -169,6 +170,11 @@ function store() {
 
 describe('issue #13328: a second concurrent Session on the same Workspace mount', () => {
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'capabilityDigest',
+      'get',
+    ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
     resetManagedRuntimeDispatchGatesForTest();
     state.root = await mkdtemp(path.join(tmpdir(), 'issue-13328-'));
     state.assertWritable.mockReset();
