@@ -1158,9 +1158,9 @@ describe('package scripts', () => {
   });
 
   it('drops DAC capabilities for root unit tests on both CI commands', () => {
-    // The permission-bit gates in packages/cli, packages/core,
-    // packages/channels/wecom and scripts/tests ask the kernel, so on a root
-    // lane that keeps these capabilities they all skip, without failing.
+    // The permission-bit probes in the workspaces and scripts/tests ask the
+    // kernel, so on a root lane that keeps these capabilities every case
+    // they gate skips, without failing.
     const step = getWorkflowStep(
       getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
       'Run tests and generate reports',
@@ -1196,6 +1196,40 @@ describe('package scripts', () => {
         /\bnpm run test:(?:ci:workspaces|scripts)\b/.test(line),
       ),
     ).toHaveLength(2);
+  });
+
+  it('keeps every copy of the permission-bit probe identical', () => {
+    // The probe is copied, not shared: each package that uses it keeps its
+    // own copy, and cli, core and browser-use also keep its tests (wecom
+    // inlines a smaller probe for its one case). A fix to one copy has to
+    // reach the others, or the packages measure differently.
+    const copies = {
+      'permission-bits.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+        'packages/sdk-typescript/test/test-utils',
+        'integrations/test-failure-explorer/src/test-utils',
+      ],
+      'permission-bits.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+      'permission-bits.mocked-fs.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+    };
+    for (const [file, dirs] of Object.entries(copies)) {
+      const [reference, ...others] = dirs.map((dir) =>
+        readFileSync(path.join(root, dir, file), 'utf8'),
+      );
+      others.forEach((text, i) => {
+        expect(text, `${file}: ${dirs[i + 1]} vs ${dirs[0]}`).toBe(reference);
+      });
+    }
   });
 
   it('bounds the CI unit step so a hang fails instead of stalling', () => {

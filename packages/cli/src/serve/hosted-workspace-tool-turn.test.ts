@@ -691,6 +691,7 @@ async function shellReceiptScenario(
     | 'sentinel'
     | 'lost-admission'
     | 'lost-reserve',
+  foregroundOnly = false,
   approval?: { mode: HostedApprovalMode },
 ) {
   const shellCall = {
@@ -865,6 +866,7 @@ async function shellReceiptScenario(
     approval
       ? { settings: { mode: approval.mode, timeoutMs: 1000 }, waiters }
       : undefined,
+    { foregroundOnly },
   );
   const execution = shellTurn.execute(
     [shellCall],
@@ -965,10 +967,13 @@ async function shellReceiptScenario(
   ).toHaveLength(1);
 }
 
-it('runs Full Access Shell without ordinary Actions through durable result and replay acceptance', async () => {
-  await shellReceiptScenario('normal', { mode: 'yolo' });
-  expect(actionIds()).toEqual([]);
-});
+it.each([false, true])(
+  'runs Full Access Shell without ordinary Actions through durable result and replay acceptance (foreground-only: %s)',
+  async (foregroundOnly) => {
+    await shellReceiptScenario('normal', foregroundOnly, { mode: 'yolo' });
+    expect(actionIds()).toEqual([]);
+  },
+);
 
 it.each([
   'normal',
@@ -983,6 +988,10 @@ it.each([
   'uses only the original Shell publication after Broker %s',
   (mode) => shellReceiptScenario(mode),
 );
+
+it('publishes foreground SSH Shell output through its original capture and ACK', async () => {
+  await shellReceiptScenario('normal', true);
+});
 
 it('records a durable receipt for a proven unstarted Shell', async () => {
   const call = {
@@ -5573,6 +5582,7 @@ function backgroundTurnRig(
     notStartedProven?: boolean;
     reserveRefused?: boolean;
     publicationMissing?: boolean;
+    foregroundOnly?: boolean;
     closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
     executionCallIds?: readonly string[];
   } = {},
@@ -5697,6 +5707,7 @@ function backgroundTurnRig(
     {
       childRuns: orchestrator as never,
       backgroundLane: options.lane,
+      foregroundOnly: options.foregroundOnly,
     },
   );
   return { order, orchestrator, turn, lane: options.lane };
@@ -5708,6 +5719,7 @@ function monitorTurnRig(
     notStartedProven?: boolean;
     lane?: HostedShellTurnOptions;
     reserveRefused?: boolean;
+    foregroundOnly?: boolean;
   } = {},
 ) {
   enablement.childRun = true;
@@ -5860,6 +5872,7 @@ function monitorTurnRig(
       } as never,
       monitors: monitors as never,
       backgroundLane: opts.lane,
+      foregroundOnly: opts.foregroundOnly,
     },
   );
   return { order, monitors, options: opts.lane ?? options, turn };
@@ -6409,6 +6422,60 @@ function backgroundCall() {
   ];
   return { call, parts };
 }
+
+it('keeps the SSH foreground-only declaration and admission free of detached tools', async () => {
+  const outcome: ToolResultEnvelope = {
+    executionStatus: 'not_started',
+    responseParts: [],
+    capture: null,
+  };
+  const rig = backgroundTurnRig(outcome, { foregroundOnly: true });
+  turn = rig.turn;
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'run_shell_command',
+  ]);
+  const shell = declarations.find((tool) => tool.name === 'run_shell_command');
+  expect(shell?.parametersJsonSchema).not.toHaveProperty(
+    'properties.is_background',
+  );
+  expect(shell?.description).not.toContain('detached');
+  const background = backgroundCall();
+  const result = await turn.execute(
+    [background.call],
+    background.parts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0]?.functionResponse?.response).toHaveProperty('error');
+  expect(rig.orchestrator.calls).toEqual([]);
+  expect(broker.prepareV3).not.toHaveBeenCalled();
+  expect(broker.executeV3).not.toHaveBeenCalled();
+});
+
+it('refuses SSH foreground-only Monitor before any Runtime or publication admission', async () => {
+  const rig = monitorTurnRig(
+    { executionStatus: 'not_started', responseParts: [], capture: null },
+    { foregroundOnly: true },
+  );
+  turn = rig.turn;
+  const monitor = monitorCall();
+  await expect(
+    turn.execute(
+      [monitor.call],
+      monitor.parts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(rig.monitors.calls).toEqual([]);
+  expect(rig.order).toEqual([]);
+  expect(broker.prepareV3).not.toHaveBeenCalled();
+  expect(broker.executeV3).not.toHaveBeenCalled();
+});
 
 it('admits a background Shell through its child_run orchestrator and lands the detached receipt family', async () => {
   const { call, parts } = backgroundCall();
