@@ -207,6 +207,14 @@ public class WorkspaceStorageGuard {
         return createdRoots.resolve(tenantId, storageId, false);
     }
 
+    Path verifiedRoot(ContextBinding binding) {
+        if (!enabled) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        verify(binding);
+        return root(binding.getTenantId(), binding.getStorageId());
+    }
+
     void registerCreated(String tenantId, String storageId, String operationId) {
         Path path = createdRoots.resolve(tenantId, storageId, true);
         if (path == null) {

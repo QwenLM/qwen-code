@@ -423,6 +423,8 @@ export function createJavaManagedAgentProvider(
                 supported: page.capabilities?.workspaceBinding === true,
                 canCreateWorkspace:
                   page.capabilities?.workspaceCreation === true,
+                canSelectDirectory:
+                  page.capabilities?.workspaceDirectorySelection === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
               };
@@ -435,6 +437,8 @@ export function createJavaManagedAgentProvider(
                 { ...request, idempotencyKey: command.idempotencyKey },
                 command.signal,
               ),
+            directories: (request, command) =>
+              client.workspaceDirectories(request, command.signal),
             getSessionOptions: (agentId, request) =>
               client.getSessionOptions(agentId, request.signal),
             createEmpty: (

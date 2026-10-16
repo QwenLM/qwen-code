@@ -206,6 +206,111 @@ class WorkspaceCreationStoreTest {
         return jdbc.queryForObject("SELECT storage_id FROM ma_workspace WHERE workspace_id = ?", String.class, workspace);
     }
 
+    @Test
+    void selectsExistingProjectAndPersistsItsDefaultWithoutRegisteringStorageAgain() throws Exception {
+        var parent = store(guard).create("tenant", "actor", "Projects", "projects");
+        Path root = guard.createdStorageRoot("tenant", storage(parent.workspaceId()));
+        Path project = Files.createDirectory(root.resolve("existing-project"));
+        Files.writeString(project.resolve("README.md"), "existing project");
+        var before = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'existing-runtime'");
+        var created = store(guard).create("tenant", "actor", "Project", "selected",
+                parent.workspaceId(), "./existing-project/");
+        assertThat(created.defaultCwdRelative()).isEqualTo("existing-project");
+        assertThat(storage(created.workspaceId())).isEqualTo(storage(parent.workspaceId()));
+        assertThat(Files.readString(project.resolve("README.md"))).isEqualTo("existing project");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).containsEntry("holder_key", "existing-runtime")
+                .containsEntry("mount_registration_id", before.get("mount_registration_id"));
+        assertThat(new ManagedWorkspaceRegistry(jdbc).findReadable("tenant", "actor", created.workspaceId())
+                .defaultCwdRelative()).isEqualTo("existing-project");
+        assertThat(store(guard).create("tenant", "actor", "Project", "selected", parent.workspaceId(),
+                "existing-project")).isEqualTo(created);
+        assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Project", "selected",
+                parent.workspaceId(), ".")).isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
+        jdbc.update("DELETE FROM ma_workspace_access WHERE workspace_id = ?", parent.workspaceId());
+        assertThat(store(guard).create("tenant", "actor", "Project", "selected", parent.workspaceId(),
+                "existing-project")).isEqualTo(created);
+        jdbc.update("DELETE FROM ma_workspace_access WHERE workspace_id = ?", created.workspaceId());
+        assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Project", "selected",
+                parent.workspaceId(), "existing-project")).isInstanceOf(ApiException.class);
+    }
+
+    @Test
+    void browsesOnlyOwnedRealDirectoriesAndRefusesUnsafeSelections() throws Exception {
+        var parent = store(guard).create("tenant", "actor", "Projects", "browse");
+        Path root = guard.createdStorageRoot("tenant", storage(parent.workspaceId()));
+        Files.createDirectory(root.resolve("project"));
+        Files.createDirectory(root.resolve(".git"));
+        Files.createDirectory(root.resolve(".qwen-child-workspaces"));
+        Files.createSymbolicLink(root.resolve("outside"), temp);
+        var page = store(guard).directories("tenant", "actor", parent.workspaceId(), ".");
+        assertThat(page.root()).isEqualTo(root.toString());
+        assertThat(page.directories()).extracting(WorkspaceCreationStore.Directory::name).containsExactly("project");
+        for (String path : List.of("../", "outside", ".git", ".qwen-child-workspaces")) {
+            assertThatThrownBy(() -> store(guard).directories("tenant", "actor", parent.workspaceId(), path))
+                    .isInstanceOf(RuntimeException.class);
+            assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Unsafe", "unsafe-" + path,
+                    parent.workspaceId(), path)).isInstanceOf(RuntimeException.class);
+        }
+        assertThatThrownBy(() -> store(guard).directories("other", "actor", parent.workspaceId(), "."))
+                .isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> store(guard).directories("tenant", "other", parent.workspaceId(), "."))
+                .isInstanceOf(ApiException.class);
+        for (String role : List.of("READER", "OPERATOR")) {
+            jdbc.update("UPDATE ma_workspace_access SET role = ?", role);
+            assertThatThrownBy(() -> store(guard).directories("tenant", "actor", parent.workspaceId(), "."))
+                    .isInstanceOf(ApiException.class);
+            assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Refused", "role-" + role,
+                    parent.workspaceId(), "project")).isInstanceOf(ApiException.class);
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void pendingSelectionCannotRebindAfterSourceGenerationChanges() throws Exception {
+        var parent = store(guard).create("tenant", "actor", "Projects", "pending-parent");
+        Path root = guard.createdStorageRoot("tenant", storage(parent.workspaceId()));
+        Files.createDirectory(root.resolve("project"));
+        var interrupted = spy(guard);
+        var count = new java.util.concurrent.atomic.AtomicInteger();
+        doAnswer(invocation -> {
+            if (count.incrementAndGet() == 2) {
+                throw new IllegalStateException("interrupted after receipt");
+            }
+            return invocation.callRealMethod();
+        }).when(interrupted).verifiedRoot(org.mockito.ArgumentMatchers.any());
+        assertThatThrownBy(() -> store(interrupted).create("tenant", "actor", "Project", "pending-selection",
+                parent.workspaceId(), "project")).isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE state = 'PENDING'", Integer.class))
+                .isEqualTo(1);
+        jdbc.update("UPDATE ma_workspace SET workspace_generation = 2 WHERE workspace_id = ?", parent.workspaceId());
+        assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Project", "pending-selection",
+                parent.workspaceId(), "project")).isInstanceOf(RuntimeException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentSelectionPublishesOneWorkspace() throws Exception {
+        var parent = store(guard).create("tenant", "actor", "Projects", "concurrent-parent");
+        Path root = guard.createdStorageRoot("tenant", storage(parent.workspaceId()));
+        Files.createDirectory(root.resolve("project"));
+        var barrier = new CyclicBarrier(2);
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            java.util.concurrent.Callable<ManagedWorkspaceRegistry.WorkspaceSummary> action = () -> {
+                barrier.await();
+                return store(guard).create("tenant", "actor", "Project", "concurrent-project",
+                        parent.workspaceId(), "project");
+            };
+            var first = pool.submit(action);
+            var second = pool.submit(action);
+            assertThat(first.get(20, TimeUnit.SECONDS)).isEqualTo(second.get(20, TimeUnit.SECONDS));
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
+    }
+
     private ContextBinding binding(String workspace) {
         return new ContextBinding("tenant", workspace, 1, storage(workspace), ".", "config", 1);
     }

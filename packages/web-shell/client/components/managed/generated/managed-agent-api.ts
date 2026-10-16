@@ -423,7 +423,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Create an independent empty Workspace under the operator-controlled creation root and grant its authenticated creator OWNER access. Disabled deployments reject creation. The actor-scoped idempotency key freezes the normalized name and storage registration; retry the same request after an uncertain response. Completed replay checks current access and does not restore removed Workspaces or revoked grants. No host path is accepted or returned. */
+        /** @description Create an empty Workspace under the operator-controlled root, or supply sourceWorkspaceId and cwdRelative together to select an existing directory under an ACTIVE ROOT Workspace owned by the actor. Existing-directory creation shares its verified storage, config and policy and persists a default working directory. The actor-scoped idempotency key pins the normalized request and source generation. Completed replay checks current access and never restores grants. */
         post: operations["webShellCreateWorkspace"];
         delete?: never;
         options?: never;
@@ -510,6 +510,23 @@ export interface paths {
         put?: never;
         /** @description Change the next-Turn policy of an idle built-in Workspace Session. Requires its recorded owner and current OPERATOR access. Changes are revision-checked and actor/session-scoped idempotent. */
         post: operations["changeWebShellSessionApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/directories/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description List bounded immediate real directories on the selected Workspace storage host. Requires an authenticated OWNER of the ACTIVE ROOT Workspace and verified LOCAL storage. Refuses traversal, symlinks and reserved maintenance directories; never uses the ordinary daemon filesystem. Root paths are disclosed only within this authorized scope. */
+        post: operations["queryWebShellWorkspaceDirectories"];
         delete?: never;
         options?: never;
         head?: never;
@@ -829,6 +846,10 @@ export interface components {
             canCreateSession: boolean;
             /** @enum {string} */
             state: "active" | "draining" | "removed";
+            /** @description Persisted default working directory for new WebShell Sessions; absent means dot. */
+            defaultCwdRelative?: string;
+            /** @description Current actor owns this active root Workspace; directory discovery rechecks authorization and native storage. */
+            canSelectDirectory?: boolean;
         };
         WebShellWorkspacePage: {
             data: components["schemas"]["WebShellWorkspace"][];
@@ -846,6 +867,8 @@ export interface components {
                 workspaceCreation?: boolean;
                 /** @description Supports effective Session policy options and explicit Workspace-bound creation policy. Missing or false means unsupported. */
                 approvalModeSelection?: boolean;
+                /** @description Supports browsing and selecting existing directories on authorized Linux storage; absent means unsupported. */
+                workspaceDirectorySelection?: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
             defaultWorkspace: (components["schemas"]["WebShellWorkspace"] & {
@@ -1232,6 +1255,8 @@ export interface components {
             /** @description Trimmed display name, without control characters. The server validates the normalized name. */
             displayName: string;
             idempotencyKey: string;
+            sourceWorkspaceId?: string;
+            cwdRelative?: string;
         };
         WebShellSessionOptionsRequest: {
             agentId: string;
@@ -1310,6 +1335,19 @@ export interface components {
             /** Format: int64 */
             approvalRevision: number;
             replayed: boolean;
+        };
+        WebShellWorkspaceDirectoryRequest: {
+            workspaceId: string;
+            cwdRelative: string;
+        };
+        WebShellWorkspaceDirectoryPage: {
+            root: string;
+            cwdRelative: string;
+            truncated: boolean;
+            directories: {
+                name: string;
+                cwdRelative: string;
+            }[];
         };
     };
     responses: {
@@ -2426,6 +2464,35 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellWorkspaceDirectories: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceDirectoryRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized existing directories. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceDirectoryPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
 }

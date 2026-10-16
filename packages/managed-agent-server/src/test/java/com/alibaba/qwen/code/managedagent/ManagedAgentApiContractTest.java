@@ -1166,6 +1166,10 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/create")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"workspace-create\"}");
+        exchange(drift, "queryWebShellWorkspaceDirectories", 409,
+                post(WEB_SHELL + "/workspaces/directories/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\"}");
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
