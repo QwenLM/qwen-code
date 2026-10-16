@@ -85,7 +85,7 @@ class ManagedSchemaPublicationLoadMySqlIT {
                 ToolPublicationObjectStore unusedObjects = new ToolPublicationObjectStore() {
                     @Override public void putIfAbsent(String key, byte[] bytes) { throw new AssertionError("No object write is expected"); }
                     @Override public java.io.InputStream open(String key) { throw new AssertionError("No object read is expected"); }
-                    @Override public void requireUnversioned() { }
+                    @Override public void validateConfiguration() { }
                 };
                 var collector = new ToolPublicationCollector(jdbc, manager,
                         new ToolPublicationRetentionStore(jdbc, manager), unusedObjects, properties);
