@@ -488,6 +488,39 @@ class HostedSessionRelayFaultGatesIT {
                                 .as("accepted/consumed proof for %s",
                                         minted)
                                 .isEqualTo(1L);
+                        // The ledger is auxiliary evidence only, after
+                        // SessionMessageRelayStore.classify()'s widening
+                        // write of consumption_state='consumed' on every
+                        // 'done' — even for the fallback paths in
+                        // SessionMessageRelay.awaitConsumption where the
+                        // receiver's reading Turn ended incompletely and
+                        // the receipt stayed accepted. The consumption
+                        // authority is the target session's own
+                        // session_message journal: its inbound record for
+                        // this msgc_ must reach delivery_state='consumed'.
+                        List<String> receivers = jdbc.queryForList(
+                                "SELECT DISTINCT target_session_id"
+                                        + " FROM ma_delivery"
+                                        + " WHERE tenant_id = ? AND"
+                                        + " delivery_kind = 'SESSION_MESSAGE'"
+                                        + " AND delivery_id = ?",
+                                String.class, tenant, minted);
+                        assertThat(receivers)
+                                .as("receiver session for %s", minted)
+                                .hasSize(1);
+                        Long receiverConsumed = jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM ma_session_record"
+                                        + " WHERE tenant_id = ? AND"
+                                        + " session_id = ? AND"
+                                        + " domain = 'session_message' AND"
+                                        + " record_id = ? AND"
+                                        + " delivery_state = 'consumed'",
+                                Long.class, tenant, receivers.get(0),
+                                minted);
+                        assertThat(receiverConsumed)
+                                .as("receiver consumed journal for %s",
+                                        minted)
+                                .isEqualTo(1L);
                     }
                 });
     }
