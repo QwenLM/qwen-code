@@ -15,6 +15,7 @@ import {
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '../core/environmentContext.js';
+import { modelText, userText } from '../test-utils/model-fixtures.js';
 
 const user = (text: string): Content => ({
   role: 'user',
@@ -24,10 +25,8 @@ const model = (text: string): Content => ({
   role: 'model',
   parts: [{ text }],
 });
-const reminder = (text: string): Content => ({
-  role: 'user',
-  parts: [{ text: `${SYSTEM_REMINDER_OPEN}${text}${SYSTEM_REMINDER_CLOSE}` }],
-});
+const reminder = (text: string): Content =>
+  userText(`${SYSTEM_REMINDER_OPEN}${text}${SYSTEM_REMINDER_CLOSE}`);
 const toolResult = (): Content => ({
   role: 'user',
   parts: [{ functionResponse: { name: 'x', response: { output: 'ok' } } }],
@@ -44,10 +43,7 @@ const toolResult = (): Content => ({
 const compressedPrefix = (): Content[] => [
   reminder('startup'),
   user('<summary>…</summary>\nResume the prior task from where it left off.'),
-  {
-    role: 'model',
-    parts: [{ text: 'Got it. Thanks for the additional context!' }],
-  },
+  modelText('Got it. Thanks for the additional context!'),
 ];
 
 const CLEARED_MEDIA = '[Old inline media cleared: image/png]';
@@ -129,6 +125,87 @@ describe('isApiUserPrompt', () => {
           excludeClearedMediaPlaceholders: true,
         }),
       ).toBe(true);
+    });
+  });
+
+  describe('excludeTaskNotifications (the ACP binding, #9608)', () => {
+    const NOTIFICATION =
+      '<task-notification>\n<task-id>agent-1</task-id>\n<status>completed</status>\n</task-notification>';
+    const envelopeEntry = (): Content => user(NOTIFICATION);
+    const deliveredEntry = (): Content => ({
+      // A delivered ACP notification turn: per-turn reminders ride in the
+      // same user entry as the envelope parts.
+      role: 'user',
+      parts: [
+        { text: `${SYSTEM_REMINDER_OPEN}ctx${SYSTEM_REMINDER_CLOSE}` },
+        { text: NOTIFICATION },
+      ],
+    });
+
+    it('drops a bare envelope entry only when the option is set', () => {
+      expect(isApiUserPrompt(envelopeEntry())).toBe(true);
+      expect(
+        isApiUserPrompt(envelopeEntry(), { excludeTaskNotifications: true }),
+      ).toBe(false);
+    });
+
+    it('drops a delivered turn that carries reminder parts', () => {
+      expect(isApiUserPrompt(deliveredEntry())).toBe(true);
+      expect(
+        isApiUserPrompt(deliveredEntry(), { excludeTaskNotifications: true }),
+      ).toBe(false);
+    });
+
+    it('keeps a genuine turn that merely carries a prepended reminder', () => {
+      const content: Content = {
+        role: 'user',
+        parts: [
+          { text: `${SYSTEM_REMINDER_OPEN}ctx${SYSTEM_REMINDER_CLOSE}` },
+          { text: 'the real prompt' },
+        ],
+      };
+      expect(isApiUserPrompt(content, { excludeTaskNotifications: true })).toBe(
+        true,
+      );
+    });
+
+    it('keeps a real prompt that a mid-turn drain merged an envelope into', () => {
+      // Merged notification parts ride a genuine user message; the entry
+      // stays a real user turn and must keep its rewind ordinal.
+      const mixed: Content = {
+        role: 'user',
+        parts: [{ text: 'second' }, { text: NOTIFICATION }],
+      };
+      expect(isApiUserPrompt(mixed, { excludeTaskNotifications: true })).toBe(
+        true,
+      );
+    });
+
+    it('keeps a prompt that merely quotes envelope text inline', () => {
+      const quoted = user(`what does this mean: ${NOTIFICATION}`);
+      expect(isApiUserPrompt(quoted, { excludeTaskNotifications: true })).toBe(
+        true,
+      );
+    });
+
+    it('shifts the rewind count back onto real prompts', () => {
+      const history: Content[] = [
+        reminder('startup'),
+        user('A'),
+        model('ra'),
+        deliveredEntry(),
+        model('notification reply'),
+        user('B'),
+      ];
+      expect(countApiUserPrompts(history)).toBe(3);
+      expect(
+        countApiUserPrompts(history, { excludeTaskNotifications: true }),
+      ).toBe(2);
+      // Rewinding to the second real turn cuts at B (index 5), not at the
+      // notification entry (index 3).
+      expect(
+        findApiRewindCutPoint(history, 1, { excludeTaskNotifications: true }),
+      ).toBe(5);
     });
   });
 });

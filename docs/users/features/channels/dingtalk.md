@@ -31,7 +31,7 @@ Add the channel to `~/.qwen/settings.json`:
       "clientId": "$DINGTALK_CLIENT_ID",
       "clientSecret": "$DINGTALK_CLIENT_SECRET",
       "useConnectionManager": true,
-      "senderPolicy": "open",
+      "privatePolicy": "open",
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
       "instructions": "You are a concise coding assistant responding via DingTalk.",
@@ -241,7 +241,7 @@ The multi-line layout above is what the agent sees in a 1:1 chat. In a group the
 ## Tips
 
 - **Use DingTalk markdown-aware instructions** — DingTalk supports headings, bold text, links, code blocks, and tables. Keep tables compact because narrow screens may scroll horizontally.
-- **Restrict access** — In an organization context, `senderPolicy: "open"` may be acceptable. For tighter control, use `"allowlist"` or `"pairing"`. See [DM Pairing](./overview#dm-pairing) for details.
+- **Restrict access** — In an organization context, `privatePolicy: "open"` may be acceptable. For tighter control, use `"allowlist"` or `"pairing"`. See [DM Pairing](./overview#dm-pairing) for details.
 - **Referenced messages** — Quoting (replying to) a user message includes the quoted text as context for the agent. Rich-text quotes preserve their text order and attach embedded pictures. If the quoted message is a picture, file, audio, or video message, the bot downloads and attaches it the same way as when sent directly. Quoting bot responses is not yet supported.
 
 ## Troubleshooting

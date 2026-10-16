@@ -5,12 +5,16 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import type { Content } from '@google/genai';
 import type { ChatRecord } from './chatRecordingService.js';
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   buildApiHistoryFromConversation,
   buildSessionHistoryFromConversation,
+  getLastApiHistoryPromptId,
+  getLastApiPromptCancellation,
+  markApiHistoryPrompt,
 } from './session-api-history.js';
 
 const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
@@ -219,6 +223,7 @@ describe('Goal turn end history metadata', () => {
     expect(buildSessionHistoryFromConversation({ messages })).toEqual({
       apiHistory: before,
       completedToolCallIds: ['finish'],
+      trailingSystemNotifications: 0,
     });
     messages.push({
       ...messages[1]!,
@@ -381,5 +386,568 @@ describe('Goal turn end history metadata', () => {
     expect(
       buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
     ).toBeUndefined();
+  });
+});
+
+describe('trailingSystemNotifications provenance signal', () => {
+  const envelope =
+    '<task-notification><task-id>agent-1</task-id>' +
+    '<status>completed</status><summary>Agent "explore" completed.</summary>' +
+    '</task-notification>';
+
+  const base = {
+    sessionId: 'session',
+    timestamp: '2026-09-18T00:00:00.000Z',
+    cwd: '/workspace',
+    version: 'test',
+  };
+
+  let seq = 0;
+  function userRecord(
+    text: string,
+    overrides: Partial<ChatRecord> = {},
+  ): ChatRecord {
+    seq += 1;
+    return {
+      ...base,
+      uuid: `u${seq}`,
+      parentUuid: null,
+      type: 'user',
+      provenance: 'real_user',
+      message: { role: 'user', parts: [{ text }] },
+      ...overrides,
+    };
+  }
+
+  /** The stamp `createNotificationRecord` produces, verbatim. */
+  function notificationRecord(text = envelope): ChatRecord {
+    return userRecord(text, {
+      subtype: 'notification',
+      provenance: 'system',
+    });
+  }
+
+  function modelRecord(text: string): ChatRecord {
+    seq += 1;
+    return {
+      ...base,
+      uuid: `m${seq}`,
+      parentUuid: null,
+      type: 'assistant',
+      provenance: 'assistant_output',
+      message: { role: 'model', parts: [{ text }] },
+    };
+  }
+
+  it('reports 0 for a real user prompt even when its text is a bare envelope', () => {
+    // The whole point of the signal: this record is shape-identical to a cold
+    // notification, and only its `provenance: 'real_user'` says otherwise.
+    const messages = [modelRecord('earlier answer'), userRecord(envelope)];
+    expect(
+      buildSessionHistoryFromConversation({ messages })
+        .trailingSystemNotifications,
+    ).toBe(0);
+  });
+
+  it('counts a consecutive trailing run of notification records', () => {
+    const messages = [
+      modelRecord('earlier answer'),
+      notificationRecord(),
+      notificationRecord(
+        envelope.replace('explore', 'build').replace('agent-1', 'agent-2'),
+      ),
+    ];
+    expect(
+      buildSessionHistoryFromConversation({ messages })
+        .trailingSystemNotifications,
+    ).toBe(2);
+  });
+
+  it('stops the count at the first non-notification entry', () => {
+    const messages = [
+      notificationRecord(),
+      modelRecord('earlier answer'),
+      notificationRecord(),
+    ];
+    expect(
+      buildSessionHistoryFromConversation({ messages })
+        .trailingSystemNotifications,
+    ).toBe(1);
+  });
+
+  it('does not count a cron record, which carries a user-authored prompt', () => {
+    // `recordCronPrompt` goes through the same `createNotificationRecord`, so a
+    // cron record carries the IDENTICAL `provenance: 'system'` — only
+    // `subtype: 'cron'` separates it, and it carries a user-authored prompt the
+    // shape predicate never trimmed. The subtype guard is what keeps it out.
+    const messages = [
+      userRecord('nightly digest', { subtype: 'cron', provenance: 'system' }),
+    ];
+    expect(
+      buildSessionHistoryFromConversation({ messages })
+        .trailingSystemNotifications,
+    ).toBe(0);
+  });
+
+  it('does not count a notification stamp missing provenance', () => {
+    const messages = [userRecord(envelope, { subtype: 'notification' })];
+    expect(
+      buildSessionHistoryFromConversation({ messages })
+        .trailingSystemNotifications,
+    ).toBe(0);
+  });
+
+  it('keeps the count aligned across a slash-command pop', () => {
+    // The pop removes the trailing user entry; a stale flag would make the
+    // notification behind it look like real input (or vice versa).
+    const command = userRecord('/docs');
+    const messages = [
+      notificationRecord(),
+      command,
+      {
+        ...base,
+        uuid: 'cmd-out',
+        parentUuid: command.uuid,
+        type: 'system' as const,
+        subtype: 'slash_command' as const,
+        systemPayload: {
+          phase: 'result' as const,
+          rawCommand: '/docs',
+          sentToModel: false,
+          outputHistoryItems: [{ type: 'assistant', text: 'Done.' }],
+        },
+      },
+    ];
+    const built = buildSessionHistoryFromConversation({ messages });
+    expect(built.apiHistory).toEqual([notificationRecord().message]);
+    expect(built.trailingSystemNotifications).toBe(1);
+  });
+
+  it('reports 0 for compressed history, which has no source records', () => {
+    const messages: ChatRecord[] = [
+      {
+        ...base,
+        uuid: 'compression',
+        parentUuid: null,
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            originalTokenCount: 100,
+            newTokenCount: 50,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [
+            { role: 'user', parts: [{ text: envelope }] },
+          ] as Content[],
+        },
+      },
+    ];
+    const built = buildSessionHistoryFromConversation({ messages });
+    expect(built.apiHistory).toHaveLength(1);
+    expect(built.trailingSystemNotifications).toBe(0);
+  });
+
+  it('makes recovery keep an envelope-shaped real prompt and trim a cold notification', () => {
+    // End to end through the classifier: same shape, opposite verdicts,
+    // decided only by the record's own stamp.
+    const prefix = [modelRecord('earlier answer')];
+    const real = buildSessionHistoryFromConversation({
+      messages: [...prefix, userRecord(envelope)],
+    });
+    expect(
+      detectTurnInterruption(
+        real.apiHistory,
+        real.completedToolCallIds,
+        real.trailingSystemNotifications,
+      ).kind,
+    ).toBe('interrupted_prompt');
+
+    const cold = buildSessionHistoryFromConversation({
+      messages: [...prefix, notificationRecord()],
+    });
+    expect(
+      detectTurnInterruption(
+        cold.apiHistory,
+        cold.completedToolCallIds,
+        cold.trailingSystemNotifications,
+      ).kind,
+    ).toBe('none');
+  });
+
+  it('does not count a delivered notification turn entry (#12042 shape A)', () => {
+    // `client.ts` stamps the record of a notification turn it actually sends
+    // with `deliveredTurn: true`. The trim exists only for records persisted
+    // BEFORE their turn ran; a delivered-but-unanswered entry is an
+    // interrupted prompt, so it must stay classifiable.
+    const messages = [
+      modelRecord('earlier answer'),
+      { ...notificationRecord(), deliveredTurn: true },
+    ];
+    expect(
+      buildSessionHistoryFromConversation({ messages })
+        .trailingSystemNotifications,
+    ).toBe(0);
+  });
+
+  it('counts a cold record behind a delivered one only up to the delivered entry', () => {
+    // A failed delivered turn leaves [cold, delivered] at the tail: the
+    // trailing count is 0 (the last entry is delivered), so neither entry is
+    // trimmed and both ride the Retry re-submission. The reverse order —
+    // [delivered, cold], a new notification persisted after the turn failed —
+    // counts 1 and trims only the genuinely cold tail entry.
+    const delivered = {
+      ...notificationRecord(),
+      deliveredTurn: true,
+    };
+    expect(
+      buildSessionHistoryFromConversation({
+        messages: [notificationRecord(), delivered],
+      }).trailingSystemNotifications,
+    ).toBe(0);
+    expect(
+      buildSessionHistoryFromConversation({
+        messages: [delivered, notificationRecord()],
+      }).trailingSystemNotifications,
+    ).toBe(1);
+  });
+});
+
+describe('cancelled prompt identity with automatic tails', () => {
+  const base = {
+    sessionId: 'session',
+    timestamp: '2026-10-14T00:00:00.000Z',
+    cwd: '/workspace',
+    version: 'test',
+    parentUuid: null,
+  };
+  const input: ChatRecord = {
+    ...base,
+    uuid: 'input',
+    type: 'user',
+    promptId: 'client-1',
+    daemonPromptId: 'daemon-1',
+    message: { role: 'user', parts: [{ text: 'work' }] },
+  };
+  const cancelledResult = {
+    promptId: 'daemon-1',
+    state: 'cancelled' as const,
+    cancelledAt: 0,
+    cancelReason: 'user' as const,
+    endedAt: 1,
+  };
+  const terminal: ChatRecord = {
+    ...base,
+    uuid: 'terminal',
+    type: 'system',
+    subtype: 'turn_result',
+    promptId: input.promptId,
+    systemPayload: cancelledResult,
+  };
+  const guard =
+    '[Todo Stop Guard] 1 todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
+  it.each([
+    guard,
+    '<task-notification><task-id>t</task-id><status>completed</status><summary>ready</summary></task-notification>',
+  ])(
+    'retains recorded cancellation through an untagged automatic tail (%s)',
+    (text) => {
+      const original = structuredClone(input.message!);
+      markApiHistoryPrompt(original, input.promptId);
+      const history: Content[] = [
+        original,
+        { role: 'user', parts: [{ text }] },
+      ];
+      const records: ChatRecord[] = [
+        input,
+        {
+          ...base,
+          uuid: 'attempt',
+          type: 'system',
+          subtype: 'turn_attempt',
+          promptId: input.promptId,
+          daemonPromptId: 'daemon-2',
+        },
+        {
+          ...terminal,
+          systemPayload: { ...cancelledResult, promptId: 'daemon-2' },
+        },
+      ];
+      expect(getLastApiHistoryPromptId(history)).toBe('client-1');
+      expect(getLastApiPromptCancellation(history, records)).toEqual({
+        reason: 'user',
+        promptId: 'daemon-2',
+      });
+      markApiHistoryPrompt(history[1]!, 'real-newer-input');
+      records.push({
+        ...input,
+        uuid: 'newer',
+        promptId: 'real-newer-input',
+        daemonPromptId: 'daemon-3',
+      });
+      expect(getLastApiHistoryPromptId(history)).toBe('real-newer-input');
+      expect(getLastApiPromptCancellation(history, records)).toBeUndefined();
+    },
+  );
+  it('unidentified newer content cannot replace recorded ownership', () => {
+    const original = structuredClone(input.message!);
+    markApiHistoryPrompt(original, input.promptId);
+    const history: Content[] = [
+      original,
+      { role: 'user', parts: [{ text: 'new real input' }] },
+    ];
+    expect(getLastApiHistoryPromptId(history)).toBe('client-1');
+    expect(getLastApiPromptCancellation(history, [input, terminal])).toEqual({
+      reason: 'user',
+      promptId: 'daemon-1',
+    });
+  });
+  it('zero notification count does not create prompt identity', () => {
+    const original = structuredClone(input.message!);
+    markApiHistoryPrompt(original, input.promptId);
+    const history: Content[] = [
+      original,
+      {
+        role: 'user',
+        parts: [{ text: '<task-notification>ready</task-notification>' }],
+      },
+    ];
+    const legacy = {
+      ...terminal,
+      promptId: undefined,
+      systemPayload: { ...cancelledResult, cancelReason: undefined },
+    };
+    expect(getLastApiHistoryPromptId(history, 0)).toBe('client-1');
+    expect(getLastApiPromptCancellation(history, [input, legacy], 0)).toEqual({
+      reason: 'unknown',
+      promptId: 'daemon-1',
+      confirmationId: 'terminal',
+    });
+  });
+  it.each([
+    'user',
+    'malformed',
+    'duplicate-owner',
+    'duplicate-result',
+    'wrong-daemon',
+    'duplicate-uuid',
+  ])('does not offer legacy confirmation for %s records', (kind) => {
+    const legacy: ChatRecord = {
+      ...terminal,
+      systemPayload: { ...cancelledResult, cancelReason: undefined },
+    };
+    const records = [input, legacy];
+    if (kind === 'user') legacy.systemPayload = cancelledResult;
+    if (kind === 'malformed') {
+      legacy.systemPayload = {
+        ...cancelledResult,
+        cancelReason: undefined,
+        endedAt: undefined,
+      } as unknown as ChatRecord['systemPayload'];
+    }
+    if (kind === 'duplicate-owner')
+      records.unshift({ ...input, uuid: 'duplicate' });
+    if (kind === 'duplicate-result')
+      records.push({ ...legacy, uuid: 'duplicate' });
+    if (kind === 'wrong-daemon') {
+      legacy.systemPayload = {
+        ...cancelledResult,
+        cancelReason: undefined,
+        promptId: 'different-daemon',
+      };
+    }
+    if (kind === 'duplicate-uuid') {
+      records.push({
+        ...legacy,
+        promptId: 'other-client',
+        systemPayload: {
+          promptId: 'daemon-1',
+          state: 'completed',
+          endedAt: 3,
+        },
+      });
+    }
+    const history = buildApiHistoryFromConversation({ messages: [input] });
+    expect(
+      getLastApiPromptCancellation(history, records)?.confirmationId,
+    ).toBeUndefined();
+  });
+  it('does not confirm an old legacy boundary after a later unowned user cancellation', () => {
+    const legacy: ChatRecord = {
+      ...terminal,
+      systemPayload: { ...cancelledResult, cancelReason: undefined },
+    };
+    const history = buildApiHistoryFromConversation({ messages: [input] });
+    const records = [
+      input,
+      legacy,
+      {
+        ...terminal,
+        uuid: 'local-completed',
+        promptId: undefined,
+        systemPayload: {
+          promptId: 'local-command',
+          state: 'completed' as const,
+          endedAt: 3,
+        },
+      },
+    ];
+    expect(getLastApiPromptCancellation(history, records)?.confirmationId).toBe(
+      'terminal',
+    );
+    records.push({
+      ...terminal,
+      uuid: 'later-user-cancel',
+      promptId: undefined,
+      systemPayload: {
+        ...cancelledResult,
+        promptId: 'unowned-new-daemon',
+        endedAt: 4,
+      },
+    });
+    expect(
+      getLastApiPromptCancellation(history, records)?.confirmationId,
+    ).toBeUndefined();
+  });
+
+  it('offers a different confirmation after a new cancelled attempt', () => {
+    const legacy: ChatRecord = {
+      ...terminal,
+      systemPayload: { ...cancelledResult, cancelReason: undefined },
+    };
+    const history = buildApiHistoryFromConversation({ messages: [input] });
+    const records = [input, legacy];
+    expect(getLastApiPromptCancellation(history, records)?.confirmationId).toBe(
+      'terminal',
+    );
+    records.push({
+      ...input,
+      type: 'system',
+      subtype: 'turn_attempt',
+      uuid: 'attempt',
+      daemonPromptId: 'daemon-2',
+      message: undefined,
+    });
+    expect(getLastApiPromptCancellation(history, records)).toBeUndefined();
+    records.push({
+      ...legacy,
+      uuid: 'new-terminal',
+      systemPayload: {
+        ...cancelledResult,
+        cancelReason: undefined,
+        promptId: 'daemon-2',
+      },
+    });
+    expect(getLastApiPromptCancellation(history, records)?.confirmationId).toBe(
+      'new-terminal',
+    );
+  });
+  it('keeps cancellation through compression with several entries for the same turn', () => {
+    const compression: ChatRecord = {
+      ...base,
+      uuid: 'compression',
+      type: 'system',
+      subtype: 'chat_compression',
+      systemPayload: {
+        compressedHistory: [
+          input.message!,
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'read-1',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+          },
+        ],
+        promptIds: [input.promptId!, input.promptId!],
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 20,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      },
+    };
+    const records = [input, compression, terminal];
+    const history = buildApiHistoryFromConversation({ messages: records });
+    expect(getLastApiPromptCancellation(history, records)).toEqual({
+      reason: 'user',
+      promptId: 'daemon-1',
+    });
+  });
+});
+
+describe('internal Code Mode tool results', () => {
+  it('keeps the internal functionResponse out of model history', () => {
+    const base = {
+      sessionId: 'session',
+      timestamp: '2026-10-07T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+    };
+    const messages: ChatRecord[] = [
+      {
+        ...base,
+        uuid: 'call',
+        parentUuid: null,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [{ functionCall: { id: 'outer', name: 'exec' } }],
+        },
+      },
+      {
+        ...base,
+        uuid: 'nested',
+        parentUuid: 'call',
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'nested',
+                name: 'write_file',
+                response: { output: 'internal' },
+              },
+            },
+          ],
+        },
+      },
+      {
+        ...base,
+        uuid: 'result',
+        parentUuid: 'nested',
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'outer',
+                name: 'exec',
+                response: { output: 'script finished' },
+              },
+            },
+          ],
+        },
+      },
+    ];
+
+    const parts = buildApiHistoryFromConversation({ messages }).flatMap(
+      (entry) => entry.parts ?? [],
+    );
+
+    expect(parts.some((part) => part.functionResponse?.id === 'outer')).toBe(
+      true,
+    );
+    expect(parts.some((part) => part.functionResponse?.id === 'nested')).toBe(
+      false,
+    );
   });
 });

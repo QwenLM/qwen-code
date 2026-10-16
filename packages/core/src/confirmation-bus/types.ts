@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookExecutionOwner } from '../hooks/hook-execution-context.js';
 import type { FunctionCall } from '@google/genai';
 import type {
   ToolConfirmationOutcome,
@@ -106,6 +107,7 @@ export interface ToolExecutionFailure<E = Error> {
 }
 
 export interface HookExecutionRequest {
+  owner: HookExecutionOwner | undefined;
   type: MessageBusType.HOOK_EXECUTION_REQUEST;
   eventName: string;
   input: Record<string, unknown>;
@@ -149,6 +151,18 @@ export interface HookProgress {
   /** Display name: the hook's name, else its command, url, id or prompt. */
   hookName: string;
   hookType: 'command' | 'http' | 'function' | 'prompt';
+  /**
+   * Opaque id for ONE hook execution: the same value on this hook's `start`
+   * and its `end`, unique within the process. Consumers pair the two by it and
+   * must never render it: it carries no meaning for a reader.
+   */
+  invocationId: string;
+  /**
+   * The subagent whose turn ran this hook, when one did. A subagent's hooks
+   * live in the parent registry and publish on the parent bus, so a consumer
+   * that writes to a transcript needs this to pick the right one.
+   */
+  agentId?: string;
   /** 0-based position of this hook inside the event's batch. */
   index: number;
   /** Number of hooks in the event's batch. */

@@ -33,10 +33,13 @@ details start expanded. Disclosure state lasts for the current mount.
 
 Transcript readings are explicitly labeled as snapshots. Detailed snapshots
 offer the existing current-context read action when available. Refreshes and
-compression never rewrite previous snapshots. When no usage count is available,
-label the total as unavailable and the breakdown as estimated base overhead,
-excluding conversation messages. Do not infer an empty conversation or absent
-API responses. Cold load and resume authenticate the restored model before
+compression never rewrite previous snapshots. When no usage count is available
+and no local history estimate exists, label the total as unavailable and the
+breakdown as estimated base overhead, excluding conversation messages. When no
+usage count is available but a local history estimate is non-zero, label the
+breakdown as estimated usage that includes the conversation and show a Messages
+row for it. Do not infer an empty conversation or absent API responses. Cold
+load and resume authenticate the restored model before
 initializing chat, so saved token counts bind to the authenticated route and
 remain readable without sending a new message. A restored conversation without
 saved usage retains an unknown count; it must never borrow another session's

@@ -52,6 +52,21 @@ describe('cleanup', () => {
     expect(asyncFn).toHaveBeenCalledTimes(1);
   });
 
+  it('runs priority resource cleanup before earlier ordinary registrations', async () => {
+    const order: string[] = [];
+    registerCleanup(() => {
+      order.push('ordinary');
+    });
+    registerCleanup(
+      () => {
+        order.push('container');
+      },
+      { first: true },
+    );
+    await runExitCleanup();
+    expect(order).toEqual(['container', 'ordinary']);
+  });
+
   it('shares an in-flight cleanup pass between concurrent callers', async () => {
     let finishCleanup: (() => void) | undefined;
     const cleanupFn = vi.fn(

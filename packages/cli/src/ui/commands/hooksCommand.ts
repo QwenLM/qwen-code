@@ -54,17 +54,33 @@ async function reloadHooksFromSettings(
       'Settings could not be read; the previous hooks are still active.',
     );
   }
+  // The system files are reloaded on their own: a user usually cannot repair
+  // an administrator's file, so a broken one must not block the user's own
+  // edits. On failure their previous snapshot stays in effect.
+  const systemScopes = [SettingScope.System, SettingScope.SystemDefaults];
+  const systemReloaded = settings.reloadScopesFromDiskAtomically(systemScopes);
   config.setHooksFromSettings(
     resolveHookSettingsForConfig(
       settings.merged.hooks,
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
       config.getBareMode() || config.isSafeMode(),
+      // Keep the confirmation hook while an MCP allow-list hides the server.
+      config.getTopTierMcpServers()?.['external-context'],
     ),
   );
   await hookSystem.reload();
+  if (!systemReloaded) {
+    const paths = systemScopes
+      .map((scope) => settings.forScope(scope).path)
+      .join(', ');
+    throw new Error(
+      `System settings could not be read (${paths}); hooks from them are unchanged, and other hook edits were applied.`,
+    );
+  }
 }
 
 /**

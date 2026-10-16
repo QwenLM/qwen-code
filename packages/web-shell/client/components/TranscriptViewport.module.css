@@ -2,6 +2,22 @@
   container-type: inline-size;
 }
 
+.searchAction {
+  display: none;
+  position: absolute;
+  top: 0;
+  right: 12px;
+  z-index: 4;
+  background: var(--background);
+  border-radius: 4px;
+}
+
+@container (min-width: 760px) {
+  .searchAction {
+    display: block;
+  }
+}
+
 .navigation {
   display: none;
   position: absolute;

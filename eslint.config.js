@@ -59,6 +59,11 @@ export default tseslint.config(
       'node_modules/*',
       'packages/**/dist/**',
       'packages/web-templates/src/generated/**',
+      // Generated UTS #39 confusables table (6.5k-entry literal): the
+      // type-aware rules OOM the eslint heap on it, and generated data
+      // has no idiom to enforce. Regenerate via
+      // packages/web-shell/scripts/generate-confusables.mjs.
+      'packages/web-shell/client/utils/unicodeConfusables.ts',
       'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
@@ -70,8 +75,9 @@ export default tseslint.config(
       'docs-site/out/**',
       '.qwen/**',
       'scripts/codemod/fixtures/**', // codemod test data; intentionally non-idiomatic ink input/output
-      'packages/desktop-shell/runtime/**',
-      'packages/desktop-shell/src-tauri/target/**',
+      'packages/desktop/runtime/**',
+      'packages/core/src/skills/bundled/browser-use/runtime/**',
+      'packages/desktop/src-tauri/target/**',
       'packages/live-host/**', // standalone Electron app with its own Node test conventions
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
       'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
@@ -500,14 +506,15 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
+      'packages/managed-agent-server/src/test/resources/*.mjs',
       // web-templates' export-html template build scripts also run with `node`.
       'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
       'packages/cli/src/serve/cdp-tunnel/acceptance/**/*.mjs',
-      // Desktop-shell skill helper scripts also run with `node`.
-      'packages/desktop-shell/.agents/skills/**/scripts/**/*.mjs',
+      // Desktop skill helper scripts also run with `node`.
+      'packages/desktop/.agents/skills/**/scripts/**/*.mjs',
     ],
     languageOptions: {
       globals: {
@@ -552,7 +559,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['packages/desktop-shell/bootstrap/**/*.js'],
+    files: ['packages/desktop/bootstrap/**/*.js'],
     languageOptions: {
       globals: {
         ...globals.browser,

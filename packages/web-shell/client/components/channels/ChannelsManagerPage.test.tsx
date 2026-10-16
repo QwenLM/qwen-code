@@ -483,7 +483,7 @@ describe('ChannelsManagerPage', () => {
       config: {
         type: 'dingtalk',
         clientId: 'stored-id',
-        senderPolicy: 'pairing',
+        privatePolicy: 'pairing',
       },
       secrets: {
         clientSecret: { present: true, source: 'literal' },

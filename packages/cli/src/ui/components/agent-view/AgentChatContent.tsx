@@ -24,12 +24,44 @@ import { useKeypress } from '../../hooks/useKeypress.js';
 import { useAgentViewActions } from '../../contexts/AgentViewContext.js';
 import { HistoryItemDisplay } from '../HistoryItemDisplay.js';
 import { useThoughtExpanded } from '../../contexts/ThoughtExpandedContext.js';
-import { ToolCallStatus } from '../../types.js';
+import { ToolCallStatus, type HistoryItem } from '../../types.js';
 import { theme } from '../../semantic-colors.js';
 import { RespondingSpinner } from '../RespondingSpinner.js';
 import { agentMessagesToHistoryItems } from './agentHistoryAdapter.js';
 import { AgentHeader } from './AgentHeader.js';
 import { buildThoughtHeadIdMap } from '../../utils/historyUtils.js';
+import {
+  ScrollableList,
+  SCROLL_TO_ITEM_END,
+  type ScrollableListRef,
+} from '../shared/ScrollableList.js';
+import { TextSelectionController } from '../../selection/use-text-selection.js';
+import { ContentMouseController } from '../../context-menu/ContentMouseController.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
+
+// Virtual-viewport item wrapper for the VP scroll path. `pending` preserves
+// the committed/live split: items from an executing/confirming tool group
+// onward render through the interactive path so approval dialogs keep
+// receiving input inside the viewport (same contract as the `<Static>` path).
+type AgentVpItem =
+  | { kind: 'header' }
+  | { kind: 'history'; item: HistoryItem; pending: boolean }
+  | { kind: 'spinner' };
+
+// Pure functions with no closure deps — defined outside the component so
+// they are stable references and never invalidate useMemo deps (mirrors
+// MainContent's virtual-path helpers).
+const agentVpEstimatedHeight = (index: number) => (index === 0 ? 4 : 3);
+const agentVpKeyExtractor = (vpItem: AgentVpItem) =>
+  vpItem.kind === 'header'
+    ? 'agent-header'
+    : vpItem.kind === 'spinner'
+      ? 'agent-spinner'
+      : // Adapter ids are index-stable across the pending→committed
+        // transition, so the key must not encode pending-ness.
+        `h-${vpItem.item.id}`;
+const agentVpIsStatic = (vpItem: AgentVpItem) =>
+  vpItem.kind === 'header' || (vpItem.kind === 'history' && !vpItem.pending);
 
 export interface AgentChatContentProps {
   /** The agent's AgentCore — the source of truth for transcript state. */
@@ -57,15 +89,30 @@ export const AgentChatContent = ({
 }: AgentChatContentProps) => {
   const readonly = !interactiveAgent;
   const uiState = useUIState();
-  const { historyRemountKey, availableTerminalHeight, constrainHeight } =
-    uiState;
+  const {
+    historyRemountKey,
+    availableTerminalHeight,
+    constrainHeight,
+    dialogsVisible,
+    // VP mode owns the whole screen — no terminal-native scrollback — so
+    // the transcript gets the same scrollable virtual viewport the main
+    // conversation view uses (#9507).
+    useTerminalBuffer: useVirtualScroll,
+  } = uiState;
   const { columns: terminalWidth } = useTerminalSize();
   // Ctrl+O full-detail, matching MainContent. Thinking blocks in this view
   // already honored the toggle (HistoryItemDisplay reads the context itself),
   // but the tool side never received it — so a truncated args row could
   // advertise `(ctrl+o)` for a key that did nothing here.
   const { allExpanded: fullDetail } = useThoughtExpanded();
+  // An open right-click menu owns the pointer and keyboard: the viewport goes
+  // quiet so scroll keys and wheel ticks don't leak into the content under it.
+  // The selection controller only PAUSES — deactivating clears the selection
+  // the menu's Copy Selection offers. The mouse controller itself stays
+  // ungated: it owns the open menu's pointer interaction and closes it.
+  const { menu: contextMenuOpen } = useContextMenu();
   const contentWidth = terminalWidth - 4;
+  const scrollRef = useRef<ScrollableListRef<AgentVpItem>>(null);
 
   // Force re-render on message updates and status changes.
   // STREAM_TEXT is deliberately excluded — model text is shown only after
@@ -153,7 +200,11 @@ export const AgentChatContent = ({
         }
       }
     },
-    { isActive: !readonly },
+    // An open right-click menu owns the keys, and KeypressContext broadcasts
+    // without consuming, so this subscriber has to go quiet itself: flipping
+    // embedded-shell focus deactivates both controllers below, which closes
+    // the menu and CLEARS the selection its Copy Selection item offers.
+    { isActive: !readonly && contextMenuOpen === null },
   );
 
   // tickRef.current in deps ensures we rebuild when events fire even if
@@ -218,6 +269,168 @@ export const AgentChatContent = ({
   );
 
   const agentModelId = core.modelConfig.model ?? '';
+
+  // ── VP (Virtualized History) path ───────────────────────────────────
+  // The whole transcript — header, committed items, live items, spinner —
+  // lives in one scrollable viewport pinned to the tail, so Page Up /
+  // Page Down / wheel can reach earlier output even though the app owns
+  // the screen. The legacy `<Static>` path below is unchanged for
+  // `useTerminalBuffer: false`, where terminal-native scrollback works.
+  const virtualItems = useMemo(
+    (): AgentVpItem[] => [
+      { kind: 'header' },
+      ...allItems.map((item, idx) => ({
+        kind: 'history' as const,
+        item,
+        pending: idx >= splitIndex,
+      })),
+      ...(isRunning ? [{ kind: 'spinner' as const }] : []),
+    ],
+    [allItems, splitIndex, isRunning],
+  );
+
+  const renderVirtualItem = useCallback(
+    ({ item: vpItem }: { item: AgentVpItem }) => {
+      if (vpItem.kind === 'header') {
+        return (
+          <AgentHeader
+            modelId={agentModelId}
+            modelName={modelName}
+            workingDirectory={agentWorkingDir}
+            gitBranch={agentGitBranch}
+          />
+        );
+      }
+      if (vpItem.kind === 'spinner') {
+        return (
+          <Box marginX={2} marginTop={1}>
+            <RespondingSpinner />
+          </Box>
+        );
+      }
+      if (vpItem.pending) {
+        return (
+          <HistoryItemDisplay
+            item={vpItem.item}
+            isPending={true}
+            terminalWidth={terminalWidth}
+            mainAreaWidth={contentWidth}
+            fullDetail={fullDetail}
+            availableTerminalHeight={
+              constrainHeight ? availableTerminalHeight : undefined
+            }
+            isFocused={!readonly}
+            activeShellPtyId={activePtyId}
+            embeddedShellFocused={embeddedShellFocused}
+          />
+        );
+      }
+      return (
+        <HistoryItemDisplay
+          item={vpItem.item}
+          isPending={false}
+          terminalWidth={terminalWidth}
+          mainAreaWidth={contentWidth}
+          thoughtHeadId={thoughtHeadIdByItem.get(vpItem.item)}
+          fullDetail={fullDetail}
+        />
+      );
+    },
+    [
+      agentModelId,
+      modelName,
+      agentWorkingDir,
+      agentGitBranch,
+      terminalWidth,
+      contentWidth,
+      constrainHeight,
+      availableTerminalHeight,
+      readonly,
+      fullDetail,
+      activePtyId,
+      embeddedShellFocused,
+      thoughtHeadIdByItem,
+    ],
+  );
+
+  // A teammate's pending tool approval renders its ToolConfirmationMessage as
+  // a tail item INSIDE this windowed viewport, and `dialogsVisible` is derived
+  // from main-app dialog state only (AppContainer.tsx) — a scheduler approval
+  // never reaches it. On the legacy `<Static>` path below, pending items are
+  // rendered outside `<Static>` so they can never scroll away; the VP path has
+  // no such guarantee. Scrolling the tail out of `[renderRangeStart,
+  // renderRangeEnd]` unmounts the dialog together with its `useKeypress`
+  // subscription, which blocks the agent round with nothing on screen to
+  // answer and no timeout to recover it.
+  const approvalPending = pendingApprovals.size > 0;
+
+  // Two halves, both required. Quieting the viewport alone would trap a user
+  // who scrolled up BEFORE the approval arrived — the dialog is already out of
+  // the render window and, with the scroll keys now dead, could never be
+  // brought back. So pull the tail into view first, then take the keys away.
+  const approvalScrolledRef = useRef(false);
+  useEffect(() => {
+    if (!useVirtualScroll) return;
+    if (!approvalPending) {
+      approvalScrolledRef.current = false;
+      return;
+    }
+    if (approvalScrolledRef.current) return;
+    approvalScrolledRef.current = true;
+    scrollRef.current?.scrollToEnd();
+  }, [approvalPending, useVirtualScroll]);
+
+  if (useVirtualScroll) {
+    return (
+      <>
+        <ScrollableList
+          ref={scrollRef}
+          hasFocus={
+            !dialogsVisible &&
+            !embeddedShellFocused &&
+            !approvalPending &&
+            contextMenuOpen === null
+          }
+          data={virtualItems}
+          renderItem={renderVirtualItem}
+          estimatedItemHeight={agentVpEstimatedHeight}
+          keyExtractor={agentVpKeyExtractor}
+          initialScrollIndex={virtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END}
+          isStaticItem={agentVpIsStatic}
+          containerHeight={Math.max(0, availableTerminalHeight ?? 0)}
+          showScrollbar={uiState.showScrollbar ?? true}
+        />
+        <TextSelectionController
+          isActive={!dialogsVisible && !embeddedShellFocused}
+          eventsPaused={contextMenuOpen !== null}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getScrollState={() =>
+            scrollRef.current?.getScrollState() ?? {
+              scrollTop: 0,
+              scrollHeight: 0,
+              innerHeight: 0,
+            }
+          }
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+        />
+        {/* SGR mouse tracking is armed by ScrollableList above, which takes
+            the mouse away from the terminal. Mount the controller that gives
+            back what tracking costs — OSC 8 link clicks and the right-click
+            context menu — exactly as MainContent does on its VP path. The
+            menu itself is painted by the shared <ContextMenuOverlay /> in
+            DefaultAppLayout, which sits above this tab. */}
+        <ContentMouseController
+          isActive={!dialogsVisible && !embeddedShellFocused}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+        />
+      </>
+    );
+  }
 
   return (
     <Box flexDirection="column">

@@ -15,6 +15,7 @@ import {
   daemonBlockToPlainText,
   daemonUiEventToTerminalText,
   estimateDaemonTranscriptBlockBytes,
+  extractTranscriptTiming,
   getOutputText,
   isDaemonUiSensitiveKey,
   normalizeDaemonEvent,
@@ -30,6 +31,169 @@ import type {
 } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
+  it('retains tool prompt ownership after byte eviction and journal-only replay', () => {
+    const event = {
+      v: 1 as const,
+      type: 'session_update' as const,
+      promptId: 'active-prompt',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'retained-call',
+          status: 'in_progress',
+          rawInput: { command: 'x'.repeat(2000) },
+          _meta: { toolName: 'run_shell_command' },
+        },
+      },
+    };
+    let state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ maxRetainedBytes: 2000 }),
+      [
+        { type: 'user.text.delta', text: 'Start', promptId: 'active-prompt' },
+        ...normalizeDaemonEvent(event),
+      ],
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      promptId: 'active-prompt',
+      toolCallId: 'retained-call',
+    });
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'retained-call',
+        status: 'completed',
+        promptId: 'later-prompt',
+      },
+    ]);
+    expect(state.blocks[0]).toMatchObject({
+      promptId: 'active-prompt',
+      status: 'completed',
+    });
+    const replay = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      normalizeDaemonEvent(event),
+    );
+    expect(replay.blocks[0]).toMatchObject({ promptId: 'active-prompt' });
+  });
+
+  it('backfills tool prompt ownership once and preserves background ownership', () => {
+    let state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'tool.update', toolCallId: 'legacy', status: 'pending' },
+      {
+        type: 'tool.update',
+        toolCallId: 'background',
+        status: 'in_progress',
+        promptId: 'foreground-prompt',
+        backgroundTurn: {
+          turnId: 'background-prompt',
+          taskId: 'agent-task',
+          kind: 'agent',
+          startedAt: 1,
+        },
+      },
+    ]);
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'legacy',
+        promptId: 'owner-prompt',
+      },
+      { type: 'tool.update', toolCallId: 'legacy', status: 'completed' },
+      {
+        type: 'tool.update',
+        toolCallId: 'background',
+        promptId: 'foreground-prompt',
+      },
+    ]);
+    expect(state.blocks.map((block) => block.promptId)).toEqual([
+      'owner-prompt',
+      'background-prompt',
+    ]);
+    expect(state.retainedBytes).toBe(
+      state.blocks.reduce(
+        (bytes, block) => bytes + estimateDaemonTranscriptBlockBytes(block),
+        0,
+      ),
+    );
+  });
+
+  it('retains recorded live tool timing across progress and completion updates', () => {
+    let state = createDaemonTranscriptState({ now: 9000 });
+    for (const update of [
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'timed',
+        status: 'pending',
+        _meta: { startedAt: 1000 },
+      },
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'timed',
+        status: 'in_progress',
+      },
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'timed',
+        status: 'completed',
+        _meta: { durationMs: 4000 },
+      },
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'already-finished',
+        status: 'completed',
+        _meta: { startedAt: 2000, durationMs: 500 },
+      },
+    ]) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'session_update',
+          data: { update },
+        }),
+        { now: 9000 },
+      );
+      expect(state.blocks[0]).toMatchObject({
+        startedAt: 1000,
+        clientReceivedAt: 9000,
+      });
+    }
+    expect(state.blocks).toMatchObject([
+      {
+        toolCallId: 'timed',
+        status: 'completed',
+        startedAt: 1000,
+        durationMs: 4000,
+      },
+      { toolCallId: 'already-finished', startedAt: 2000, durationMs: 500 },
+    ]);
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, 'invalid'])(
+    'ignores invalid live tool timing %s',
+    (value) => {
+      const events = normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'invalid',
+            _meta: { startedAt: value, durationMs: value },
+          },
+        },
+      });
+      expect(events[0]).toMatchObject({
+        type: 'tool.update',
+        toolCallId: 'invalid',
+      });
+      expect(events[0]).not.toHaveProperty('startedAt');
+      expect(events[0]).not.toHaveProperty('durationMs');
+    },
+  );
+
   it('normalizes daemon stream chunks and merges assistant transcript blocks', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     state = appendLocalUserTranscriptMessage(state, 'hello', { now: 2 });
@@ -1036,13 +1200,13 @@ describe('daemon UI normalizer and transcript reducer', () => {
       id: 23,
       v: 1,
       type: 'session_closed',
-      data: { reason: 'idle timeout' },
+      data: { reason: 'idle_timeout' },
     });
 
     expect(events).toMatchObject([
       {
         type: 'status',
-        text: 'Session closed: idle timeout',
+        text: 'Session closed after idle timeout',
       },
     ]);
   });
@@ -5387,6 +5551,96 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     expect(
       createDaemonToolResultPreview(undefined, content('x'.repeat(100_001))),
     ).toBeUndefined();
+  });
+
+  it.each([false, true])(
+    'retains structured shell metadata while bounding large preview text: %s',
+    (large) => {
+      const text = large ? 'output '.repeat(100_000) : '';
+      const result = {
+        type: 'shell_result',
+        version: 1,
+        text,
+        output: text,
+        directory: '/workspace',
+        exitCode: null,
+        signal: 15,
+        pid: 42,
+        error: large ? 'error '.repeat(30_000) : null,
+        outcome: 'cancelled',
+        notices: ['Cancelled by user', text],
+        truncated: false,
+        outputFiles: ['/tmp/output.log'],
+      };
+      const preview = createDaemonToolResultPreview({
+        ...result,
+        internalPayload: 'x'.repeat(200_000),
+      });
+      expect(preview).not.toHaveProperty('result.internalPayload');
+      expect(preview?.kind).toBe('shell_result');
+      if (preview?.kind !== 'shell_result')
+        throw new Error('Missing shell preview');
+      expect(preview.result).toMatchObject({
+        type: 'shell_result',
+        version: 1,
+        directory: '/workspace',
+        exitCode: null,
+        signal: 15,
+        pid: 42,
+        outcome: 'cancelled',
+        notices: ['Cancelled by user', expect.any(String)],
+        truncated: large,
+        outputFiles: ['/tmp/output.log'],
+      });
+      const retainedText = [
+        preview.result.text,
+        preview.result.output,
+        preview.result.error ?? '',
+        ...preview.result.notices,
+        preview.result.directory,
+        ...preview.result.outputFiles,
+      ].join('');
+      expect(retainedText.length).toBeLessThanOrEqual(100_000);
+      if (large) {
+        expect(preview.result.output.length).toBeGreaterThan(0);
+        expect(preview.result.output.length).toBeLessThan(text.length);
+        expect(text.startsWith(preview.result.output)).toBe(true);
+      } else {
+        expect(preview.result).toEqual(result);
+      }
+      expect(result.truncated).toBe(false);
+      expect(result.output).toBe(text);
+    },
+  );
+
+  it('does not split emoji at an odd structured shell preview boundary', () => {
+    const text = '😀'.repeat(100_000);
+    const preview = createDaemonToolResultPreview({
+      type: 'shell_result',
+      version: 1,
+      text,
+      output: text,
+      directory: 'xx',
+      exitCode: 0,
+      signal: null,
+      pid: 42,
+      error: null,
+      outcome: 'completed',
+      notices: [],
+      truncated: false,
+      outputFiles: [],
+    });
+    expect(preview?.kind).toBe('shell_result');
+    if (preview?.kind !== 'shell_result')
+      throw new Error('Missing shell preview');
+    expect(preview.result.truncated).toBe(true);
+    for (const value of [preview.result.text, preview.result.output]) {
+      expect(value.length).toBeGreaterThan(0);
+      expect(value.length).toBeLessThanOrEqual(49_999);
+      expect(Buffer.from(value, 'utf8').toString('utf8')).toBe(value);
+      expect(value).not.toContain('\uFFFD');
+      expect(value.length % 2).toBe(0);
+    }
   });
 
   it('preserves bounded question answer pairs without unknown raw fields', () => {
@@ -10725,4 +10979,339 @@ it('retains the same background text execution ID for live and replay events', (
   expect(
     normalizeDaemonEvent({ ...event, promptId: 'explicit' })[0],
   ).toMatchObject({ promptId: 'explicit' });
+});
+
+describe('transcript timing frames', () => {
+  const TIMING_FRAME = {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: {
+      timing: {
+        kind: 'request',
+        status: 'ok',
+        durationMs: 6544,
+        ttftMs: 2344,
+        startedAt: 1_760_000_000_000,
+        responseId: 'chatcmpl-abc',
+        promptId: 'session-1########0',
+        model: 'qwen3.8-max',
+      },
+    },
+  };
+
+  it('normalizes a timing frame to no UI events', () => {
+    // Existing clients must stay unaffected by the new frame: it carries no
+    // text and no usage, so the normalizer has nothing to surface.
+    expect(
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { update: TIMING_FRAME },
+      } as never),
+    ).toEqual([]);
+  });
+
+  it.each(['execution-1', '', '   ', null, 42])(
+    'validates request execution identity %s',
+    (executionId) => {
+      const update = {
+        ...TIMING_FRAME,
+        _meta: {
+          ...TIMING_FRAME._meta,
+          timing: { ...TIMING_FRAME._meta.timing, executionId },
+        },
+      };
+      const timing = extractTranscriptTiming(update);
+      if (executionId === 'execution-1')
+        expect(timing?.executionId).toBe(executionId);
+      else expect(timing).not.toHaveProperty('executionId');
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'session_update',
+          data: { update },
+        }),
+      ).toEqual([]);
+    },
+  );
+
+  it('reads a request timing frame', () => {
+    expect(extractTranscriptTiming(TIMING_FRAME)).toEqual({
+      kind: 'request',
+      status: 'ok',
+      durationMs: 6544,
+      ttftMs: 2344,
+      startedAt: 1_760_000_000_000,
+      responseId: 'chatcmpl-abc',
+      promptId: 'session-1########0',
+      model: 'qwen3.8-max',
+    });
+  });
+
+  it('reads a tool timing frame', () => {
+    expect(
+      extractTranscriptTiming({
+        ...TIMING_FRAME,
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            toolName: 'read_file',
+            toolStatus: 'success',
+            responseId: 'chatcmpl-abc',
+          },
+        },
+      }),
+    ).toEqual({
+      kind: 'tool',
+      durationMs: 16,
+      callId: 'call-1',
+      toolName: 'read_file',
+      toolStatus: 'success',
+      responseId: 'chatcmpl-abc',
+    });
+  });
+
+  it.each([
+    ['a plain assistant chunk', { sessionUpdate: 'agent_message_chunk' }],
+    ['a usage frame', { _meta: { usage: { inputTokens: 1 } } }],
+    ['a non-object update', 'nope'],
+    ['a non-object timing', { _meta: { timing: 'nope' } }],
+    ['an unknown kind', { _meta: { timing: { kind: 'x', durationMs: 1 } } }],
+    ['a missing duration', { _meta: { timing: { kind: 'tool' } } }],
+    [
+      'a non-numeric duration',
+      { _meta: { timing: { kind: 'tool', durationMs: '16' } } },
+    ],
+  ])('returns nothing for %s', (_label, update) => {
+    expect(extractTranscriptTiming(update)).toBeUndefined();
+  });
+
+  it('keeps the start time a tool frame carries', () => {
+    // The producer only sends one the session recorded, never a derived one.
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            startedAt: 1_760_000_000_000,
+          },
+        },
+      }),
+    ).toEqual({
+      kind: 'tool',
+      durationMs: 16,
+      callId: 'call-1',
+      startedAt: 1_760_000_000_000,
+    });
+  });
+
+  it('drops a tool start time that is not a finite number', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            startedAt: '1760000000000',
+          },
+        },
+      }),
+    ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, '1760000000000'])(
+    'drops invalid tool start %s without losing recorded duration',
+    (startedAt) => {
+      expect(
+        extractTranscriptTiming({
+          _meta: { timing: { kind: 'tool', durationMs: 16, startedAt } },
+        }),
+      ).toEqual({ kind: 'tool', durationMs: 16 });
+    },
+  );
+
+  it('rejects a negative duration', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: { timing: { kind: 'request', durationMs: -1 } },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('drops a negative TTFT but keeps the frame', () => {
+    const timing = extractTranscriptTiming({
+      _meta: { timing: { kind: 'request', durationMs: 10, ttftMs: -5 } },
+    });
+
+    expect(timing).toEqual({ kind: 'request', durationMs: 10 });
+  });
+
+  it('drops fields that do not belong to the frame kind', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            // Request-only fields on a tool frame, and a bad tool status.
+            ttftMs: 100,
+            status: 'ok',
+            toolStatus: 'timed_out',
+          },
+        },
+      }),
+    ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
+  });
+});
+
+describe('daemonBlockToPlainText sanitizes tool preview content', () => {
+  it('strips terminal escapes and control chars from a command preview', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      status: 'in_progress',
+      // Command text is model- and repository-controlled content; every other
+      // render path strips terminal escapes, so the copy-paste path must too.
+      preview: createDaemonToolPreview(
+        { command: 'echo hi\x1b[31mRED\x1b[0m\r\x1b[2J' },
+        { toolName: 'Bash', toolKind: 'execute' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b[');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('echo hiRED');
+  });
+
+  it('strips terminal escapes from a web_fetch method', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'WebFetch',
+      status: 'completed',
+      // detectWebFetch() copies `method` verbatim out of raw tool-call input
+      // and the field is typed free-form, so it is exactly as model-controlled
+      // as the command text above.
+      preview: createDaemonToolPreview({
+        url: 'https://api.example.com/data',
+        method: 'POST\x1b[31mPWN\x1b[0m\r',
+      }),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b');
+    expect(plain).not.toContain('\r');
+    // Assert the visible method survives too: a "fix" that dropped the field
+    // entirely would satisfy the two assertions above.
+    expect(plain).toContain('POSTPWN https://api.example.com/data');
+  });
+
+  it('strips terminal escapes from the tool status line', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      // `status` is an open string on the wire, so a non-conforming peer can
+      // put escapes here too.
+      status: 'completed\x1b]0;TITLE\x1b[31m\r',
+      preview: createDaemonToolPreview({ command: 'echo hi' }),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('status: completed');
+  });
+
+  const plainForThumbnail = async (thumbnailUrl: string) => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    return daemonBlockToPlainText({
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'gen',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { prompt: 'p', thumbnailUrl },
+        { toolName: 'image_generator', toolKind: 'tool' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+  };
+
+  it('strips terminal escapes from an image_generation thumbnail URL', async () => {
+    const plain = await plainForThumbnail(
+      'https://cdn.example.com/a.png\r\x1b[31mFAKE',
+    );
+    expect(plain).not.toContain('\x1b');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('https://cdn.example.com/a.png');
+  });
+
+  it('keeps a long data:image thumbnail URL intact while sanitizing it', async () => {
+    const payload = 'A'.repeat(20_000);
+    const plain = await plainForThumbnail(`data:image/png;base64,${payload}`);
+    // The wrap must not be the length cap: ensureSafeImageUrl() deliberately
+    // admits arbitrary-length data:image/* payloads, and capping one turns a
+    // valid image into a broken URL.
+    expect(plain).not.toContain('[truncated]');
+    expect(plain).toContain(payload);
+  });
+
+  it('measures the preview cap against visible characters, not escape bytes', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { command: `${'A'.repeat(40)}\x1b[31m${'B'.repeat(40)}` },
+        { toolName: 'Bash', toolKind: 'execute' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    // Sanitising before capping is the tradeoff the description names; if the
+    // two calls are swapped the escapes spend the budget and plaintext starts
+    // cutting visible text that markdown still renders.
+    const plain = daemonBlockToPlainText(block, { maxFieldLength: 80 });
+    expect(plain).not.toContain('[truncated]');
+    expect(plain).toContain('B'.repeat(40));
+  });
 });

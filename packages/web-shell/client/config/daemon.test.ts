@@ -335,6 +335,37 @@ describe('navigateToDaemon', () => {
     expect(assigned.searchParams.get('context')).toBeNull();
   });
 
+  it('carries the remote workspace continuation only when requested', async () => {
+    const { assign } = setupPage(
+      'http://localhost:5173/app?addRemoteWorkspace=browse',
+    );
+    const mod = await import('./daemon');
+
+    mod.navigateToDaemon('http://remote.example:4170');
+    let assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('addRemoteWorkspace')).toBeNull();
+
+    assign.mockClear();
+    mod.navigateToDaemon('http://remote.example:4170', undefined, {
+      continueFlow: 'workspace',
+    });
+    assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('addRemoteWorkspace')).toBe('browse');
+  });
+
+  it('carries connection verification only when requested', async () => {
+    const { assign } = setupPage('http://localhost:5173/app');
+    const mod = await import('./daemon');
+
+    mod.navigateToDaemon('http://remote.example:4170', undefined, {
+      continueFlow: 'connection',
+    });
+
+    const assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('addRemoteConnection')).toBe('verify');
+    expect(assigned.searchParams.get('addRemoteWorkspace')).toBeNull();
+  });
+
   // The Daemon Status address field is pre-filled with the current target, so
   // this is the form's DEFAULT click — an operator rotating a bearer token must
   // not be rebooted out of the session a plain F5 would have kept.
@@ -348,6 +379,22 @@ describe('navigateToDaemon', () => {
     expect(assign).not.toHaveBeenCalled();
     // The persist half still ran, or the reload would boot the old credential.
     expect(mod.getDaemonToken('http://localhost:5173')).toBe('rotated-token');
+  });
+
+  it('preserves continuation when reloading the current target', async () => {
+    const { reload } = setupPage('http://localhost:5173/app');
+    const replaceState = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => undefined);
+    const mod = await import('./daemon');
+
+    mod.navigateToDaemon('http://localhost:5173', undefined, {
+      continueFlow: 'workspace',
+    });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    const replaced = new URL(replaceState.mock.calls[0]![2] as URL);
+    expect(replaced.searchParams.get('addRemoteWorkspace')).toBe('browse');
   });
 
   // Boot scrubbed the fragment, so with storage disabled the in-memory cache
@@ -829,5 +876,85 @@ describe('persistDaemonToken', () => {
     const mod = await import('./daemon');
     mod.persistDaemonToken('mem-only');
     expect(mod.getDaemonToken()).toBe('mem-only');
+  });
+});
+
+describe('fanout origins (#13727)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  async function importAt(pageUrl: string) {
+    const url = new URL(pageUrl);
+    Object.defineProperty(window, 'location', {
+      value: {
+        origin: url.origin,
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        href: url.href,
+        search: url.search,
+      },
+      writable: true,
+      configurable: true,
+    });
+    return import('./daemon');
+  }
+
+  it('parses repeated validated origins, dedupes, and drops the page origin', async () => {
+    const mod = await importAt(
+      'http://localhost:5173/?fanout=https%3A%2F%2Fa.example' +
+        '&fanout=http%3A%2F%2F10.0.0.2%3A4170' +
+        '&fanout=https%3A%2F%2Fa.example' +
+        '&fanout=http%3A%2F%2Flocalhost%3A5173' +
+        '&fanout=file%3A%2F%2F%2Ftmp',
+    );
+    expect(mod.getFanoutOrigins()).toEqual([
+      'https://a.example',
+      'http://10.0.0.2:4170',
+    ]);
+  });
+
+  it('returns empty when no fanout params are present', async () => {
+    const mod = await importAt('http://localhost:5173/');
+    expect(mod.getFanoutOrigins()).toEqual([]);
+  });
+
+  it('syncFanoutParams rewrites only the fanout set via replaceState', async () => {
+    const mod = await importAt(
+      'http://localhost:5173/?daemon=https%3A%2F%2Ffocus.example' +
+        '&workspace=ws-1&fanout=https%3A%2F%2Fstale.example&token=sekret',
+    );
+    const spy = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => {});
+    mod.syncFanoutParams([
+      'https://a.example',
+      'http://10.0.0.2:4170',
+      // The page origin never needs a param — CSP 'self' covers it.
+      'http://localhost:5173',
+    ]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const next = new URL(spy.mock.calls[0][2] as string);
+    expect(next.searchParams.get('daemon')).toBe('https://focus.example');
+    expect(next.searchParams.get('workspace')).toBe('ws-1');
+    expect(next.searchParams.get('token')).toBe('sekret');
+    expect(next.searchParams.getAll('fanout')).toEqual([
+      'https://a.example',
+      'http://10.0.0.2:4170',
+    ]);
+    spy.mockRestore();
+  });
+
+  it('syncFanoutParams no-ops when the set is already in sync', async () => {
+    const mod = await importAt(
+      'http://localhost:5173/?fanout=https%3A%2F%2Fa.example',
+    );
+    const spy = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => {});
+    mod.syncFanoutParams(['https://a.example', 'http://localhost:5173']);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

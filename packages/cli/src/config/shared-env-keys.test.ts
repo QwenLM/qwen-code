@@ -64,6 +64,15 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
+  // The name-only lock is a deployment policy: a repo-shipped .env, or a
+  // mid-session edit of one, must not overwrite the operator's exported =1
+  // and silently let the model run workflow scripts again.
+  it('keeps the named-workflows-only lock operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_WORKFLOW_NAME_ONLY',
+    );
+  });
+
   it('keeps daemon memory scope operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'QWEN_CODE_MEMORY_PROJECT_SCOPE',
@@ -298,6 +307,22 @@ describe('isHardcodedProjectEnvExclusion', () => {
   });
 
   it('matches the newly added hardcoded exclusions case-insensitively', () => {
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV_URL')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev_url')).toBe(
+      true,
+    );
+    // The two switches the URL key sits beside: a project must not flip the
+    // catalog daemon-wide (or over the operator's exported `off`) either.
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV_REFRESH')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev_refresh')).toBe(
+      true,
+    );
     expect(isHardcodedProjectEnvExclusion('SSL_CERT_FILE')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('ssl_cert_file')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('GIT_SSH_COMMAND')).toBe(true);

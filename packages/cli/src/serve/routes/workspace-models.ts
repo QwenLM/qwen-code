@@ -594,10 +594,12 @@ export function registerWorkspaceModelsRoutes(
                     : key === 'fastModel'
                       ? !model.imageOnly &&
                         !model.voiceOnly &&
+                        !model.realtimeOnly &&
                         !model.visionOnly
                       : key === 'visionModel'
                         ? !model.imageOnly &&
                           !model.voiceOnly &&
+                          !model.realtimeOnly &&
                           !model.fastOnly
                         : isConversationModelConfiguration(model)),
               )

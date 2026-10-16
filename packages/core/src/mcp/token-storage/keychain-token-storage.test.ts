@@ -18,6 +18,20 @@ const mockKeytar = vi.hoisted(() => ({
 
 const mockServiceName = 'service-name';
 const mockCryptoRandomBytesString = 'random-string';
+const probe = [
+  mockServiceName,
+  `__keychain_test__${mockCryptoRandomBytesString}`,
+] as const;
+
+// Stubs the availability probe: write, read back `readBack`, delete.
+function mockProbe(readBack = 'test') {
+  mockKeytar.setPassword.mockResolvedValue(undefined);
+  mockKeytar.getPassword.mockResolvedValue(readBack);
+  mockKeytar.deletePassword.mockResolvedValue(true);
+}
+
+const accounts = (...names: string[]) =>
+  names.map((account) => ({ account, password: '' }));
 
 // Mock the dynamic import of 'keytar'
 vi.mock('keytar', () => ({
@@ -57,28 +71,20 @@ describe('KeychainTokenStorage', () => {
     },
     updatedAt: Date.now(),
   } as OAuthCredentials;
+  const expired = (extra: Partial<OAuthCredentials> = {}) => ({
+    ...validCredentials,
+    ...extra,
+    token: { ...validCredentials.token, expiresAt: Date.now() - 1000 },
+  });
 
   describe('checkKeychainAvailability', () => {
     it('should return true if keytar is available and functional', async () => {
-      mockKeytar.setPassword.mockResolvedValue(undefined);
-      mockKeytar.getPassword.mockResolvedValue('test');
-      mockKeytar.deletePassword.mockResolvedValue(true);
-
+      mockProbe();
       const isAvailable = await storage.checkKeychainAvailability();
       expect(isAvailable).toBe(true);
-      expect(mockKeytar.setPassword).toHaveBeenCalledWith(
-        mockServiceName,
-        `__keychain_test__${mockCryptoRandomBytesString}`,
-        'test',
-      );
-      expect(mockKeytar.getPassword).toHaveBeenCalledWith(
-        mockServiceName,
-        `__keychain_test__${mockCryptoRandomBytesString}`,
-      );
-      expect(mockKeytar.deletePassword).toHaveBeenCalledWith(
-        mockServiceName,
-        `__keychain_test__${mockCryptoRandomBytesString}`,
-      );
+      expect(mockKeytar.setPassword).toHaveBeenCalledWith(...probe, 'test');
+      expect(mockKeytar.getPassword).toHaveBeenCalledWith(...probe);
+      expect(mockKeytar.deletePassword).toHaveBeenCalledWith(...probe);
     });
 
     it('should return false if keytar fails to set password', async () => {
@@ -88,18 +94,13 @@ describe('KeychainTokenStorage', () => {
     });
 
     it('should return false if retrieved password does not match', async () => {
-      mockKeytar.setPassword.mockResolvedValue(undefined);
-      mockKeytar.getPassword.mockResolvedValue('wrong-password');
-      mockKeytar.deletePassword.mockResolvedValue(true);
+      mockProbe('wrong-password');
       const isAvailable = await storage.checkKeychainAvailability();
       expect(isAvailable).toBe(false);
     });
 
     it('should cache the availability result', async () => {
-      mockKeytar.setPassword.mockResolvedValue(undefined);
-      mockKeytar.getPassword.mockResolvedValue('test');
-      mockKeytar.deletePassword.mockResolvedValue(true);
-
+      mockProbe();
       await storage.checkKeychainAvailability();
       await storage.checkKeychainAvailability();
 
@@ -114,42 +115,26 @@ describe('KeychainTokenStorage', () => {
       await storage.checkKeychainAvailability();
     });
 
-    it('getCredentials should throw', async () => {
-      await expect(storage.getCredentials('server')).rejects.toThrow(
-        'Keychain is not available',
-      );
-    });
-
-    it('setCredentials should throw', async () => {
-      await expect(storage.setCredentials(validCredentials)).rejects.toThrow(
-        'Keychain is not available',
-      );
-    });
-
-    it('deleteCredentials should throw', async () => {
-      await expect(storage.deleteCredentials('server')).rejects.toThrow(
-        'Keychain is not available',
-      );
-    });
-
-    it('listServers should throw', async () => {
-      await expect(storage.listServers()).rejects.toThrow(
-        'Keychain is not available',
-      );
-    });
-
-    it('getAllCredentials should throw', async () => {
-      await expect(storage.getAllCredentials()).rejects.toThrow(
-        'Keychain is not available',
-      );
+    it.each([
+      ['getCredentials should throw', () => storage.getCredentials('server')],
+      [
+        'setCredentials should throw',
+        () => storage.setCredentials(validCredentials),
+      ],
+      [
+        'deleteCredentials should throw',
+        () => storage.deleteCredentials('server'),
+      ],
+      ['listServers should throw', () => storage.listServers()],
+      ['getAllCredentials should throw', () => storage.getAllCredentials()],
+    ])('%s', async (_title, call: () => Promise<unknown>) => {
+      await expect(call()).rejects.toThrow('Keychain is not available');
     });
   });
 
   describe('with keychain available', () => {
     beforeEach(async () => {
-      mockKeytar.setPassword.mockResolvedValue(undefined);
-      mockKeytar.getPassword.mockResolvedValue('test');
-      mockKeytar.deletePassword.mockResolvedValue(true);
+      mockProbe();
       await storage.checkKeychainAvailability();
       // Reset mocks after availability check
       vi.resetAllMocks();
@@ -175,11 +160,7 @@ describe('KeychainTokenStorage', () => {
       });
 
       it('should return null if credentials have expired', async () => {
-        const expiredCreds = {
-          ...validCredentials,
-          token: { ...validCredentials.token, expiresAt: Date.now() - 1000 },
-        };
-        mockKeytar.getPassword.mockResolvedValue(JSON.stringify(expiredCreds));
+        mockKeytar.getPassword.mockResolvedValue(JSON.stringify(expired()));
         const result = await storage.getCredentials('test-server');
         expect(result).toBeNull();
       });
@@ -243,23 +224,17 @@ describe('KeychainTokenStorage', () => {
 
     describe('listServers', () => {
       it('should return a list of server names', async () => {
-        mockKeytar.findCredentials.mockResolvedValue([
-          { account: 'server1', password: '' },
-          { account: 'server2', password: '' },
-        ]);
+        mockKeytar.findCredentials.mockResolvedValue(
+          accounts('server1', 'server2'),
+        );
         const result = await storage.listServers();
         expect(result).toEqual(['server1', 'server2']);
       });
 
       it('should not include internal test keys in the server list', async () => {
-        mockKeytar.findCredentials.mockResolvedValue([
-          { account: 'server1', password: '' },
-          {
-            account: `__keychain_test__${mockCryptoRandomBytesString}`,
-            password: '',
-          },
-          { account: 'server2', password: '' },
-        ]);
+        mockKeytar.findCredentials.mockResolvedValue(
+          accounts('server1', probe[1], 'server2'),
+        );
         const result = await storage.listServers();
         expect(result).toEqual(['server1', 'server2']);
       });
@@ -273,18 +248,9 @@ describe('KeychainTokenStorage', () => {
 
     describe('getAllCredentials', () => {
       it('should return a map of all valid credentials', async () => {
-        const creds2 = {
-          ...validCredentials,
-          serverName: 'server2',
-        };
-        const expiredCreds = {
-          ...validCredentials,
-          serverName: 'expired-server',
-          token: { ...validCredentials.token, expiresAt: Date.now() - 1000 },
-        };
-        const structurallyInvalidCreds = {
-          serverName: 'invalid-server',
-        };
+        const creds2 = { ...validCredentials, serverName: 'server2' };
+        const expiredCreds = expired({ serverName: 'expired-server' });
+        const structurallyInvalidCreds = { serverName: 'invalid-server' };
 
         mockKeytar.findCredentials.mockResolvedValue([
           {
@@ -315,10 +281,9 @@ describe('KeychainTokenStorage', () => {
 
     describe('clearAll', () => {
       it('should delete all credentials for the service', async () => {
-        mockKeytar.findCredentials.mockResolvedValue([
-          { account: 'server1', password: '' },
-          { account: 'server2', password: '' },
-        ]);
+        mockKeytar.findCredentials.mockResolvedValue(
+          accounts('server1', 'server2'),
+        );
         mockKeytar.deletePassword.mockResolvedValue(true);
 
         await storage.clearAll();
@@ -335,10 +300,9 @@ describe('KeychainTokenStorage', () => {
       });
 
       it('should throw an aggregated error if deletions fail', async () => {
-        mockKeytar.findCredentials.mockResolvedValue([
-          { account: 'server1', password: '' },
-          { account: 'server2', password: '' },
-        ]);
+        mockKeytar.findCredentials.mockResolvedValue(
+          accounts('server1', 'server2'),
+        );
         mockKeytar.deletePassword
           .mockResolvedValueOnce(true)
           .mockRejectedValueOnce(new Error('delete failed'));

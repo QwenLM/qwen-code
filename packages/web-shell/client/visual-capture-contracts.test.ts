@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { FIXED_CAPTURE_TIME } from './e2e/visuals/constants';
+import smokeConfig from '../playwright.config';
 
 /*
  * Contracts the visuals pipeline depends on and that no runtime assertion
@@ -80,14 +81,18 @@ describe('visual capture contracts', () => {
     expect(sources.length).toBeGreaterThan(5);
   });
 
-  it('keeps both navigation helpers freezing the clock before they navigate', () => {
+  it('keeps every navigation helper freezing the clock before it navigates', () => {
     // `freezeWallClock` runs only implicitly, and nothing in the visuals suite
     // reads the page clock -- so dropping the call, or moving it after
     // `page.goto`, leaves every test green while timestamped captures silently
     // resume drifting between the base and head passes.
     const harness = readFileSync(join(VISUALS_DIR, 'harness.ts'), 'utf8');
 
-    for (const helper of ['gotoSession', 'gotoNewSession']) {
+    for (const helper of [
+      'gotoSession',
+      'gotoNewSession',
+      'gotoSettingsHarness',
+    ]) {
       const body = harness.slice(
         harness.indexOf(`export async function ${helper}(`),
       );
@@ -253,5 +258,45 @@ describe('visual capture contracts', () => {
     expect(css, 'the hide rule must live inside @media (hover: hover)').toMatch(
       /@media \(hover: hover\) \{\s*\.sessionRow:has\(\.sessionBackgroundRunning:hover\) \.sessionActions \{/,
     );
+  });
+});
+
+describe('smoke lane browser projects', () => {
+  // `npm run test:e2e:smoke` selects `--grep @smoke` across every project in
+  // playwright.config.ts. Nothing reads that project list at test time, and
+  // Playwright does not fail when a project definition disappears — it just
+  // collects fewer tests — so deleting or re-scoping the WebKit project would
+  // silently drop the repo's only WebKit execution while the separately
+  // pinned WebKit install steps (scripts/tests/no-ak-integration-ci.test.js)
+  // keep every gate green.
+  it('keeps a WebKit and a Chromium mobile project intersecting --grep @smoke', () => {
+    const projects = smokeConfig.projects ?? [];
+    const coversMobileSpecs = (project: (typeof projects)[number]) =>
+      [project.testMatch ?? []]
+        .flat()
+        .some((pattern) =>
+          typeof pattern === 'string'
+            ? pattern.includes('*.mobile.spec.ts')
+            : pattern.test('fake.mobile.spec.ts'),
+        );
+    const intersectsSmokeGrep = (project: (typeof projects)[number]) => {
+      const greps = [project.grep ?? []].flat();
+      return (
+        greps.length === 0 ||
+        greps.some((grep) => new RegExp(grep).test('@smoke'))
+      );
+    };
+    for (const browserType of ['chromium', 'webkit'] as const) {
+      const matching = projects.filter(
+        (project) =>
+          project.use?.defaultBrowserType === browserType &&
+          coversMobileSpecs(project) &&
+          intersectsSmokeGrep(project),
+      );
+      expect(
+        matching.length,
+        `playwright.config.ts must keep a ${browserType} mobile project reachable from --grep @smoke`,
+      ).toBeGreaterThan(0);
+    }
   });
 });

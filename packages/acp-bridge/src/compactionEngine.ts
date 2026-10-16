@@ -11,6 +11,7 @@ import {
 import {
   EVENT_SCHEMA_VERSION,
   logEventSizingFailed,
+  mcpAppTextFallback,
   serializedBridgeEventByteLength,
   type BridgeEvent,
   type CompactionEngine,
@@ -678,7 +679,11 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
-        if (hasDiscreteMessageMeta(data?.update?._meta)) {
+        const meta = data?.update?._meta as Record<string, unknown> | undefined;
+        if (
+          hasDiscreteMessageMeta(data?.update?._meta) ||
+          meta?.['executionLifecycle'] !== undefined
+        ) {
           this.slots.push({ kind: 'misc', event });
           break;
         }
@@ -695,6 +700,16 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       }
       case 'tool_call':
       case 'tool_call_update': {
+        const update = data?.update;
+        const meta = update?.['_meta'] as Record<string, unknown> | undefined;
+        if (
+          meta?.['toolLifecycle'] !== undefined &&
+          update?.['status'] === undefined &&
+          update?.['content'] === undefined
+        ) {
+          this.slots.push({ kind: 'misc', event });
+          break;
+        }
         const toolCallId = data?.update?.toolCallId;
         if (!toolCallId) {
           this.slots.push({ kind: 'misc', event });
@@ -906,6 +921,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   }
 
   private enforceReplayWindow(): void {
+    this.degradeReplayAppHtml(this.replaySegments.length - 1);
     let droppedSegmentCount = 0;
     let droppedBytes = 0;
     let droppedEvents = 0;
@@ -930,6 +946,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         lastDroppedRecordId = droppedRecordId;
       }
     }
+
+    this.degradeReplayAppHtml(this.replaySegments.length);
 
     if (droppedSegmentCount > 0) {
       // Freeze the pagination anchor at the first eviction so later
@@ -972,6 +990,45 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     return this.replaySegments
       .slice(this.replaySegmentStart)
       .flatMap((segment) => segment.events);
+  }
+
+  /**
+   * Blank retained MCP App `html` oldest-first while the window is over
+   * budget, before whole segments are evicted. One ceiling-size App
+   * document overflows the default window on its own (JSON escaping
+   * expands html up to ~6x), so without this degrade the oversized
+   * segment crowds out every older turn and is then itself evicted by
+   * the next one — a reconnecting client could not replay the App at
+   * all. The renderer falls back to `fallbackText`; the full document
+   * remains in the persisted transcript. The newest segment is degraded
+   * only if eviction of older segments cannot make it fit. Segment events are
+   * replaced with copies: the live ring keeps the original frame for
+   * `Last-Event-ID` resume.
+   */
+  private degradeReplayAppHtml(end: number): void {
+    for (
+      let i = this.replaySegmentStart;
+      i < end && this.replayBytes > this.maxReplayBytes;
+      i++
+    ) {
+      const segment = this.replaySegments[i]!;
+      for (
+        let j = 0;
+        j < segment.events.length && this.replayBytes > this.maxReplayBytes;
+        j++
+      ) {
+        const event = segment.events[j]!;
+        const degraded = mcpAppTextFallback(event);
+        if (degraded === undefined) continue;
+        const originalBytes = serializedBridgeEventByteLength(event);
+        const degradedBytes = serializedBridgeEventByteLength(degraded);
+        if (originalBytes === undefined || degradedBytes === undefined)
+          continue;
+        segment.events[j] = degraded;
+        segment.bytes += degradedBytes - originalBytes;
+        this.replayBytes += degradedBytes - originalBytes;
+      }
+    }
   }
 
   private activeReplaySegmentCount(): number {

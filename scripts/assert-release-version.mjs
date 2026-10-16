@@ -8,25 +8,15 @@
 
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { RELEASE_WORKSPACES } from './release-packages.mjs';
 
 export const PUBLISHED_PACKAGES = [
   '@qwen-code/qwen-code',
-  '@qwen-code/external-context-mem0',
-  '@qwen-code/audio-capture',
-  '@qwen-code/channel-base',
-  '@qwen-code/channel-dingtalk',
-  '@qwen-code/channel-dws',
-  '@qwen-code/channel-feishu',
-  '@qwen-code/channel-github',
-  '@qwen-code/channel-qqbot',
-  '@qwen-code/channel-telegram',
-  '@qwen-code/channel-wecom',
-  '@qwen-code/channel-weixin',
+  ...RELEASE_WORKSPACES,
 ];
 
 // Deliberately a copy of `scripts/lib/release-helpers.js`, not an import:
-// the workflow checks this file out alone (`/scripts/assert-release-version.mjs`
-// in release.yml's sparse-checkout set), so importing from `scripts/lib/`
+// the workflow's sparse checkout excludes `scripts/lib/`, so importing it
 // resolves in every test lane and throws ERR_MODULE_NOT_FOUND only in the
 // publish job. `scripts/tests/release-workflow.test.js` pins the two bodies
 // identical — widen or harden them together, and never widen this copy alone:

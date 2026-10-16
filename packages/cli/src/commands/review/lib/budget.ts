@@ -70,6 +70,13 @@ export interface BudgetContext {
    * recall at plan time. `hasReviewDeadline` answers this question.
    */
   hasDeadline?: boolean;
+  /**
+   * The capture command's incremental ruling, when it made one — so the
+   * recorded round cap reads the SAME topology the fix-audit posture flips
+   * (`isFixAuditRound`), instead of stamping the small tier's ten rounds on
+   * a plan whose builder will enforce the territory tier's five.
+   */
+  incremental?: unknown;
 }
 
 export interface ReviewBudget {
@@ -250,6 +257,97 @@ const FAN_OUT_TOTAL_FLOOR = 3200;
 export interface DiffSize {
   srcDiffLines?: unknown;
   diffLines?: unknown;
+  /**
+   * The capture command's incremental ruling, carried so the fix-audit
+   * posture can reach the topology gate — see `isFixAuditRound`.
+   */
+  incremental?: unknown;
+}
+
+/**
+ * Is this plan a critical-posture **fix-audit round** — an incremental
+ * re-review whose capture resolved the round's posting posture to
+ * critical-only (issue #10104)?
+ *
+ * The fact is read from the plan, never from a caller argument, for the
+ * reason `effort` is: a shape the caller could assert is a shape that gets
+ * asserted. The capture command (`fetch-pr`) writes `incremental.posture`
+ * exactly when the posture resolved AND the round scoped to the anchor, and
+ * this reader additionally requires the scope to be present — a hand-edited
+ * plan claiming the posture over a full-range diff must not shrink the
+ * roster below what the full range is owed. Everything malformed reads as
+ * "not a fix-audit round", which is the ordinary full shape — the safe
+ * direction.
+ *
+ * It lives here beside `isTerritoryFanOut` because this module must stay
+ * import-free; the topology gate and the round-cap tier read it here, and
+ * the floor's fix-audit arm plus the brief builder's posture frame read it
+ * back directly.
+ */
+export function isFixAuditRound(plan: { incremental?: unknown }): boolean {
+  const inc = plan?.incremental;
+  if (typeof inc !== 'object' || inc === null) return false;
+  const rec = inc as {
+    posture?: unknown;
+    effective?: unknown;
+    scope?: unknown;
+  };
+  if (rec.posture !== 'critical' || rec.effective !== true) return false;
+  // The scope must pass the bar the brief builder applies — a non-empty
+  // anchor and a delta list that IS one — or a posture beside a scope
+  // `incrementalScopeOf` rejects would shrink the roster while the briefs
+  // degrade to full-scope, two readers disagreeing about one plan. The bar
+  // meets the builder's OWN reading of that list: `incrementalScopeOf`
+  // rejects only non-string elements and filters '' AFTER admission, so a
+  // list mixing a valid path with an empty string renders an incremental
+  // frame there and must engage the posture here (an all-or-nothing bar let
+  // the briefs narrow while every reader below went full). The bar is
+  // stricter than the builder's only where the builder would still render
+  // an incremental frame (an interaction-only scope): that then reads as
+  // the ordinary full shape — the safe direction, as always here.
+  const scope = rec.scope as
+    | { anchor?: unknown; deltaFiles?: unknown }
+    | null
+    | undefined;
+  return (
+    typeof scope === 'object' &&
+    scope !== null &&
+    typeof scope.anchor === 'string' &&
+    scope.anchor !== '' &&
+    Array.isArray(scope.deltaFiles) &&
+    scope.deltaFiles.every((p) => typeof p === 'string') &&
+    scope.deltaFiles.some((p) => typeof p === 'string' && p !== '')
+  );
+}
+
+/**
+ * One admission for a plan's `incremental.scope.interaction[]` entry,
+ * shared by every reader of it (#10136): the brief builder (which renders
+ * the entry's scope class) and `compose-review`'s round-shape disclosure.
+ * Two readers with two bars let the body count an entry the briefs never
+ * rendered. (The roster reads the plan through `isFixAuditRound` alone and
+ * never opens the entries.)
+ *
+ * `null` for anything the briefs would not render: no path, no surviving
+ * `importsChanged` edge (an entry IS its edge — "because it imports ,
+ * which changed" is a seam pointing at nothing). Lives here beside
+ * `isFixAuditRound` for the same reason it does: this module is
+ * import-free, so every reader can reach it without a cycle.
+ */
+export function interactionEntryOf(raw: unknown): {
+  path: string;
+  importsChanged: string[];
+} | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const e = raw as { path?: unknown; importsChanged?: unknown };
+  if (typeof e.path !== 'string' || e.path === '') return null;
+  const importsChanged = Array.isArray(e.importsChanged)
+    ? e.importsChanged.filter(
+        (p): p is string => typeof p === 'string' && p !== '',
+      )
+    : [];
+  if (importsChanged.length === 0) return null;
+  return { path: e.path, importsChanged };
 }
 
 /**
@@ -264,6 +362,16 @@ export interface DiffSize {
  * own, so the direction cannot cycle).
  */
 export function isTerritoryFanOut(plan: DiffSize): boolean {
+  // A fix-audit round keeps the territory shape whatever its size: the
+  // narrowed delta is usually 3A-sized, but the round's whole point is one
+  // accountable auditor per territory of the fix commits, not fourteen
+  // dimension lenses re-walking a delta the posture defers all but Critical
+  // findings on. Ruling it HERE keeps the one-predicate contract — the
+  // roster and the topology-mismatch note read this gate, and the round-cap
+  // tier reads the same posture beside `sizeTier` (which never sees it, so
+  // the default wall stays a size ruling) — so none of them can disagree
+  // about which fan-out the round owed.
+  if (isFixAuditRound(plan)) return true;
   const src = Number(plan?.srcDiffLines ?? 0);
   const total = Number(plan?.diffLines ?? 0);
   return !(src <= FAN_OUT_SRC_FLOOR && total <= FAN_OUT_TOTAL_FLOOR);
@@ -306,7 +414,17 @@ export function reverseAuditRoundTier(
 ): number {
   switch (sizeTier(size)) {
     case 'small':
-      return SMALL_REVERSE_AUDIT_ROUNDS;
+      // A fix-audit round is priced at the territory tier it flips to
+      // (`isTerritoryFanOut`), whatever its narrowed delta measures. The
+      // posture is read HERE and not inside `sizeTier`: that reading is a
+      // size ruling the default wall shares, and a posture is not a size — the
+      // same plan must read the same size whether or not its incremental
+      // block rides along. Huge and large need no override: large is
+      // already the territory tier, and huge is a finishability ruling that
+      // still wins.
+      return isFixAuditRound(size)
+        ? LARGE_REVERSE_AUDIT_ROUNDS
+        : SMALL_REVERSE_AUDIT_ROUNDS;
     case 'huge':
       // The huge reduction is a ruling about fitting inside a wall, so it
       // applies only where there is one — an EXPLICIT clock; the plan's
@@ -500,7 +618,7 @@ export function reviewBudget(
     // size failed to arrive, where the flat cap recorded five. The tier does
     // its own usability check precisely so this call can hand it the truth.
     reverseAuditRounds: cappedRoundTier(
-      input,
+      { ...input, incremental: context.incremental },
       context.operatorRoundCap,
       context.hasDeadline === true,
     ),

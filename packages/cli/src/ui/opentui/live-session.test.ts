@@ -28,6 +28,7 @@ import {
   ensureConfigInitialized,
   livePromptEvents,
   nextApprovalMode,
+  nextLivePromptId,
   resetPromptCountForTesting,
   selectAutoApprovals,
   STARTUP_CHAT_WAIT_MS,
@@ -42,6 +43,11 @@ import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 // bridge's gates and formatters) stays real.
 const visionMocks = vi.hoisted(() => ({
   run: vi.fn(),
+}));
+
+const modMocks = vi.hoisted(() => ({ get: vi.fn() }));
+vi.mock('../../services/interactive-mod-session.js', () => ({
+  getInteractiveModSession: modMocks.get,
 }));
 
 // The round-trip tests also replace the tool scheduler with a stub that
@@ -155,11 +161,28 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
           for (let i = 0; i < 2; i++) {
             await this.opts.onToolCallsUpdate?.(
               calls.map((c) => {
-                const desc = ((c.args ?? {}) as { __invocationDesc?: string })
-                  .__invocationDesc;
+                const { __invocationDesc: desc, __resolvedName: resolvedName } =
+                  (c.args ?? {}) as {
+                    __invocationDesc?: string;
+                    __resolvedName?: string;
+                  };
                 return {
                   status: 'awaiting_approval',
-                  request: c,
+                  request: resolvedName
+                    ? {
+                        ...c,
+                        name: resolvedName,
+                        modelFacingName: c.name,
+                      }
+                    : c,
+                  ...(resolvedName
+                    ? {
+                        tool: {
+                          name: resolvedName,
+                          displayName: 'Advisor',
+                        },
+                      }
+                    : {}),
                   ...(desc
                     ? { invocation: { getDescription: () => desc } }
                     : {}),
@@ -352,6 +375,22 @@ describe('livePromptEvents', () => {
     atMocks.hang = null;
     atMocks.abortAfter = null;
     visionMocks.run.mockReset();
+    modMocks.get.mockReset();
+  });
+
+  it('seeds prompt ids past claims in the resumed transcript', () => {
+    const messages = [0, 1, 2].map((turn) => ({
+      type: 'user' as const,
+      sessionId: 'session-1',
+      promptId: `session-1########${turn}`,
+      message: { parts: [{ text: `prompt ${turn}` }] },
+    }));
+    const config = {
+      getSessionId: () => 'session-1',
+      getResumedSessionData: () => ({ conversation: { messages } }),
+    } as unknown as Config;
+
+    expect(nextLivePromptId(config)).toBe('session-1########3');
   });
 
   it('forwards string prompts as an explicit UserQuery send', async () => {
@@ -380,6 +419,27 @@ describe('livePromptEvents', () => {
     ]);
 
     expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks model sends on Mod failure even when the native client is initialized', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({ isInitialized: () => true }),
+    } as unknown as Config;
+    const initializeMods = vi
+      .fn()
+      .mockRejectedValue(new Error('Unsupported terminal tool.call'));
+    modMocks.get.mockReturnValue({ initialize: initializeMods });
+
+    await expect(ensureConfigInitialized(config)).rejects.toThrow(
+      'terminal tool.call',
+    );
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'terminal tool.call',
+    );
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(initializeMods).toHaveBeenCalledOnce();
   });
 
   it('waits for the shared initialization before the first send', async () => {
@@ -448,6 +508,62 @@ describe('livePromptEvents', () => {
       'auth exploded',
     );
   });
+
+  it('rejects pending Mod readiness when host initialization fails', async () => {
+    const error = new Error('Transcript restore failed');
+    let rejectReady!: (reason: unknown) => void;
+    const ready = new Promise<void>((_, reject) => {
+      rejectReady = reject;
+    });
+    const failed = vi.fn();
+    void ready.catch(failed);
+    const failStartup = vi.fn(rejectReady);
+    const initializeMods = vi.fn();
+    modMocks.get.mockReturnValue({
+      ready,
+      failStartup,
+      initialize: initializeMods,
+    });
+    const config = {
+      initialize: vi.fn().mockRejectedValue(error),
+      getGeminiClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    await expect(ensureConfigInitialized(config)).rejects.toBe(error);
+    expect(failed).toHaveBeenCalledExactlyOnceWith(error);
+    await expect(ready).rejects.toBe(error);
+    await expect(ensureConfigInitialized(config)).rejects.toBe(error);
+    expect(failStartup).toHaveBeenCalledExactlyOnceWith(error);
+    expect(initializeMods).not.toHaveBeenCalled();
+    expect(config.initialize).toHaveBeenCalledOnce();
+  });
+
+  it.each(['already initialized', 'client ready'])(
+    'still initializes Mods after a recoverable host re-entry: %s',
+    async (state) => {
+      const initializeMods = vi.fn().mockResolvedValue(undefined);
+      const failStartup = vi.fn();
+      modMocks.get.mockReturnValue({ initialize: initializeMods, failStartup });
+      const config = {
+        initialize: vi
+          .fn()
+          .mockRejectedValue(
+            new Error(
+              state === 'already initialized'
+                ? 'Config was already initialized'
+                : 'Background recovery failed',
+            ),
+          ),
+        getGeminiClient: () => ({
+          isInitialized: () => state === 'client ready',
+        }),
+      } as unknown as Config;
+
+      await expect(ensureConfigInitialized(config)).resolves.toBeUndefined();
+      expect(initializeMods).toHaveBeenCalledOnce();
+      expect(failStartup).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps surfacing the real initialization failure on later submits', async () => {
     // Core never retries a settled initialization, so the rejected shared
@@ -2002,6 +2118,36 @@ describe('livePromptEvents', () => {
     ]);
   });
 
+  it('relabels a deferred consultation with the scheduler-resolved Advisor', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* () {
+      if (++calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'advisor-bridge',
+            name: 'tool_call',
+            args: {
+              __resolvedName: 'advisor',
+              __invocationDesc: 'advisor-model',
+            },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const events = await drain(
+      livePromptEvents(createFakeConfig(sendMessageStream), 'review'),
+    );
+    expect(events).toContainEqual({
+      type: 'tool-start',
+      id: 'advisor-bridge',
+      tool: 'advisor',
+      title: 'Advisor',
+    });
+  });
+
   it('emits no tool-description without an invocation (R1-104)', async () => {
     let calls = 0;
     const sendMessageStream = vi.fn(function* (): Generator<{
@@ -2155,9 +2301,6 @@ describe('livePromptEvents', () => {
       expect(events).toContainEqual({
         type: 'task-end',
         id: 'agent1',
-        tools: 2,
-        seconds: 12.4,
-        tokens: '2.1k',
       });
       // Progress for already-seen subagent tool calls is not repeated.
       expect(

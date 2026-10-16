@@ -47,12 +47,19 @@ PRs are exempt):
 **When in doubt, escalate. Better to wrongly escalate than to wrongly
 approve.**
 
+## Module-specific Instructions
+
+Before changing `packages/managed-agent-server/**`, read its
+[AGENTS.md](packages/managed-agent-server/AGENTS.md). It supplements
+these repository-wide rules with Java verification and service constraints;
+the common design, self-audit, and PR workflows still apply.
+
 ## Common Commands
 
 ### Building
 
 ```bash
-npm install        # Install all dependencies
+corepack pnpm install --frozen-lockfile  # Install all dependencies (the tree CI tests)
 npm run build      # Build all packages (TypeScript compilation + asset copying)
 npm run build:all  # Build everything including sandbox container
 npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
@@ -62,11 +69,14 @@ npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
 ### Development
 
 ```bash
-npm run dev        # Run CLI directly from TypeScript source (no build needed)
+npm run dev        # Run CLI from TypeScript source
 ```
 
 Runs the CLI via `tsx` with `DEV=true`. Changes to `packages/core` or
-`packages/cli` are reflected immediately without rebuilding.
+`packages/cli` are reflected immediately without rebuilding. Browser Use reuses
+its built runtime, like other compiled workspace dependencies. After editing
+Browser Use, run `npm run build --workspace=@qwen-code/browser-use` to rebuild
+and stage its runtime for dev. Normal `npm install` prepares it automatically.
 
 ### Unit Testing
 
@@ -78,27 +88,26 @@ packages (`@qwen-code/acp-bridge`, `@qwen-code/web-templates`,
 `packages/channels/*`, ...) through their built `dist/` output, and
 `packages/core` tests import the package's own entry
 (`@qwen-code/qwen-code-core`), which also resolves into `dist/`. A plain
-`npm ci` already builds them via the `prepare` script, but a worktree that
-shares the main checkout's `node_modules` (or a deep-cleaned copy) does not
-have them. If any prerequisite is missing, a vitest `globalSetup` guard stops
-the run and names the fix; build once from the repository root:
+`corepack pnpm install --frozen-lockfile` already builds them via the
+`prepare` script, but a worktree that shares the main checkout's
+`node_modules` (or a deep-cleaned copy) does not have them. If any
+prerequisite is missing, a vitest `globalSetup` guard stops the run and names
+the fix; build once from the repository root:
 
 ```bash
 npm run build
 ```
 
-**pnpm worktree bootstrap (opt-in):** an additional Git worktree can install
-dependencies with `node scripts/setup-worktree.js`, which runs the pinned
-pnpm with `--frozen-lockfile` (warm store ≈ 99 MiB on copy-on-write
-filesystems such as APFS, btrfs, and XFS with reflink; without reflink, as on
-ext4, it is ≈ 1.2 GiB, close to a plain npm install). The bootstrap skips the
-`prepare` build, so run `npm run build` before package tests. npm remains the
-authoritative path for build, CI, packaging, and release; the pnpm layout is
-install-only for now. When dependencies change, update `package-lock.json`
-with npm first, then regenerate the pnpm lockfile from it with
-`corepack pnpm import` and commit both lockfiles together;
-`npm run check:lockfile` fails when pnpm resolves a version npm has not
-locked.
+**Installing dependencies:** CI, release and every workflow install with the
+pnpm version pinned in `packageManager` (`corepack pnpm install
+--frozen-lockfile`); scripts still run through `npm run`. An additional Git
+worktree can use `node scripts/setup-worktree.js`, which runs the same install
+from a shared store (≈ 99 MiB on copy-on-write filesystems such as APFS, btrfs,
+and XFS with reflink; ≈ 1.2 GiB on ext4) and skips the `prepare` build, so run
+`npm run build` before package tests. When dependencies change, edit the
+manifest, run `corepack pnpm install` (or `corepack pnpm add`), and commit
+`pnpm-lock.yaml`; every CI install runs with `--frozen-lockfile`, so a
+lockfile that no longer matches the manifests fails the build.
 
 **Run individual test files** (always preferred):
 
@@ -216,15 +225,24 @@ npm run preflight  # Full check: clean → install → format → lint → build
 2. **Test plan for behavioral changes** — write an E2E test plan in
    `.qwen/e2e-tests/` when the change affects user-observable behavior. Dry-run
    against the global `qwen` CLI first to confirm the baseline.
-3. **Build, typecheck, and test before declaring done**:
+3. **Update workflow meta-tests when changing CI definitions** — if you edit
+   `.github/workflows/*.yml`, run
+   `grep -R ".github/workflows/<filename>.yml" scripts/tests/` and update every
+   `scripts/tests/*.test.js` that parses the changed file. These tests pin
+   trigger shape and failure-routing contracts; leaving them stale turns a
+   workflow change into a red main CI run.
+4. **Build, typecheck, and test before declaring done**:
    `npm run build && npm run typecheck`, plus unit tests for the files you
-   changed.
-4. **Self-audit before declaring done** — read the full diff you are about
+   changed. Changes confined to `packages/managed-agent-server/`
+   follow its local Maven verification instructions instead. Cross-language
+   changes require both the affected Java checks and the TypeScript checks
+   above. Documentation-only changes require formatting and reference checks.
+5. **Self-audit before declaring done** — read the full diff you are about
    to ship, including new untracked files, in open-ended passes, not hunting
    for anything specific. Then verify each change, and each green test you
    rely on as evidence, presuming it wrong (a passing test can assert the
    wrong thing). Stop after two consecutive clean passes — a clean pass is
-   evidence about that pass, not the code. A fix re-runs step 3, resets the
+   evidence about that pass, not the code. A fix re-runs step 4, resets the
    clean-pass count, and gets a further pass over the updated diff — never
    exit on a pass that found something. If five passes bring no convergence,
    say so instead of declaring done. Scale to the diff: one clean, careful
@@ -246,6 +264,8 @@ Project-specific rules for `/review`. The skill loads this section verbatim (by
 its `## Code Review` heading) and hands it to every review agent, so keep it to
 things a reviewer of _this_ codebase must check — not general advice.
 
+- **Apply module-specific review rules.** Read any nested `AGENTS.md` that
+  applies to the reviewed files and include its `## Code Review` rules.
 - **Verify a finding against the exact reviewed commit before reporting it.**
   Read the lines you are about to cite. A Critical that quotes code not present at
   the commit under review is worse than no finding — it blocks the author over

@@ -26,15 +26,14 @@ type ExecCallback = (
   stderr: string,
 ) => void;
 
+type ExecResult = {
+  error?: Error & { code?: number | string };
+  stdout?: string;
+  stderr?: string;
+};
+
 function mockExecResult(
-  handler: (
-    command: string,
-    args: string[],
-  ) => {
-    error?: Error & { code?: number | string };
-    stdout?: string;
-    stderr?: string;
-  },
+  handler: (command: string, args: string[]) => ExecResult,
 ): void {
   execFileMock.mockImplementation(
     (
@@ -48,6 +47,13 @@ function mockExecResult(
     },
   );
 }
+
+/** Every execFile call prints `json` (an ffprobe report) and exits 0. */
+const mockProbeOutput = (json: object) =>
+  mockExecResult(() => ({ stdout: JSON.stringify(json) }));
+/** An execFile failure carrying `code` (exit status or errno string). */
+const execError = (message: string, code: number | string) =>
+  Object.assign(new Error(message), { code });
 
 beforeEach(() => {
   resetFfmpegCachesForTests();
@@ -68,9 +74,7 @@ describe('availability checks', () => {
 
   it('returns false when the binary is missing', async () => {
     mockExecResult(() => ({
-      error: Object.assign(new Error('spawn ffprobe ENOENT'), {
-        code: 'ENOENT',
-      }),
+      error: execError('spawn ffprobe ENOENT', 'ENOENT'),
     }));
     await expect(isFfprobeAvailable()).resolves.toBe(false);
   });
@@ -97,9 +101,7 @@ describe('assertOmniRuntimeDependencies', () => {
     mockExecResult((command) =>
       command === 'ffmpeg'
         ? { stdout: 'ok' }
-        : {
-            error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
-          },
+        : { error: execError('ENOENT', 'ENOENT') },
     );
     await expect(assertOmniRuntimeDependencies()).rejects.toThrow(
       /ffprobe was not found on PATH.*brew install ffmpeg/s,
@@ -107,9 +109,7 @@ describe('assertOmniRuntimeDependencies', () => {
   });
 
   it('names both binaries when neither is present', async () => {
-    mockExecResult(() => ({
-      error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
-    }));
+    mockExecResult(() => ({ error: execError('ENOENT', 'ENOENT') }));
     await expect(assertOmniRuntimeDependencies()).rejects.toThrow(
       /ffmpeg and ffprobe was not found/,
     );
@@ -147,18 +147,16 @@ describe('probeMediaMetadata (video)', () => {
   });
 
   it('falls back to r_frame_rate when avg is 0/0', async () => {
-    mockExecResult(() => ({
-      stdout: JSON.stringify({
-        format: {},
-        streams: [
-          {
-            codec_type: 'video',
-            avg_frame_rate: '0/0',
-            r_frame_rate: '25/1',
-          },
-        ],
-      }),
-    }));
+    mockProbeOutput({
+      format: {},
+      streams: [
+        {
+          codec_type: 'video',
+          avg_frame_rate: '0/0',
+          r_frame_rate: '25/1',
+        },
+      ],
+    });
     const result = await probeMediaMetadata('/v.mp4', 'video');
     expect(result.frameRate).toBe(25);
     expect(result.durationMs).toBeUndefined();
@@ -166,7 +164,7 @@ describe('probeMediaMetadata (video)', () => {
 
   it('throws on non-zero ffprobe exit', async () => {
     mockExecResult(() => ({
-      error: Object.assign(new Error('bad'), { code: 1 }),
+      error: execError('bad', 1),
       stderr: 'moov atom not found',
     }));
     await expect(probeMediaMetadata('/broken.mp4', 'video')).rejects.toThrow(
@@ -186,20 +184,18 @@ describe('probeMediaMetadata per-modality branches', () => {
   it("reads the AUDIO stream (not video) for modality 'audio'", async () => {
     // A file carrying both streams proves the audio branch selects the
     // audio stream: reading videoStream?.codec_name here would yield 'h264'.
-    mockExecResult(() => ({
-      stdout: JSON.stringify({
-        format: { format_name: 'mov,mp4', duration: '12.5' },
-        streams: [
-          { codec_type: 'video', codec_name: 'h264', width: 640, height: 480 },
-          {
-            codec_type: 'audio',
-            codec_name: 'aac',
-            sample_rate: '44100',
-            channels: 2,
-          },
-        ],
-      }),
-    }));
+    mockProbeOutput({
+      format: { format_name: 'mov,mp4', duration: '12.5' },
+      streams: [
+        { codec_type: 'video', codec_name: 'h264', width: 640, height: 480 },
+        {
+          codec_type: 'audio',
+          codec_name: 'aac',
+          sample_rate: '44100',
+          channels: 2,
+        },
+      ],
+    });
     await expect(probeMediaMetadata('/a.m4a', 'audio')).resolves.toEqual({
       formatName: 'mov,mp4',
       durationMs: 12_500,
@@ -210,57 +206,45 @@ describe('probeMediaMetadata per-modality branches', () => {
   });
 
   it('prefers the format-level bit rate and falls back to the stream', async () => {
-    mockExecResult(() => ({
-      stdout: JSON.stringify({
-        format: { format_name: 'mp3', duration: '10', bit_rate: '320000' },
-        streams: [
-          { codec_type: 'audio', codec_name: 'mp3', bit_rate: '128000' },
-        ],
-      }),
-    }));
+    mockProbeOutput({
+      format: { format_name: 'mp3', duration: '10', bit_rate: '320000' },
+      streams: [{ codec_type: 'audio', codec_name: 'mp3', bit_rate: '128000' }],
+    });
     await expect(probeMediaMetadata('/a.mp3', 'audio')).resolves.toMatchObject({
       bitRate: 320_000,
     });
 
-    mockExecResult(() => ({
-      stdout: JSON.stringify({
-        format: { format_name: 'mp3', duration: '10' },
-        streams: [
-          { codec_type: 'audio', codec_name: 'mp3', bit_rate: '128000' },
-        ],
-      }),
-    }));
+    mockProbeOutput({
+      format: { format_name: 'mp3', duration: '10' },
+      streams: [{ codec_type: 'audio', codec_name: 'mp3', bit_rate: '128000' }],
+    });
     await expect(probeMediaMetadata('/a.mp3', 'audio')).resolves.toMatchObject({
       bitRate: 128_000,
     });
   });
 
   it('reports the video bit rate for modality video', async () => {
-    mockExecResult(() => ({
-      stdout: JSON.stringify({
-        format: { format_name: 'mp4', duration: '5', bit_rate: '2500000' },
-        streams: [{ codec_type: 'video', codec_name: 'h264' }],
-      }),
-    }));
+    mockProbeOutput({
+      format: { format_name: 'mp4', duration: '5', bit_rate: '2500000' },
+      streams: [{ codec_type: 'video', codec_name: 'h264' }],
+    });
     await expect(probeMediaMetadata('/v.mp4', 'video')).resolves.toMatchObject({
       bitRate: 2_500_000,
     });
   });
 
   it('omits bitRate/sampleRateHz/channels when unusable', async () => {
-    mockExecResult(() => ({
-      stdout: JSON.stringify({
-        format: { format_name: 'wav', duration: '3', bit_rate: 'N/A' },
-        streams: [
-          {
-            codec_type: 'audio',
-            codec_name: 'pcm_s16le',
-            sample_rate: 'N/A',
-            channels: 0,
-          },
-        ],
-      }),
-    }));
+    mockProbeOutput({
+      format: { format_name: 'wav', duration: '3', bit_rate: 'N/A' },
+      streams: [
+        {
+          codec_type: 'audio',
+          codec_name: 'pcm_s16le',
+          sample_rate: 'N/A',
+          channels: 0,
+        },
+      ],
+    });
     const result = await probeMediaMetadata('/a.wav', 'audio');
     expect(result.bitRate).toBeUndefined();
     expect(result.sampleRateHz).toBeUndefined();
@@ -268,14 +252,12 @@ describe('probeMediaMetadata per-modality branches', () => {
   });
 
   it("reads only dimensions for modality 'image' (no duration)", async () => {
-    mockExecResult(() => ({
-      stdout: JSON.stringify({
-        format: { format_name: 'png_pipe', duration: '0.04' },
-        streams: [
-          { codec_type: 'video', codec_name: 'png', width: 1920, height: 1080 },
-        ],
-      }),
-    }));
+    mockProbeOutput({
+      format: { format_name: 'png_pipe', duration: '0.04' },
+      streams: [
+        { codec_type: 'video', codec_name: 'png', width: 1920, height: 1080 },
+      ],
+    });
     // Images must not report a duration even when ffprobe invents one.
     await expect(probeMediaMetadata('/i.png', 'image')).resolves.toEqual({
       formatName: 'png_pipe',
@@ -289,20 +271,18 @@ describe('probeMediaMetadata per-modality branches', () => {
     // Animated GIF/APNG/WebP report nb_frames on the video stream; the token
     // estimator needs the real count — a 300-frame GIF estimated as a single
     // frame would sail under the transport guard at ~1/300 of its real cost.
-    mockExecResult(() => ({
-      stdout: JSON.stringify({
-        format: { format_name: 'gif' },
-        streams: [
-          {
-            codec_type: 'video',
-            codec_name: 'gif',
-            width: 480,
-            height: 480,
-            nb_frames: '300',
-          },
-        ],
-      }),
-    }));
+    mockProbeOutput({
+      format: { format_name: 'gif' },
+      streams: [
+        {
+          codec_type: 'video',
+          codec_name: 'gif',
+          width: 480,
+          height: 480,
+          nb_frames: '300',
+        },
+      ],
+    });
     await expect(probeMediaMetadata('/anim.gif', 'image')).resolves.toEqual({
       formatName: 'gif',
       width: 480,
@@ -314,32 +294,28 @@ describe('probeMediaMetadata per-modality branches', () => {
 
   it('omits frameCount when nb_frames is absent or unusable', async () => {
     for (const nb of [undefined, '0', 'N/A']) {
-      mockExecResult(() => ({
-        stdout: JSON.stringify({
-          format: { format_name: 'webp' },
-          streams: [
-            {
-              codec_type: 'video',
-              codec_name: 'webp',
-              width: 64,
-              height: 64,
-              ...(nb === undefined ? {} : { nb_frames: nb }),
-            },
-          ],
-        }),
-      }));
+      mockProbeOutput({
+        format: { format_name: 'webp' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'webp',
+            width: 64,
+            height: 64,
+            ...(nb === undefined ? {} : { nb_frames: nb }),
+          },
+        ],
+      });
       const result = await probeMediaMetadata('/i.webp', 'image');
       expect(result.frameCount).toBeUndefined();
     }
   });
 
   it("audio with no audio stream yields undefined codec, not the video's", async () => {
-    mockExecResult(() => ({
-      stdout: JSON.stringify({
-        format: { format_name: 'mp4', duration: '3' },
-        streams: [{ codec_type: 'video', codec_name: 'h264' }],
-      }),
-    }));
+    mockProbeOutput({
+      format: { format_name: 'mp4', duration: '3' },
+      streams: [{ codec_type: 'video', codec_name: 'h264' }],
+    });
     const result = await probeMediaMetadata('/silent.mp4', 'audio');
     expect(result.codec).toBeUndefined();
   });
@@ -371,7 +347,7 @@ describe('runFfmpeg', () => {
 
   it('never rejects: a failing run resolves with the exit code and stderr', async () => {
     mockExecResult(() => ({
-      error: Object.assign(new Error('exit 187'), { code: 187 }),
+      error: execError('exit 187', 187),
       stderr: 'Conversion failed!',
     }));
     await expect(runFfmpeg(['-i', '/in.mov'])).resolves.toEqual({
@@ -382,9 +358,7 @@ describe('runFfmpeg', () => {
 
   it('maps a non-numeric error code (e.g. ENOENT/abort kill) to 1', async () => {
     mockExecResult(() => ({
-      error: Object.assign(new Error('spawn ffmpeg ENOENT'), {
-        code: 'ENOENT',
-      }),
+      error: execError('spawn ffmpeg ENOENT', 'ENOENT'),
     }));
     await expect(runFfmpeg(['-version'])).resolves.toEqual({
       code: 1,

@@ -196,6 +196,18 @@ export interface DaemonWorkspaceService {
     request: WorkspaceTrustChangeRequest,
   ): Promise<WorkspaceTrustChangeResult>;
 
+  /**
+   * Record the bound workspace as trusted in the local trusted-folders file.
+   *
+   * `requestWorkspaceTrustChange` only publishes an operator prompt; this
+   * writes the decision. The path is always the bound workspace, never
+   * caller-supplied, and the route reaching it sits behind the strict
+   * mutation gate, so the caller already holds operator authority.
+   */
+  grantWorkspaceTrust(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceTrustStatus>;
+
   /** Replace one permission rule list. */
   setWorkspacePermissionRules(
     ctx: WorkspaceRequestContext,
@@ -349,6 +361,23 @@ export class WorkspacePermissionRulesSessionRequiredError extends Error {
       'setWorkspacePermissionRules requires a live ACP session to update active permission rules',
     );
     this.name = 'WorkspacePermissionRulesSessionRequiredError';
+  }
+}
+
+/**
+ * A trust grant wrote its rule but the decision did not change: an
+ * equal-depth DO_NOT_TRUST rule under an alias spelling of the same
+ * directory, a settings error, or an IDE distrust of the daemon's own cwd
+ * wins over the new entry. The write is durably recorded; the failure is
+ * about the grant not taking effect, not about persistence.
+ */
+export class WorkspaceTrustGrantIneffectiveError extends Error {
+  constructor(state: string, source: string) {
+    super(
+      `Workspace trust grant did not take effect (state: ${state}, source: ${source}). ` +
+        'Check the workspace trust status and trust policy before retrying.',
+    );
+    this.name = 'WorkspaceTrustGrantIneffectiveError';
   }
 }
 
@@ -518,9 +547,9 @@ export interface DaemonWorkspaceServiceDeps {
   workspaceSkillsStatusProvider?: WorkspaceSkillsStatusProvider;
 
   /**
-   * Returns whether the ACP channel is currently live. Used by
-   * `getWorkspaceEnvStatus` to populate the `acpChannelLive` field
-   * without requiring an ACP round-trip.
+   * Returns whether the workspace-control ACP channel (Legacy on a paired
+   * Bridge) is currently live. Used for preheat results, post-mutation
+   * refreshes and the `acpChannelLive` fields without an ACP round-trip.
    */
   isChannelLive?: () => boolean;
 

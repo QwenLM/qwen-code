@@ -23,6 +23,7 @@ import type { Content } from '@google/genai';
 import { MICROCOMPACT_CLEARED_MESSAGE } from './microcompaction/microcompact.js';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
 import { MemoryMetricType } from '../telemetry/metrics.js';
+import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
 
 // Hoisted so vi.mock can consume it.
 const { mockDebugLogger } = vi.hoisted(() => ({
@@ -54,19 +55,14 @@ const {
       totalmem = v;
     },
     getMockCgroupFile: (path: string) => {
-      if (path === '/sys/fs/cgroup/memory.max') {
-        if (cgroupMemoryMax === undefined) {
-          throw new Error('ENOENT');
-        }
-        return cgroupMemoryMax;
-      }
-      if (path === '/sys/fs/cgroup/memory/memory.limit_in_bytes') {
-        if (cgroupV1MemoryLimit === undefined) {
-          throw new Error('ENOENT');
-        }
-        return cgroupV1MemoryLimit;
-      }
-      throw new Error('ENOENT');
+      const value =
+        path === '/sys/fs/cgroup/memory.max'
+          ? cgroupMemoryMax
+          : path === '/sys/fs/cgroup/memory/memory.limit_in_bytes'
+            ? cgroupV1MemoryLimit
+            : undefined;
+      if (value === undefined) throw new Error('ENOENT');
+      return value;
     },
     setCgroupMemoryMax: (v: string | undefined) => {
       cgroupMemoryMax = v;
@@ -174,10 +170,14 @@ function createMockConfig(
     getFileReadCache: () =>
       ({
         clear: vi.fn(),
+        dropEntries: vi.fn(),
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
     getLlmClient: () => client as never,
+    getMemoryManager: () => ({
+      markMemoryBodiesEvictedFromHistory: vi.fn(),
+    }),
     getClearContextOnIdle: () => ({
       clearContextMinutes: 60,
       toolResultsNumToKeep: 5,
@@ -206,12 +206,106 @@ function createMemUsage(
 }
 
 async function drainCleanupMeasurement(): Promise<void> {
-  // Each cleanup step has an await Promise.resolve() boundary.
-  // With up to 4 steps (evict_cold_cache, compact_history, clear_file_cache, trigger_gc),
-  // we need enough microtask drains to let them all complete.
+  // Each cleanup step has an await Promise.resolve() boundary; drain enough
+  // for up to 4 steps (evict_cold_cache, compact_history, clear_file_cache, trigger_gc).
   for (let i = 0; i < 6; i++) await Promise.resolve();
   await new Promise<void>((resolve) => setImmediate(resolve));
   await Promise.resolve();
+}
+
+const MB = 1024 * 1024;
+const GB = 1024 * MB;
+
+type Monitor = InstanceType<typeof MemoryPressureMonitor>;
+
+/** A monitor over createMockConfig(overrides); cleanup cooldown 0 unless overridden. */
+function createMonitor(
+  overrides: Parameters<typeof createMockConfig>[0] = {},
+  pressure: Partial<typeof DEFAULT_PRESSURE_CONFIG> = {},
+): Monitor {
+  return new MemoryPressureMonitor(createMockConfig(overrides), {
+    ...DEFAULT_PRESSURE_CONFIG,
+    cleanupCooldownMs: 0,
+    ...pressure,
+  });
+}
+
+function cacheMonitor(
+  fileReadCache: Partial<FileReadCache>,
+  pressure: Partial<typeof DEFAULT_PRESSURE_CONFIG> = {},
+): Monitor {
+  return createMonitor({ fileReadCache }, pressure);
+}
+
+/** Runs `times` checks, letting each one's cleanup finish. */
+async function runChecks(monitor: Monitor, times = 1): Promise<void> {
+  for (let i = 0; i < times; i++) {
+    monitor.performCheck();
+    await drainCleanupMeasurement();
+  }
+}
+
+async function checkAt(monitor: Monitor, rss: number): Promise<void> {
+  setMemUsage(rss);
+  await runChecks(monitor);
+}
+
+function listen(monitor: Monitor, event: string) {
+  const listener = vi.fn();
+  monitor.on(event, listener);
+  return listener;
+}
+
+const throwingEvict = () =>
+  vi.fn((): number => {
+    throw new Error('cache failure');
+  });
+
+/** Runs `times` soft-pressure checks on a monitor whose eviction throws. */
+async function runFailingChecks(
+  times: number,
+  onFailed?: () => void,
+): Promise<Monitor> {
+  const monitor = cacheMonitor({ evictNotAccessedSince: throwingEvict() });
+  if (onFailed) monitor.on('memory-cleanup-failed', onFailed);
+  setMemUsage(9 * GB); // soft pressure
+  await runChecks(monitor, times);
+  return monitor;
+}
+
+/** An LLM client whose chat serves `history`; `getHistory` only when `full` is given. */
+function chatClient(
+  setHistory: ReturnType<typeof vi.fn>,
+  history: unknown[],
+  opts: {
+    initialized?: boolean;
+    completed?: readonly string[];
+    full?: () => unknown[];
+  } = {},
+) {
+  return {
+    isInitialized: () => opts.initialized ?? true,
+    getChat: () => ({
+      getCompletedToolCallIds: () => opts.completed,
+      getHistoryShallow: () => history,
+      ...(opts.full && { getHistory: opts.full }),
+      setHistory,
+    }),
+  };
+}
+
+/** Seven read_file call/response pairs (call_0..call_6). */
+function readFileHistory(): Content[] {
+  return Array.from({ length: 7 }, (_, i) => [
+    content('model', fnCall('read_file', { path: `/f${i}.ts` })),
+    content('user', {
+      functionResponse: {
+        name: 'read_file',
+        id: `call_${i}`,
+        response: { output: `content of f${i}` },
+      },
+    }),
+  ]).flat();
 }
 
 describe('MemoryPressureMonitor', () => {
@@ -222,7 +316,7 @@ describe('MemoryPressureMonitor', () => {
     mockDebugLogger.error.mockClear();
     setCgroupMemoryMax('max');
     setCgroupV1MemoryLimit(undefined);
-    setHeapSizeLimit(16 * 1024 * 1024 * 1024);
+    setHeapSizeLimit(16 * GB);
   });
 
   afterEach(() => {
@@ -231,157 +325,95 @@ describe('MemoryPressureMonitor', () => {
   });
 
   describe('validateMemoryPressureConfig', () => {
-    it('accepts valid config', () => {
-      expect(() =>
+    const RANGE = 'must be a finite ratio in [0.3, 0.98]';
+    const validate =
+      (soft: number, hard: number, critical: number, cooldown = 5000) =>
+      () =>
         validateMemoryPressureConfig({
-          softPressureRatio: 0.6,
-          hardPressureRatio: 0.7,
-          criticalRatio: 0.8,
-          cleanupCooldownMs: 5000,
+          softPressureRatio: soft,
+          hardPressureRatio: hard,
+          criticalRatio: critical,
+          cleanupCooldownMs: cooldown,
           enableExplicitGC: false,
-        }),
-      ).not.toThrow();
+        });
+
+    it('accepts valid config', () => {
+      expect(validate(0.6, 0.7, 0.8)).not.toThrow();
     });
 
     it('accepts zero cleanup cooldowns', () => {
-      expect(() =>
-        validateMemoryPressureConfig({
-          softPressureRatio: 0.6,
-          hardPressureRatio: 0.7,
-          criticalRatio: 0.8,
-          cleanupCooldownMs: 0,
-          enableExplicitGC: false,
-        }),
-      ).not.toThrow();
+      expect(validate(0.6, 0.7, 0.8, 0)).not.toThrow();
     });
 
-    it('rejects soft >= hard', () => {
-      expect(() =>
-        validateMemoryPressureConfig({
-          softPressureRatio: 0.8,
-          hardPressureRatio: 0.7,
-          criticalRatio: 0.9,
-          cleanupCooldownMs: 5000,
-          enableExplicitGC: false,
-        }),
-      ).toThrow('softPressureRatio must be < hardPressureRatio');
-    });
-
-    it('rejects hard >= critical', () => {
-      expect(() =>
-        validateMemoryPressureConfig({
-          softPressureRatio: 0.5,
-          hardPressureRatio: 0.9,
-          criticalRatio: 0.9,
-          cleanupCooldownMs: 5000,
-          enableExplicitGC: false,
-        }),
-      ).toThrow('hardPressureRatio must be < criticalRatio');
+    it.each<[string, Parameters<typeof validate>, string]>([
+      [
+        'rejects soft >= hard',
+        [0.8, 0.7, 0.9],
+        'softPressureRatio must be < hardPressureRatio',
+      ],
+      [
+        'rejects hard >= critical',
+        [0.5, 0.9, 0.9],
+        'hardPressureRatio must be < criticalRatio',
+      ],
+      [
+        'rejects ratios below 0.3',
+        [0.2, 0.7, 0.9],
+        `softPressureRatio ${RANGE}`,
+      ],
+      ['rejects ratios above 0.98', [0.5, 0.7, 0.99], `criticalRatio ${RANGE}`],
+      [
+        'rejects negative cleanup cooldowns',
+        [0.5, 0.7, 0.9, -1],
+        'cleanupCooldownMs must be a non-negative number',
+      ],
+    ])('%s', (_title, args, message) => {
+      expect(validate(...args)).toThrow(message);
     });
 
     it('rejects non-finite ratios', () => {
-      expect(() =>
-        validateMemoryPressureConfig({
-          softPressureRatio: Number.NaN,
-          hardPressureRatio: 0.7,
-          criticalRatio: 0.9,
-          cleanupCooldownMs: 5000,
-          enableExplicitGC: false,
-        }),
-      ).toThrow('softPressureRatio must be a finite ratio in [0.3, 0.98]');
-
-      expect(() =>
-        validateMemoryPressureConfig({
-          softPressureRatio: 0.5,
-          hardPressureRatio: Number.POSITIVE_INFINITY,
-          criticalRatio: 0.9,
-          cleanupCooldownMs: 5000,
-          enableExplicitGC: false,
-        }),
-      ).toThrow('hardPressureRatio must be a finite ratio in [0.3, 0.98]');
-    });
-
-    it('rejects ratios below 0.3', () => {
-      expect(() =>
-        validateMemoryPressureConfig({
-          softPressureRatio: 0.2,
-          hardPressureRatio: 0.7,
-          criticalRatio: 0.9,
-          cleanupCooldownMs: 5000,
-          enableExplicitGC: false,
-        }),
-      ).toThrow('softPressureRatio must be a finite ratio in [0.3, 0.98]');
-    });
-
-    it('rejects ratios above 0.98', () => {
-      expect(() =>
-        validateMemoryPressureConfig({
-          softPressureRatio: 0.5,
-          hardPressureRatio: 0.7,
-          criticalRatio: 0.99,
-          cleanupCooldownMs: 5000,
-          enableExplicitGC: false,
-        }),
-      ).toThrow('criticalRatio must be a finite ratio in [0.3, 0.98]');
-    });
-
-    it('rejects negative cleanup cooldowns', () => {
-      expect(() =>
-        validateMemoryPressureConfig({
-          softPressureRatio: 0.5,
-          hardPressureRatio: 0.7,
-          criticalRatio: 0.9,
-          cleanupCooldownMs: -1,
-          enableExplicitGC: false,
-        }),
-      ).toThrow('cleanupCooldownMs must be a non-negative number');
+      expect(validate(Number.NaN, 0.7, 0.9)).toThrow(
+        `softPressureRatio ${RANGE}`,
+      );
+      expect(validate(0.5, Number.POSITIVE_INFINITY, 0.9)).toThrow(
+        `hardPressureRatio ${RANGE}`,
+      );
     });
   });
 
   describe('getPressureLevel', () => {
-    let monitor: InstanceType<typeof MemoryPressureMonitor>;
+    let monitor: Monitor;
 
     beforeEach(() => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024); // 16 GB
+      setOsTotalmem(16 * GB); // 16 GB
       monitor = new MemoryPressureMonitor(createMockConfig());
     });
 
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
+    /** Sets host total and cgroup v2/v1 limits, then rebuilds the monitor. */
+    const withLimits = (total: number, v2: string | undefined, v1?: string) => {
+      setOsTotalmem(total);
+      setCgroupMemoryMax(v2);
+      setCgroupV1MemoryLimit(v1);
+      monitor = new MemoryPressureMonitor(createMockConfig());
+    };
+    const levelAt = (rss: number, heapUsed?: number) => {
+      setMemUsage(rss, heapUsed);
+      return monitor.getPressureLevel();
+    };
 
-    it('returns normal when RSS is low', () => {
-      setMemUsage(1 * 1024 * 1024 * 1024); // 1 GB
-      // 1/16 = 0.0625 < 0.50: normal
-      expect(monitor.getPressureLevel()).toBe('normal');
-    });
-
-    it('returns soft when RSS exceeds soft ratio', () => {
-      setMemUsage(9 * 1024 * 1024 * 1024); // 9 GB
-      // 9/16 = 0.5625 >= 0.50: soft
-      expect(monitor.getPressureLevel()).toBe('soft');
-    });
-
-    it('returns hard when RSS exceeds hard ratio', () => {
-      setMemUsage(11 * 1024 * 1024 * 1024); // 11 GB
-      // 11/16 = 0.6875 >= 0.65: hard
-      expect(monitor.getPressureLevel()).toBe('hard');
-    });
-
-    it('returns critical when RSS exceeds critical ratio', () => {
-      setMemUsage(14 * 1024 * 1024 * 1024); // 14 GB
-      // 14/16 = 0.875 >= 0.80: critical
-      expect(monitor.getPressureLevel()).toBe('critical');
+    it.each([
+      ['returns normal when RSS is low', 1, 'normal'], // 1/16 = 0.0625 < 0.50
+      ['returns soft when RSS exceeds soft ratio', 9, 'soft'], // 9/16 = 0.5625 >= 0.50
+      ['returns hard when RSS exceeds hard ratio', 11, 'hard'], // 11/16 = 0.6875 >= 0.65
+      ['returns critical when RSS exceeds critical ratio', 14, 'critical'], // 14/16 = 0.875 >= 0.80
+    ])('%s', (_title, gb, level) => {
+      expect(levelAt(gb * GB)).toBe(level);
     });
 
     it('does not treat a zero effective memory limit as RSS pressure', () => {
-      setOsTotalmem(0);
-      setCgroupMemoryMax('max');
-      setCgroupV1MemoryLimit(undefined);
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      withLimits(0, 'max');
 
-      setMemUsage(1024 * 1024 * 1024, 0);
-      expect(monitor.getPressureLevel()).toBe('normal');
+      expect(levelAt(GB, 0)).toBe('normal');
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
         'Effective memory limit is not positive; RSS pressure checks are disabled',
       );
@@ -399,81 +431,55 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('uses cgroup memory.max when available', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      setCgroupMemoryMax(String(2 * 1024 * 1024 * 1024)); // 2 GB
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      withLimits(16 * GB, String(2 * GB)); // 2 GB
 
-      setMemUsage(1200 * 1024 * 1024); // 1.2/2 = 0.586 >= 0.50
-      expect(monitor.getPressureLevel()).toBe('soft');
+      expect(levelAt(1200 * MB)).toBe('soft'); // 1.2/2 = 0.586 >= 0.50
       expect(mockDebugLogger.info).toHaveBeenCalledWith(
         'Using cgroup v2 memory limit: 2048 MiB',
       );
     });
 
     it('uses cgroup memory.max even when host total memory is unavailable', () => {
-      setOsTotalmem(0);
-      setCgroupMemoryMax(String(2 * 1024 * 1024 * 1024)); // 2 GB
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      withLimits(0, String(2 * GB)); // 2 GB
 
-      setMemUsage(1200 * 1024 * 1024); // 1.2/2 = 0.586 >= 0.50
-      expect(monitor.getPressureLevel()).toBe('soft');
+      expect(levelAt(1200 * MB)).toBe('soft'); // 1.2/2 = 0.586 >= 0.50
     });
 
     it('uses cgroup v1 memory.limit_in_bytes when cgroup v2 is unavailable', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      setCgroupMemoryMax(undefined);
-      setCgroupV1MemoryLimit(String(2 * 1024 * 1024 * 1024)); // 2 GB
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      withLimits(16 * GB, undefined, String(2 * GB)); // 2 GB
 
-      setMemUsage(1200 * 1024 * 1024); // 1.2/2 = 0.586 >= 0.50
-      expect(monitor.getPressureLevel()).toBe('soft');
+      expect(levelAt(1200 * MB)).toBe('soft'); // 1.2/2 = 0.586 >= 0.50
       expect(mockDebugLogger.info).toHaveBeenCalledWith(
         'Using cgroup v1 memory limit: 2048 MiB',
       );
     });
 
-    it('ignores cgroup v1 unlimited sentinel values', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      setCgroupMemoryMax(undefined);
-      setCgroupV1MemoryLimit('9223372036854771712');
-      monitor = new MemoryPressureMonitor(createMockConfig());
+    const V1_UNLIMITED = '9223372036854771712';
+    const expectV1SentinelIgnored = (total: number) => {
+      withLimits(total, undefined, V1_UNLIMITED);
 
-      setMemUsage(1200 * 1024 * 1024); // 1.2/16 = 0.073 < 0.50
-      expect(monitor.getPressureLevel()).toBe('normal');
+      expect(levelAt(1200 * MB)).toBe('normal'); // 1.2/16 = 0.073 < 0.50
       expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
-        expect.stringContaining('9223372036854771712'),
+        expect.stringContaining(V1_UNLIMITED),
       );
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
         'Ignoring unlimited cgroup memory limit from ' +
-          '/sys/fs/cgroup/memory/memory.limit_in_bytes: 9223372036854771712',
+          `/sys/fs/cgroup/memory/memory.limit_in_bytes: ${V1_UNLIMITED}`,
       );
+    };
+
+    it('ignores cgroup v1 unlimited sentinel values', () => {
+      expectV1SentinelIgnored(16 * GB);
     });
 
     it('ignores cgroup v1 unlimited sentinel values when host total is unavailable', () => {
-      setOsTotalmem(0);
-      setCgroupMemoryMax(undefined);
-      setCgroupV1MemoryLimit('9223372036854771712');
-      monitor = new MemoryPressureMonitor(createMockConfig());
-
-      setMemUsage(1200 * 1024 * 1024);
-      expect(monitor.getPressureLevel()).toBe('normal');
-      expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
-        expect.stringContaining('9223372036854771712'),
-      );
-      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
-        'Ignoring unlimited cgroup memory limit from ' +
-          '/sys/fs/cgroup/memory/memory.limit_in_bytes: 9223372036854771712',
-      );
+      expectV1SentinelIgnored(0);
     });
 
     it('ignores malformed cgroup limits without partially parsing them', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      setCgroupMemoryMax('2048garbage');
-      setCgroupV1MemoryLimit(undefined);
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      withLimits(16 * GB, '2048garbage');
 
-      setMemUsage(1200 * 1024 * 1024); // 1.2/16 = 0.073 < 0.50
-      expect(monitor.getPressureLevel()).toBe('normal');
+      expect(levelAt(1200 * MB)).toBe('normal'); // 1.2/16 = 0.073 < 0.50
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
         'Ignoring non-numeric cgroup memory limit from ' +
           '/sys/fs/cgroup/memory.max: 2048garbage',
@@ -484,13 +490,9 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('logs cgroup read failures before falling back to host memory', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      setCgroupMemoryMax(undefined);
-      setCgroupV1MemoryLimit(undefined);
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      withLimits(16 * GB, undefined);
 
-      setMemUsage(1200 * 1024 * 1024);
-      expect(monitor.getPressureLevel()).toBe('normal');
+      expect(levelAt(1200 * MB)).toBe('normal');
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
         'Failed to read cgroup memory limit from /sys/fs/cgroup/memory.max: ' +
           'ENOENT',
@@ -500,106 +502,66 @@ describe('MemoryPressureMonitor', () => {
       );
     });
 
-    it('logs out-of-range cgroup limits distinctly', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      setCgroupMemoryMax('0');
-      setCgroupV1MemoryLimit(undefined);
-      monitor = new MemoryPressureMonitor(createMockConfig());
+    it.each([
+      ['logs out-of-range cgroup limits distinctly', '0', 'out-of-range'],
+      ['ignores negative cgroup limits as out-of-range', '-1', 'out-of-range'],
+      [
+        'ignores unrealistically small cgroup limits',
+        '1',
+        'unrealistically small',
+      ],
+    ])('%s', (_title, limit, kind) => {
+      withLimits(16 * GB, limit);
 
-      setMemUsage(1200 * 1024 * 1024);
-      expect(monitor.getPressureLevel()).toBe('normal');
+      expect(levelAt(1200 * MB)).toBe('normal'); // 1.2/16 = 0.073 < 0.50
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-        'Ignoring out-of-range cgroup memory limit from ' +
-          '/sys/fs/cgroup/memory.max: 0',
-      );
-    });
-
-    it('ignores negative cgroup limits as out-of-range', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      setCgroupMemoryMax('-1');
-      setCgroupV1MemoryLimit(undefined);
-      monitor = new MemoryPressureMonitor(createMockConfig());
-
-      setMemUsage(1200 * 1024 * 1024);
-      expect(monitor.getPressureLevel()).toBe('normal');
-      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-        'Ignoring out-of-range cgroup memory limit from ' +
-          '/sys/fs/cgroup/memory.max: -1',
+        `Ignoring ${kind} cgroup memory limit from ` +
+          `/sys/fs/cgroup/memory.max: ${limit}`,
       );
     });
 
     it('ignores safe cgroup limits above host total memory', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      setCgroupMemoryMax(String(32 * 1024 * 1024 * 1024));
-      setCgroupV1MemoryLimit(undefined);
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      withLimits(16 * GB, String(32 * GB));
 
-      setMemUsage(1200 * 1024 * 1024); // 1.2/16 = 0.073 < 0.50
-      expect(monitor.getPressureLevel()).toBe('normal');
+      expect(levelAt(1200 * MB)).toBe('normal'); // 1.2/16 = 0.073 < 0.50
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
         'Ignoring cgroup memory limit above host total from ' +
           '/sys/fs/cgroup/memory.max: 34359738368',
       );
     });
 
-    it('ignores unrealistically small cgroup limits', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      setCgroupMemoryMax('1');
-      setCgroupV1MemoryLimit(undefined);
-      monitor = new MemoryPressureMonitor(createMockConfig());
-
-      setMemUsage(1200 * 1024 * 1024); // 1.2/16 = 0.073 < 0.50
-      expect(monitor.getPressureLevel()).toBe('normal');
-      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-        'Ignoring unrealistically small cgroup memory limit from ' +
-          '/sys/fs/cgroup/memory.max: 1',
-      );
-    });
-
     it('does not treat heap usage as pressure when V8 heap limit is zero', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
       setHeapSizeLimit(0);
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      withLimits(16 * GB, 'max');
 
-      setMemUsage(512 * 1024 * 1024, 12 * 1024 * 1024 * 1024);
-      expect(monitor.getPressureLevel()).toBe('normal');
+      expect(levelAt(512 * MB, 12 * GB)).toBe('normal');
     });
 
     it('refreshes the V8 heap limit for each pressure check', () => {
-      setOsTotalmem(64 * 1024 * 1024 * 1024); // 64 GB
-      setHeapSizeLimit(1024 * 1024 * 1024); // 1 GB at construction
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      setHeapSizeLimit(GB); // 1 GB at construction
+      withLimits(64 * GB, 'max'); // 64 GB
 
-      setHeapSizeLimit(4 * 1024 * 1024 * 1024); // V8 grew the limit later
-      setMemUsage(512 * 1024 * 1024, 800 * 1024 * 1024);
-
-      expect(monitor.getPressureLevel()).toBe('normal');
+      setHeapSizeLimit(4 * GB); // V8 grew the limit later
+      expect(levelAt(512 * MB, 800 * MB)).toBe('normal');
     });
 
     it('uses V8 heap pressure even when RSS is low versus system memory', () => {
-      setOsTotalmem(64 * 1024 * 1024 * 1024); // 64 GB
-      setHeapSizeLimit(2 * 1024 * 1024 * 1024); // 2 GB
-      monitor = new MemoryPressureMonitor(createMockConfig());
+      setHeapSizeLimit(2 * GB); // 2 GB
+      withLimits(64 * GB, 'max'); // 64 GB
 
-      setMemUsage(512 * 1024 * 1024, 1200 * 1024 * 1024); // heap 1.2/2 = 0.586
-      expect(monitor.getPressureLevel()).toBe('soft');
+      expect(levelAt(512 * MB, 1200 * MB)).toBe('soft'); // heap 1.2/2 = 0.586
     });
   });
 
   describe('scheduleCheck', () => {
     it('only schedules one check per microtask round', async () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
+      setOsTotalmem(16 * GB);
       const evictSpy = vi.fn().mockReturnValue(0);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: evictSpy },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      const monitor = cacheMonitor({ evictNotAccessedSince: evictSpy });
 
       // Soft pressure should call evictNotAccessedSince(60).
       vi.spyOn(process, 'memoryUsage').mockReturnValue({
-        rss: 9 * 1024 * 1024 * 1024, // 9/16 = 0.5625 >= 0.50: soft
+        rss: 9 * GB, // 9/16 = 0.5625 >= 0.50: soft
         heapTotal: 0,
         heapUsed: 0,
         external: 0,
@@ -624,77 +586,59 @@ describe('MemoryPressureMonitor', () => {
 
   describe('performCheck with cleanup', () => {
     beforeEach(() => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
+      setOsTotalmem(16 * GB);
     });
 
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
+    /** dropEntries and evictNotAccessedSince (returning 0) as spies. */
+    const spiedMonitor = (cleanupCooldownMs: number) => {
+      const clearSpy = vi.fn();
+      const evictSpy = vi.fn().mockReturnValue(0);
+      const monitor = cacheMonitor(
+        { dropEntries: clearSpy, evictNotAccessedSince: evictSpy },
+        { cleanupCooldownMs },
+      );
+      return { monitor, clearSpy, evictSpy };
+    };
+
+    const expectEvictionAt = (rss: number, minutes: number) => {
+      const evictSpy = vi.fn().mockReturnValue(5);
+      const monitor = cacheMonitor({ evictNotAccessedSince: evictSpy });
+
+      setMemUsage(rss);
+      monitor.performCheck();
+      expect(evictSpy).toHaveBeenCalledWith(minutes);
+    };
 
     it('calls evictNotAccessedSince on soft pressure', () => {
-      const evictSpy = vi.fn().mockReturnValue(5);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: evictSpy },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-
-      setMemUsage(9 * 1024 * 1024 * 1024); // 9/16 = 0.5625 >= 0.50: soft
-      monitor.performCheck();
-      expect(evictSpy).toHaveBeenCalledWith(60);
+      expectEvictionAt(9 * GB, 60); // 9/16 = 0.5625 >= 0.50: soft
     });
 
     it('calls evictNotAccessedSince on hard pressure', () => {
-      const evictSpy = vi.fn().mockReturnValue(5);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: evictSpy },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-
-      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65: hard
-      monitor.performCheck();
-      expect(evictSpy).toHaveBeenCalledWith(30);
+      expectEvictionAt(11 * GB, 30); // 11/16 = 0.6875 >= 0.65: hard
     });
 
-    it('calls clear on critical pressure', async () => {
+    it('drops local entries without clearing remote reads on critical pressure', async () => {
       const clearSpy = vi.fn();
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: clearSpy,
-            evictNotAccessedSince: vi.fn(),
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      const clearHistory = vi.fn();
+      const monitor = cacheMonitor({
+        clear: clearHistory,
+        dropEntries: clearSpy,
+        evictNotAccessedSince: vi.fn(),
+      });
 
-      setMemUsage(14 * 1024 * 1024 * 1024); // 14/16 = 0.875 >= 0.80: critical
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 14 * GB); // 14/16 = 0.875 >= 0.80: critical
       expect(clearSpy).toHaveBeenCalled();
+      expect(clearHistory).not.toHaveBeenCalled();
     });
 
     it('runs escalated critical cleanup after lower cleanup finishes', async () => {
-      const clearSpy = vi.fn();
-      const evictSpy = vi.fn().mockReturnValue(0);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: clearSpy,
-            evictNotAccessedSince: evictSpy,
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 60_000 },
-      );
+      const { monitor, clearSpy, evictSpy } = spiedMonitor(60_000);
 
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure
+      setMemUsage(9 * GB); // soft pressure
       monitor.performCheck();
       expect(evictSpy).toHaveBeenCalledWith(60);
 
-      setMemUsage(14 * 1024 * 1024 * 1024); // escalates to critical
+      setMemUsage(14 * GB); // escalates to critical
       monitor.performCheck();
       expect(clearSpy).not.toHaveBeenCalled();
 
@@ -703,17 +647,7 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('keeps the strongest queued cleanup while cleanup is in progress', async () => {
-      const clearSpy = vi.fn();
-      const evictSpy = vi.fn().mockReturnValue(0);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: clearSpy,
-            evictNotAccessedSince: evictSpy,
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 60_000 },
-      );
+      const { monitor, clearSpy, evictSpy } = spiedMonitor(60_000);
       vi.spyOn(monitor, 'getPressureLevel')
         .mockReturnValueOnce('soft')
         .mockReturnValueOnce('critical')
@@ -731,22 +665,12 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('cancels queued cleanup when the session is reset', async () => {
-      const clearSpy = vi.fn();
-      const evictSpy = vi.fn().mockReturnValue(0);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: clearSpy,
-            evictNotAccessedSince: evictSpy,
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 60_000 },
-      );
+      const { monitor, clearSpy, evictSpy } = spiedMonitor(60_000);
       vi.spyOn(monitor, 'getPressureLevel')
         .mockReturnValueOnce('soft')
         .mockReturnValueOnce('critical')
         .mockReturnValue('critical');
-      setMemUsage(14 * 1024 * 1024 * 1024);
+      setMemUsage(14 * GB);
 
       monitor.performCheck();
       monitor.performCheck();
@@ -756,124 +680,50 @@ describe('MemoryPressureMonitor', () => {
       expect(evictSpy).toHaveBeenCalledWith(60);
       expect(clearSpy).not.toHaveBeenCalled();
 
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await runChecks(monitor);
       expect(clearSpy).toHaveBeenCalledTimes(1);
     });
 
     it('blocks same-level cleanup within the cooldown window', async () => {
-      const evictSpy = vi.fn().mockReturnValue(0);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: evictSpy },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 60_000 },
-      );
+      const { monitor, evictSpy } = spiedMonitor(60_000);
 
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      setMemUsage(9 * GB); // soft pressure
+      await runChecks(monitor, 2);
 
       expect(evictSpy).toHaveBeenCalledTimes(1);
       expect(evictSpy).toHaveBeenCalledWith(60);
     });
 
     it('does not count successful cleanup as a failure when RSS does not drop', async () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: vi.fn().mockReturnValue(0) },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-      const cleanupFailed = vi.fn();
-      monitor.on('memory-cleanup-failed', cleanupFailed);
+      const monitor = createMonitor();
+      const cleanupFailed = listen(monitor, 'memory-cleanup-failed');
 
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure, unchanged RSS
-
-      for (let i = 0; i < 3; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
+      setMemUsage(9 * GB); // soft pressure, unchanged RSS
+      await runChecks(monitor, 3);
 
       expect(monitor.getConsecutiveFailures()).toBe(0);
       expect(cleanupFailed).not.toHaveBeenCalled();
     });
 
-    it('emits a diagnostic event after repeated ineffective cleanups', async () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: vi.fn().mockReturnValue(0) },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-      const cleanupIneffective = vi.fn();
-      monitor.on('memory-cleanup-ineffective', cleanupIneffective);
+    it.each([
+      ['emits a diagnostic event after repeated ineffective cleanups', 3, 1],
+      ['throttles diagnostic events for continued ineffective cleanup', 10, 2],
+      [
+        'emits repeated ineffective cleanup diagnostics at the long interval',
+        20,
+        3,
+      ],
+    ])('%s', async (_title, checks, events) => {
+      const monitor = createMonitor();
+      const cleanupIneffective = listen(monitor, 'memory-cleanup-ineffective');
 
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure, unchanged RSS
+      setMemUsage(9 * GB); // soft pressure, unchanged RSS
+      await runChecks(monitor, checks);
 
-      for (let i = 0; i < 3; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
-
-      expect(cleanupIneffective).toHaveBeenCalledTimes(1);
-      expect(cleanupIneffective).toHaveBeenCalledWith(
-        expect.objectContaining({
-          consecutiveIneffectiveCleanups: 3,
-          freedRatio: 0,
-        }),
-      );
-    });
-
-    it('throttles diagnostic events for continued ineffective cleanup', async () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: vi.fn().mockReturnValue(0) },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-      const cleanupIneffective = vi.fn();
-      monitor.on('memory-cleanup-ineffective', cleanupIneffective);
-
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure, unchanged RSS
-
-      for (let i = 0; i < 10; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
-
-      expect(cleanupIneffective).toHaveBeenCalledTimes(2);
+      expect(cleanupIneffective).toHaveBeenCalledTimes(events);
       expect(cleanupIneffective).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          consecutiveIneffectiveCleanups: 10,
-          freedRatio: 0,
-        }),
-      );
-    });
-
-    it('emits repeated ineffective cleanup diagnostics at the long interval', async () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: vi.fn().mockReturnValue(0) },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-      const cleanupIneffective = vi.fn();
-      monitor.on('memory-cleanup-ineffective', cleanupIneffective);
-
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure, unchanged RSS
-
-      for (let i = 0; i < 20; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
-
-      expect(cleanupIneffective).toHaveBeenCalledTimes(3);
-      expect(cleanupIneffective).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          consecutiveIneffectiveCleanups: 20,
+          consecutiveIneffectiveCleanups: checks,
           freedRatio: 0,
         }),
       );
@@ -883,61 +733,44 @@ describe('MemoryPressureMonitor', () => {
       let now = 1_000;
       vi.spyOn(Date, 'now').mockImplementation(() => now);
       const clearSpy = vi.fn();
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: clearSpy,
-            evictNotAccessedSince: vi.fn(),
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 1_000 },
+      const monitor = cacheMonitor(
+        { dropEntries: clearSpy, evictNotAccessedSince: vi.fn() },
+        { cleanupCooldownMs: 1_000 },
       );
 
-      setMemUsage(14 * 1024 * 1024 * 1024); // critical, unchanged RSS
+      setMemUsage(14 * GB); // critical, unchanged RSS
 
       for (let i = 0; i < 3; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
+        await runChecks(monitor);
         now += 1_000;
       }
 
       expect(clearSpy).toHaveBeenCalledTimes(3);
 
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await runChecks(monitor);
       expect(clearSpy).toHaveBeenCalledTimes(3);
 
       now += 1_000;
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await runChecks(monitor);
       expect(clearSpy).toHaveBeenCalledTimes(4);
     });
 
     it('measures a cleanup before running a queued escalation', async () => {
-      let rss = 9 * 1024 * 1024 * 1024;
-      vi.spyOn(process, 'memoryUsage').mockImplementation(() => ({
-        rss,
-        heapTotal: 512 * 1024 * 1024,
-        heapUsed: 256 * 1024 * 1024,
-        external: 0,
-        arrayBuffers: 0,
-      }));
+      let rss = 9 * GB;
+      vi.spyOn(process, 'memoryUsage').mockImplementation(() =>
+        createMemUsage(rss),
+      );
 
       const evictSpy = vi.fn(() => {
-        rss = 8 * 1024 * 1024 * 1024;
+        rss = 8 * GB;
         return 0;
       });
       const clearSpy = vi.fn(() => {
-        rss = 4 * 1024 * 1024 * 1024;
+        rss = 4 * GB;
       });
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: clearSpy,
-            evictNotAccessedSince: evictSpy,
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 60_000 },
+      const monitor = cacheMonitor(
+        { dropEntries: clearSpy, evictNotAccessedSince: evictSpy },
+        { cleanupCooldownMs: 60_000 },
       );
       vi.spyOn(monitor, 'getPressureLevel')
         .mockReturnValueOnce('soft')
@@ -956,49 +789,30 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('resets ineffective cleanup count after an effective cleanup', async () => {
-      let rss = 9 * 1024 * 1024 * 1024;
+      let rss = 9 * GB;
       const evictSpy = vi.fn(() => {
         if (evictSpy.mock.calls.length === 3) {
-          rss = 8 * 1024 * 1024 * 1024;
+          rss = 8 * GB;
         }
         return 0;
       });
       vi.spyOn(process, 'memoryUsage').mockImplementation(() =>
         createMemUsage(rss),
       );
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: evictSpy },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-      const cleanupIneffective = vi.fn();
-      monitor.on('memory-cleanup-ineffective', cleanupIneffective);
+      const monitor = cacheMonitor({ evictNotAccessedSince: evictSpy });
+      const cleanupIneffective = listen(monitor, 'memory-cleanup-ineffective');
 
       for (let i = 0; i < 3; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-        rss = 9 * 1024 * 1024 * 1024;
+        await runChecks(monitor);
+        rss = 9 * GB;
       }
-      for (let i = 0; i < 2; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
+      await runChecks(monitor, 2);
 
       expect(cleanupIneffective).not.toHaveBeenCalled();
     });
 
     it('records queued cleanup startup failures', async () => {
-      const evictSpy = vi.fn().mockReturnValue(0);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: vi.fn(),
-            evictNotAccessedSince: evictSpy,
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 60_000 },
-      );
+      const { monitor } = spiedMonitor(60_000);
       vi.spyOn(monitor, 'getPressureLevel')
         .mockReturnValueOnce('soft')
         .mockReturnValueOnce('critical');
@@ -1007,14 +821,14 @@ describe('MemoryPressureMonitor', () => {
       // cleanup's memBefore (the throw under test), then the RSS read in
       // recordCleanupFailure.
       vi.spyOn(process, 'memoryUsage')
-        .mockReturnValueOnce(createMemUsage(9 * 1024 * 1024 * 1024))
-        .mockReturnValueOnce(createMemUsage(8 * 1024 * 1024 * 1024))
-        .mockReturnValueOnce(createMemUsage(9 * 1024 * 1024 * 1024))
-        .mockReturnValueOnce(createMemUsage(8 * 1024 * 1024 * 1024))
+        .mockReturnValueOnce(createMemUsage(9 * GB))
+        .mockReturnValueOnce(createMemUsage(8 * GB))
+        .mockReturnValueOnce(createMemUsage(9 * GB))
+        .mockReturnValueOnce(createMemUsage(8 * GB))
         .mockImplementationOnce(() => {
           throw new Error('queued RSS unavailable');
         })
-        .mockReturnValueOnce(createMemUsage(8 * 1024 * 1024 * 1024));
+        .mockReturnValueOnce(createMemUsage(8 * GB));
 
       monitor.performCheck();
       monitor.performCheck();
@@ -1030,23 +844,12 @@ describe('MemoryPressureMonitor', () => {
     it('warns when explicit GC is requested but unavailable', async () => {
       vi.stubGlobal('gc', undefined);
       const clearSpy = vi.fn();
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: clearSpy,
-            evictNotAccessedSince: vi.fn(),
-          },
-        }),
-        {
-          ...DEFAULT_PRESSURE_CONFIG,
-          cleanupCooldownMs: 0,
-          enableExplicitGC: true,
-        },
+      const monitor = cacheMonitor(
+        { dropEntries: clearSpy, evictNotAccessedSince: vi.fn() },
+        { enableExplicitGC: true },
       );
 
-      setMemUsage(14 * 1024 * 1024 * 1024); // critical pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 14 * GB); // critical pressure
 
       expect(clearSpy).toHaveBeenCalled();
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
@@ -1058,23 +861,12 @@ describe('MemoryPressureMonitor', () => {
     it('runs explicit GC when requested and available', async () => {
       const gcSpy = vi.fn();
       vi.stubGlobal('gc', gcSpy);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: vi.fn(),
-            evictNotAccessedSince: vi.fn(),
-          },
-        }),
-        {
-          ...DEFAULT_PRESSURE_CONFIG,
-          cleanupCooldownMs: 0,
-          enableExplicitGC: true,
-        },
+      const monitor = cacheMonitor(
+        { evictNotAccessedSince: vi.fn() },
+        { enableExplicitGC: true },
       );
 
-      setMemUsage(14 * 1024 * 1024 * 1024); // critical pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 14 * GB); // critical pressure
 
       expect(gcSpy).toHaveBeenCalledTimes(1);
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
@@ -1083,15 +875,9 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('skips same-priority cleanup while another cleanup is in progress', () => {
-      const evictSpy = vi.fn().mockReturnValue(0);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: evictSpy },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      const { monitor, evictSpy } = spiedMonitor(0);
 
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure
+      setMemUsage(9 * GB); // soft pressure
       monitor.performCheck();
       monitor.performCheck();
 
@@ -1102,25 +888,8 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('counts cleanup step exceptions as failures', async () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            evictNotAccessedSince: vi.fn(() => {
-              throw new Error('cache failure');
-            }),
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
       const cleanupFailed = vi.fn();
-      monitor.on('memory-cleanup-failed', cleanupFailed);
-
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure
-
-      for (let i = 0; i < 3; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
+      const monitor = await runFailingChecks(3, cleanupFailed);
 
       expect(monitor.getConsecutiveFailures()).toBe(3);
       expect(cleanupFailed).toHaveBeenCalledTimes(1);
@@ -1133,50 +902,28 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('resets consecutive failures after a successful cleanup', async () => {
-      const evictSpy = vi.fn((): number => {
-        throw new Error('cache failure');
-      });
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            evictNotAccessedSince: evictSpy,
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      const evictSpy = throwingEvict();
+      const monitor = cacheMonitor({ evictNotAccessedSince: evictSpy });
 
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 9 * GB); // soft pressure
       expect(monitor.getConsecutiveFailures()).toBe(1);
 
       evictSpy.mockReturnValue(0);
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await runChecks(monitor);
 
       expect(monitor.getConsecutiveFailures()).toBe(0);
     });
 
     it('records cleanup failures when RSS cannot be read', async () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            evictNotAccessedSince: vi.fn(() => {
-              throw new Error('cache failure');
-            }),
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      const monitor = cacheMonitor({ evictNotAccessedSince: throwingEvict() });
       vi.spyOn(process, 'memoryUsage')
-        .mockReturnValueOnce(createMemUsage(9 * 1024 * 1024 * 1024))
-        .mockReturnValueOnce(createMemUsage(9 * 1024 * 1024 * 1024))
+        .mockReturnValueOnce(createMemUsage(9 * GB))
+        .mockReturnValueOnce(createMemUsage(9 * GB))
         .mockImplementationOnce(() => {
           throw new Error('RSS unavailable');
         });
 
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await runChecks(monitor);
 
       expect(monitor.getConsecutiveFailures()).toBe(1);
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
@@ -1188,25 +935,8 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('throttles repeated cleanup failure events after the threshold', async () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            evictNotAccessedSince: vi.fn(() => {
-              throw new Error('cache failure');
-            }),
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
       const cleanupFailed = vi.fn();
-      monitor.on('memory-cleanup-failed', cleanupFailed);
-
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure
-
-      for (let i = 0; i < 10; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
+      const monitor = await runFailingChecks(10, cleanupFailed);
 
       expect(monitor.getConsecutiveFailures()).toBe(10);
       expect(cleanupFailed).toHaveBeenCalledTimes(2);
@@ -1219,56 +949,25 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('does not surface listener exceptions as cleanup promise rejections', async () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            evictNotAccessedSince: vi.fn(() => {
-              throw new Error('cache failure');
-            }),
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-      monitor.on('memory-cleanup-failed', () => {
+      const monitor = await runFailingChecks(3, () => {
         throw new Error('listener failure');
       });
-
-      setMemUsage(9 * 1024 * 1024 * 1024); // soft pressure
-
-      for (let i = 0; i < 3; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
 
       expect(monitor.getConsecutiveFailures()).toBe(3);
     });
   });
 
   describe('compact_history step', () => {
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
-
     it('skips compaction when client is not initialized', async () => {
       const setHistory = vi.fn();
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          llmClient: {
-            isInitialized: () => false,
-            getChat: () => ({
-              getCompletedToolCallIds: () => undefined,
-              getHistoryShallow: () => [{ role: 'user' }],
-              getHistory: () => [{ role: 'user' }],
-              setHistory,
-            }),
-          },
+      const monitor = createMonitor({
+        llmClient: chatClient(setHistory, [{ role: 'user' }], {
+          initialized: false,
+          full: () => [{ role: 'user' }],
         }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      });
 
-      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 10 * GB); // hard pressure
 
       expect(setHistory).not.toHaveBeenCalled();
     });
@@ -1276,24 +975,13 @@ describe('MemoryPressureMonitor', () => {
     it('runs compaction step without errors when client is initialized', async () => {
       const setHistory = vi.fn();
       const originalHistory = [{ role: 'user', parts: [{ text: 'hello' }] }];
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          llmClient: {
-            isInitialized: () => true,
-            getChat: () => ({
-              getCompletedToolCallIds: () => undefined,
-              getHistoryShallow: () => originalHistory,
-              getHistory: () => [...originalHistory],
-              setHistory,
-            }),
-          },
+      const monitor = createMonitor({
+        llmClient: chatClient(setHistory, originalHistory, {
+          full: () => [...originalHistory],
         }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      });
 
-      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 10 * GB); // hard pressure
 
       // The step ran without errors — no crash, no failure count
       expect(monitor.getConsecutiveFailures()).toBe(0);
@@ -1301,44 +989,26 @@ describe('MemoryPressureMonitor', () => {
 
     it('handles empty history without errors', async () => {
       const setHistory = vi.fn();
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          llmClient: {
-            isInitialized: () => true,
-            getChat: () => ({
-              getCompletedToolCallIds: () => undefined,
-              getHistoryShallow: () => [],
-              getHistory: () => [],
-              setHistory,
-            }),
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      const monitor = createMonitor({
+        llmClient: chatClient(setHistory, [], { full: () => [] }),
+      });
 
-      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 10 * GB); // hard pressure
 
       expect(setHistory).not.toHaveBeenCalled();
     });
 
     it('handles exceptions during compaction gracefully', async () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          llmClient: {
-            isInitialized: () => true,
-            getChat: () => {
-              throw new Error('chat unavailable');
-            },
+      const monitor = createMonitor({
+        llmClient: {
+          isInitialized: () => true,
+          getChat: () => {
+            throw new Error('chat unavailable');
           },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+        },
+      });
 
-      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65: hard pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 11 * GB); // 11/16 = 0.6875 >= 0.65: hard pressure
 
       // compact_history error is caught and logged without propagating,
       // so subsequent cleanup steps (like trigger_gc) can still run.
@@ -1347,16 +1017,9 @@ describe('MemoryPressureMonitor', () => {
 
     it('handles getLlmClient returning null', async () => {
       const setHistory = vi.fn();
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          llmClient: null,
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      const monitor = createMonitor({ llmClient: null });
 
-      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65: hard pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 11 * GB); // 11/16 = 0.6875 >= 0.65: hard pressure
 
       expect(setHistory).not.toHaveBeenCalled();
     });
@@ -1372,75 +1035,32 @@ describe('MemoryPressureMonitor', () => {
             ? '/mock/project/.qwen/team-memory/feedback/testing.md'
             : `/f${i}.ts`;
         toolHistory.push(
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: `call_${i}`,
-                  name: 'read_file',
-                  args: { file_path: filePath },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  name: 'read_file',
-                  id: `call_${i}`,
-                  response: { output: `content of f${i}` },
-                },
-              },
-            ],
-          },
+          content(
+            'model',
+            fnCall('read_file', { file_path: filePath }, `call_${i}`),
+          ),
+          content('user', {
+            functionResponse: {
+              name: 'read_file',
+              id: `call_${i}`,
+              response: { output: `content of f${i}` },
+            },
+          }),
         );
       }
       toolHistory.push(
-        {
-          role: 'model',
-          parts: [{ functionCall: { id: 'goal-end', name: 'update_goal' } }],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'goal-end',
-                name: 'update_goal',
-                response: {},
-              },
-            },
-          ],
-        },
+        content('model', fnCall('update_goal', undefined, 'goal-end')),
+        content('user', fnResponse('update_goal', {}, 'goal-end')),
       );
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          llmClient: {
-            isInitialized: () => true,
-            getChat: () => ({
-              getCompletedToolCallIds: () => ['call_1', 'goal-end'],
-              getHistoryShallow: () => toolHistory,
-              setHistory,
-            }),
-          },
-          fileReadCache: {
-            clear: clearCache,
-            evictNotAccessedSince: vi.fn().mockReturnValue(0),
-          },
-          clearContextOnIdle: {
-            clearContextMinutes: 60,
-            toolResultsNumToKeep: 5,
-          },
+      // Default clearContextOnIdle: keep 5 tool results.
+      const monitor = createMonitor({
+        llmClient: chatClient(setHistory, toolHistory, {
+          completed: ['call_1', 'goal-end'],
         }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+        fileReadCache: { clear: clearCache },
+      });
 
-      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65: hard pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 11 * GB); // 11/16 = 0.6875 >= 0.65: hard pressure
 
       expect(setHistory).toHaveBeenCalled();
       expect(clearCache).toHaveBeenCalled();
@@ -1479,19 +1099,20 @@ describe('MemoryPressureMonitor', () => {
       );
     });
 
-    it('overrides positive toolResultsThresholdMinutes to 0', async () => {
-      const setHistory = vi.fn();
-      // 7 tool results with threshold=60 → overridden to 0, all get compacted
+    it('forwards evicted search_memory bodies to the memory manager', async () => {
+      const markMemoryBodiesEvictedFromHistory = vi.fn();
       const toolHistory: Content[] = [];
-      for (let i = 0; i < 7; i++) {
+      for (let index = 0; index < 7; index += 1) {
+        const callId = `memory_${index}`;
         toolHistory.push(
           {
             role: 'model',
             parts: [
               {
                 functionCall: {
-                  name: 'read_file',
-                  args: { path: `/f${i}.ts` },
+                  id: callId,
+                  name: 'search_memory',
+                  args: { mode: 'fetch', refs: [`project:${index}.md`] },
                 },
               },
             ],
@@ -1501,58 +1122,70 @@ describe('MemoryPressureMonitor', () => {
             parts: [
               {
                 functionResponse: {
-                  name: 'read_file',
-                  id: `call_${i}`,
-                  response: { output: `content of f${i}` },
+                  id: callId,
+                  name: 'search_memory',
+                  response: {
+                    output: JSON.stringify({
+                      mode: 'fetch',
+                      results: [
+                        {
+                          ref: `project:${index}.md`,
+                          version: index + 1,
+                          content: `memory body ${index}`,
+                          range: { start: 0, end: 13, total: 13 },
+                        },
+                      ],
+                    }),
+                  },
                 },
               },
             ],
           },
         );
       }
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          llmClient: {
-            isInitialized: () => true,
-            getChat: () => ({
-              getCompletedToolCallIds: () => undefined,
-              getHistoryShallow: () => toolHistory,
-              setHistory,
-            }),
-          },
-          fileReadCache: {
-            clear: vi.fn(),
-            evictNotAccessedSince: vi.fn().mockReturnValue(0),
-          },
-          clearContextOnIdle: {
-            clearContextMinutes: 60,
-            toolResultsNumToKeep: 5,
-            toolResultsThresholdMinutes: 60,
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      const config = createMockConfig({
+        llmClient: {
+          isInitialized: () => true,
+          getChat: () => ({
+            getHistoryShallow: () => toolHistory,
+            setHistory: vi.fn(),
+            getCompletedToolCallIds: () => [],
+          }),
+        },
+      });
+      vi.spyOn(config, 'getMemoryManager').mockReturnValue({
+        markMemoryBodiesEvictedFromHistory,
+      } as unknown as ReturnType<Config['getMemoryManager']>);
+      const monitor = new MemoryPressureMonitor(config, {
+        ...DEFAULT_PRESSURE_CONFIG,
+        cleanupCooldownMs: 0,
+      });
 
       setMemUsage(11 * 1024 * 1024 * 1024);
       monitor.performCheck();
       await drainCleanupMeasurement();
 
-      // Positive value overridden to 0 → compaction runs
-      expect(setHistory).toHaveBeenCalled();
+      expect(markMemoryBodiesEvictedFromHistory).toHaveBeenCalledWith([
+        { memoryRef: 'project:0.md', mtimeMs: 1 },
+        { memoryRef: 'project:1.md', mtimeMs: 2 },
+      ]);
     });
 
-    it('preserves negative toolResultsThresholdMinutes (-1), skipping compaction', async () => {
-      const setHistory = vi.fn();
+    it('falls back to the blanket wipe when an evicted memory body is unresolved', async () => {
+      const markMemoryBodiesEvictedFromHistory = vi.fn();
+      const markAllMemoryBodiesEvictedFromHistory = vi.fn();
       const toolHistory: Content[] = [];
-      for (let i = 0; i < 7; i++) {
+      for (let index = 0; index < 7; index += 1) {
+        const callId = `memory_${index}`;
         toolHistory.push(
           {
             role: 'model',
             parts: [
               {
                 functionCall: {
-                  name: 'read_file',
-                  args: { path: `/f${i}.ts` },
+                  id: callId,
+                  name: 'search_memory',
+                  args: { mode: 'fetch', refs: [`project:${index}.md`] },
                 },
               },
             ],
@@ -1562,135 +1195,88 @@ describe('MemoryPressureMonitor', () => {
             parts: [
               {
                 functionResponse: {
-                  name: 'read_file',
-                  id: `call_${i}`,
-                  response: { output: `content of f${i}` },
+                  id: callId,
+                  name: 'search_memory',
+                  response: {
+                    // Unparseable output (e.g. scheduler-truncated): the body
+                    // refs cannot be recovered, so the eviction is unresolved.
+                    output: '{"mode":"fetch","results":[{"ref":"project:0.md"',
+                  },
                 },
               },
             ],
           },
         );
       }
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          llmClient: {
-            isInitialized: () => true,
-            getChat: () => ({
-              getCompletedToolCallIds: () => undefined,
-              getHistoryShallow: () => toolHistory,
-              setHistory,
-            }),
-          },
-          fileReadCache: {
-            clear: vi.fn(),
-            evictNotAccessedSince: vi.fn().mockReturnValue(0),
-          },
-          clearContextOnIdle: {
-            clearContextMinutes: 60,
-            toolResultsNumToKeep: 5,
-            toolResultsThresholdMinutes: -1,
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      const config = createMockConfig({
+        llmClient: {
+          isInitialized: () => true,
+          getChat: () => ({
+            getHistoryShallow: () => toolHistory,
+            setHistory: vi.fn(),
+            getCompletedToolCallIds: () => [],
+          }),
+        },
+      });
+      vi.spyOn(config, 'getMemoryManager').mockReturnValue({
+        markMemoryBodiesEvictedFromHistory,
+        markAllMemoryBodiesEvictedFromHistory,
+      } as unknown as ReturnType<Config['getMemoryManager']>);
+      const monitor = new MemoryPressureMonitor(config, {
+        ...DEFAULT_PRESSURE_CONFIG,
+        cleanupCooldownMs: 0,
+      });
 
       setMemUsage(11 * 1024 * 1024 * 1024);
       monitor.performCheck();
       await drainCleanupMeasurement();
 
-      // Negative value preserved → microcompactHistory skips compaction
-      expect(setHistory).not.toHaveBeenCalled();
+      expect(markAllMemoryBodiesEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(markMemoryBodiesEvictedFromHistory).not.toHaveBeenCalled();
     });
 
-    it('defaults undefined toolResultsThresholdMinutes to 0', async () => {
+    // 7 tool results, keep=5. A positive threshold is overridden to 0 and
+    // an unset one defaults to 0, so compaction runs; a negative one (-1)
+    // is preserved and microcompactHistory skips compaction.
+    it.each([
+      ['overrides positive toolResultsThresholdMinutes to 0', 60, true],
+      [
+        'preserves negative toolResultsThresholdMinutes (-1), skipping compaction',
+        -1,
+        false,
+      ],
+      ['defaults undefined toolResultsThresholdMinutes to 0', undefined, true],
+    ])('%s', async (_title, threshold, compacts) => {
       const setHistory = vi.fn();
-      const toolHistory: Content[] = [];
-      for (let i = 0; i < 7; i++) {
-        toolHistory.push(
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  name: 'read_file',
-                  args: { path: `/f${i}.ts` },
-                },
+      const monitor = createMonitor({
+        llmClient: chatClient(setHistory, readFileHistory()),
+        clearContextOnIdle:
+          threshold === undefined
+            ? undefined
+            : {
+                clearContextMinutes: 60,
+                toolResultsNumToKeep: 5,
+                toolResultsThresholdMinutes: threshold,
               },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  name: 'read_file',
-                  id: `call_${i}`,
-                  response: { output: `content of f${i}` },
-                },
-              },
-            ],
-          },
-        );
-      }
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          llmClient: {
-            isInitialized: () => true,
-            getChat: () => ({
-              getCompletedToolCallIds: () => undefined,
-              getHistoryShallow: () => toolHistory,
-              setHistory,
-            }),
-          },
-          fileReadCache: {
-            clear: vi.fn(),
-            evictNotAccessedSince: vi.fn().mockReturnValue(0),
-          },
-          clearContextOnIdle: {
-            clearContextMinutes: 60,
-            toolResultsNumToKeep: 5,
-          },
-          // toolResultsThresholdMinutes not set → undefined → defaults to 0
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
+      });
 
-      setMemUsage(11 * 1024 * 1024 * 1024);
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 11 * GB);
 
-      // Undefined defaults to 0 → compaction runs
-      expect(setHistory).toHaveBeenCalled();
+      if (compacts) expect(setHistory).toHaveBeenCalled();
+      else expect(setHistory).not.toHaveBeenCalled();
     });
   });
 
   describe('getConsecutiveFailures', () => {
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
-
     it('starts at zero', () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
+      setOsTotalmem(16 * GB);
       const monitor = new MemoryPressureMonitor(createMockConfig());
       expect(monitor.getConsecutiveFailures()).toBe(0);
     });
 
     it('can reset consecutive failures', async () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            evictNotAccessedSince: vi.fn(() => {
-              throw new Error('cache failure');
-            }),
-          },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-
-      setMemUsage(9 * 1024 * 1024 * 1024);
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      setOsTotalmem(16 * GB);
+      const monitor = await runFailingChecks(1);
 
       expect(monitor.getConsecutiveFailures()).toBe(1);
       monitor.resetConsecutiveFailures();
@@ -1698,27 +1284,14 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('can reset ineffective cleanup diagnostics', async () => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: { evictNotAccessedSince: vi.fn().mockReturnValue(0) },
-        }),
-        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
-      );
-      const cleanupIneffective = vi.fn();
-      monitor.on('memory-cleanup-ineffective', cleanupIneffective);
+      setOsTotalmem(16 * GB);
+      const monitor = createMonitor();
+      const cleanupIneffective = listen(monitor, 'memory-cleanup-ineffective');
 
-      setMemUsage(9 * 1024 * 1024 * 1024);
-
-      for (let i = 0; i < 2; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
+      setMemUsage(9 * GB);
+      await runChecks(monitor, 2);
       monitor.resetConsecutiveFailures();
-      for (let i = 0; i < 3; i++) {
-        monitor.performCheck();
-        await drainCleanupMeasurement();
-      }
+      await runChecks(monitor, 3);
 
       expect(cleanupIneffective).toHaveBeenCalledTimes(1);
       expect(cleanupIneffective).toHaveBeenCalledWith(
@@ -1730,23 +1303,14 @@ describe('MemoryPressureMonitor', () => {
   });
 
   describe('global.gc() safety guards', () => {
+    const gcMonitor = (enableExplicitGC: boolean) =>
+      cacheMonitor({ evictNotAccessedSince: vi.fn() }, { enableExplicitGC });
+
     it('should not include trigger_gc in soft or hard pressure tiers', () => {
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: vi.fn(),
-            evictNotAccessedSince: vi.fn(),
-          },
-        }),
-        {
-          ...DEFAULT_PRESSURE_CONFIG,
-          cleanupCooldownMs: 0,
-          enableExplicitGC: true,
-        },
-      );
+      const monitor = gcMonitor(true);
 
       // Soft pressure — should NOT trigger GC
-      setMemUsage(9 * 1024 * 1024 * 1024); // 9/16 = 0.5625 >= 0.5 soft
+      setMemUsage(9 * GB); // 9/16 = 0.5625 >= 0.5 soft
       monitor.performCheck();
       expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
         expect.stringContaining('global.gc()'),
@@ -1756,7 +1320,7 @@ describe('MemoryPressureMonitor', () => {
       mockDebugLogger.debug.mockClear();
 
       // Hard pressure — should NOT trigger GC
-      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65 hard
+      setMemUsage(11 * GB); // 11/16 = 0.6875 >= 0.65 hard
       monitor.performCheck();
       expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
         expect.stringContaining('global.gc()'),
@@ -1766,73 +1330,39 @@ describe('MemoryPressureMonitor', () => {
     it('global.gc() is only called under critical pressure with enableExplicitGC: true', async () => {
       const gcSpy = vi.fn();
       vi.stubGlobal('gc', gcSpy);
-
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: vi.fn(),
-            evictNotAccessedSince: vi.fn(),
-          },
-        }),
-        {
-          ...DEFAULT_PRESSURE_CONFIG,
-          cleanupCooldownMs: 0,
-          enableExplicitGC: true,
-        },
-      );
+      const monitor = gcMonitor(true);
 
       // Soft pressure — GC should NOT be called
-      setMemUsage(9 * 1024 * 1024 * 1024); // 9/16 = 0.5625 >= 0.5 soft
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 9 * GB); // 9/16 = 0.5625 >= 0.5 soft
       expect(gcSpy).not.toHaveBeenCalled();
 
       gcSpy.mockClear();
 
       // Hard pressure — GC should NOT be called
-      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65 hard
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 11 * GB); // 11/16 = 0.6875 >= 0.65 hard
       expect(gcSpy).not.toHaveBeenCalled();
 
       gcSpy.mockClear();
 
       // Critical pressure — GC SHOULD be called exactly once
-      setMemUsage(14 * 1024 * 1024 * 1024); // 14/16 = 0.875 >= 0.8 critical
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 14 * GB); // 14/16 = 0.875 >= 0.8 critical
       expect(gcSpy).toHaveBeenCalledTimes(1);
     });
 
     it('global.gc() is never called when enableExplicitGC is false', async () => {
       const gcSpy = vi.fn();
       vi.stubGlobal('gc', gcSpy);
-
-      const monitor = new MemoryPressureMonitor(
-        createMockConfig({
-          fileReadCache: {
-            clear: vi.fn(),
-            evictNotAccessedSince: vi.fn(),
-          },
-        }),
-        {
-          ...DEFAULT_PRESSURE_CONFIG,
-          cleanupCooldownMs: 0,
-          enableExplicitGC: false,
-        },
-      );
+      const monitor = gcMonitor(false);
 
       // Critical pressure — GC should NOT be called
-      setMemUsage(14 * 1024 * 1024 * 1024);
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await checkAt(monitor, 14 * GB);
       expect(gcSpy).not.toHaveBeenCalled();
     });
   });
 
   describe('runtime sampling and telemetry', () => {
     beforeEach(() => {
-      setOsTotalmem(16 * 1024 * 1024 * 1024);
+      setOsTotalmem(16 * GB);
       mockIsPerformanceMonitoringActive.mockReturnValue(false);
       mockRecordMemoryUsage.mockClear();
       mockRecordCpuUsage.mockClear();
@@ -1840,8 +1370,8 @@ describe('MemoryPressureMonitor', () => {
 
     it('reports memory and CPU metrics when performance monitoring is active', () => {
       mockIsPerformanceMonitoringActive.mockReturnValue(true);
-      const rss = 4 * 1024 * 1024 * 1024; // 4/16 = 0.25: normal, no cleanup
-      const heapUsed = 256 * 1024 * 1024;
+      const rss = 4 * GB; // 4/16 = 0.25: normal, no cleanup
+      const heapUsed = 256 * MB;
       setMemUsage(rss, heapUsed);
       const monitor = new MemoryPressureMonitor(createMockConfig());
 
@@ -1867,7 +1397,7 @@ describe('MemoryPressureMonitor', () => {
     });
 
     it('does not report metrics when performance monitoring is inactive', () => {
-      setMemUsage(4 * 1024 * 1024 * 1024);
+      setMemUsage(4 * GB);
       const monitor = new MemoryPressureMonitor(createMockConfig());
 
       monitor.performCheck();
@@ -1898,7 +1428,7 @@ describe('MemoryPressureMonitor', () => {
       mockRecordMemoryUsage.mockImplementation(() => {
         throw new Error('OTel export failed');
       });
-      setMemUsage(4 * 1024 * 1024 * 1024); // normal pressure, no cleanup
+      setMemUsage(4 * GB); // normal pressure, no cleanup
 
       const monitor = new MemoryPressureMonitor(createMockConfig());
       mockDebugLogger.error.mockClear();
@@ -1930,18 +1460,14 @@ describe('MemoryPressureMonitor', () => {
       const dumpSpy = vi
         .spyOn(MemoryDiagnosticsDumper.prototype, 'dump')
         .mockResolvedValue(undefined);
-      const rss = 11 * 1024 * 1024 * 1024; // 11/16 = 0.6875: hard
+      const rss = 11 * GB; // 11/16 = 0.6875: hard
       setMemUsage(rss);
-      const monitor = new MemoryPressureMonitor(createMockConfig(), {
-        ...DEFAULT_PRESSURE_CONFIG,
-        cleanupCooldownMs: 0,
-      });
+      const monitor = createMonitor();
       // Advance the clock past the ring's construction tick so record()
       // sees elapsed > 0 and actually pushes a sample.
       vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 50);
 
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      await runChecks(monitor);
 
       expect(dumpSpy).toHaveBeenCalledTimes(1);
       expect(dumpSpy).toHaveBeenCalledWith(

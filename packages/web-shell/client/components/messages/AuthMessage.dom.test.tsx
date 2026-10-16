@@ -89,6 +89,7 @@ async function install(
 
 async function openAndSave(
   setup?: (click: (text: string) => Promise<void>) => Promise<void>,
+  allowAdd = true,
 ) {
   const onMessage = vi.fn();
   const onClose = vi.fn();
@@ -98,7 +99,11 @@ async function openAndSave(
   await act(async () => {
     root?.render(
       <I18nProvider language="en">
-        <AuthMessage onMessage={onMessage} onClose={onClose} />
+        <AuthMessage
+          onMessage={onMessage}
+          onClose={onClose}
+          allowAdd={allowAdd}
+        />
       </I18nProvider>,
     );
     await Promise.resolve();
@@ -544,5 +549,28 @@ describe('AuthMessage model configuration', () => {
     expect(actions.installAuthProvider.mock.calls[0][0].advancedConfig).toEqual(
       { replaceExisting: true, contextWindowSize: 10000000, maxTokens: 1 },
     );
+  });
+});
+
+describe('host model management', () => {
+  it('does not install when model addition is disabled', async () => {
+    await openAndSave(undefined, false);
+    expect(actions.installAuthProvider).not.toHaveBeenCalled();
+  });
+  it('checks the latest add policy after setup is already open', async () => {
+    await openAndSave(async () => {
+      await act(async () =>
+        root?.render(
+          <I18nProvider language="en">
+            <AuthMessage
+              allowAdd={false}
+              onMessage={vi.fn()}
+              onClose={vi.fn()}
+            />
+          </I18nProvider>,
+        ),
+      );
+    });
+    expect(actions.installAuthProvider).not.toHaveBeenCalled();
   });
 });

@@ -54,7 +54,7 @@ qwen extensions install <marketplace-name>:<plugin-name>
 qwen extensions install <marketplace-github-url>:<plugin-name>
 ```
 
-For example, to install the `prompts.chat` plugin from the [f/awesome-chatgpt-prompts](https://claudemarketplaces.com/plugins/f-awesome-chatgpt-prompts) marketplace:
+For example, to install the `prompts.chat` plugin from the [f/awesome-chatgpt-prompts](https://claudemarketplaces.com/plugins/f-prompts.chat) marketplace:
 
 ```bash
 qwen extensions install f/awesome-chatgpt-prompts:prompts.chat
@@ -430,6 +430,8 @@ export const meta = {
 Only a workflow that declares `whenToUse` is listed for the model, together with its description, so the model can start it when a request matches; each run still goes through the workflow approval. Without it, the model does not see the workflow, which then runs when you invoke it, ask for it by name, or another workflow calls it. `whenToUse` is shortened past 500 characters, like `description`, and since it lives in the script, changing it makes the next update ask for consent again.
 
 In the interactive UI, `/gcp:deep-research` starts the workflow directly. In headless mode and over ACP, the same command asks the model to run it by name, and the approval follows.
+
+To let the model start your extension's workflows without letting it write and run scripts of its own, deploy with [`tools.workflowNameOnly`](../configuration/settings.md) (or `QWEN_CODE_WORKFLOW_NAME_ONLY=1`) and allow the workflows by name, for example `Workflow(name:gcp:deep-research)`. The lock makes every run the model starts addressable by such a rule; it does not approve anything by itself, so keep asking for names you have not allowed.
 
 Discovery is deliberately narrow:
 

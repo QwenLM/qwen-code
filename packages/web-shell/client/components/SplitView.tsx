@@ -23,6 +23,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
+import type { WebShellModelManagementOptions } from '../modelManagement';
 import type { RegisterContextUsageControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
 import { ChatPane, type PaneHeaderActionsRenderer } from './ChatPane';
@@ -46,11 +47,14 @@ import {
   workspaceLabelForCwd,
 } from '../utils/workspace';
 import { isEditableTarget } from '../utils/dom';
+import { AssistantTurnSettlementObserver } from '../assistant-turn-settlement';
+import type { WebShellAssistantTurnSettledEvent } from '../customization';
 import styles from './SplitView.module.css';
 
 const MAX_PANES = MAX_SPLIT_PANES;
 
 export interface SplitViewProps {
+  showResponseTokensPerSecond?: boolean;
   /** Sessions to show in the split view. */
   sessionIds?: string[];
   /** Respect the host's session-details action allowlist. */
@@ -63,6 +67,7 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Report panes surfacing approvals, including hidden panes. Keep stable while
    * consumer inputs are unchanged; a new callback receives the current list.
@@ -73,6 +78,7 @@ export interface SplitViewProps {
   onError?: (error: unknown, fallback: string) => void;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
+  modelManagement?: WebShellModelManagementOptions;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
@@ -122,11 +128,13 @@ export function SplitView({
   sessionIds,
   showSessionDetails = true,
   onPanesChange,
+  onAssistantTurnSettled,
   onPendingPanesChange,
   onExit,
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  modelManagement,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
@@ -144,6 +152,7 @@ export function SplitView({
   voiceWorkspaceRevisions = {},
   voiceWorkspaces,
   sessionWorkflowEnabled = false,
+  showResponseTokensPerSecond = false,
   planControlVisible = false,
 }: SplitViewProps) {
   const { t } = useI18n();
@@ -631,7 +640,13 @@ export function SplitView({
                     suppressOwnUserEcho
                     restartEventStreamOnPrompt={restartSseOnPrompt}
                   >
+                    {onAssistantTurnSettled ? (
+                      <AssistantTurnSettlementObserver
+                        onAssistantTurnSettled={onAssistantTurnSettled}
+                      />
+                    ) : null}
                     <ChatPane
+                      showResponseTokensPerSecond={showResponseTokensPerSecond}
                       title={titleById.get(sessionId)}
                       sessionSummary={
                         showSessionDetails
@@ -660,6 +675,7 @@ export function SplitView({
                       onError={onError}
                       onImageIngestionNotice={onImageIngestionNotice}
                       onSlashCommand={onSlashCommand}
+                      modelManagement={modelManagement}
                       onOpenGoals={onOpenGoals}
                       onRightPanelOpen={onRightPanelOpen}
                       onOpenMonitor={onOpenMonitor}

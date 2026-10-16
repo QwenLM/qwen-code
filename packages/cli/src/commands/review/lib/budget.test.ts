@@ -18,6 +18,9 @@ import {
   sizeTier,
   cappedRoundTier,
   reviewBudget as deriveReviewBudget,
+  isFixAuditRound,
+  isTerritoryFanOut,
+  interactionEntryOf,
   type BudgetContext,
   type BudgetInput,
 } from './budget.js';
@@ -1267,6 +1270,154 @@ describe('the huge reduction applies only under an explicit clock — a ceiling 
     const withClock = { ...HUGE, budget: { reverseAuditRounds: 3 } };
     expect(reverseAuditRoundCap(withClock, true)).toBe(3);
     expect(reverseAuditRoundCap(withClock, false)).toBe(3); // in [3,5], honoured
+  });
+});
+
+describe('isFixAuditRound and the topology override (#10104)', () => {
+  const POSTURE = {
+    incremental: {
+      since: 'a'.repeat(40),
+      effective: true,
+      posture: 'critical',
+      scope: { anchor: 'a'.repeat(40), deltaFiles: ['x.ts'], interaction: [] },
+    },
+  };
+
+  it('reads the posture only from a well-formed effective block', () => {
+    expect(isFixAuditRound(POSTURE)).toBe(true);
+    expect(isFixAuditRound({})).toBe(false);
+    expect(isFixAuditRound({ incremental: null })).toBe(false);
+    expect(
+      isFixAuditRound({
+        incremental: { ...POSTURE.incremental, effective: false },
+      }),
+    ).toBe(false);
+    expect(
+      isFixAuditRound({
+        incremental: { ...POSTURE.incremental, scope: undefined },
+      }),
+    ).toBe(false);
+    expect(
+      isFixAuditRound({
+        incremental: { ...POSTURE.incremental, posture: 'CRITICAL' },
+      }),
+    ).toBe(false);
+  });
+
+  it('refuses the scopes the brief builder refuses — one bar across readers', () => {
+    // `incrementalScopeOf` degrades to full scope when the delta list is
+    // empty beside an empty interaction list, and when it carries a
+    // non-string element; the shape readers must refuse the same plans, or
+    // the roster fans out per territory while every brief runs full-scope.
+    const scope = POSTURE.incremental.scope;
+    const divergent = [
+      { ...scope, deltaFiles: [], interaction: [] },
+      { ...scope, deltaFiles: ['x.ts', 42] },
+      { ...scope, deltaFiles: [''] },
+    ];
+    for (const s of divergent) {
+      expect(
+        isFixAuditRound({
+          incremental: { ...POSTURE.incremental, scope: s },
+        }),
+      ).toBe(false);
+    }
+    // …and neither shape flips the topology or the round-cap tier.
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(
+      isTerritoryFanOut({
+        ...small,
+        incremental: { ...POSTURE.incremental, scope: divergent[0] },
+      }),
+    ).toBe(false);
+    expect(
+      reverseAuditRoundTier(
+        {
+          ...small,
+          incremental: { ...POSTURE.incremental, scope: divergent[1] },
+        },
+        false,
+      ),
+    ).toBe(10);
+
+    // …but a delta list mixing a valid path with an empty string is one the
+    // brief builder ACCEPTS — `incrementalScopeOf` rejects only non-string
+    // elements and filters '' AFTER admission — so the shape readers must
+    // accept it too, or the briefs render an incremental frame while every
+    // isFixAuditRound reader goes full: the exact two-reader disagreement
+    // this bar exists to eliminate.
+    expect(
+      isFixAuditRound({
+        incremental: {
+          ...POSTURE.incremental,
+          scope: { ...scope, deltaFiles: ['x.ts', ''] },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isTerritoryFanOut({
+        ...small,
+        incremental: {
+          ...POSTURE.incremental,
+          scope: { ...scope, deltaFiles: ['x.ts', ''] },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it('flips a small plan into the territory fan-out', () => {
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(isTerritoryFanOut(small)).toBe(false);
+    expect(isTerritoryFanOut({ ...small, ...POSTURE })).toBe(true);
+  });
+
+  it('prices the round cap at the territory tier it flips to', () => {
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(reverseAuditRoundTier(small, false)).toBe(10);
+    expect(reverseAuditRoundTier({ ...small, ...POSTURE }, false)).toBe(5);
+    // …while the size reading the default wall shares never sees the
+    // posture: a posture is not a size, so the same plan reads the same
+    // tier with or without its incremental block.
+    expect(sizeTier({ ...small, ...POSTURE })).toBe('small');
+    // The huge finishability ruling still wins under an explicit clock.
+    const huge = { srcDiffLines: 4000, diffLines: 5000, ...POSTURE };
+    expect(reverseAuditRoundTier(huge, true)).toBe(3);
+  });
+
+  it('stamps the flipped tier into the recorded budget', () => {
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(reviewBudget(small, {}).reverseAuditRounds).toBe(10);
+    expect(
+      reviewBudget(small, { incremental: POSTURE.incremental })
+        .reverseAuditRounds,
+    ).toBe(5);
+  });
+});
+
+describe('interactionEntryOf — one admission for every interaction-entry reader (#10136)', () => {
+  it('keeps the edge and nothing else an entry carries', () => {
+    expect(
+      interactionEntryOf({
+        path: 'src/b.ts',
+        importsChanged: ['src/a.ts'],
+        seam: { kept: 1, total: 2 },
+        note: 'a field no reader renders',
+      }),
+    ).toEqual({ path: 'src/b.ts', importsChanged: ['src/a.ts'] });
+  });
+
+  it('refuses an entry the briefs would not render', () => {
+    for (const raw of [
+      null,
+      'src/b.ts',
+      { importsChanged: ['src/a.ts'] },
+      { path: '', importsChanged: ['src/a.ts'] },
+      { path: 'src/b.ts' },
+      { path: 'src/b.ts', importsChanged: [] },
+      { path: 'src/b.ts', importsChanged: ['', 3] },
+    ]) {
+      expect(interactionEntryOf(raw)).toBeNull();
+    }
   });
 });
 
