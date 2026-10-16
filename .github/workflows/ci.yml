@@ -3,18 +3,13 @@
 name: 'Qwen Code CI'
 
 on:
-  # This trigger was removed on the premise that the merge queue validates the
-  # merged tree before it lands. No queue is enabled (none since 2026-07-02),
-  # so nothing validated that tree on either side of a merge: `main` had no
-  # gate before one and nothing faster than the ~40-minute E2E after one.
+  # Keep post-merge validation of main alongside the merge queue's validation
+  # of prospective merged trees.
   # `test`, `lint_and_static`, and the `classify_pr` they depend on accept
   # it (see their `if`s); every other job excludes push, so a post-merge run
   # is exactly those three. The no-AK integration gate is its own
   # `integration_no_ak` job on pull_request / merge_group, so this lane is
-  # lint, static analysis and unit tests. Removing it once the queue is
-  # enabled means dropping the trigger AND the push arm from ALL THREE
-  # `if`s: a partial removal leaves every merge running the survivors alone,
-  # publishing outputs nothing consumes.
+  # lint, static analysis and unit tests.
   push:
     branches:
       - 'main'
@@ -24,13 +19,10 @@ on:
       - 'release/**'
       - 'omni-experiment'
   merge_group:
-  # The macOS and Windows lanes' ONLY remaining trigger, and therefore this
-  # repository's only signal about a host that is not Linux with a GNU
-  # userland. Those two are otherwise gated on `merge_group`, and the merge
-  # queue is not enabled here — no queue run since 2026-07-02 — while their
+  # Validate macOS and Windows daily as well as on `merge_group`. Their
   # pull-request trigger is off until the standing Windows failures are fixed
-  # (see test_macos). A regression therefore surfaces here, one day later, on
-  # `main`, and nowhere else: treat a red nightly as a blocker, not as noise.
+  # (see test_macos), so the nightly also covers merges outside the queue.
+  # Treat a red nightly as a blocker, not as noise.
   # Every other job here excludes `schedule` explicitly, so a nightly run is
   # exactly two jobs.
   schedule:
@@ -1112,14 +1104,15 @@ jobs:
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: 'node .github/scripts/check-lint-gate-freshness.mjs'
 
-      # Keep the cheap schema guards on PRs and main while Java runs daily.
+      # Checkout is shallow, so fetch the queue's pinned base or the PR's target.
       - name: 'Fetch base branch for version checks'
         id: 'version_base'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
         env:
           BASE_REF: '${{ github.event.pull_request.base.ref }}'
+          QUEUE_BASE_SHA: '${{ github.event.merge_group.base_sha }}'
         run: |-
-          git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
+          git fetch --quiet --depth=1 --filter=blob:none origin "${QUEUE_BASE_SHA:-refs/heads/${BASE_REF}}"
           BASE_SHA="$(git rev-parse FETCH_HEAD)"
           echo "sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"
 

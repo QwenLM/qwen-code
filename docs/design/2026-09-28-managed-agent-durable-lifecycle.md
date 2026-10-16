@@ -297,12 +297,14 @@ instead would make Flyway refuse to start a database that already applied the
 later version. Upgrade tests apply the ordered sequence before service
 startup. Uniqueness across both migration locations and all scanned Maven
 modules is enforced without a database by `scripts/check-flyway-migrations.js`,
-which runs in Qwen Code CI on every pull request and push (#12940); the daily
-and manual SDK Java runs retain the uniqueness check.
+which runs in Qwen Code CI on every pull request, merge queue run, and push
+(#12940); the daily and manual SDK Java runs retain the uniqueness check.
 On `pull_request`, it also requires newly added versions to be strictly above
 the fetched base snapshot's newest version, passed via `FLYWAY_BASE_REF`;
-push runs check uniqueness only. That check sees a pull request against the
-`main` of the moment it ran, so every push to `main` that
+on `merge_group`, it fetches the event's pinned `merge_group.base_sha` and
+enforces the same ordering against that snapshot, including on shallow
+checkouts. Push runs check uniqueness only. A PR-time check sees the branch
+against the `main` of the moment it ran, so every push to `main` that
 changes a migration, and a schedule every 30 minutes, re-check the open pull
 requests against `main` and set the
 `Flyway migration version uniqueness (latest main)` status on each one that

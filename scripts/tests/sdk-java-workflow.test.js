@@ -323,7 +323,7 @@ describe('SDK Java Flyway migration version guard', () => {
     );
   });
 
-  it('fetches the pull request baseline before enforcing migration ordering', () => {
+  it('fetches the pull request or merge queue baseline before enforcing migration ordering', () => {
     const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
     const steps = ci.jobs.lint_and_static.steps;
     const fetchIndex = steps.findIndex(
@@ -337,14 +337,17 @@ describe('SDK Java Flyway migration version guard', () => {
     );
     expect(fetchIndex).toBeLessThan(checkIndex);
     expect(steps[fetchIndex].if).toBe(
-      "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
     );
     expect(steps[fetchIndex].env.BASE_REF).toBe(
       '${{ github.event.pull_request.base.ref }}',
     );
+    expect(steps[fetchIndex].env.QUEUE_BASE_SHA).toBe(
+      '${{ github.event.merge_group.base_sha }}',
+    );
     expect(steps[fetchIndex].id).toBe('version_base');
     expect(steps[fetchIndex].run).toContain(
-      'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"',
+      'git fetch --quiet --depth=1 --filter=blob:none origin "${QUEUE_BASE_SHA:-refs/heads/${BASE_REF}}"',
     );
     expect(steps[fetchIndex].run).toContain('git rev-parse FETCH_HEAD');
     expect(steps[fetchIndex].run).toContain(
