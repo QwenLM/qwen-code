@@ -67,6 +67,7 @@ class SessionLifecycleCoordinatorTest {
         Mockito.doThrow(failure).when(harness).prepareLifecycleResources(operation);
         var warmer = Mockito.mock(RuntimeWarmer.class);
         Mockito.when(warmer.supportsWorkspaceClose()).thenReturn(true);
+        Mockito.when(warmer.supportsWorkspaceClose(session.workspace())).thenReturn(true);
         var authority = com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.authority(operation);
         Mockito.when(warmer.recoverStoppedWorkspaceResources("tenant", "session", authority)).thenReturn(CompletableFuture.completedFuture(null));
         Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
@@ -95,6 +96,65 @@ class SessionLifecycleCoordinatorTest {
                     Mockito.verify(lifecycle, Mockito.never()).verifyResources(operation);
                 }
                 Mockito.verify(warmer, Mockito.times(recovery ? 1 : 0)).recoverStoppedWorkspaceResources("tenant", "session", authority);
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"0,true", "0,false", "1,true", "1,false"})
+    void settlesOnlyWhenTheSelectedBindingSupportsClose(int protocol, boolean supported) throws Exception {
+        var store = Mockito.mock(com.alibaba.qwen.code.managedagent.store.AgentStateStore.class);
+        var session = Mockito.mock(StoreModels.SessionRecord.class);
+        var workspace = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                "tenant", "workspace", 1, "storage", ".", "config", 1);
+        Mockito.when(session.workspace()).thenReturn(workspace);
+        Mockito.when(session.toolProfile()).thenReturn(WorkspaceExecutionProfile.PROFILE);
+        Mockito.when(store.requireSession("tenant", "session")).thenReturn(session);
+        var warmer = Mockito.mock(RuntimeWarmer.class);
+        Mockito.when(warmer.supportsWorkspaceClose()).thenReturn(!supported);
+        Mockito.when(warmer.supportsWorkspaceClose(workspace)).thenReturn(supported);
+        Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
+        var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.CLOSE,
+                "digest", "DELIVERING", "ACCEPTED", "DRAINING", "ACTIVE", "receipt", "server", 1, 1, null, protocol);
+        var lifecycle = Mockito.mock(com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
+        Mockito.when(lifecycle.recoverEffects(operation)).thenReturn(new ObjectMapper().createObjectNode().put("neverInitialized", true));
+        var relay = Mockito.mock(ChildResultRelayStore.class);
+        Mockito.when(relay.findLiveScopes("tenant", "session")).thenReturn(List.of());
+        var harness = Mockito.mock(HarnessConnector.class);
+        Mockito.when(harness.supportsLifecycle(WorkspaceExecutionProfile.PROFILE)).thenReturn(true);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class), harness,
+                    warmer, relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor,
+                    Clock.systemUTC(), new ManagedAgentProperties());
+            coordinator.setWorkspaceLifecycleStore(lifecycle);
+            try {
+                assertThat(coordinator.supportsWorkspaceLifecycle(session)).isEqualTo(supported);
+                Mockito.when(harness.supportsLifecycle(WorkspaceExecutionProfile.PROFILE)).thenReturn(false);
+                assertThat(coordinator.supportsWorkspaceLifecycle(session)).isFalse();
+                Mockito.when(harness.supportsLifecycle(WorkspaceExecutionProfile.PROFILE)).thenReturn(true);
+                var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class,
+                        java.util.concurrent.atomic.AtomicBoolean.class);
+                settle.setAccessible(true);
+                if (supported) {
+                    assertThat(settle.invoke(coordinator, operation,
+                            new java.util.concurrent.atomic.AtomicBoolean())).isEqualTo(protocol != 0);
+                    Mockito.verify(warmer).closeWorkspace("tenant", "session");
+                } else {
+                    var error = org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
+                            () -> settle.invoke(coordinator, operation,
+                                    new java.util.concurrent.atomic.AtomicBoolean()));
+                    if (protocol == 0) {
+                        assertThat(error.getCause()).isInstanceOfSatisfying(
+                                com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class,
+                                failure -> assertThat(failure.getCode()).isEqualTo("workspace_close_identity_unverified"));
+                    } else {
+                        assertThat(error.getCause()).isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.api.ApiException.class,
+                                failure -> assertThat(failure.getCode()).isEqualTo("workspace_close_identity_unverified"));
+                    }
+                    Mockito.verify(warmer, Mockito.never()).closeWorkspace(Mockito.anyString(), Mockito.anyString());
+                }
             } finally {
                 coordinator.stopRenewals();
             }

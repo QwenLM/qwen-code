@@ -20,6 +20,7 @@ public final class LoadHarnessSession {
     private List<Map<String, Object>> mcpServers;
     private Map<String, Object> hookCatalog;
     private boolean stopMessages;
+    private boolean foregroundOnly;
 
     /**
      * #13753 I2: a copy that tells the Hosted side this control plane
@@ -65,6 +66,24 @@ public final class LoadHarnessSession {
         copy.childWorkspaces = value;
         copy.childSnapshots = value && snapshots;
         copy.stopMessages = stopMessages;
+        copy.foregroundOnly = foregroundOnly;
+        return copy;
+    }
+
+    /** Restates the immutable SSH Session tool restriction on every attachment. */
+    public LoadHarnessSession withForegroundOnly(boolean value) {
+        LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
+                suppressChildAgents);
+        copy.agentDefinition = agentDefinition;
+        copy.mcpServers = mcpServers;
+        copy.hookCatalog = hookCatalog;
+        copy.lifecycleAuthority = lifecycleAuthority;
+        copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
+        copy.childWorkspaces = childWorkspaces;
+        copy.childSnapshots = childSnapshots;
+        copy.stopMessages = stopMessages;
+        copy.foregroundOnly = value;
         return copy;
     }
 
@@ -90,6 +109,7 @@ public final class LoadHarnessSession {
         copy.childWorkspaces = childWorkspaces;
         copy.childSnapshots = childSnapshots;
         copy.stopMessages = stopMessages;
+        copy.foregroundOnly = foregroundOnly;
         return copy;
     }
 
@@ -107,6 +127,7 @@ public final class LoadHarnessSession {
         copy.childWorkspaces = childWorkspaces;
         copy.childSnapshots = childSnapshots;
         copy.stopMessages = true;
+        copy.foregroundOnly = foregroundOnly;
         return copy;
     }
 
@@ -217,6 +238,9 @@ public final class LoadHarnessSession {
         }
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
+        }
+        if (foregroundOnly) {
+            result.put("foregroundOnly", true);
         }
         if (childSnapshots) {
             result.put("childSnapshots", true);
