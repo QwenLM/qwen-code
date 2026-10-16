@@ -1314,6 +1314,8 @@ export interface CloseSessionOpts {
    * leaves the session live.
    */
   closeIfUnheld?: boolean;
+  /** Refuse the close unless the owning runtime confirms the session is idle. */
+  requireIdle?: boolean;
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
   /**
