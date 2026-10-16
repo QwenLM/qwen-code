@@ -59,7 +59,6 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.arrowKeysScrollTranscript',
   'ui.showScrollbar',
   'ui.hideBanner',
-  'ui.accessibility.enableLoadingPhrases',
   'ui.enableWelcomeBack',
 ]);
 
@@ -69,6 +68,7 @@ const TUI_ONLY_SETTINGS = new Set([
 // `/voice/stream` then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set([
   'ui.compactMode',
+  'ui.customWittyPhrases',
   'voiceModel',
   'imageModel',
   'advisorModel',
