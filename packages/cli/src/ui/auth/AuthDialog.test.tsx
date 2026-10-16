@@ -1547,26 +1547,27 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       );
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+      try {
+        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+        stdin.write('\r');
+        await waitForSelectedOption(lastFrame, 'Token Plan');
+        // The sub-menu heading comes from VIEW_TITLES, unlike the flowTitle path
+        // asserted below, so it is the assertion that pins render-time lookup.
+        expect(lastFrame()).toContain('千问AI平台 · 接入方式');
+        stdin.write('\r');
 
-      await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
-      stdin.write('\r');
-      await waitForSelectedOption(lastFrame, 'Token Plan');
-      // The sub-menu heading comes from VIEW_TITLES, unlike the flowTitle path
-      // asserted below, so it is the assertion that pins render-time lookup.
-      expect(lastFrame()).toContain('千问AI平台 · 接入方式');
-      stdin.write('\r');
-
-      await vi.waitFor(
-        () => {
-          const frame = lastFrame();
-          expect(frame).toContain('千问AI平台');
-          expect(frame).not.toContain('QwenCloud · Step');
-        },
-        { timeout: WAIT_FOR_TIMEOUT },
-      );
-
-      unmount();
-      await setLanguageAsync('en');
+        await vi.waitFor(
+          () => {
+            const frame = lastFrame();
+            expect(frame).toContain('千问AI平台');
+            expect(frame).not.toContain('QwenCloud · Step');
+          },
+          { timeout: WAIT_FOR_TIMEOUT },
+        );
+      } finally {
+        unmount();
+        await setLanguageAsync('en');
+      }
     },
   );
 

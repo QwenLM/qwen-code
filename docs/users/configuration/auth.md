@@ -80,6 +80,10 @@ If you prefer to skip the interactive `/auth` flow, add the following to `~/.qwe
 }
 ```
 
+> [!note]
+>
+> `capabilities` is the one provider stamp that is never inferred from the model name, so a hand-written entry resolves with no reasoning declaration and `/effort` offers the generic tier list rather than QwenCloud's curated `low` / `medium` / `xhigh`. Use `/auth` to install the provider when you want the curated set.
+
 As with the other provider-specific keys, `QWENCLOUD_API_KEY` and `QWENCLOUD_TOKEN_PLAN_API_KEY` take effect once a `settings.json` provider entry declares them as the `envKey`; to select OpenAI-compatible auth with environment variables alone, export `OPENAI_API_KEY` instead.
 
 > [!note]
