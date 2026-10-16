@@ -2061,8 +2061,35 @@ describe('purgeSingleScopeOrphans', () => {
 
     expect(removeSessionId).not.toHaveBeenCalled();
     expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
-      "cannot verify the router's session scope",
+      "cannot confirm the router's session scope",
     );
+    stderrSpy.mockRestore();
+  });
+
+  it('spares the live single-scope key when the router pins the channel to single', () => {
+    // A daemon router starts from the configured default and can be pinned per
+    // channel with setChannelScope. The purge must read that per-channel value:
+    // falling back to the router default would treat the key the router is
+    // actively routing with as a single-scope-era orphan and delete it.
+    const router = new SessionRouter({} as never, '/tmp', 'user');
+    router.setChannelScope('test-bot', 'single');
+    const removeSessionId = vi
+      .spyOn(router, 'removeSessionId')
+      .mockImplementation(() => true);
+    vi.spyOn(router, 'getAll').mockReturnValue([
+      {
+        key: singleScopeRoutingKey('test-bot'),
+        sessionId: 'live-single-1',
+        target: { channelName: 'test-bot' },
+      },
+    ]);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    expect(removeSessionId).not.toHaveBeenCalled();
     stderrSpy.mockRestore();
   });
 });

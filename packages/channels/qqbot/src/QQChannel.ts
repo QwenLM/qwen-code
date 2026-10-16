@@ -2116,7 +2116,10 @@ export class QQChannel extends ChannelBase {
       // superseded-id redirect can point several keys at one), so releasing it
       // would tear that live route — and its daemon session — down with the
       // orphan. Resolve this before the rescue ledger is written, so the ledger
-      // lists only the routes that are actually released.
+      // lists the routes the purge plans to delete and this guard did not
+      // withhold, never one the guard leaves in place. (removeSessionId runs
+      // after the write, so a router that refuses it can still leave an
+      // over-listed record — the safe direction for a rescue copy.)
       const doomedKeys = new Set(doomed.map((entry) => entry.key));
       const liveSessionIds = new Set<string>();
       for (const entry of all) {
@@ -2134,11 +2137,11 @@ export class QQChannel extends ChannelBase {
         return;
       }
       if (!scopeTrusted && this.qqConfig.purgeLegacySessions === true) {
-        // Fail closed and say so: the rewrite may have replaced the channel's
-        // scope and this router exposes none to check it against, so the
-        // user-scope branch is refused rather than guessed at.
+        // Fail closed and say so: the channel's scope may have been rewritten
+        // and this router exposes none to check it against, so the user-scope
+        // branch is refused rather than guessed at.
         process.stderr.write(
-          `[QQ:${this.name}] purgeSingleScopeOrphans cannot verify the router's session scope (groupAllPolicy rewrites the channel's own scope), leaving this channel's user-scope routes in place\n`,
+          `[QQ:${this.name}] purgeSingleScopeOrphans cannot confirm the router's session scope, leaving this channel's user-scope routes in place\n`,
         );
       }
       for (const entry of doomed) {
