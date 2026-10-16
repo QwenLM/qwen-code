@@ -171,11 +171,11 @@ public class ManagedToolResultStore {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String workspace = (String) candidate.get("workspace_id");
                                 String session = (String) candidate.get("session_id");
-                                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                                 if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                     return false;
                                 }
                                 var head = lockBackfillHead(tenant, workspace, session);
+                                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                                 if (head == null) {
                                     return false;
                                 }
@@ -245,13 +245,13 @@ public class ManagedToolResultStore {
                         status -> {
                             String tenant = (String) failed.get("tenant_id");
                             String session = (String) failed.get("session_id");
-                            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                             if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                 return;
                             }
                             var current =
                                     lockBackfillHead(
                                             tenant, (String) failed.get("workspace_id"), session);
+                            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                             if (failed.equals(current)) {
                                 jdbc.update(
                                         "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", o3_backfill_error ="
@@ -339,11 +339,11 @@ public class ManagedToolResultStore {
                             for (var candidate : rows) {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
-                                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                                 if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                     continue;
                                 }
                                 ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
+                                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                                 var current =
                                         jdbc.queryForList(
                                                 "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'TOOL_RESULT_PROJECTION' FOR UPDATE",
@@ -433,11 +433,11 @@ public class ManagedToolResultStore {
                             }
                             String tenant = (String) rows.getFirst().get("tenant_id");
                             String session = (String) rows.getFirst().get("session_id");
-                            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                             if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                 return false;
                             }
                             ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
+                            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                             var row =
                                     jdbc.queryForMap(
                                             "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ? FOR UPDATE",

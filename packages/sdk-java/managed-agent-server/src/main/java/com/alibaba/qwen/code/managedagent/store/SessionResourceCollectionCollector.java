@@ -190,13 +190,17 @@ public final class SessionResourceCollectionCollector {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
                                 String scope = (String) candidate.get("scope_key");
-                                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                                 if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                     return null;
                                 }
                                 var head =
                                         ToolPublicationRetentionStore.lockSessionHead(
                                                 jdbc, tenant, session);
+                                // The page holds the retention guard for the
+                                // whole claim; the row is already locked via
+                                // lockSessionHead above, behind the Session
+                                // root (#13800).
+                                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                                 var row =
                                         jdbc.query(
                                                         "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' FOR UPDATE",
@@ -344,9 +348,9 @@ public final class SessionResourceCollectionCollector {
 
     private Boolean page(Claim claim) {
         // Session locks precede the ledger row lock, matching claim()'s order.
-        ToolPublicationRetentionStore.lockTenant(jdbc, claim.tenant());
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, claim.tenant(), claim.session());
         var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, claim.tenant(), claim.session());
+        ToolPublicationRetentionStore.lockTenant(jdbc, claim.tenant());
         var row =
                 jdbc.query(
                                 "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' FOR UPDATE",

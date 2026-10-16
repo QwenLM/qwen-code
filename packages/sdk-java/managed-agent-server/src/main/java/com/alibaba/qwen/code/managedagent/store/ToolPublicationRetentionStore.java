@@ -115,13 +115,14 @@ public final class ToolPublicationRetentionStore {
 
     private static Map<String, Object> lockSessionHead(
             JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
-        // Retention-read callers reach the tenant CAS row here before the
-        // head row, so the acquisition runs bounded with the shared
-        // named-failure mapping: a held row answers tenant_guard_contended
-        // instead of out-waiting the caller's own request budget (#13800).
+        // The root is taken before the tenant CAS row so retention matches
+        // the CSI lane's root-first order (#13800); the CAS row still runs
+        // bounded with the shared named-failure mapping: a held row answers
+        // tenant_guard_contended instead of out-waiting the caller's own
+        // request budget.
+        lockSessionRoot(jdbc, tenant, session, legacyMutation);
         ManagedSessionStore.lockBounded(() -> lockTenant(jdbc, tenant,
                 ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        lockSessionRoot(jdbc, tenant, session, legacyMutation);
         var heads =
                 jdbc.query(
                         "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
