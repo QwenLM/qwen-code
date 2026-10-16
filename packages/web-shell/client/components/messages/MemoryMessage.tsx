@@ -46,9 +46,10 @@ export function MemoryMessage({
   onMessage,
 }: MemoryMessageProps) {
   const { t } = useI18n();
-  const { files, loading, error, readFile, reload, writeMemory } = useMemory({
-    autoLoad: true,
-  });
+  const { files, status, loading, error, readMemoryFile, reload, writeMemory } =
+    useMemory({
+      autoLoad: true,
+    });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const loadSeqRef = useRef(0);
   const [selectedScope, setSelectedScope] = useState<MemoryScope>('workspace');
@@ -57,6 +58,10 @@ export function MemoryMessage({
   const [draft, setDraft] = useState('');
   const [contentLoading, setContentLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // False when an existing file's full text is not in hand (read failed
+  // or truncated): saving uses mode=replace, which would overwrite
+  // whatever the panel could not show.
+  const [editable, setEditable] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const handledAddSignalRef = useRef(0);
 
@@ -84,6 +89,14 @@ export function MemoryMessage({
   const selectedEntry =
     entries.find((entry) => entry.scope === selectedScope) ?? entries[0];
 
+  // Replace needs both the file's full text and the list that says whether
+  // the file exists. While the status load is outstanding (`status` is
+  // undefined on first paint, in flight, and after a failure) `files` is
+  // empty, so the create path below would offer replace over a file that is
+  // really on disk. Keying on the load having succeeded — never on `files`
+  // being empty — keeps the legitimate first-memory-file create path working.
+  const canReplace = editable && status !== undefined;
+
   const loadContent = useCallback(
     (entry: MemoryEntry | undefined, nextMode: MemoryMode) => {
       const loadSeq = ++loadSeqRef.current;
@@ -91,6 +104,7 @@ export function MemoryMessage({
       setMessage(null);
       setContent('');
       setDraft('');
+      setEditable(true);
       if (!entry?.file) {
         if (nextMode === 'edit') {
           requestAnimationFrame(() => editorRef.current?.focus());
@@ -98,26 +112,37 @@ export function MemoryMessage({
         return;
       }
       setContentLoading(true);
-      readFile(entry.file.path)
+      readMemoryFile(entry.file.path)
         .then((result) => {
           if (loadSeq !== loadSeqRef.current) return;
           setContent(result.content);
+          if (result.truncated) {
+            setEditable(false);
+            setMode('view');
+            setMessage(t('memory.fileTruncated'));
+            return;
+          }
           setDraft(result.content);
-          if (result.truncated) setMessage(t('memory.fileTruncated'));
           requestAnimationFrame(() => editorRef.current?.focus());
         })
         .catch((readError: unknown) => {
           if (loadSeq !== loadSeqRef.current) return;
+          setEditable(false);
+          setMode('view');
+          if (entry.scope === 'global') {
+            setMessage(t('memory.globalReadUnsupported'));
+            return;
+          }
           const text =
             readError instanceof Error ? readError.message : String(readError);
           setMessage(text);
-          if (entry.scope !== 'global') onMessage?.(text, 'error');
+          onMessage?.(text, 'error');
         })
         .finally(() => {
           if (loadSeq === loadSeqRef.current) setContentLoading(false);
         });
     },
-    [onMessage, readFile, t],
+    [onMessage, readMemoryFile, t],
   );
 
   useEffect(() => {
@@ -167,17 +192,25 @@ export function MemoryMessage({
   };
 
   const handleSave = () => {
-    if (!selectedEntry) return;
+    if (!selectedEntry || !canReplace) return;
     if (!draft.trim()) {
       setMessage(t('memory.contentEmpty'));
       return;
     }
     setSaving(true);
     setMessage(null);
+    // The <textarea> value API normalizes CRLF to LF, so a one-line edit
+    // would otherwise rewrite every line ending in the file. Restore the
+    // loaded file's own endings — only when they are uniformly CRLF, so a
+    // mixed-ending file is never double-CR'd, and idempotently (`\r?`), so a
+    // draft that was never typed into still holds the file's own CRLF.
+    const restoreCrlf =
+      content.includes('\r\n') && !content.replace(/\r\n/g, '').includes('\n');
+    const payload = restoreCrlf ? draft.replace(/\r?\n/g, '\r\n') : draft;
     writeMemory({
       scope: selectedEntry.scope,
       mode: 'replace',
-      content: draft,
+      content: payload,
     })
       .then((result) => {
         const savedMessage = t('memory.saved', {
@@ -185,7 +218,7 @@ export function MemoryMessage({
           bytes: result.bytesWritten,
           path: result.filePath,
         });
-        setContent(draft);
+        setContent(payload);
         setMode('view');
         setMessage(savedMessage);
         onMessage?.(savedMessage, 'status');
@@ -232,6 +265,7 @@ export function MemoryMessage({
             <button
               type="button"
               className={styles.actionButton}
+              disabled={!canReplace}
               onClick={handleEdit}
             >
               {t('settings.action.edit')}
@@ -268,7 +302,7 @@ export function MemoryMessage({
               <button
                 type="button"
                 className={styles.primaryButton}
-                disabled={saving || contentLoading}
+                disabled={saving || contentLoading || !canReplace}
                 onClick={handleSave}
               >
                 {saving ? t('memory.saving') : t('memory.save')}

@@ -7,6 +7,7 @@
 export const WEB_SHELL_PAGES = [
   'plugins',
   'channels',
+  'live',
   'scheduled-tasks',
   'goals',
   'settings',

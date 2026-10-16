@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookExecutionOwner } from '../hooks/hook-execution-context.js';
 import type { FunctionCall } from '@google/genai';
 import type {
   ToolConfirmationOutcome,
@@ -106,6 +107,7 @@ export interface ToolExecutionFailure<E = Error> {
 }
 
 export interface HookExecutionRequest {
+  owner: HookExecutionOwner | undefined;
   type: MessageBusType.HOOK_EXECUTION_REQUEST;
   eventName: string;
   input: Record<string, unknown>;

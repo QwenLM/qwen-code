@@ -785,7 +785,11 @@ describe('standalone release packaging', () => {
       packageScript,
     );
     expect(requiredBlock).not.toBeNull();
-    for (const asset of ['sandboxBwrapRelay.js', 'sandboxFileWorker.js']) {
+    for (const asset of [
+      'sandboxBwrapRelay.js',
+      'sandboxLandlockRelay.js',
+      'sandboxFileWorker.js',
+    ]) {
       expect(allowedBlock[1]).toContain(`'${asset}'`);
       expect(npmOnlyBlock[1]).not.toContain(`'${asset}'`);
       expect(requiredBlock[1]).toContain(`'${asset}'`);
@@ -2226,6 +2230,9 @@ describe('standalone release packaging', () => {
         existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
       ).toBe(true);
       expect(
+        readScript(path.join(extractDir, 'qwen-code', 'lib', 'mod-worker.js')),
+      ).toBe('export {};\n');
+      expect(
         existsSync(
           path.join(extractDir, 'qwen-code', 'lib', 'execution-worker.js'),
         ),
@@ -2426,6 +2433,11 @@ describe('standalone release packaging', () => {
         expect(
           existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
         ).toBe(true);
+        expect(
+          readScript(
+            path.join(extractDir, 'qwen-code', 'lib', 'mod-worker.js'),
+          ),
+        ).toBe('export {};\n');
         const shim = readScript(
           path.join(extractDir, 'qwen-code', 'bin', 'qwen'),
         );
@@ -5188,13 +5200,21 @@ function ensureMinimalDist({
   }
 
   mkdirSync(path.join(distPath, 'chunks'), { recursive: true });
+  mkdirSync(path.join(distPath, 'mem0'), { recursive: true });
+  writeFileSync(path.join(distPath, 'mem0/main.js'), 'export {};\n');
+  writeFileSync(
+    path.join(distPath, 'mem0/write-confirmation.js'),
+    'export {};\n',
+  );
   mkdirSync(path.join(distPath, 'vendor'), { recursive: true });
   mkdirSync(path.join(distPath, 'bundled/qc-helper/docs'), {
     recursive: true,
   });
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
   writeFileSync(path.join(distPath, 'codeModeHost.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'mod-worker.js'), 'export {};\n');
   writeFileSync(path.join(distPath, 'sandboxBwrapRelay.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'sandboxLandlockRelay.js'), 'export {};\n');
   writeFileSync(path.join(distPath, 'sandboxFileWorker.js'), 'export {};\n');
   if (includeCliEntry) {
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');

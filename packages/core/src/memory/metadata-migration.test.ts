@@ -32,6 +32,18 @@ import { parseAutoMemoryTopicDocument } from './structured-scan.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({ runForkedAgent: vi.fn() }));
 
+const debugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => debugLogger,
+}));
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return { ...actual };
@@ -1244,9 +1256,12 @@ describe('memory metadata migration', () => {
         return readdir(...args);
       });
     try {
-      await expect(runMemoryMetadataMigration(params)).rejects.toThrow(
-        'incomplete',
-      );
+      await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+        attempted: 1,
+        committed: 1,
+        remainingLegacyFiles: 0,
+        indexRebuildError: expect.stringContaining('incomplete'),
+      });
       expect(generateMetadata).toHaveBeenCalledTimes(1);
       expect(await fs.readFile(filePath, 'utf-8')).toContain(
         'name: Migrated memory',
@@ -1288,13 +1303,26 @@ describe('memory metadata migration', () => {
       generateMetadata,
     };
 
-    await expect(runMemoryMetadataMigration(params)).rejects.toThrow();
-    await fs.rmdir(index);
     await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+      attempted: 1,
+      committed: 1,
+      remainingLegacyFiles: 0,
+      indexRebuildError: expect.any(String),
+    });
+    // The swallowed rebuild failure must still reach the debug channel —
+    // the in-memory record is gone at process exit.
+    expect(debugLogger.error).toHaveBeenCalledWith(
+      'Memory index rebuild failed:',
+      expect.any(Error),
+    );
+    await fs.rmdir(index);
+    const repaired = await runMemoryMetadataMigration(params);
+    expect(repaired).toMatchObject({
       attempted: 0,
       committed: 0,
       remainingLegacyFiles: 0,
     });
+    expect(repaired).not.toHaveProperty('indexRebuildError');
     expect(generateMetadata).toHaveBeenCalledTimes(1);
     await expect(fs.readFile(index, 'utf-8')).resolves.toContain('legacy.md');
   });

@@ -5,9 +5,12 @@
  */
 
 import * as fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
+import nodeOs from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describeTree as describeTreeUnder } from '../test-utils/describe-tree.js';
 import { resetHomeEnvBootstrapForTesting } from './environment.js';
 import { readSettingsSnapshot } from './settings.js';
 
@@ -77,29 +80,7 @@ describe('readSettingsSnapshot', () => {
   const read = (workspaceTrusted = true) =>
     readSettingsSnapshot(workspace, { environment, workspaceTrusted });
 
-  // Every entry under the root with its bytes and identity.
-  const describeTree = (): string[] => {
-    const lines: string[] = [];
-    const walk = (directory: string) => {
-      for (const entry of fs.readdirSync(directory).sort()) {
-        const entryPath = path.join(directory, entry);
-        const stats = fs.lstatSync(entryPath, { bigint: true });
-        const identity = `${stats.ino}:${stats.mtimeNs}:${stats.ctimeNs}`;
-        if (stats.isDirectory()) {
-          lines.push(`${path.relative(root, entryPath)}/ ${identity}`);
-          walk(entryPath);
-        } else {
-          lines.push(
-            `${path.relative(root, entryPath)} ${identity} ${
-              stats.isFile() ? fs.readFileSync(entryPath, 'utf8') : 'link'
-            }`,
-          );
-        }
-      }
-    };
-    walk(root);
-    return lines;
-  };
+  const describeTree = () => describeTreeUnder(root);
 
   it('locates and merges the layers through the given environment', () => {
     vi.stubEnv('QWEN_HOME', path.join(root, 'elsewhere'));
@@ -160,6 +141,31 @@ describe('readSettingsSnapshot', () => {
     expect(merged.ui?.theme).toBe('${QWEN_SNAPSHOT_TEST_THEME}');
   });
 
+  it('resolves placeholders on Windows as a spawned session host sees them', () => {
+    fs.writeFileSync(
+      userFile,
+      JSON.stringify({
+        $version: 4,
+        tools: { approvalMode: '${mode}' },
+        general: { preferredEditor: '${Editor}' },
+      }),
+    );
+    // A workspace .env can add a second spelling beside the daemon's own;
+    // spawn passes on only the one that sorts first.
+    environment['MODE'] = 'plan';
+    environment['mode'] = 'default';
+    environment['EDITOR'] = 'vim';
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const merged = read().merged;
+      expect(merged.tools?.approvalMode).toBe('plan');
+      expect(merged.general?.preferredEditor).toBe('vim');
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+  });
+
   it('never looks for user settings the process home still holds', () => {
     // A process whose QWEN_HOME has moved away from a home that still holds
     // settings warns about the move after swapping QWEN_HOME to find them.
@@ -193,6 +199,20 @@ describe('readSettingsSnapshot', () => {
     expect(version(settings.user)).toBe(4);
     expect(version(settings.workspace)).toBe(4);
     expect(describeTree()).toEqual(treeBefore);
+  });
+
+  // The evaluation checks this first, through the same resolveHomeDirectory.
+  it('throws when the home directory cannot be resolved', () => {
+    // Builtin named exports follow the module object only after a sync.
+    const homedir = nodeOs.homedir;
+    nodeOs.homedir = () => path.join(root, 'missing-home');
+    syncBuiltinESMExports();
+    try {
+      expect(() => read()).toThrow(/ENOENT/);
+    } finally {
+      nodeOs.homedir = homedir;
+      syncBuiltinESMExports();
+    }
   });
 
   it('reads and writes nothing without an environment', () => {

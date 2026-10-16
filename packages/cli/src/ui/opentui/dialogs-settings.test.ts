@@ -12,6 +12,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
@@ -25,6 +27,7 @@ import {
   editInsert,
   editMoveCursor,
   filterSettingsItems,
+  formatSettingRowValue,
   isSubDialogSetting,
   nextToggleValue,
   parseEditCommit,
@@ -63,6 +66,55 @@ describe('sub-dialog settings', () => {
   });
 });
 
+describe('formatSettingRowValue', () => {
+  // The picker persists `authType:id\0baseUrl`; the suffix can carry userinfo.
+  const credentialSelector = 'o:f\0https://user:sk-secret@h.example/v1';
+
+  it('redacts userinfo from an aux-model selector row', () => {
+    for (const key of ['fastModel', 'visionModel']) {
+      const rendered = formatSettingRowValue(key, credentialSelector);
+      expect(rendered).toBe('o:f (https://h.example/v1)');
+      expect(rendered).not.toContain('sk-secret');
+    }
+  });
+
+  it('drops an unpublishable suffix instead of echoing it', () => {
+    expect(formatSettingRowValue('fastModel', 'o:f\0not-a-url')).toBe('o:f');
+  });
+
+  it('leaves clean selectors and non-aux rows on the legacy String() path', () => {
+    expect(
+      formatSettingRowValue('fastModel', 'o:f\0https://h.example/v1'),
+    ).toBe('o:f (https://h.example/v1)');
+    expect(formatSettingRowValue('fastModel', 'o:f')).toBe('o:f');
+    expect(formatSettingRowValue('general.preferredEditor', 'nvim')).toBe(
+      'nvim',
+    );
+    expect(formatSettingRowValue('ui.someNumber', 42)).toBe('42');
+  });
+});
+
+describe('settings row rendering contract', () => {
+  it('lists the credential-bearing aux keys as inline string rows', () => {
+    const items = buildSettingsListItems();
+    for (const key of ['fastModel', 'visionModel']) {
+      expect(items.find((item) => item.key === key)?.type).toBe('string');
+    }
+  });
+
+  it('routes the inline number/string row value through the aux-aware formatter', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('./dialogs-settings.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(source).toContain('displayValue = formatSettingRowValue(');
+    // Reverting the row to the raw string re-opens the credential egress.
+    expect(source).not.toContain(
+      'displayValue = String(effectiveCurrentValue)',
+    );
+  });
+});
+
 describe('buildSettingsListItems', () => {
   it('sources rows from the settings schema, in dialog order', () => {
     const items = buildSettingsListItems();
@@ -72,6 +124,7 @@ describe('buildSettingsListItems', () => {
     expect(keys.indexOf('tools.codeModeOnly')).toBe(
       keys.indexOf('tools.approvalMode') + 1,
     );
+    expect(keys).not.toContain('tools.freeform');
     // Labels are resolved from the schema definitions.
     const themeItem = items.find((item) => item.key === 'ui.theme');
     expect(themeItem?.label).toBeTruthy();

@@ -681,23 +681,26 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     }
   });
 
-  it('normalizes the plural workspace upload route to a stable route label', () => {
-    const mw = daemonTelemetryMiddleware(() => '/ws');
-    const res = mockRes(200);
-    mw(
-      mockReq('POST', '/workspaces/ws-secondary/file/upload'),
-      res,
-      vi.fn() as unknown as NextFunction,
-    );
-    res.emit('finish');
-    expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        method: 'POST',
-        route: 'POST /workspace/file/upload',
-      }),
-      expect.any(Function),
-    );
-  });
+  it.each(['upload', 'delete'])(
+    'normalizes the plural workspace %s route to a stable route label',
+    (operation) => {
+      const mw = daemonTelemetryMiddleware(() => '/ws');
+      const res = mockRes(200);
+      mw(
+        mockReq('POST', `/workspaces/ws-secondary/file/${operation}`),
+        res,
+        vi.fn() as unknown as NextFunction,
+      );
+      res.emit('finish');
+      expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          method: 'POST',
+          route: `POST /workspace/file/${operation}`,
+        }),
+        expect.any(Function),
+      );
+    },
+  );
 
   it('attributes plural workspace voice requests to the selected workspace', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
@@ -1140,17 +1143,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 describe('legacy session telemetry route catalog', () => {
   // MCP App calls resolve the live session owner in the handler, adding one
   // handler-resolved route while preserving the two pre-resolved routes.
-  it('contains 75 unique routes with the audited 73/2 attribution split', () => {
+  it('contains 80 unique routes with the audited 78/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(75);
-    expect(new Set(keys).size).toBe(75);
+    expect(keys).toHaveLength(80);
+    expect(new Set(keys).size).toBe(80);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(73);
+    ).toHaveLength(78);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

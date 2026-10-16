@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionService } from '@qwen-code/qwen-code-core';
 import type { Config, ResumedSessionData } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 import {
   handleBranchSession,
   handleResumeSession,
@@ -249,6 +250,30 @@ describe('handleResumeSession', () => {
     );
   });
 
+  it('re-initializes the client when rolling back after the core swap', async () => {
+    // The forward initialize succeeds; the failure lands at the transcript
+    // reset (after the core swap, before the UI commit). The rollback's
+    // startNewSession clears the reviewed-schema evidence, so the client
+    // must be re-initialized against the restored session — otherwise the
+    // next hidden deferred call is refused even though its tool_search
+    // block is still in context. Removing the rollback's initialize() reds
+    // this: the count stays at the forward call alone.
+    const { config, calls } = createFakeConfig();
+    const host = createFakeHost(config);
+    vi.mocked(host.resetTranscript).mockImplementation(() => {
+      throw new Error('transcript boom');
+    });
+
+    await handleResumeSession(host, 'target-session');
+
+    expect(calls.startNewSession.map(([id]) => id)).toEqual([
+      'target-session',
+      'old-session',
+    ]);
+    expect(calls.clientInitialize).toBe(2);
+    expect(calls.swapAbort).toBe(1);
+  });
+
   it('blocks the switch while background work is running', async () => {
     const { config, calls } = createFakeConfig();
     const registry = config.getBackgroundTaskRegistry() as unknown as {
@@ -327,6 +352,12 @@ describe('handleBranchSession', () => {
 
   it('forks, persists a title, swaps core then UI, and announces', async () => {
     const { config, calls } = createFakeConfig();
+    const syncSession = vi.fn(async () => {
+      expect(calls.swapCommit).toBe(1);
+    });
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      syncSession,
+    } as unknown as interactiveMods.InteractiveModSession);
     const forkSession = vi.fn(async () => {});
     const renameSession = vi.fn(async () => true);
     const sessionService = {
@@ -355,6 +386,7 @@ describe('handleBranchSession', () => {
     expect(host.loadHistory).toHaveBeenCalled();
     expect(host.resetTranscript).toHaveBeenCalledTimes(1);
     expect(host.setSessionName).toHaveBeenCalled();
+    expect(syncSession).toHaveBeenCalledExactlyOnceWith('resume');
     // The two-line announcement (branch + resume hint).
     const infos = (host.addItem as ReturnType<typeof vi.fn>).mock.calls
       .map((call) => call[0])
@@ -366,6 +398,10 @@ describe('handleBranchSession', () => {
 
   it('removes the fork and reports the failure when the title write fails', async () => {
     const { config, calls } = createFakeConfig();
+    const syncSession = vi.fn();
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      syncSession,
+    } as unknown as interactiveMods.InteractiveModSession);
     const removeSession = vi.fn(async () => true);
     const sessionService = {
       loadSession: async () => emptySession(),
@@ -383,6 +419,7 @@ describe('handleBranchSession', () => {
 
     expect(removeSession).toHaveBeenCalled();
     expect(calls.startNewSession).toHaveLength(0);
+    expect(syncSession).not.toHaveBeenCalled();
     expect(host.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',

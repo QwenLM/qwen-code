@@ -22,7 +22,7 @@ const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
 // The docker-sandbox E2E leg builds its image by running this script, so an
 // over-budget package turns main's E2E run red as well as blocking publishing.
-const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 128 * 1024 * 1024;
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 160 * 1024 * 1024;
 const PACKAGE_TEXT_FILE_RE =
   /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh|svg|map)$/i;
 const PACKAGE_SCAN_FORBIDDEN_LITERALS = [
@@ -69,6 +69,11 @@ function verifyBundleArtifacts(rootDir, distDir) {
   const requiredPaths = [
     path.join(distDir, 'cli.js'),
     path.join(distDir, 'execution-worker.js'),
+    path.join(distDir, 'mem0', 'main.js'),
+    path.join(distDir, 'mem0', 'write-confirmation.js'),
+    path.join(distDir, 'sandboxBwrapRelay.js'),
+    path.join(distDir, 'sandboxLandlockRelay.js'),
+    path.join(distDir, 'sandboxFileWorker.js'),
     path.join(distDir, 'vendor'),
     path.join(distDir, 'bundled', 'qc-helper', 'docs'),
     // The Web Shell ships with the published package ("Web Shell out of the
@@ -344,9 +349,13 @@ function writeDistPackageJson(rootDir, distDir) {
       // Must ship in the tarball or the @-picker silently falls back to the
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
+      'glob-search-worker.js',
       'codeModeHost.js',
+      'mod-worker.js',
       'sandboxBwrapRelay.js',
+      'sandboxLandlockRelay.js',
       'sandboxFileWorker.js',
+      'mem0',
       'chunks',
       'vendor',
       '*.sb',

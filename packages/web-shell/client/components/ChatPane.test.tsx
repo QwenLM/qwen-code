@@ -105,6 +105,7 @@ const daemonActions = {
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
 const editQueuedPrompt = vi.fn();
+const sendQueuedPromptNow = vi.fn();
 const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
 let queuedPromptsMock: any[] = [];
@@ -178,6 +179,7 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
       queuedTexts: queuedTextsMock,
       enqueuePrompt,
       removeQueuedPrompt,
+      sendQueuedPromptNow,
       editQueuedPrompt,
       editLastQueuedPrompt,
       clearQueuedPrompts,
@@ -378,6 +380,8 @@ vi.mock('./QueuedPromptDisplay', () => ({
       data-testid="pane-queue"
       data-can-mutate-mid-turn={String(props.canMutateMidTurn)}
       data-can-insert-mid-turn={String(props.canInsertMidTurn)}
+      data-can-send-mid-turn-now={String(props.canSendMidTurnNow)}
+      onClick={() => props.onSendNow?.(1)}
     >
       {String(props.prompts.length)}
     </div>
@@ -1563,6 +1567,7 @@ describe('ChatPane', () => {
     pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
     render();
     expect(testid('pane-approval')).not.toBeNull();
+    expect(latestToolApprovalProps?.showBrowserNotifications).toBe(true);
     // The streaming status and the editor share the approval-hidden wrapper,
     // so neither lingers below the dialog.
     expect(testid('pane-streaming')?.parentElement?.className).toContain(
@@ -2979,6 +2984,19 @@ describe('ChatPane', () => {
     expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
   });
 
+  it('offers send-now on queued rows only when advertised', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
+    render();
+    expect(testid('pane-queue')?.dataset.canSendMidTurnNow).toBe('false');
+    connectionState.capabilities = {
+      features: ['session_mid_turn_send_now'],
+    };
+    rerender();
+    expect(testid('pane-queue')?.dataset.canSendMidTurnNow).toBe('true');
+    act(() => testid('pane-queue')?.click());
+    expect(sendQueuedPromptNow).toHaveBeenCalledWith(1);
+  });
+
   it('passes follow-up suggestions to the pane editor', () => {
     render();
     expect(testid('pane-followup')?.textContent).toBe('next idea');
@@ -3094,23 +3112,33 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
   });
 
-  it('shows context usage for this pane session', async () => {
-    render();
+  it.each(['idle', 'responding'])(
+    'shows context usage for this pane session while %s',
+    async (state) => {
+      streamingStateValue = state;
+      render();
 
-    await act(async () => {
-      latestChatEditorProps.onShowContextUsage();
-    });
+      await act(async () => {
+        latestChatEditorProps.onShowContextUsage();
+      });
 
-    expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
-    expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
-    expect(transcriptDispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        clearActiveText: false,
-        text: expect.stringContaining('web-shell:context-usage:v1:'),
-      }),
-    ]);
-  });
+      if (state === 'idle')
+        expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
+      else expect(appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
+      expect(transcriptDispatch).toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          clearActiveText: false,
+          text: 'Context Usage',
+          data: {
+            type: 'web-shell:context-usage:v1:',
+            status: { usage: { totalTokens: 1200, contextWindowSize: 8192 } },
+          },
+        }),
+      ]);
+    },
+  );
 
   it('hides model setup dynamically while preserving model and session commands', () => {
     connectionState.commands = [

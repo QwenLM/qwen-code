@@ -7,21 +7,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { InProcessBackend } from './InProcessBackend.js';
 import { DISPLAY_MODE } from './types.js';
-import type { AgentSpawnConfig } from './types.js';
+import type { AgentSpawnConfig, InProcessSpawnConfig } from './types.js';
 import { AgentCore } from '../runtime/agent-core.js';
 import { getTeammateContext } from '../team/identity.js';
 import { createContentGenerator } from '../../core/contentGenerator.js';
 import { ApprovalMode, Config } from '../../config/config.js';
 import { hasRebuiltToolRegistry } from '../../tools/agent/agent.js';
 import { join } from 'node:path';
+import { modelText, userText } from '../../test-utils/model-fixtures.js';
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
 
 // Mock createContentGenerator to avoid real API client setup
-const mockContentGenerator = {
-  generateContentStream: vi.fn(),
-};
+const mockContentGenerator = { generateContentStream: vi.fn() };
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../core/contentGenerator.js')>();
@@ -33,10 +32,9 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   };
 });
 
-// Mock AgentCore to avoid real model calls. The factory, the positional
-// destructure helper, and the mock ToolRegistry live in a shared fixture
-// so this suite and TeamManager.model-routing.test.ts assert against the
-// same mocked AgentCore surface.
+// Mock AgentCore to avoid real model calls. The factory, destructure helper
+// and mock ToolRegistry are shared with TeamManager.model-routing.test.ts so
+// both suites assert against the same mocked AgentCore surface.
 vi.mock('../runtime/agent-core.js', async () =>
   (await import('../runtime/agent-core-test-mock.js')).agentCoreMockModule(),
 );
@@ -45,6 +43,9 @@ import {
   destructureAgentCoreCall,
   createMockToolRegistry,
 } from '../runtime/agent-core-test-mock.js';
+
+type Mock = ReturnType<typeof vi.fn>;
+const mockCreate = createContentGenerator as Mock;
 
 function createMockConfig() {
   const registry = createMockToolRegistry();
@@ -82,7 +83,25 @@ function createMockConfig() {
   } as never;
 }
 
-function createSpawnConfig(agentId: string): AgentSpawnConfig {
+/** createMockConfig() typed for the getters cases re-stub or inspect. */
+type MockConfig = Record<
+  | 'createToolRegistry'
+  | 'getApprovalMode'
+  | 'getFileFilteringOptions'
+  | 'getMonitorRegistry'
+  | 'getPermissionManager'
+  | 'getPlanFilePath'
+  | 'isTrustedFolder'
+  | 'setApprovalMode',
+  Mock
+>;
+const mockConfig = () => createMockConfig() as unknown as MockConfig;
+
+/** `inProcess` fields in `extra` are set on top of the defaults. */
+function createSpawnConfig(
+  agentId: string,
+  extra: Partial<InProcessSpawnConfig> = {},
+): AgentSpawnConfig {
   return {
     agentId,
     command: 'node',
@@ -96,9 +115,43 @@ function createSpawnConfig(agentId: string): AgentSpawnConfig {
         modelConfig: { model: 'test-model' },
         runConfig: { max_turns: 10 },
       },
+      ...extra,
     },
   };
 }
+
+/** init(), then spawn each spec (an id means createSpawnConfig(id)). */
+async function started(
+  b: InProcessBackend,
+  ...specs: Array<string | AgentSpawnConfig>
+) {
+  await b.init();
+  for (const spec of specs) {
+    await b.spawnAgent(
+      typeof spec === 'string' ? createSpawnConfig(spec) : spec,
+    );
+  }
+  return b;
+}
+
+/** started() on a fresh backend over `parent`. */
+const backendOn = (
+  parent: unknown,
+  ...specs: Array<string | AgentSpawnConfig>
+) => started(new InProcessBackend(parent as never), ...specs);
+
+const agentCoreCalls = () => (AgentCore as unknown as Mock).mock.calls;
+
+/** The latest AgentCore construction; `checked` also asserts it happened. */
+function lastCoreCall(checked = false) {
+  const call = agentCoreCalls().at(-1);
+  if (checked) expect(call).toBeDefined();
+  return destructureAgentCoreCall(call!);
+}
+
+const registriesOf = (b: InProcessBackend) =>
+  (b as unknown as { agentRegistries: Map<string, { stop: Mock }> })
+    .agentRegistries;
 
 describe('InProcessBackend', () => {
   let backend: InProcessBackend;
@@ -112,6 +165,56 @@ describe('InProcessBackend', () => {
     });
     backend = new InProcessBackend(createMockConfig());
   });
+
+  /** Moves the roster one step, then asserts which agent is active. */
+  const nav = (move: 'switchToNext' | 'switchToPrevious', active: string) => {
+    backend[move]();
+    expect(backend.getActiveAgentId()).toBe(active);
+  };
+
+  /** Swaps in a permission manager; returns its strip/restore spies. */
+  function mockPermissionManager(parent: MockConfig) {
+    const manager = {
+      restoreDangerousRules: vi.fn(),
+      stripDangerousRulesForAutoMode: vi.fn(),
+    };
+    parent.getPermissionManager.mockReturnValue(manager);
+    return manager;
+  }
+
+  /** Spawns two idle AUTO children over `parent` with a mocked manager. */
+  async function twoAutoChildren(parent: MockConfig) {
+    const manager = mockPermissionManager(parent);
+    const auto = (agentId: string) =>
+      createSpawnConfig(agentId, {
+        approvalMode: ApprovalMode.AUTO,
+        initialTask: undefined,
+      });
+    const b = await backendOn(parent, auto('agent-1'), auto('agent-2'));
+    return { manager, localBackend: b };
+  }
+
+  /** Spawns agent-1 over `parent`; returns its own Config. */
+  async function agentConfigOn(parent: unknown, approvalMode?: ApprovalMode) {
+    const extra = approvalMode ? { approvalMode } : {};
+    await backendOn(parent, createSpawnConfig('agent-1', extra));
+    return lastCoreCall(true).runtimeContext as unknown as Config;
+  }
+
+  // agent-1 + agent-2 on a config minting a fresh registry per call: the
+  // shared createMockConfig singleton would conflate r1/r2 and make
+  // per-registry call counts ambiguous.
+  async function twoWithOwnRegistries() {
+    const config = mockConfig();
+    config.createToolRegistry = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(createMockToolRegistry()));
+    const localBackend = await backendOn(config, 'agent-1', 'agent-2');
+    const registries = registriesOf(localBackend);
+    const r1 = registries.get('agent-1')!;
+    const r2 = registries.get('agent-2')!;
+    return { localBackend, registries, r1, r2 };
+  }
 
   it('should have IN_PROCESS type', () => {
     expect(backend.type).toBe(DISPLAY_MODE.IN_PROCESS);
@@ -147,21 +250,14 @@ describe('InProcessBackend', () => {
   });
 
   it('should throw when spawning without inProcess config', async () => {
-    const config: AgentSpawnConfig = {
-      agentId: 'test',
-      command: 'node',
-      args: [],
-      cwd: '/tmp',
-    };
-
+    const config = { agentId: 'test', command: 'node', args: [], cwd: '/tmp' };
     await expect(backend.spawnAgent(config)).rejects.toThrow(
       'InProcessBackend requires inProcess config',
     );
   });
 
   it('should spawn an agent with inProcess config', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    await started(backend, 'agent-1');
 
     expect(backend.getActiveAgentId()).toBe('agent-1');
     expect(backend.getAgent('agent-1')).toBeDefined();
@@ -171,26 +267,15 @@ describe('InProcessBackend', () => {
   });
 
   it('routes owned monitor notifications into the agent message queue', async () => {
-    // AgentInteractive frames tool bodies under the agent identity, so a
-    // monitor it starts is agent-owned — and owned-monitor dispatch has no
-    // session fallback. Spawn must register the routing; stop must tear it
-    // down and cancel anything still running.
-    const mockConfig = createMockConfig();
-    const monitorRegistry = (
-      mockConfig as unknown as {
-        getMonitorRegistry: () => {
-          setAgentNotificationCallback: ReturnType<typeof vi.fn>;
-          cancelRunningForOwner: ReturnType<typeof vi.fn>;
-        };
-      }
-    ).getMonitorRegistry();
-    const localBackend = new InProcessBackend(
-      mockConfig as unknown as ConstructorParameters<
-        typeof InProcessBackend
-      >[0],
-    );
-    await localBackend.init();
-    await localBackend.spawnAgent(createSpawnConfig('agent-1'));
+    // AgentInteractive frames tool bodies under the agent identity, so its
+    // monitors are agent-owned with no session fallback: spawn must register
+    // the routing; stop must tear it down and cancel anything still running.
+    const parent = mockConfig();
+    const monitorRegistry = parent.getMonitorRegistry() as Record<
+      'setAgentNotificationCallback' | 'cancelRunningForOwner',
+      Mock
+    >;
+    const localBackend = await backendOn(parent, 'agent-1');
 
     expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
       'agent-1',
@@ -216,50 +301,28 @@ describe('InProcessBackend', () => {
   });
 
   it('should set first spawned agent as active', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-    await backend.spawnAgent(createSpawnConfig('agent-2'));
-
+    await started(backend, 'agent-1', 'agent-2');
     expect(backend.getActiveAgentId()).toBe('agent-1');
   });
 
   it('should navigate between agents', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-    await backend.spawnAgent(createSpawnConfig('agent-2'));
-    await backend.spawnAgent(createSpawnConfig('agent-3'));
-
+    await started(backend, 'agent-1', 'agent-2', 'agent-3');
     expect(backend.getActiveAgentId()).toBe('agent-1');
-
-    backend.switchToNext();
-    expect(backend.getActiveAgentId()).toBe('agent-2');
-
-    backend.switchToNext();
-    expect(backend.getActiveAgentId()).toBe('agent-3');
-
-    // Wraps around
-    backend.switchToNext();
-    expect(backend.getActiveAgentId()).toBe('agent-1');
-
-    backend.switchToPrevious();
-    expect(backend.getActiveAgentId()).toBe('agent-3');
+    nav('switchToNext', 'agent-2');
+    nav('switchToNext', 'agent-3');
+    nav('switchToNext', 'agent-1'); // wraps around
+    nav('switchToPrevious', 'agent-3');
   });
 
   it('should switch to a specific agent', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-    await backend.spawnAgent(createSpawnConfig('agent-2'));
-
+    await started(backend, 'agent-1', 'agent-2');
     backend.switchTo('agent-2');
     expect(backend.getActiveAgentId()).toBe('agent-2');
   });
 
   it('should forward input to active agent', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-
-    const result = backend.forwardInput('hello');
-    expect(result).toBe(true);
+    await started(backend, 'agent-1');
+    expect(backend.forwardInput('hello')).toBe(true);
   });
 
   it('should return false for forwardInput with no active agent', () => {
@@ -267,9 +330,7 @@ describe('InProcessBackend', () => {
   });
 
   it('should write to specific agent', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-
+    await started(backend, 'agent-1');
     expect(backend.writeToAgent('agent-1', 'hello')).toBe(true);
     expect(backend.writeToAgent('nonexistent', 'hello')).toBe(false);
   });
@@ -280,20 +341,19 @@ describe('InProcessBackend', () => {
       seenContexts.push(getTeammateContext());
       return { text: 'Done', terminateMode: null, turnsUsed: 1 };
     });
-    await backend.init();
-    const config = createSpawnConfig('planner@test-team');
-    config.inProcess!.initialTask = undefined;
-    Object.assign(config.inProcess!, {
-      teammateIdentity: {
-        agentId: 'planner@test-team',
-        agentName: 'planner',
-        teamName: 'test-team',
-        isTeamLead: false,
-        planModeRequired: true,
-      },
-    });
-
-    await backend.spawnAgent(config);
+    await started(
+      backend,
+      createSpawnConfig('planner@test-team', {
+        initialTask: undefined,
+        teammateIdentity: {
+          agentId: 'planner@test-team',
+          agentName: 'planner',
+          teamName: 'test-team',
+          isTeamLead: false,
+          planModeRequired: true,
+        },
+      }),
+    );
     const agent = backend.getAgent('planner@test-team');
     expect(agent).toBeDefined();
 
@@ -311,9 +371,7 @@ describe('InProcessBackend', () => {
   });
 
   it('should return null for screen capture methods', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-
+    await started(backend, 'agent-1');
     expect(backend.getActiveSnapshot()).toBeNull();
     expect(backend.getAgentSnapshot('agent-1')).toBeNull();
     expect(backend.getAgentScrollbackLength('agent-1')).toBe(0);
@@ -324,31 +382,19 @@ describe('InProcessBackend', () => {
   });
 
   it('should stop a specific agent', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-
-    const agent = backend.getAgent('agent-1');
-    expect(agent).toBeDefined();
-
+    await started(backend, 'agent-1');
+    expect(backend.getAgent('agent-1')).toBeDefined();
     backend.stopAgent('agent-1');
     // Agent should eventually reach cancelled state
   });
 
   it('stopAgent disposes the per-agent tool registry and clears the Map entry', async () => {
-    // Regression: per-agent tool registries used to live in a flat array
-    // and only got disposed at backend cleanup(). With the Map, stopAgent
-    // must (1) call registry.stop() so listeners on shared managers
-    // (SkillManager / SubagentManager) get released immediately, and (2)
-    // delete the Map entry so a subsequent cleanup() doesn't double-stop
-    // and a re-spawn with the same id can take a fresh registry.
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-
-    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
-    const registries = (
-      backend as unknown as { agentRegistries: AgentRegistries }
-    ).agentRegistries;
-
+    // Regression: registries lived in a flat array disposed only at cleanup().
+    // stopAgent must (1) call registry.stop() so listeners on shared managers
+    // (SkillManager / SubagentManager) are released at once, and (2) delete
+    // the Map entry so cleanup() doesn't double-stop and a same-id respawn
+    // can take a fresh registry.
+    const registries = registriesOf(await started(backend, 'agent-1'));
     const registry = registries.get('agent-1');
     expect(registry).toBeDefined();
     expect(registries.has('agent-1')).toBe(true);
@@ -360,17 +406,10 @@ describe('InProcessBackend', () => {
   });
 
   it('stopAgent on a non-existent id is a no-op (no throw, Map untouched)', async () => {
-    // Defensive: if an upstream caller (e.g. SubagentManager) loses track
-    // and asks to stop an unknown agent, we silently ignore rather than
-    // throwing — matches the behavior of `agents.get` returning undefined
-    // for the agent itself in the same method.
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-
-    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
-    const registries = (
-      backend as unknown as { agentRegistries: AgentRegistries }
-    ).agentRegistries;
+    // Defensive: an upstream caller (e.g. SubagentManager) that lost track may
+    // stop an unknown id; ignore it rather than throw, matching `agents.get`
+    // returning undefined for the agent itself in the same method.
+    const registries = registriesOf(await started(backend, 'agent-1'));
     const sizeBefore = registries.size;
 
     expect(() => backend.stopAgent('agent-does-not-exist')).not.toThrow();
@@ -378,12 +417,10 @@ describe('InProcessBackend', () => {
   });
 
   it('stopAgent keeps the handle readable for post-stop inspection while freeing the id for respawn', async () => {
-    // ArenaManager resolves transcripts through getAgent after the
-    // arena timeout path stops its agents (collectResults ->
-    // getAgentTranscript). Deleting the handle in stopAgent silently
-    // dropped those reads; retention must also keep respawns working.
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    // ArenaManager reads transcripts via getAgent after its timeout path stops
+    // agents (collectResults -> getAgentTranscript); deleting the handle in
+    // stopAgent silently dropped those reads. Respawns must still work.
+    await started(backend, 'agent-1');
     const agent = backend.getAgent('agent-1');
     expect(agent).toBeDefined();
 
@@ -407,14 +444,11 @@ describe('InProcessBackend', () => {
   });
 
   it('stopAgent reassigns the active agent and removes the stopped id from navigation', async () => {
-    // Mutation pin for the stopAgent roster bookkeeping: without the
-    // agentOrder splice a same-id respawn duplicates the entry and
-    // navigate() wrap-around skews; without the activeAgentId
-    // reassignment, forwardInput resolves to a stopped agent and
-    // typed input is silently dropped.
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-    await backend.spawnAgent(createSpawnConfig('agent-2'));
+    // Mutation pin for stopAgent roster bookkeeping: without the agentOrder
+    // splice a same-id respawn duplicates the entry and navigate() wrap-around
+    // skews; without the activeAgentId reassignment, forwardInput resolves to
+    // a stopped agent and typed input is silently dropped.
+    await started(backend, 'agent-1', 'agent-2');
     expect(backend.getActiveAgentId()).toBe('agent-1');
 
     backend.stopAgent('agent-1');
@@ -432,40 +466,15 @@ describe('InProcessBackend', () => {
     // cycles over exactly the two surviving ids.
     await backend.spawnAgent(createSpawnConfig('agent-1'));
     expect(backend.getActiveAgentId()).toBe('agent-2');
-    backend.switchToNext();
-    expect(backend.getActiveAgentId()).toBe('agent-1');
-    backend.switchToNext();
-    expect(backend.getActiveAgentId()).toBe('agent-2');
-    backend.switchToPrevious();
-    expect(backend.getActiveAgentId()).toBe('agent-1');
+    nav('switchToNext', 'agent-1');
+    nav('switchToNext', 'agent-2');
+    nav('switchToPrevious', 'agent-1');
   });
 
   it('cleanup disposes all remaining registries (covers the in-flight shutdown path)', async () => {
-    // Even when stopAgent has not been called for every agent (fast-path
-    // shutdown / tab close), cleanup must drain the Map so listeners
-    // don't leak past process exit.
-    //
-    // Build a config whose createToolRegistry returns a fresh mock per
-    // call — the shared `createMockConfig` returns the same singleton
-    // every spawn, which would conflate r1/r2 into a single instance and
-    // make per-registry call counts ambiguous.
-    const config = createMockConfig() as unknown as {
-      createToolRegistry: ReturnType<typeof vi.fn>;
-    };
-    config.createToolRegistry = vi
-      .fn()
-      .mockImplementation(() => Promise.resolve(createMockToolRegistry()));
-    const localBackend = new InProcessBackend(config as never);
-    await localBackend.init();
-    await localBackend.spawnAgent(createSpawnConfig('agent-1'));
-    await localBackend.spawnAgent(createSpawnConfig('agent-2'));
-
-    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
-    const registries = (
-      localBackend as unknown as { agentRegistries: AgentRegistries }
-    ).agentRegistries;
-    const r1 = registries.get('agent-1')!;
-    const r2 = registries.get('agent-2')!;
+    // Even when stopAgent was not called for every agent (fast-path shutdown,
+    // tab close), cleanup must drain the Map so listeners don't outlive exit.
+    const { localBackend, registries, r1, r2 } = await twoWithOwnRegistries();
     expect(r1).not.toBe(r2);
 
     await localBackend.cleanup();
@@ -476,23 +485,7 @@ describe('InProcessBackend', () => {
   });
 
   it('should stop all agents', async () => {
-    const config = createMockConfig() as unknown as {
-      createToolRegistry: ReturnType<typeof vi.fn>;
-    };
-    config.createToolRegistry = vi
-      .fn()
-      .mockImplementation(() => Promise.resolve(createMockToolRegistry()));
-    const localBackend = new InProcessBackend(config as never);
-    await localBackend.init();
-    await localBackend.spawnAgent(createSpawnConfig('agent-1'));
-    await localBackend.spawnAgent(createSpawnConfig('agent-2'));
-
-    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
-    const registries = (
-      localBackend as unknown as { agentRegistries: AgentRegistries }
-    ).agentRegistries;
-    const r1 = registries.get('agent-1')!;
-    const r2 = registries.get('agent-2')!;
+    const { localBackend, registries, r1, r2 } = await twoWithOwnRegistries();
 
     localBackend.stopAll();
 
@@ -502,101 +495,50 @@ describe('InProcessBackend', () => {
   });
 
   it('restores approval override cleanup when per-agent setup fails', async () => {
-    const restoreDangerousRules = vi.fn();
-    const stripDangerousRulesForAutoMode = vi.fn();
-    const parentConfig = createMockConfig() as unknown as {
-      createToolRegistry: ReturnType<typeof vi.fn>;
-      getPermissionManager: ReturnType<typeof vi.fn>;
-    };
+    const parentConfig = mockConfig();
     parentConfig.createToolRegistry.mockRejectedValueOnce(
       new Error('registry boom'),
     );
-    parentConfig.getPermissionManager.mockReturnValue({
-      restoreDangerousRules,
-      stripDangerousRulesForAutoMode,
+    const manager = mockPermissionManager(parentConfig);
+    const localBackend = await backendOn(parentConfig);
+
+    const config = createSpawnConfig('agent-1', {
+      approvalMode: ApprovalMode.AUTO,
     });
-    const localBackend = new InProcessBackend(parentConfig as never);
-    await localBackend.init();
-
-    const config = createSpawnConfig('agent-1');
-    config.inProcess!.approvalMode = ApprovalMode.AUTO;
-
     await expect(localBackend.spawnAgent(config)).rejects.toThrow(
       'registry boom',
     );
-    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
-    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+    expect(manager.stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+    expect(manager.restoreDangerousRules).toHaveBeenCalledTimes(1);
   });
 
   it('keeps dangerous rules stripped until the last AUTO child exits', async () => {
-    const restoreDangerousRules = vi.fn();
-    const stripDangerousRulesForAutoMode = vi.fn();
-    const parentConfig = createMockConfig() as unknown as {
-      getPermissionManager: ReturnType<typeof vi.fn>;
-    };
-    parentConfig.getPermissionManager.mockReturnValue({
-      restoreDangerousRules,
-      stripDangerousRulesForAutoMode,
-    });
-    const localBackend = new InProcessBackend(parentConfig as never);
-    await localBackend.init();
+    const { manager, localBackend } = await twoAutoChildren(mockConfig());
 
-    const first = createSpawnConfig('agent-1');
-    first.inProcess!.approvalMode = ApprovalMode.AUTO;
-    first.inProcess!.initialTask = undefined;
-    const second = createSpawnConfig('agent-2');
-    second.inProcess!.approvalMode = ApprovalMode.AUTO;
-    second.inProcess!.initialTask = undefined;
-
-    await localBackend.spawnAgent(first);
-    await localBackend.spawnAgent(second);
-
-    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+    expect(manager.stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
     localBackend.stopAgent('agent-1');
-    expect(restoreDangerousRules).not.toHaveBeenCalled();
+    expect(manager.restoreDangerousRules).not.toHaveBeenCalled();
 
     localBackend.stopAgent('agent-2');
-    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+    expect(manager.restoreDangerousRules).toHaveBeenCalledTimes(1);
   });
 
   it('continues tracking AUTO children while the parent mode changes', async () => {
-    const restoreDangerousRules = vi.fn();
-    const stripDangerousRulesForAutoMode = vi.fn();
     let parentMode = DEFAULT_MODE;
-    const parentConfig = createMockConfig() as unknown as {
-      getApprovalMode: ReturnType<typeof vi.fn>;
-      getPermissionManager: ReturnType<typeof vi.fn>;
-    };
+    const parentConfig = mockConfig();
     parentConfig.getApprovalMode.mockImplementation(() => parentMode);
-    parentConfig.getPermissionManager.mockReturnValue({
-      restoreDangerousRules,
-      stripDangerousRulesForAutoMode,
-    });
-    const localBackend = new InProcessBackend(parentConfig as never);
-    await localBackend.init();
-
-    const first = createSpawnConfig('agent-1');
-    first.inProcess!.approvalMode = ApprovalMode.AUTO;
-    first.inProcess!.initialTask = undefined;
-    const second = createSpawnConfig('agent-2');
-    second.inProcess!.approvalMode = ApprovalMode.AUTO;
-    second.inProcess!.initialTask = undefined;
-
-    await localBackend.spawnAgent(first);
-    await localBackend.spawnAgent(second);
+    const { manager, localBackend } = await twoAutoChildren(parentConfig);
     parentMode = ApprovalMode.AUTO;
     localBackend.stopAgent('agent-1');
     parentMode = DEFAULT_MODE;
     localBackend.stopAgent('agent-2');
 
-    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
-    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+    expect(manager.stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+    expect(manager.restoreDangerousRules).toHaveBeenCalledTimes(1);
   });
 
   it('should cleanup all agents', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-
+    await started(backend, 'agent-1');
     await backend.cleanup();
 
     expect(backend.getActiveAgentId()).toBeNull();
@@ -611,13 +553,11 @@ describe('InProcessBackend', () => {
 
     await backend.spawnAgent(createSpawnConfig('agent-1'));
 
-    // The mock agent stays idle after processing initialTask.
-    // Trigger a graceful shutdown to make it complete.
+    // The mock agent idles after initialTask; a graceful shutdown completes it.
     const agent = backend.getAgent('agent-1');
     expect(agent).toBeDefined();
     await agent!.shutdown();
 
-    // Wait for the exit callback to fire
     await vi.waitFor(() => {
       expect(exitCallback).toHaveBeenCalledWith(
         'agent-1',
@@ -628,68 +568,31 @@ describe('InProcessBackend', () => {
   });
 
   it('should pass per-agent cwd to AgentCore via config proxy', async () => {
-    const parentConfig = createMockConfig();
-    const backendWithParentCwd = new InProcessBackend(parentConfig);
-    await backendWithParentCwd.init();
-
     const agentCwd = '/worktree/agent-1';
-    const config = createSpawnConfig('agent-1');
-    config.cwd = agentCwd;
+    await backendOn(createMockConfig(), {
+      ...createSpawnConfig('agent-1'),
+      cwd: agentCwd,
+    });
 
-    await backendWithParentCwd.spawnAgent(config);
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const lastCall = MockAgentCore.mock.calls.at(-1);
-    expect(lastCall).toBeDefined();
-
-    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
-    const agentContext = runtimeContext as unknown as {
-      getWorkingDir: () => string;
-      getTargetDir: () => string;
-      getToolRegistry: () => unknown;
-    };
+    const agentContext = lastCoreCall(true).runtimeContext as unknown as Config;
     expect(agentContext.getWorkingDir()).toBe(agentCwd);
     expect(agentContext.getTargetDir()).toBe(agentCwd);
     expect(agentContext.getToolRegistry()).toBeDefined();
 
-    // This config is LONG-LIVED — the agent keeps it — so it must NOT carry
-    // the rebuilt marker. `hasRebuiltToolRegistry` reads it through the
-    // prototype chain, so a wrapper built on it later (a dir-scoped workflow
-    // dispatch) would see it and skip `buildSubagentContextOverride`'s
-    // rebuild — the sole re-anchoring that lifts the subagent's tools above
-    // that wrapper. Without it, relative paths resolve against this agent's
-    // cwd instead of the provisioned worktree.
-    //
-    // Pinned HERE, at the call site, because the helper's own tests pass
-    // explicit options and so say nothing about what this caller passes:
-    // dropping `{ markRebuilt: false }` left every other suite green.
-    expect(hasRebuiltToolRegistry(runtimeContext as unknown as Config)).toBe(
-      false,
-    );
+    // This config is LONG-LIVED (the agent keeps it), so it must NOT carry the
+    // rebuilt marker: `hasRebuiltToolRegistry` reads it through the prototype
+    // chain, so a later wrapper on it (a dir-scoped workflow dispatch) would
+    // skip `buildSubagentContextOverride`'s rebuild, the sole re-anchoring
+    // that lifts the subagent's tools above that wrapper, and relative paths
+    // would resolve against this agent's cwd, not the provisioned worktree.
+    // Pinned HERE, at the call site: the helper's own tests pass explicit
+    // options, and dropping `{ markRebuilt: false }` left every suite green.
+    expect(hasRebuiltToolRegistry(agentContext)).toBe(false);
   });
 
   it('uses a per-agent approval mode without mutating the parent config', async () => {
-    const parentConfig = createMockConfig() as unknown as {
-      getApprovalMode: ReturnType<typeof vi.fn>;
-      setApprovalMode: ReturnType<typeof vi.fn>;
-    };
-    const backendWithParentMode = new InProcessBackend(parentConfig as never);
-    await backendWithParentMode.init();
-
-    const config = createSpawnConfig('agent-1');
-    config.inProcess!.approvalMode = PLAN_MODE;
-
-    await backendWithParentMode.spawnAgent(config);
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const lastCall = MockAgentCore.mock.calls.at(-1);
-    expect(lastCall).toBeDefined();
-
-    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
-    const agentContext = runtimeContext as unknown as {
-      getApprovalMode: () => ApprovalMode;
-      getPrePlanMode: () => ApprovalMode;
-    };
+    const parentConfig = mockConfig();
+    const agentContext = await agentConfigOn(parentConfig, PLAN_MODE);
     expect(agentContext.getApprovalMode()).toBe(PLAN_MODE);
     expect(agentContext.getPrePlanMode()).toBe(DEFAULT_MODE);
     expect(parentConfig.getApprovalMode()).toBe(DEFAULT_MODE);
@@ -697,35 +600,21 @@ describe('InProcessBackend', () => {
   });
 
   it('copies the inherited plan-exit event into a per-agent mode override', async () => {
-    const parentConfig = createMockConfig() as unknown as Record<
-      string,
-      unknown
-    >;
+    const parentConfig: Record<string, unknown> = createMockConfig();
     Object.assign(parentConfig, {
       approvalMode: ApprovalMode.DEFAULT,
-      manualPlanExitNoticeEventState: {
-        version: 2,
-        kind: 'manual-exit',
-      },
+      manualPlanExitNoticeEventState: { version: 2, kind: 'manual-exit' },
       takePendingManualPlanExitNotice:
         Config.prototype.takePendingManualPlanExitNotice,
       restorePendingManualPlanExitNotice:
         Config.prototype.restorePendingManualPlanExitNotice,
     });
-    const backendWithParentMode = new InProcessBackend(
-      parentConfig as unknown as Config,
+    await backendOn(
+      parentConfig,
+      createSpawnConfig('agent-1', { approvalMode: ApprovalMode.AUTO_EDIT }),
     );
-    await backendWithParentMode.init();
 
-    const config = createSpawnConfig('agent-1');
-    config.inProcess!.approvalMode = ApprovalMode.AUTO_EDIT;
-    await backendWithParentMode.spawnAgent(config);
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const { runtimeContext } = destructureAgentCoreCall(
-      MockAgentCore.mock.calls.at(-1)!,
-    );
-    const agentContext = runtimeContext as unknown as Config;
+    const agentContext = lastCoreCall().runtimeContext as unknown as Config;
     expect(agentContext.takePendingManualPlanExitNotice()).toEqual({
       version: 2,
       currentMode: ApprovalMode.AUTO_EDIT,
@@ -740,31 +629,12 @@ describe('InProcessBackend', () => {
       Config.prototype.takePendingManualPlanExitNotice.call(
         parentConfig as unknown as Config,
       ),
-    ).toEqual({
-      version: 3,
-      currentMode: ApprovalMode.DEFAULT,
-    });
+    ).toEqual({ version: 3, currentMode: ApprovalMode.DEFAULT });
   });
 
   it('restores a plan-mode per-agent config to default without mutating the parent config', async () => {
-    const parentConfig = createMockConfig() as unknown as {
-      getApprovalMode: ReturnType<typeof vi.fn>;
-      setApprovalMode: ReturnType<typeof vi.fn>;
-    };
-    const backendWithParentMode = new InProcessBackend(parentConfig as never);
-    await backendWithParentMode.init();
-
-    const config = createSpawnConfig('agent-1');
-    config.inProcess!.approvalMode = PLAN_MODE;
-
-    await backendWithParentMode.spawnAgent(config);
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const lastCall = MockAgentCore.mock.calls.at(-1);
-    expect(lastCall).toBeDefined();
-
-    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
-    const agentContext = runtimeContext as unknown as Config;
+    const parentConfig = mockConfig();
+    const agentContext = await agentConfigOn(parentConfig, PLAN_MODE);
     agentContext.setApprovalMode(DEFAULT_MODE);
 
     expect(agentContext.getApprovalMode()).toBe(DEFAULT_MODE);
@@ -778,21 +648,8 @@ describe('InProcessBackend', () => {
     // non-plan teammate. Tools bind to this config, so "Proceed always"
     // (AUTO_EDIT) and Shift+Tab mode switches must transition child-local
     // state instead of hitting the bare-derived-Config guard.
-    const parentConfig = createMockConfig() as unknown as {
-      getApprovalMode: ReturnType<typeof vi.fn>;
-      setApprovalMode: ReturnType<typeof vi.fn>;
-    };
-    const backendWithParentMode = new InProcessBackend(parentConfig as never);
-    await backendWithParentMode.init();
-
-    await backendWithParentMode.spawnAgent(createSpawnConfig('agent-1'));
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const lastCall = MockAgentCore.mock.calls.at(-1);
-    expect(lastCall).toBeDefined();
-
-    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
-    const agentContext = runtimeContext as unknown as Config;
+    const parentConfig = mockConfig();
+    const agentContext = await agentConfigOn(parentConfig);
 
     expect(agentContext.getApprovalMode()).toBe(DEFAULT_MODE);
 
@@ -809,25 +666,11 @@ describe('InProcessBackend', () => {
   });
 
   it('uses a teammate-scoped plan file path in per-agent config', async () => {
-    const parentConfig = createMockConfig() as unknown as {
-      getPlanFilePath: ReturnType<typeof vi.fn>;
-    };
+    const parentConfig = mockConfig();
     parentConfig.getPlanFilePath = vi
       .fn()
       .mockReturnValue(join('/tmp/plans', 'test-session.md'));
-    const backendWithParentMode = new InProcessBackend(parentConfig as never);
-    await backendWithParentMode.init();
-
-    await backendWithParentMode.spawnAgent(createSpawnConfig('agent-1'));
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const lastCall = MockAgentCore.mock.calls.at(-1);
-    expect(lastCall).toBeDefined();
-
-    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
-    const agentContext = runtimeContext as unknown as {
-      getPlanFilePath: () => string;
-    };
+    const agentContext = await agentConfigOn(parentConfig);
     expect(agentContext.getPlanFilePath()).toBe(
       join('/tmp/plans', 'test-session-agent-1.md'),
     );
@@ -837,75 +680,27 @@ describe('InProcessBackend', () => {
   });
 
   it('keeps Config approval-mode safety checks on per-agent config', async () => {
-    const parentConfig = createMockConfig() as unknown as {
-      isTrustedFolder: ReturnType<typeof vi.fn>;
-    };
+    const parentConfig = mockConfig();
     parentConfig.isTrustedFolder.mockReturnValue(false);
-    const backendWithUntrustedParent = new InProcessBackend(
-      parentConfig as never,
-    );
-    await backendWithUntrustedParent.init();
-
-    const config = createSpawnConfig('agent-1');
-    config.inProcess!.approvalMode = PLAN_MODE;
-
-    await backendWithUntrustedParent.spawnAgent(config);
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const lastCall = MockAgentCore.mock.calls.at(-1);
-    expect(lastCall).toBeDefined();
-
-    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
-    const agentContext = runtimeContext as unknown as Config;
+    const agentContext = await agentConfigOn(parentConfig, PLAN_MODE);
     expect(() => agentContext.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
   });
 
   it('downgrades privileged initial approval modes in untrusted folders', async () => {
-    const parentConfig = createMockConfig() as unknown as {
-      isTrustedFolder: ReturnType<typeof vi.fn>;
-    };
+    const parentConfig = mockConfig();
     parentConfig.isTrustedFolder.mockReturnValue(false);
-    const backendWithUntrustedParent = new InProcessBackend(
-      parentConfig as never,
+    const agentContext = await agentConfigOn(
+      parentConfig,
+      ApprovalMode.AUTO_EDIT,
     );
-    await backendWithUntrustedParent.init();
-
-    const config = createSpawnConfig('agent-1');
-    config.inProcess!.approvalMode = ApprovalMode.AUTO_EDIT;
-
-    await backendWithUntrustedParent.spawnAgent(config);
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const lastCall = MockAgentCore.mock.calls.at(-1);
-    expect(lastCall).toBeDefined();
-
-    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
-    const agentContext = runtimeContext as unknown as Config;
     expect(agentContext.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
   });
 
   it('should pass parent custom ignore files to per-agent file service', async () => {
-    const parentConfig = createMockConfig() as unknown as {
-      getFileFilteringOptions: ReturnType<typeof vi.fn>;
-    };
-    const backendWithCustomIgnore = new InProcessBackend(parentConfig as never);
-    await backendWithCustomIgnore.init();
-
-    await backendWithCustomIgnore.spawnAgent(createSpawnConfig('agent-1'));
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const lastCall = MockAgentCore.mock.calls.at(-1);
-    expect(lastCall).toBeDefined();
-
-    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
-    const agentContext = runtimeContext as unknown as {
-      getFileService: () => {
-        getQwenIgnoreFileNamesDisplay: () => string;
-      };
-    };
-
+    const parentConfig = mockConfig();
+    const agentContext = await agentConfigOn(parentConfig);
     expect(parentConfig.getFileFilteringOptions).toHaveBeenCalled();
     expect(agentContext.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
       '.qwenignore, .cursorignore',
@@ -913,15 +708,12 @@ describe('InProcessBackend', () => {
   });
 
   it('should propagate runConfig limits to AgentInteractive', async () => {
-    await backend.init();
-
     const config = createSpawnConfig('agent-1');
     config.inProcess!.runtimeConfig.runConfig = {
       max_turns: 5,
       max_time_minutes: 10,
     };
-
-    await backend.spawnAgent(config);
+    await started(backend, config);
 
     const agent = backend.getAgent('agent-1');
     expect(agent).toBeDefined();
@@ -930,12 +722,9 @@ describe('InProcessBackend', () => {
   });
 
   it('should default limits to undefined when runConfig omits them', async () => {
-    await backend.init();
-
     const config = createSpawnConfig('agent-1');
     config.inProcess!.runtimeConfig.runConfig = {};
-
-    await backend.spawnAgent(config);
+    await started(backend, config);
 
     const agent = backend.getAgent('agent-1');
     expect(agent).toBeDefined();
@@ -944,27 +733,15 @@ describe('InProcessBackend', () => {
   });
 
   it('should give each agent its own cwd even when sharing a backend', async () => {
-    await backend.init();
+    await started(
+      backend,
+      { ...createSpawnConfig('agent-1'), cwd: '/worktree/agent-1' },
+      { ...createSpawnConfig('agent-2'), cwd: '/worktree/agent-2' },
+    );
 
-    const config1 = createSpawnConfig('agent-1');
-    config1.cwd = '/worktree/agent-1';
-    const config2 = createSpawnConfig('agent-2');
-    config2.cwd = '/worktree/agent-2';
-
-    await backend.spawnAgent(config1);
-    await backend.spawnAgent(config2);
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const calls = MockAgentCore.mock.calls;
-
-    const ctx1 = calls.at(-2)![1] as {
-      getWorkingDir: () => string;
-      getTargetDir: () => string;
-    };
-    const ctx2 = calls.at(-1)![1] as {
-      getWorkingDir: () => string;
-      getTargetDir: () => string;
-    };
+    const calls = agentCoreCalls();
+    const ctx1 = calls.at(-2)![1] as Config;
+    const ctx2 = calls.at(-1)![1] as Config;
 
     expect(ctx1.getWorkingDir()).toBe('/worktree/agent-1');
     expect(ctx1.getTargetDir()).toBe('/worktree/agent-1');
@@ -973,9 +750,7 @@ describe('InProcessBackend', () => {
   });
 
   it('should throw when spawning a duplicate agent ID', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-
+    await started(backend, 'agent-1');
     await expect(
       backend.spawnAgent(createSpawnConfig('agent-1')),
     ).rejects.toThrow('Agent "agent-1" already exists.');
@@ -983,32 +758,21 @@ describe('InProcessBackend', () => {
 
   it('should fire exit callback with code 1 when start() throws', async () => {
     const registry = createMockToolRegistry();
-    const parentConfig = createMockConfig() as unknown as {
-      createToolRegistry: ReturnType<typeof vi.fn>;
-    };
+    const parentConfig = mockConfig();
     parentConfig.createToolRegistry = vi.fn().mockResolvedValue(registry);
     const failingBackend = new InProcessBackend(parentConfig as never);
     // Make createChat throw for this test
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    MockAgentCore.mockImplementationOnce(() => ({
+    const emitter = () => ({ on: vi.fn(), off: vi.fn(), emit: vi.fn() });
+    const createChat = vi.fn().mockRejectedValue(new Error('Auth failed'));
+    (AgentCore as unknown as Mock).mockImplementationOnce(() => ({
       subagentId: 'mock-id',
       name: 'mock-agent',
-      eventEmitter: {
-        on: vi.fn(),
-        off: vi.fn(),
-        emit: vi.fn(),
-      },
-      stats: {
-        start: vi.fn(),
-        getSummary: vi.fn().mockReturnValue({}),
-      },
-      createChat: vi.fn().mockRejectedValue(new Error('Auth failed')),
+      runInHookFrame: <T>(fn: () => T): T => fn(),
+      eventEmitter: emitter(),
+      stats: { start: vi.fn(), getSummary: vi.fn().mockReturnValue({}) },
+      createChat,
       prepareTools: vi.fn().mockReturnValue([]),
-      getEventEmitter: vi.fn().mockReturnValue({
-        on: vi.fn(),
-        off: vi.fn(),
-        emit: vi.fn(),
-      }),
+      getEventEmitter: vi.fn().mockReturnValue(emitter()),
       getExecutionSummary: vi.fn().mockReturnValue({}),
     }));
 
@@ -1022,51 +786,33 @@ describe('InProcessBackend', () => {
       failingBackend.spawnAgent(createSpawnConfig('agent-fail')),
     ).resolves.toBeUndefined();
 
-    // Exit callback should have been fired with exit code 1
+    expect(createChat).toHaveBeenCalledTimes(1);
     expect(exitCallback).toHaveBeenCalledWith('agent-fail', 1, null);
     expect(registry.stop).toHaveBeenCalledTimes(1);
     expect(failingBackend.getAgent('agent-fail')).toBeUndefined();
     expect(failingBackend.getActiveAgentId()).toBeNull();
-    expect(
-      (
-        failingBackend as unknown as {
-          agentApprovalCleanups: Map<string, () => void>;
-          agentRegistries: Map<string, unknown>;
-        }
-      ).agentApprovalCleanups.size,
-    ).toBe(0);
-    expect(
-      (
-        failingBackend as unknown as {
-          agentRegistries: Map<string, unknown>;
-        }
-      ).agentRegistries.size,
-    ).toBe(0);
+    const internals = failingBackend as unknown as {
+      agentApprovalCleanups: Map<string, () => void>;
+      agentRegistries: Map<string, unknown>;
+    };
+    expect(internals.agentApprovalCleanups.size).toBe(0);
+    expect(internals.agentRegistries.size).toBe(0);
   });
 
   it('should return true immediately from waitForAll after cleanup', async () => {
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
-
+    await started(backend, 'agent-1');
     await backend.cleanup();
 
-    // waitForAll should return immediately after cleanup
-    const result = await backend.waitForAll(5000);
-    expect(result).toBe(true);
+    expect(await backend.waitForAll(5000)).toBe(true);
   });
 
   describe('chat history', () => {
     it('should pass chatHistory to AgentInteractive config', async () => {
-      await backend.init();
-
       const chatHistory = [
-        { role: 'user' as const, parts: [{ text: 'prior question' }] },
-        { role: 'model' as const, parts: [{ text: 'prior answer' }] },
+        userText('prior question'),
+        modelText('prior answer'),
       ];
-      const config = createSpawnConfig('agent-1');
-      config.inProcess!.chatHistory = chatHistory;
-
-      await backend.spawnAgent(config);
+      await started(backend, createSpawnConfig('agent-1', { chatHistory }));
 
       const agent = backend.getAgent('agent-1');
       expect(agent).toBeDefined();
@@ -1074,8 +820,7 @@ describe('InProcessBackend', () => {
     });
 
     it('should leave chatHistory undefined when not provided', async () => {
-      await backend.init();
-      await backend.spawnAgent(createSpawnConfig('agent-1'));
+      await started(backend, 'agent-1');
 
       const agent = backend.getAgent('agent-1');
       expect(agent).toBeDefined();
@@ -1084,26 +829,25 @@ describe('InProcessBackend', () => {
   });
 
   describe('auth isolation', () => {
+    const withAuth = (
+      agentId: string,
+      authOverrides: InProcessSpawnConfig['authOverrides'],
+    ) => createSpawnConfig(agentId, { authOverrides });
+
     it('should create per-agent ContentGenerator when authOverrides is provided', async () => {
-      await backend.init();
+      await started(
+        backend,
+        withAuth('agent-1', {
+          authType: 'anthropic',
+          apiKey: 'agent-key-123',
+          baseUrl: 'https://agent.example.com',
+        }),
+      );
 
-      const config = createSpawnConfig('agent-1');
-      config.inProcess!.authOverrides = {
-        authType: 'anthropic',
-        apiKey: 'agent-key-123',
-        baseUrl: 'https://agent.example.com',
-      };
-
-      await backend.spawnAgent(config);
-
-      const mockCreate = createContentGenerator as ReturnType<typeof vi.fn>;
       // Owner must be the per-agent override Config (the same instance
       // AgentCore receives as runtimeContext) — NOT the parent. Asserting
       // that match exactly catches a regression where `base` slips in.
-      const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-      const { runtimeContext: agentContext } = destructureAgentCoreCall(
-        MockAgentCore.mock.calls.at(-1)!,
-      );
+      const { runtimeContext: agentContext } = lastCoreCall();
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           authType: 'anthropic',
@@ -1117,23 +861,14 @@ describe('InProcessBackend', () => {
 
     it('should pass per-agent ContentGenerator via runtimeView', async () => {
       const agentGenerator = { generateContentStream: vi.fn() };
-      const mockCreate = createContentGenerator as ReturnType<typeof vi.fn>;
       mockCreate.mockResolvedValueOnce(agentGenerator);
 
-      await backend.init();
+      await started(
+        backend,
+        withAuth('agent-1', { authType: 'anthropic', apiKey: 'agent-key' }),
+      );
 
-      const config = createSpawnConfig('agent-1');
-      config.inProcess!.authOverrides = {
-        authType: 'anthropic',
-        apiKey: 'agent-key',
-      };
-
-      await backend.spawnAgent(config);
-
-      const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-      const lastCall = MockAgentCore.mock.calls.at(-1);
-      const { runtimeView } = destructureAgentCoreCall(lastCall!);
-
+      const { runtimeView } = lastCoreCall();
       expect(runtimeView).toBeDefined();
       expect(runtimeView!.contentGenerator).toBe(agentGenerator);
       expect(runtimeView!.contentGeneratorConfig.authType).toBe('anthropic');
@@ -1141,65 +876,47 @@ describe('InProcessBackend', () => {
     });
 
     it('should leave parent ContentGenerator unchanged without authOverrides', async () => {
-      const mockCreate = createContentGenerator as ReturnType<typeof vi.fn>;
       mockCreate.mockClear();
-
-      await backend.init();
-      await backend.spawnAgent(createSpawnConfig('agent-1'));
-
+      await started(backend, 'agent-1');
       expect(mockCreate).not.toHaveBeenCalled();
     });
 
     it('should fall back to parent ContentGenerator if per-agent creation fails', async () => {
-      const mockCreate = createContentGenerator as ReturnType<typeof vi.fn>;
       mockCreate.mockRejectedValueOnce(new Error('Auth failed'));
-
       await backend.init();
 
-      const config = createSpawnConfig('agent-1');
-      config.inProcess!.authOverrides = {
-        authType: 'anthropic',
-        apiKey: 'bad-key',
-      };
-
       // Should not throw — falls back gracefully
-      await expect(backend.spawnAgent(config)).resolves.toBeUndefined();
-
-      const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-      const lastCall = MockAgentCore.mock.calls.at(-1);
+      await expect(
+        backend.spawnAgent(
+          withAuth('agent-1', { authType: 'anthropic', apiKey: 'bad-key' }),
+        ),
+      ).resolves.toBeUndefined();
 
       // No runtimeView when per-agent creation failed; agent inherits parent.
-      expect(destructureAgentCoreCall(lastCall!).runtimeView).toBeUndefined();
+      expect(lastCoreCall().runtimeView).toBeUndefined();
       expect(backend.getAgentContentGenerator('agent-1')).toBeUndefined();
     });
 
     it('should give different agents different ContentGenerators', async () => {
       const gen1 = { generateContentStream: vi.fn() };
       const gen2 = { generateContentStream: vi.fn() };
-      const mockCreate = createContentGenerator as ReturnType<typeof vi.fn>;
       mockCreate.mockResolvedValueOnce(gen1).mockResolvedValueOnce(gen2);
 
-      await backend.init();
+      await started(
+        backend,
+        withAuth('agent-1', {
+          authType: 'openai',
+          apiKey: 'key-1',
+          baseUrl: 'https://api1.example.com',
+        }),
+        withAuth('agent-2', {
+          authType: 'anthropic',
+          apiKey: 'key-2',
+          baseUrl: 'https://api2.example.com',
+        }),
+      );
 
-      const config1 = createSpawnConfig('agent-1');
-      config1.inProcess!.authOverrides = {
-        authType: 'openai',
-        apiKey: 'key-1',
-        baseUrl: 'https://api1.example.com',
-      };
-      const config2 = createSpawnConfig('agent-2');
-      config2.inProcess!.authOverrides = {
-        authType: 'anthropic',
-        apiKey: 'key-2',
-        baseUrl: 'https://api2.example.com',
-      };
-
-      await backend.spawnAgent(config1);
-      await backend.spawnAgent(config2);
-
-      const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-      const calls = MockAgentCore.mock.calls;
-
+      const calls = agentCoreCalls();
       const view1 = calls.at(-2)![8] as { contentGenerator: unknown };
       const view2 = calls.at(-1)![8] as { contentGenerator: unknown };
 
@@ -1211,34 +928,27 @@ describe('InProcessBackend', () => {
 });
 
 describe('InProcessBackend Session Workflow revision write-through', () => {
-  // Teammates and arena agents run on InProcessBackend.createPerAgentConfig,
-  // a third Config-wrapper family besides createApprovalModeOverride and
-  // buildSubagentContextOverride. Its rebuilt tool registry binds
-  // TodoWriteTool to `this.config = wrapper`, so a divergent todo_write
-  // clears the session-global approved revision through the wrapper — the
-  // clear must land on the root Config, not as an own property on the
-  // wrapper (the base would keep rejecting Agent launches against a plan
-  // that no longer exists).
+  // Teammates and arena agents run on InProcessBackend.createPerAgentConfig, a
+  // third Config-wrapper family besides createApprovalModeOverride and
+  // buildSubagentContextOverride. Its rebuilt registry binds TodoWriteTool to
+  // `this.config = wrapper`, so a divergent todo_write clears the approved
+  // session-global revision through the wrapper; the clear must land on the
+  // root Config, not as a wrapper own property (the base would keep rejecting
+  // Agent launches against a plan that no longer exists).
   const approvedRevision = {
     planId: 'plan-approved',
     sourceCallId: 'call-approved',
     todoIds: ['a', 'b'],
   };
 
-  const workflowBaseParams = {
-    cwd: '/tmp',
-    targetDir: '/tmp',
-    debugMode: false,
-    model: 'test-model',
-    usageStatisticsEnabled: false,
-    bareMode: true,
-  };
-
-  async function spawnWithWorkflowBase(
-    approvalMode?: ApprovalMode,
-  ): Promise<{ base: Config; agentContext: Config }> {
+  async function spawnWithWorkflowBase(approvalMode?: ApprovalMode) {
     const base = new Config({
-      ...workflowBaseParams,
+      cwd: '/tmp',
+      targetDir: '/tmp',
+      debugMode: false,
+      model: 'test-model',
+      usageStatisticsEnabled: false,
+      bareMode: true,
       sessionWorkflowEnabled: true,
     });
     const registry = await base.createToolRegistry(undefined, {
@@ -1249,20 +959,15 @@ describe('InProcessBackend Session Workflow revision write-through', () => {
     base.setSessionWorkflowPlanRevision(approvedRevision);
     expect(base.isSessionWorkflowTodoContextActive()).toBe(true);
 
-    const localBackend = new InProcessBackend(base);
-    await localBackend.init();
-    const spawnConfig = createSpawnConfig('agent-1');
-    spawnConfig.inProcess!.initialTask = undefined;
-    if (approvalMode !== undefined) {
-      spawnConfig.inProcess!.approvalMode = approvalMode;
-    }
-    await localBackend.spawnAgent(spawnConfig);
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const { runtimeContext } = destructureAgentCoreCall(
-      MockAgentCore.mock.calls.at(-1)!,
+    await started(
+      new InProcessBackend(base),
+      createSpawnConfig('agent-1', {
+        initialTask: undefined,
+        ...(approvalMode !== undefined ? { approvalMode } : {}),
+      }),
     );
-    return { base, agentContext: runtimeContext as unknown as Config };
+    const agentContext = lastCoreCall().runtimeContext as unknown as Config;
+    return { base, agentContext };
   }
 
   it('routes revision mutations from the plain per-agent wrapper to the base Config', async () => {

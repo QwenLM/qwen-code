@@ -30,6 +30,10 @@ interface Reply {
   error?: { code: string; message: string };
 }
 
+/** The exact reply shapes for a success and for a failure with `code`. */
+const success = (result: unknown) => ({ ok: true, result });
+const failure = (code: string) => ({ ok: false, error: { code } });
+
 describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
   let root: string;
   beforeEach(() => {
@@ -56,8 +60,28 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
     return JSON.parse(child.stdout) as Reply;
   }
 
+  /** Runs `execute` to completion; `frames()` parses its output after the caller's own checks. */
+  function runExecute(params: Record<string, unknown>, timeout?: number) {
+    const child = spawnSync('python3', ['-c', SSH_WORKSPACE_SCRIPT], {
+      input: JSON.stringify({ root, operation: 'execute', params }),
+      encoding: 'utf8',
+      ...(timeout !== undefined && { timeout }),
+    });
+    const frames = () =>
+      child.stdout
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+    return { child, frames };
+  }
+
+  const decode = (frames: Array<{ data: string }>) =>
+    frames
+      .map((frame) => Buffer.from(frame.data, 'base64').toString())
+      .join('');
+
   it('probes the remote root and preserves UTF-8 BOM and CRLF in reads and conditional writes', () => {
-    expect(request('probe')).toEqual({ ok: true, result: { directory: root } });
+    expect(request('probe')).toEqual(success({ directory: root }));
     const content = '\uFEFF你好\r\nsecond\r\n';
     writeFileSync(join(root, 'script.sh'), content, { mode: 0o700 });
     const read = request('read', { path: 'script.sh' });
@@ -79,7 +103,7 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         expectedHash: result.hash,
         mode: 'replace',
       }),
-    ).toMatchObject({ ok: true, result: { created: false } });
+    ).toMatchObject(success({ created: false }));
     expect(statSync(join(root, 'script.sh')).mode & 0o777).toBe(0o700);
     expect(readFileSync(join(root, 'script.sh'), 'utf8')).toBe('changed\r\n');
     expect(
@@ -89,7 +113,7 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         expectedHash: result.hash,
         mode: 'replace',
       }),
-    ).toMatchObject({ ok: false, error: { code: 'hash_mismatch' } });
+    ).toMatchObject(failure('hash_mismatch'));
     expect(readFileSync(join(root, 'script.sh'), 'utf8')).toBe('changed\r\n');
   });
 
@@ -97,39 +121,34 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
     expect(request('mkdir', { path: 'a/b', recursive: true }).ok).toBe(true);
     expect(
       request('write', { path: 'a/b/new', content: 'one', mode: 'create' }),
-    ).toMatchObject({ ok: true, result: { created: true, sizeBytes: 3 } });
+    ).toMatchObject(success({ created: true, sizeBytes: 3 }));
     expect(statSync(join(root, 'a/b/new')).mode & 0o777).toBe(0o600);
     expect(
       request('write', { path: 'a/b/new', content: 'two', mode: 'create' }),
-    ).toMatchObject({ ok: false, error: { code: 'file_already_exists' } });
+    ).toMatchObject(failure('file_already_exists'));
     expect(
       request('write', { path: 'a/b/new', content: 'two', mode: 'replace' }),
-    ).toMatchObject({ ok: false, error: { code: 'invalid_argument' } });
+    ).toMatchObject(failure('invalid_argument'));
   });
 
   it('rejects traversal and symbolic links for both reads and writes', () => {
     writeFileSync(join(root, 'safe'), 'original');
     symlinkSync(join(root, 'safe'), join(root, 'link'));
     symlinkSync(root, join(root, 'directory-link'));
-    for (const operation of ['read', 'write']) {
-      expect(
-        request(operation, { path: '../outside', content: 'changed' }),
-      ).toMatchObject({ ok: false, error: { code: 'path_outside_workspace' } });
-      expect(
-        request(operation, { path: '/etc/passwd', content: 'changed' }),
-      ).toMatchObject({ ok: false, error: { code: 'path_outside_workspace' } });
-      expect(
-        request(operation, { path: 'link', content: 'changed' }),
-      ).toMatchObject({ ok: false, error: { code: 'symlink_escape' } });
-      expect(
-        request(operation, { path: 'directory-link/safe', content: 'changed' }),
-      ).toMatchObject({ ok: false, error: { code: 'symlink_escape' } });
-    }
+    for (const operation of ['read', 'write'])
+      for (const [path, code] of [
+        ['../outside', 'path_outside_workspace'],
+        ['/etc/passwd', 'path_outside_workspace'],
+        ['link', 'symlink_escape'],
+        ['directory-link/safe', 'symlink_escape'],
+      ])
+        expect(request(operation, { path, content: 'changed' })).toMatchObject(
+          failure(code),
+        );
     expect(readFileSync(join(root, 'safe'), 'utf8')).toBe('original');
-    expect(request('stat', { path: 'link' })).toMatchObject({
-      ok: true,
-      result: { kind: 'symlink' },
-    });
+    expect(request('stat', { path: 'link' })).toMatchObject(
+      success({ kind: 'symlink' }),
+    );
   });
 
   it('returns bounded byte windows with the full file size and hash', () => {
@@ -141,45 +160,38 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         mode: 'create',
       }).ok,
     ).toBe(true);
-    expect(request('readBytes', { path: 'bytes' })).toMatchObject({
-      ok: true,
-      result: { hash: expect.stringMatching(/^sha256:/) },
-    });
+    expect(request('readBytes', { path: 'bytes' })).toMatchObject(
+      success({ hash: expect.stringMatching(/^sha256:/) }),
+    );
     expect(
       request('readBytes', { path: 'bytes', offset: 1, maxBytes: 2 }),
-    ).toEqual({
-      ok: true,
-      result: {
+    ).toEqual(
+      success({
         data: bytes.subarray(1, 3).toString('base64'),
         sizeBytes: 5,
-      },
-    });
-    expect(request('readBytes', { path: 'bytes', offset: -1 })).toMatchObject({
-      ok: false,
-      error: { code: 'invalid_argument' },
-    });
-    expect(request('read', { path: 'bytes' })).toMatchObject({
-      ok: false,
-      error: { code: 'binary_file' },
-    });
+      }),
+    );
+    expect(request('readBytes', { path: 'bytes', offset: -1 })).toMatchObject(
+      failure('invalid_argument'),
+    );
+    expect(request('read', { path: 'bytes' })).toMatchObject(
+      failure('binary_file'),
+    );
     writeFileSync(join(root, 'non-utf8'), Buffer.from([255, 254]));
-    expect(request('read', { path: 'non-utf8' })).toMatchObject({
-      ok: false,
-      error: { code: 'unsupported_encoding' },
-    });
+    expect(request('read', { path: 'non-utf8' })).toMatchObject(
+      failure('unsupported_encoding'),
+    );
   });
 
   it('enforces the file size limit without returning partial text as complete', () => {
     const file = join(root, 'large');
     writeFileSync(file, Buffer.alloc(16 * 1024 * 1024 + 1));
-    expect(request('read', { path: file })).toMatchObject({
-      ok: false,
-      error: { code: 'file_too_large' },
-    });
-    expect(request('read', { path: 'missing' })).toMatchObject({
-      ok: false,
-      error: { code: 'path_not_found' },
-    });
+    expect(request('read', { path: file })).toMatchObject(
+      failure('file_too_large'),
+    );
+    expect(request('read', { path: 'missing' })).toMatchObject(
+      failure('path_not_found'),
+    );
   });
 
   it('honors Git and Qwen ignore rules, including tracked files, and bounds search results', () => {
@@ -208,25 +220,23 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       mode: 0o700,
     });
     execFileSync('git', ['-C', root, 'config', 'core.fsmonitor', monitor]);
-    expect(request('glob', { pattern: '**/*.txt' })).toEqual({
-      ok: true,
-      result: {
+    expect(request('glob', { pattern: '**/*.txt' })).toEqual(
+      success({
         paths: [join(root, 'src/nested.txt'), join(root, 'visible.txt')],
         truncated: false,
-      },
-    });
+      }),
+    );
     expect(
       request(
         'glob',
         { pattern: '**/*.txt' },
         { ...process.env, GIT_DIR: join(root, 'missing-git-directory') },
       ),
-    ).toMatchObject({
-      ok: true,
-      result: {
+    ).toMatchObject(
+      success({
         paths: [join(root, 'src/nested.txt'), join(root, 'visible.txt')],
-      },
-    });
+      }),
+    );
     expect(
       request('grep', {
         pattern: 'needle',
@@ -234,22 +244,15 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         caseSensitive: false,
         limit: 1,
       }),
-    ).toEqual({
-      ok: true,
-      result: { text: 'src/nested.txt:1:needle', truncated: true },
-    });
-    expect(request('glob', { pattern: '*.txt', path: 'src' })).toEqual({
-      ok: true,
-      result: { paths: [join(root, 'src/nested.txt')], truncated: false },
-    });
+    ).toEqual(success({ text: 'src/nested.txt:1:needle', truncated: true }));
+    expect(request('glob', { pattern: '*.txt', path: 'src' })).toEqual(
+      success({ paths: [join(root, 'src/nested.txt')], truncated: false }),
+    );
     expect(request('grep', { pattern: 'needle', glob: '*.txt' })).toMatchObject(
-      {
-        ok: true,
-        result: {
-          text: 'src/nested.txt:1:needle\nvisible.txt:1:needle',
-          truncated: false,
-        },
-      },
+      success({
+        text: 'src/nested.txt:1:needle\nvisible.txt:1:needle',
+        truncated: false,
+      }),
     );
     expect(existsSync(join(root, 'fsmonitor-ran'))).toBe(false);
   });
@@ -274,16 +277,12 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       const options = ['.agentignore', '.aiignore'].includes(ignoreFile)
         ? {}
         : { ignoreFiles: ['.qwenignore', ignoreFile] };
-      expect(request('glob', { pattern: '**/*.txt', ...options })).toEqual({
-        ok: true,
-        result: { paths: [join(root, 'visible.txt')], truncated: false },
-      });
+      expect(request('glob', { pattern: '**/*.txt', ...options })).toEqual(
+        success({ paths: [join(root, 'visible.txt')], truncated: false }),
+      );
       expect(
         request('grep', { pattern: 'needle', glob: '*.txt', ...options }),
-      ).toEqual({
-        ok: true,
-        result: { text: 'visible.txt:1:needle', truncated: false },
-      });
+      ).toEqual(success({ text: 'visible.txt:1:needle', truncated: false }));
       const listed = request('list', { ...options }).result as Array<{
         name: string;
       }>;
@@ -292,10 +291,9 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       rmSync(join(root, '.git'), { recursive: true });
       rmSync(join(root, '.qwenignore'));
       for (const operation of ['glob', 'grep'])
-        expect(request(operation, { pattern: '*', ...options })).toMatchObject({
-          ok: false,
-          error: { code: 'unsupported_ignore' },
-        });
+        expect(request(operation, { pattern: '*', ...options })).toMatchObject(
+          failure('unsupported_ignore'),
+        );
     },
   );
 
@@ -308,27 +306,22 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         paths: ['text', 'binary', 'link', 'missing'],
         maxBytes: 6,
       }),
-    ).toEqual({
-      ok: true,
-      result: [
+    ).toEqual(
+      success([
         { path: 'text', added: 2, isBinary: false, truncated: true },
         { path: 'binary', added: 0, isBinary: true, truncated: false },
         { path: 'link', added: 0, isBinary: true, truncated: false },
         { path: 'missing', added: 0, isBinary: true, truncated: false },
-      ],
-    });
+      ]),
+    );
     expect(
       request('gitUntrackedStats', { paths: ['../outside'] }),
-    ).toMatchObject({
-      ok: false,
-      error: { code: 'path_outside_workspace' },
-    });
+    ).toMatchObject(failure('path_outside_workspace'));
     expect(
       request('gitUntrackedStats', { paths: ['text'], maxLines: 1 }),
-    ).toMatchObject({
-      ok: true,
-      result: [{ path: 'text', added: 2, lines: ['one'], truncated: true }],
-    });
+    ).toMatchObject(
+      success([{ path: 'text', added: 2, lines: ['one'], truncated: true }]),
+    );
   });
 
   it('sorts glob matches by modification time before applying the result limit', () => {
@@ -336,24 +329,22 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
     writeFileSync(join(root, 'z.txt'), 'newer');
     utimesSync(join(root, 'a.txt'), 100, 100);
     utimesSync(join(root, 'z.txt'), 200, 200);
-    expect(request('glob', { pattern: '*.txt', limit: 1 })).toEqual({
-      ok: true,
-      result: { paths: [join(root, 'z.txt')], truncated: true },
-    });
+    expect(request('glob', { pattern: '*.txt', limit: 1 })).toEqual(
+      success({ paths: [join(root, 'z.txt')], truncated: true }),
+    );
   });
 
   it('returns the requested directory window and accepts the route glob truncation probe', () => {
     for (const name of ['a.txt', 'b.txt', 'c.txt'])
       writeFileSync(join(root, name), 'text');
-    expect(request('list', { maxEntries: 2 })).toEqual({
-      ok: true,
-      result: [
+    expect(request('list', { maxEntries: 2 })).toEqual(
+      success([
         { name: 'a.txt', kind: 'file', ignored: false },
         { name: 'b.txt', kind: 'file', ignored: false },
-      ],
-    });
+      ]),
+    );
     const result = request('glob', { pattern: '*.txt', maxResults: 50001 });
-    expect(result).toMatchObject({ ok: true, result: { truncated: false } });
+    expect(result).toMatchObject(success({ truncated: false }));
     expect((result.result as { paths: string[] }).paths).toHaveLength(3);
   });
 
@@ -365,75 +356,49 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         path: 'visible.txt',
         glob: '*.txt',
       }),
-    ).toMatchObject({
-      ok: true,
-      result: { text: 'visible.txt:1:needle', truncated: false },
-    });
+    ).toMatchObject(
+      success({ text: 'visible.txt:1:needle', truncated: false }),
+    );
   });
 
   it('fails explicitly for unsupported ignore files and glob features', () => {
     writeFileSync(join(root, '.gitignore'), 'secret\n');
     writeFileSync(join(root, 'secret'), 'secret');
-    expect(request('glob', { pattern: '**/*' })).toMatchObject({
-      ok: false,
-      error: { code: 'unsupported_ignore' },
-    });
+    expect(request('glob', { pattern: '**/*' })).toMatchObject(
+      failure('unsupported_ignore'),
+    );
     expect(
       request('glob', { pattern: '{a,b}', includeIgnored: true }),
-    ).toMatchObject({ ok: false, error: { code: 'unsupported_pattern' } });
+    ).toMatchObject(failure('unsupported_pattern'));
   });
 
   it('runs shell commands in a checked remote directory without interpolating the command', () => {
     mkdirSync(join(root, "quoted ' directory"));
-    const child = spawnSync('python3', ['-c', SSH_WORKSPACE_SCRIPT], {
-      input: JSON.stringify({
-        root,
-        operation: 'execute',
-        params: {
-          path: "quoted ' directory",
-          command: 'pwd; printf "value\\n"; exit 7',
-        },
-      }),
-      encoding: 'utf8',
+    const run = runExecute({
+      path: "quoted ' directory",
+      command: 'pwd; printf "value\\n"; exit 7',
     });
-    expect(child.status).toBe(0);
-    const frames = child.stdout
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
-    expect(frames.at(-1)).toEqual({ ok: true, result: { exitCode: 7 } });
-    expect(
-      frames
-        .slice(0, -1)
-        .map((frame) => Buffer.from(frame.data, 'base64').toString())
-        .join(''),
-    ).toBe(`${join(root, "quoted ' directory")}\nvalue\n`);
-    expect(child.stderr).toBe('');
+    expect(run.child.status).toBe(0);
+    const frames = run.frames();
+    expect(frames.at(-1)).toEqual(success({ exitCode: 7 }));
+    expect(decode(frames.slice(0, -1))).toBe(
+      `${join(root, "quoted ' directory")}\nvalue\n`,
+    );
+    expect(run.child.stderr).toBe('');
   });
   it('executes the Bash syntax advertised to the agent', () => {
-    const child = spawnSync('python3', ['-c', SSH_WORKSPACE_SCRIPT], {
-      input: JSON.stringify({
-        root,
-        operation: 'execute',
-        params: {
-          command:
-            '[[ -d . ]] && source /dev/null && set -o pipefail && printf "%s\\n" "$0" {one,two}',
-        },
-      }),
-      encoding: 'utf8',
-      timeout: 5000,
-    });
-    expect(child.error).toBeUndefined();
-    const frames = child.stdout
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
-    expect(frames.at(-1)).toEqual({ ok: true, result: { exitCode: 0 } });
+    const run = runExecute(
+      {
+        command:
+          '[[ -d . ]] && source /dev/null && set -o pipefail && printf "%s\\n" "$0" {one,two}',
+      },
+      5000,
+    );
+    expect(run.child.error).toBeUndefined();
+    const frames = run.frames();
+    expect(frames.at(-1)).toEqual(success({ exitCode: 0 }));
     expect(frames.filter((frame) => frame.stream === 'stderr')).toEqual([]);
-    const output = frames
-      .filter((frame) => frame.stream === 'stdout')
-      .map((frame) => Buffer.from(frame.data, 'base64').toString())
-      .join('');
+    const output = decode(frames.filter((frame) => frame.stream === 'stdout'));
     expect(output).toBe('bash\none\ntwo\n');
   });
 
@@ -512,18 +477,15 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
 
   it('lists FIFOs without opening them and rejects reading one', () => {
     execFileSync('mkfifo', [join(root, 'pipe')]);
-    expect(request('list')).toMatchObject({
-      ok: true,
-      result: [{ name: 'pipe', kind: 'other' }],
-    });
-    expect(request('stat', { path: 'pipe' })).toMatchObject({
-      ok: true,
-      result: { kind: 'other' },
-    });
-    expect(request('read', { path: 'pipe' })).toMatchObject({
-      ok: false,
-      error: { code: 'not_file' },
-    });
+    expect(request('list')).toMatchObject(
+      success([{ name: 'pipe', kind: 'other' }]),
+    );
+    expect(request('stat', { path: 'pipe' })).toMatchObject(
+      success({ kind: 'other' }),
+    );
+    expect(request('read', { path: 'pipe' })).toMatchObject(
+      failure('not_file'),
+    );
   });
 
   it('creates missing parents only for an approved create and refuses symlink parents', () => {
@@ -547,7 +509,7 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         mode: 'create',
         createParents: true,
       }),
-    ).toMatchObject({ ok: false, error: { code: 'symlink_escape' } });
+    ).toMatchObject(failure('symlink_escape'));
     expect(existsSync(join(root, 'new/escape'))).toBe(false);
   });
 
@@ -559,13 +521,12 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
     );
     expect(
       request('readBytes', { path: 'large', offset, maxBytes: 4 }),
-    ).toEqual({
-      ok: true,
-      result: {
+    ).toEqual(
+      success({
         sizeBytes: offset + 4,
         data: Buffer.from('tail').toString('base64'),
-      },
-    });
+      }),
+    );
   });
 
   it('keeps Git warnings separate from paths and never expands ignored untracked trees', () => {
@@ -583,16 +544,12 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       { mode: 0o700 },
     );
     const env = { ...process.env, PATH: bin + ':' + process.env['PATH'] };
-    expect(request('glob', { pattern: '*.txt' }, env)).toMatchObject({
-      ok: true,
-      result: { paths: [join(root, 'visible.txt')], truncated: true },
-    });
+    expect(request('glob', { pattern: '*.txt' }, env)).toMatchObject(
+      success({ paths: [join(root, 'visible.txt')], truncated: true }),
+    );
     expect(
       request('grep', { pattern: 'needle', glob: '*.txt' }, env),
-    ).toMatchObject({
-      ok: true,
-      result: { text: 'visible.txt:1:needle', truncated: true },
-    });
+    ).toMatchObject(success({ text: 'visible.txt:1:needle', truncated: true }));
   });
 
   it('matches glob case when requested and preserves the default exact-case API', () => {
@@ -611,10 +568,9 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
     writeFileSync(join(root, 'nested/.qwenignore'), 'secret.txt\n');
     writeFileSync(join(root, 'nested/secret.txt'), 'needle');
     writeFileSync(join(root, 'nested/visible.txt'), 'needle');
-    expect(request('glob', { pattern: '**/*.txt' })).toMatchObject({
-      ok: true,
-      result: { paths: [join(root, 'nested/visible.txt')], truncated: false },
-    });
+    expect(request('glob', { pattern: '**/*.txt' })).toMatchObject(
+      success({ paths: [join(root, 'nested/visible.txt')], truncated: false }),
+    );
   });
   it('filters and marks ignored directory entries without descending ignored trees', () => {
     execFileSync('git', ['init', '-q', root]);
@@ -647,19 +603,17 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       mkdirSync(join(root, directory));
       writeFileSync(join(root, directory, 'secret.txt'), 'secret');
       writeFileSync(join(root, directory, 'visible.txt'), 'visible');
-      expect(request('list', { path: directory })).toMatchObject({
-        ok: true,
-        result: [{ name: 'visible.txt', ignored: false }],
-      });
+      expect(request('list', { path: directory })).toMatchObject(
+        success([{ name: 'visible.txt', ignored: false }]),
+      );
       expect(
         request('list', { path: directory, includeIgnored: true }),
-      ).toMatchObject({
-        ok: true,
-        result: [
+      ).toMatchObject(
+        success([
           { name: 'secret.txt', ignored: true },
           { name: 'visible.txt', ignored: false },
-        ],
-      });
+        ]),
+      );
     },
   );
 
@@ -669,13 +623,12 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       'needle\n' + 'x'.repeat(16 * 1024 * 1024),
     );
     writeFileSync(join(root, 'z-small.txt'), 'needle');
-    expect(request('grep', { pattern: 'needle' })).toMatchObject({
-      ok: true,
-      result: {
+    expect(request('grep', { pattern: 'needle' })).toMatchObject(
+      success({
         text: 'a-large.txt:1:needle\nz-small.txt:1:needle',
         truncated: true,
-      },
-    });
+      }),
+    );
   });
 
   it.skipIf(process.getuid?.() === 0)(
@@ -685,28 +638,25 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       writeFileSync(join(root, 'locked.txt'), 'needle', { mode: 0o000 });
       mkdirSync(join(root, 'locked-dir'), { mode: 0o000 });
       try {
-        expect(request('grep', { pattern: 'needle' })).toMatchObject({
-          ok: true,
-          result: { text: 'visible.txt:1:needle', truncated: true },
-        });
-        expect(request('glob', { pattern: '**/*.txt' })).toMatchObject({
-          ok: true,
-          result: {
+        expect(request('grep', { pattern: 'needle' })).toMatchObject(
+          success({ text: 'visible.txt:1:needle', truncated: true }),
+        );
+        expect(request('glob', { pattern: '**/*.txt' })).toMatchObject(
+          success({
             paths: expect.arrayContaining([join(root, 'visible.txt')]),
             truncated: true,
-          },
-        });
+          }),
+        );
         expect(
           request('gitUntrackedStats', {
             paths: ['visible.txt', 'locked.txt'],
           }),
-        ).toMatchObject({
-          ok: true,
-          result: [
+        ).toMatchObject(
+          success([
             { path: 'visible.txt', added: 1 },
             { path: 'locked.txt', added: 0, isBinary: true },
-          ],
-        });
+          ]),
+        );
       } finally {
         chmodSync(join(root, 'locked.txt'), 0o600);
         chmodSync(join(root, 'locked-dir'), 0o700);
@@ -725,7 +675,7 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         undefined,
         failedPublish,
       ),
-    ).toMatchObject({ ok: false, error: { code: 'io_error' } });
+    ).toMatchObject(failure('io_error'));
     expect(readdirSync(root)).toEqual([]);
     const unsupportedSync = SSH_WORKSPACE_SCRIPT.replace(
       'os.fsync(fd)',
@@ -765,15 +715,12 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
           }),
         ).toMatchObject(
           operation === 'gitUntrackedStats' && target.startsWith('link/')
-            ? { ok: true, result: [{ path: target, added: 0, isBinary: true }] }
-            : {
-                ok: false,
-                error: {
-                  code: target.startsWith('..')
-                    ? 'path_outside_workspace'
-                    : 'symlink_escape',
-                },
-              },
+            ? success([{ path: target, added: 0, isBinary: true }])
+            : failure(
+                target.startsWith('..')
+                  ? 'path_outside_workspace'
+                  : 'symlink_escape',
+              ),
         );
       }
     },
@@ -788,18 +735,12 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         input: JSON.stringify({ root: alias, operation: 'probe', params: {} }),
         encoding: 'utf8',
       });
-      expect(JSON.parse(probe.stdout)).toEqual({
-        ok: true,
-        result: { directory: root },
-      });
+      expect(JSON.parse(probe.stdout)).toEqual(success({ directory: root }));
       const read = spawnSync('python3', ['-c', script], {
         input: JSON.stringify({ root: alias, operation: 'stat', params: {} }),
         encoding: 'utf8',
       });
-      expect(JSON.parse(read.stdout)).toMatchObject({
-        ok: false,
-        error: { code: 'symlink_escape' },
-      });
+      expect(JSON.parse(read.stdout)).toMatchObject(failure('symlink_escape'));
     } finally {
       rmSync(alias);
     }
@@ -816,22 +757,19 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       '--cacheinfo',
       '160000,' + '1'.repeat(40) + ',submodule',
     ]);
-    expect(request('glob', { pattern: '**/*.txt' })).toMatchObject({
-      ok: true,
-      result: { paths: [], truncated: true },
-    });
-    expect(request('grep', { pattern: 'needle' })).toMatchObject({
-      ok: true,
-      result: { text: '', truncated: true },
-    });
+    expect(request('glob', { pattern: '**/*.txt' })).toMatchObject(
+      success({ paths: [], truncated: true }),
+    );
+    expect(request('grep', { pattern: 'needle' })).toMatchObject(
+      success({ text: '', truncated: true }),
+    );
   });
 
   it('searches a bare repository as a filesystem instead of misclassifying it as a Git failure', () => {
     execFileSync('git', ['init', '--bare', '-q', root]);
     writeFileSync(join(root, 'visible.txt'), 'needle');
-    expect(request('glob', { pattern: '*.txt' })).toMatchObject({
-      ok: true,
-      result: { paths: [join(root, 'visible.txt')], truncated: false },
-    });
+    expect(request('glob', { pattern: '*.txt' })).toMatchObject(
+      success({ paths: [join(root, 'visible.txt')], truncated: false }),
+    );
   });
 });

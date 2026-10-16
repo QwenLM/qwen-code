@@ -138,8 +138,11 @@ interactive session: batch-auto-collect.ts (started by startPostRenderPrefetches
   (rough: ~4 characters per token for Latin text, ~1.5 for CJK). A dollar
   estimate needs
   `QWEN_BATCH_INPUT_PRICE_PER_1M_USD` / `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`.
-  A plan's `maxCostUsd` is an **estimate gate, not a cap on the bill**; set
-  without prices, it refuses to submit.
+  The forecast leaves out thinking tokens and says so. A plan's
+  `maxCostUsd` is enforced against the **worst case at the request caps**
+  (each request's output cap plus its thinking bound: 0 with thinking off, a
+  `thinking_budget` on non-tiered Qwen models), never against the forecast;
+  without prices or without a finite bound it refuses to submit.
 - **Accounting states its gaps.** Usage is summed over all attempts' result
   files; a line without usage marks the total incomplete, never a silent
   zero. Preparation in the session is invisible to the executor and every
@@ -207,23 +210,24 @@ or unsupported selections fail before upload.
 
 ## 5. Boundary behaviors
 
-| Case                                                                    | Behavior                                                                                                          |
-| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Source path escapes the project root (incl. via symlink)                | Refused at assembly; nothing is uploaded                                                                          |
-| Assembled line over 1 MB                                                | Refused before upload; split the document                                                                         |
-| Create returns a definite 4xx                                           | Orphan upload deleted, items `failed`, `retry` is safe                                                            |
-| Create answer lost (5xx / dropped socket)                               | `submit-unknown`, and `run` exits with an error; `collect` reconciles via the provider list; no resubmit          |
-| Plan, a source or the frozen settings changed after the preview         | `run --expect` refuses; nothing is uploaded and no task is kept                                                   |
-| Reconcile finds 0 or 2+ candidates                                      | Report and stop; the provider list is the source of truth                                                         |
-| Batch not settled at collect                                            | Report status; `--wait` polls (no lock held) with 10s → 60s backoff until it settles or `--timeout`               |
-| Result truncated / tool calls / empty                                   | Item `failed` with the reason; a truncated item needs a larger limit to retry                                     |
-| Result custom_id unknown or duplicated                                  | Ignored with a warning                                                                                            |
-| Item missing from all result files                                      | `failed` ("no result line", or the provider's reason when the whole batch failed)                                 |
-| Result files present, but no line maps to the attempt                   | Nothing marked failed, remote files kept, local copies dropped for a fresh download; collect reports it           |
-| Create accepted, but its body names no batch id                         | `submit-unknown`, reconciled like a lost answer                                                                   |
-| Source changed since submission                                         | `held`; `retry` resubmits it against the new source                                                               |
-| Target exists with other content / symlinks outside / cannot be written | `held` (other items still deliver); re-collect after resolving delivers from the local record, no new cost        |
-| After collect                                                           | Remote input/output/error files deleted (404 counts as deleted); a failed deletion is retried by the next collect |
+| Case                                                                    | Behavior                                                                                                                                                                                           |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Source path escapes the project root (incl. via symlink)                | Refused at assembly; nothing is uploaded                                                                                                                                                           |
+| Assembled line over 1 MB                                                | Refused before upload; split the document                                                                                                                                                          |
+| Create returns a definite 4xx                                           | Orphan upload deleted, items `failed`, `retry` is safe                                                                                                                                             |
+| Create answer lost (5xx / dropped socket)                               | `submit-unknown`, and `run` exits with an error; `collect` reconciles via the provider list; no resubmit                                                                                           |
+| Plan, a source or the frozen settings changed after the preview         | `run --expect` refuses; nothing is uploaded and no task is kept                                                                                                                                    |
+| Reconcile finds 0 or 2+ candidates                                      | Report and stop; the provider list is the source of truth                                                                                                                                          |
+| Batch not settled at collect                                            | Report status; `--wait` polls (no lock held) with 10s → 60s backoff until it settles or `--timeout`                                                                                                |
+| Result truncated / tool calls / empty                                   | Item `failed` with the reason; a truncated item needs a larger limit to retry                                                                                                                      |
+| Result custom_id unknown or duplicated                                  | Ignored with a warning                                                                                                                                                                             |
+| Item missing from all result files                                      | `failed` ("no result line", or the provider's reason when the whole batch failed)                                                                                                                  |
+| Result files short of the finished requests                             | Nothing marked failed, remote files kept, local copies dropped for one fresh download; short again from fresh copies → missing items `failed`, attempt harvested, remote files kept for inspection |
+| Result file gone at the provider (404)                                  | Missing items `failed`; the attempt is harvested                                                                                                                                                   |
+| Create accepted, but its body names no batch id                         | `submit-unknown`, reconciled like a lost answer                                                                                                                                                    |
+| Source changed since submission                                         | `held`; `retry` resubmits it against the new source                                                                                                                                                |
+| Target exists with other content / symlinks outside / cannot be written | `held` (other items still deliver); re-collect after resolving delivers from the local record, no new cost                                                                                         |
+| After collect                                                           | Remote input/output/error files deleted (404 counts as deleted); a failed deletion is retried by the next manual collect and never blocks `retry`, `cancel` or `clean`                             |
 
 Retry semantics:
 

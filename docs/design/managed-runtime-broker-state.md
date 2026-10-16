@@ -63,6 +63,13 @@ generation. **LOST** is reclaimed into **RELEASED** only while no Session or
 execution references it, and **RECOVERY_BLOCKED** never transitions on its
 own; see
 [Runtime binding reconciliation](2026-09-24-runtime-binding-reconciliation.md).
+The Hosted operator recovery procedure adds `OPERATOR_RECOVERY`: it blocks
+admission, release and replacement until explicit stopped-writer evidence moves
+it to `LOST`. A pending operator audit also excludes an already `LOST`
+binding from automatic recovery. `LOST`, `OPERATOR_RECOVERY`,
+`RECOVERY_BLOCKED` and unreclaimed `FAILED` bindings prevent another managed
+placement on the same storage ID or canonical directory; see
+[Hosted operator recovery](2026-09-29-hosted-operator-recovery.md).
 **FAILED** and **RELEASED** are the only terminal states. A later allocation
 creates a new generation. Mutations use an optimistic version and an expiring
 operation owner so only one service instance performs a placement action at a

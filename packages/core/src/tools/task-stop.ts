@@ -196,8 +196,8 @@ class TaskStopInvocation extends BaseToolInvocation<
       return {
         llmContent:
           `Cancellation requested for ${memoryRecord.taskType} task "${taskId}". ` +
-          `The fork agent is being aborted; the consolidation lock will ` +
-          `be released as the agent unwinds. Status is visible via the ` +
+          `The fork agent is being aborted; task state will settle as it ` +
+          `unwinds. Status is visible via the ` +
           `interactive Background tasks dialog (focus the footer Background ` +
           `tasks pill, then Enter).`,
         returnDisplay: `Cancelled ${memoryRecord.taskType}: ${taskId}`,

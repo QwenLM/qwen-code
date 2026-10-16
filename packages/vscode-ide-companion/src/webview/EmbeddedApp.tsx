@@ -765,10 +765,16 @@ export function EmbeddedApp() {
         setSessionListError(undefined);
         setRuntime(nextRuntime);
       } else if (message.type === 'webShellBootstrapError') {
-        const errorMessage = (message.data as { message?: unknown } | null)
-          ?.message;
+        const errorData = message.data as {
+          message?: unknown;
+          reason?: unknown;
+        } | null;
         const text =
-          typeof errorMessage === 'string' ? errorMessage : t('boot.failed');
+          errorData?.reason === 'daemonPreAuthHostGate'
+            ? t('boot.preAuthHostGate')
+            : typeof errorData?.message === 'string'
+              ? errorData.message
+              : t('boot.failed');
         setRuntimeError(text);
         // Before bootstrap this renders as the full-panel startup state. After
         // it, `runtime` is set and that branch is gone, so the same failure
@@ -1606,6 +1612,7 @@ export function EmbeddedApp() {
           }}
           composerRef={composerRef}
           prepareSubmit={async (submission) => {
+            if (submission.source === 'mcp-app') return undefined;
             if (editingMessage) {
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {

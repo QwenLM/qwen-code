@@ -11,7 +11,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { runForkedAgent } from '../agents/forkedAgent.js';
+import {
+  runForkedAgent,
+  type ForkedAgentResult,
+} from '../agents/forkedAgent.js';
 import {
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
@@ -43,6 +46,7 @@ describe('User Dream agent planner', () => {
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
       getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
@@ -214,4 +218,74 @@ describe('User Dream agent planner', () => {
       }),
     ).resolves.toBe('deny');
   });
+
+  it('forwards the caller abort signal to the fork agent', async () => {
+    // The cancelled-status cases below all inject the abort *after* the
+    // fork call, so nothing else pins the `abortSignal` member of that
+    // call. Dropping it stays type-clean (the parameter is optional on
+    // both sides) and keeps every suite green, while `task_stop` on a
+    // running user dream aborts a controller the agent never sees and the
+    // agent writes for its full turn/time budget. The signal is optional
+    // on planUserAutoMemoryDreamByAgent as well, so this case has to pass
+    // one explicitly or it asserts nothing.
+    const controller = new AbortController();
+
+    await planUserAutoMemoryDreamByAgent(
+      config,
+      projectRoot,
+      controller.signal,
+    );
+
+    expect(vi.mocked(runForkedAgent)).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: controller.signal }),
+    );
+  });
+
+  it('threads the configured memory agent turn limit into the forked agent', async () => {
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(25);
+
+    await planUserAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(vi.mocked(runForkedAgent)).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('preserves the zero turn limit sentinel', async () => {
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(0);
+
+    await planUserAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(vi.mocked(runForkedAgent)).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
+    );
+  });
+
+  it('falls back to the built-in turn budget when the limit is unset', async () => {
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(undefined);
+
+    await planUserAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(vi.mocked(runForkedAgent)).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 8 }),
+    );
+  });
+
+  it.each([
+    ['failed', 'Model timed out'],
+    ['cancelled', 'CANCELLED'],
+  ] as const)(
+    'rejects when the agent finishes as %s',
+    async (status, reason) => {
+      vi.mocked(runForkedAgent).mockResolvedValue({
+        status,
+        terminateReason: reason,
+        filesTouched: [],
+      } satisfies ForkedAgentResult);
+
+      await expect(
+        planUserAutoMemoryDreamByAgent(config, projectRoot),
+      ).rejects.toThrow(reason);
+    },
+  );
 });

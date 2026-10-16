@@ -522,6 +522,8 @@ Use `/auth` inside a Qwen Code session to configure authentication. Use `/doctor
 
 Note: Spaces in paths need to be escaped with backslash (e.g., `@My\ Documents/file.txt`)
 
+In the interactive prompt, `@` completion supports Unicode filenames, including emoji. Emoji elsewhere in the prompt do not change the file path used for completion.
+
 ## 3. Exclamation Commands (`!`) - Shell Command Execution
 
 Exclamation commands allow you to execute system commands directly within Qwen Code.
@@ -1070,9 +1072,10 @@ waiting out an expiry. Where a held message should surface for those
 sessions is not settled yet.
 
 A session registers unless its own settings turn
-`agents.crossSessionMessaging` off. Turned off, it stays invisible,
-because the only reason to list a session nobody can message would be to
-advertise an address that never answers.
+`agents.crossSessionMessaging` off, or it was started with `--bare` or
+`--safe-mode` — those turn messaging off whatever the setting says. Turned
+off, it stays invisible, because the only reason to list a session nobody
+can message would be to advertise an address that never answers.
 
 ### Programs that are not Qwen Code sessions
 
