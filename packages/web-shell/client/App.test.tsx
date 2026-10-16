@@ -17952,7 +17952,7 @@ describe('App session callbacks', () => {
     expect(testState.latestArtifactPanelProps?.onReferenceFile).toBeUndefined();
   });
 
-  it('opens one files tab per workspace when configured', () => {
+  it('opens and selects one files tab from the header folder', () => {
     mockWorkspace.capabilities = {
       workspaceCwd: '/tmp/project',
       workspaces: [
@@ -17966,16 +17966,12 @@ describe('App session callbacks', () => {
     } as typeof mockWorkspace.capabilities;
     testState.captureArtifactPanelOnly = true;
     const { container } = renderApp({ rightPanel: { items: ['files'] } });
-    act(() =>
-      container
-        .querySelector<HTMLButtonElement>(
-          'button[aria-label="Toggle right panel"]',
-        )
-        ?.click(),
-    );
-    expect(testState.latestArtifactPanelProps?.onOpenFiles).toBeDefined();
-    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
-    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+    const folder = container.querySelector<HTMLButtonElement>(
+      'button[data-testid="chat-header-workspace"]',
+    )!;
+    expect(folder).not.toBeNull();
+    act(() => folder.click());
+    act(() => folder.click());
     expect(testState.latestArtifactPanelProps?.tabs).toEqual([
       expect.objectContaining({
         kind: 'files',
@@ -18004,6 +18000,21 @@ describe('App session callbacks', () => {
     ]);
     expect(testState.latestArtifactPanelProps?.tabs[1]).not.toHaveProperty(
       'previewContent',
+    );
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[1]?.id,
+    );
+    act(() => folder.click());
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[0]?.id,
+    );
+    act(() => testState.latestArtifactPanelProps?.onClose());
+    testState.latestArtifactPanelProps = null;
+    act(() => folder.click());
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[0]?.id,
     );
   });
 
@@ -18047,6 +18058,9 @@ describe('App session callbacks', () => {
       const { container } = renderApp({
         rightPanel: { items: reason === 'disabled' ? ['review'] : ['files'] },
       });
+      expect(
+        container.querySelector('button[data-testid="chat-header-workspace"]'),
+      ).toBeNull();
       act(() =>
         container
           .querySelector<HTMLButtonElement>(
