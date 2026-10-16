@@ -14,8 +14,7 @@ executed depends on whether that round's agent spends its own time budget
 downloading a toolchain. Some rounds do, some do not, and a later round can
 silently stop executing Java that an earlier round executed.
 
-`sdk-java.yml` already builds and tests Java on `pull_request`. The gap is
-the verify agent's own verdict, not CI coverage.
+`sdk-java.yml` defines Java build and test lanes. The gap here is the verify agent's own verdict.
 
 ## Current state
 
@@ -25,10 +24,9 @@ the verify agent's own verdict, not CI coverage.
 - The agent starts with `env -i` and a fresh `HOME` under `$RUNNER_TEMP`.
   `~/.m2` is always empty. Anything the agent should see has to be passed in
   that environment.
-- The four Java modules publish fixed versions (`0.1.0-alpha`,
+- The Java modules publish fixed versions (`0.1.0-alpha`,
   `0.0.1-alpha` for `acp-sdk`), not SNAPSHOT. `qwen-managed-agent-server`
-  depends on `qwencode-sdk` and `qwen-managed-runtime-broker`, including the
-  broker test-jar. A stale jar left in the local repository is what Maven
+  depends on `qwencode-sdk`; Broker sources and tests are compiled in the server module. A stale jar left in the local repository is what Maven
   resolves.
 - `actions/cache` identifies an entry by the literal `path` plus the
   compression method. This image ships no `zstd`. The working precedent is
@@ -39,9 +37,8 @@ the verify agent's own verdict, not CI coverage.
 
 ## Goals
 
-When a pull request diff touches `packages/sdk-java/`, the agent starts with
-JDK 21, Maven 3.9.11, a warmed local repository, and `qwencode` plus
-`runtime-broker` installed from the merge ref. Other pull requests pay
+When a pull request diff touches `packages/sdk-java/` or `packages/managed-agent-server/`, the agent starts with
+JDK 21, Maven 3.9.11, a warmed local repository, and `qwencode` installed from the merge ref. Other pull requests pay
 nothing. The skill's environment contract states what the lane provides.
 
 ## Non-goals
@@ -56,7 +53,7 @@ Left under _Not covered_ in the skill, and still owned by `sdk-java.yml`:
 ## Proposed solution
 
 The resolver already paginates the full changed-file list into `$files`
-before checkout. When that list matches `^packages/sdk-java/`, it sets the
+before checkout. When that list matches `^packages/(sdk-java|managed-agent-server)/`, it sets the
 `java=true` output. Later steps require both `decision == 'run'` and
 `java == 'true'`.
 
@@ -97,18 +94,18 @@ previous run.
 ### Maven repository cache
 
 `.github/workflows/verify-maven-repo.yml` is the producer. It runs on push
-to `main` when `packages/sdk-java/*/pom.xml` or the workflow file itself
+to `main` when `packages/sdk-java/*/pom.xml`, `packages/managed-agent-server/pom.xml` or the workflow file itself
 changes, and on `workflow_dispatch`. It uses the verify job's `runs-on` and
 `node:22-bookworm` with `--init --user node`, and saves
 `${{ runner.temp }}/verify-maven-repo` with `actions/cache/save` at the same
 SHA pin as the pnpm store. The key is
-`verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml') }}`.
+`verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml', 'packages/managed-agent-server/pom.xml') }}`.
 
-The producer installs `qwencode` and `runtime-broker` with `-DskipTests`,
+The producer installs `qwencode` with `-DskipTests`,
 then runs `-DskipTests verify` on `managed-agent-server` and `client` so
 compile, test, and lifecycle plugins land in the repository. Before saving,
 it deletes `com/alibaba/<artifactId>` for every module under
-`packages/sdk-java/*/pom.xml`. Those versions are not SNAPSHOT; leaving
+`packages/sdk-java/*/pom.xml` and `packages/managed-agent-server/pom.xml`. Those versions are not SNAPSHOT; leaving
 main's jars in the cache would let a failed sibling install resolve the
 main build.
 
@@ -127,10 +124,9 @@ repository to `node` and runs, each under `timeout -k 30 300` and `runuser
 -u node` with credentials stripped:
 
 - `mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install`
-- `mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install`
 
-Both use `-Dmaven.repo.local=$RUNNER_TEMP/verify-maven-repo`. Root appends
-`qwencode=<exit> runtime-broker=<exit>` to
+The command uses `-Dmaven.repo.local=$RUNNER_TEMP/verify-maven-repo`. Root appends
+`qwencode=<exit>` to
 `$RUNNER_TEMP/verify-context/java-prepare.log` and writes the cache hit to
 the step summary. The step always exits 0 and never writes a verdict.
 
@@ -161,7 +157,7 @@ the same 10 minutes of headroom.
 
 ## Design decisions
 
-- **Path gate is `packages/sdk-java/` only.** `sdk-java.yml` also triggers
+- **Path gate covers `packages/sdk-java/` and `packages/managed-agent-server/`.** `sdk-java.yml` also triggers
   on broad core and CLI paths. Provisioning Java for those diffs would
   download the toolchain for most core pull requests, whose cross-language
   tests still need MySQL and a bundle that this lane does not provide.
@@ -220,13 +216,13 @@ the same 10 minutes of headroom.
 
 ## Acceptance criteria
 
-- A diff outside `packages/sdk-java/` does not download a JDK, restore the
+- A diff outside `packages/sdk-java/` and `packages/managed-agent-server/` does not download a JDK, restore the
   Maven repository, or install siblings.
 - A Java diff reaches the agent with `QWEN_VERIFY_JAVA=1`, `JAVA_HOME`, and
   `MAVEN_ARGS` set, or, when the download fails, without those variables and
   with a warning. The job still runs the agent.
 - The verify job never saves the Maven cache.
 - The producer's stripped artifact ids are exactly the artifact ids of
-  `packages/sdk-java/*/pom.xml`.
+  `packages/sdk-java/*/pom.xml` and `packages/managed-agent-server/pom.xml`.
 - The second verify run on `main`, after the producer has saved, reports a
   cache hit.

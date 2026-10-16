@@ -39,6 +39,7 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   ignoreBrokenPipe: vi.fn(),
@@ -417,7 +418,7 @@ describe('runAbDrive, harnessed', () => {
     expect(r2.note).toContain('--shared-cwd');
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses a directory whose search bit is revoked — tmux -c would fall back',
     () => {
       // A mode-000 dir passes isDirectory() but `tmux new-session -c` cannot
@@ -478,7 +479,7 @@ describe('runAbDrive, harnessed', () => {
     expect(h.events()).not.toContain('new:arm-b');
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     're-validates --shared-cwd for a revoked search bit, not only deletion',
     () => {
       const sharedCwd = tempDir('ab-shcwd3-');
