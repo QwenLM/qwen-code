@@ -169,6 +169,20 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     `bash -c "git reset $MODE"`,
     `echo 'git reset --hard' | bash`,
     `git -c alias.nuke='!git reset --hard' nuke`,
+    // An unquoted expansion may split into several words.
+    `X='msg --amend'; git commit -m $X`,
+    'git checkout feature/$X',
+    `X='. reset --hard'; git -C $X status`,
+    // xargs appends what it reads; find and xargs fill in `{}`.
+    `printf -- '--hard\\n' | xargs git -C /repo reset`,
+    'echo reset --hard | xargs git -C /repo',
+    'find . -maxdepth 0 -exec git checkout {} \\;',
+    // A script the same command writes and then runs.
+    `printf 'git reset --hard\\n' > fixup.sh && bash fixup.sh`,
+    `printf 'git reset --hard\\n' > fixup.sh && . ./fixup.sh`,
+    `cat > fix.sh <<'EOF'\ngit stash drop\nEOF\nchmod +x fix.sh && ./fix.sh`,
+    `printf 'git clean -fd\\n' | tee fix.sh > /dev/null && sh ./fix.sh`,
+    `printf 'git clean -fd\\n' | sudo tee fix.sh && command . ./fix.sh`,
     // The parser cannot read these.
     `case "$1" in x) git reset --hard ;; esac`,
     `echo 'git reset --hard`,
@@ -186,6 +200,15 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     'git commit -m "$(cat msg.txt)"',
     'git commit --message="$MSG"',
     'git checkout -b "feature/$NAME"',
+    'git checkout "feature/$X"',
+    'git reset --soft "HEAD~$N"',
+    // After `--` a run-time word can only be a pathspec.
+    'f=app.txt; git reset -q -- "$f"',
+    `f=app.txt; git commit -q -m 'update' -- "$f"`,
+    'git -C $DIR status',
+    'git ls-files -m | xargs git add',
+    `cat > t.sh <<'EOF'\nnpm test\nEOF\nbash t.sh && git commit -m done`,
+    'bash scripts/test.sh && git commit -m done',
   ])('allows %j, which cannot reach a protected operation', async (command) => {
     expect(await reasonFor(command)).toBeNull();
   });

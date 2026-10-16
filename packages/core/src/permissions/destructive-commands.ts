@@ -105,6 +105,8 @@ export function clearSessionCommits(): void {
 
 /** Stands in for the part of a word the shell only computes at run time. */
 const DYNAMIC = '\0';
+/** An unquoted expansion, which the shell may split into any number of words. */
+const SPLIT = '\u0001';
 
 const words = (list: string) => new Set(list.split(' '));
 
@@ -120,6 +122,7 @@ const GIT_GLOBAL_OPTIONS_WITH_VALUE = words(
   '-C -c --git-dir --work-tree --namespace --super-prefix --config-env --attr-source',
 );
 const GIT_REPOSITORY_VARIABLES = words('GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR');
+const WRITE_REDIRECTS = words('> >> >| &> &>>');
 /** Same bound as the shell-wrapper unwrapping in `shell-semantics.ts`. */
 const MAX_SCRIPT_DEPTH = 4;
 
@@ -152,10 +155,16 @@ interface Scan {
   /** A cd or repository variable may point a later git command elsewhere. */
   movesRepository: boolean;
   unverifiable: boolean;
+  /** Files the command writes, with the statements that write them. */
+  writtenFiles: Map<string, string>;
+  /** Script files the command runs. */
+  scriptRuns: string[];
 }
 
 interface CommandContext {
   node: SyntaxNode;
+  /** Text of the script the command belongs to. */
+  text: string;
   cwd: string | undefined;
   depth: number;
 }
@@ -180,6 +189,8 @@ export async function isDestructiveCommand(
     amendTargets: [],
     movesRepository: false,
     unverifiable: false,
+    writtenFiles: new Map(),
+    scriptRuns: [],
   };
   for (
     let script = scan.scripts.shift();
@@ -187,6 +198,10 @@ export async function isDestructiveCommand(
     script = scan.scripts.shift()
   ) {
     await scanScript(script, scan);
+  }
+  // A script the same command writes is a program the guard cannot see run.
+  for (const file of scan.scriptRuns) {
+    flagIfMayRunProtected(scan.writtenFiles.get(file) ?? '', scan);
   }
 
   if (scan.found) {
@@ -243,6 +258,16 @@ async function scanScript(script: Script, scan: Scan): Promise<void> {
       ) {
         // The parser does not model backquotes nested inside backquotes.
         flagIfMayRunProtected(node.text, scan);
+      } else if (
+        node.type === 'file_redirect' &&
+        node.children.some((child) => WRITE_REDIRECTS.has(child.type))
+      ) {
+        const destination = node.childForFieldName('destination');
+        recordWrite(
+          scan,
+          destination ? scriptPath(wordOf(destination)) : undefined,
+          node.parent?.text ?? '',
+        );
       }
       for (let i = node.namedChildCount - 1; i >= 0; i--) {
         stack.push(node.namedChild(i)!);
@@ -262,10 +287,17 @@ function visitCommand(node: SyntaxNode, script: Script, scan: Scan): void {
       argv.push(wordOf(node.child(i)!));
     }
   }
-  runArgv(argv, { node, cwd: script.cwd, depth: script.depth }, scan);
+  runArgv(
+    argv,
+    { node, text: script.text, cwd: script.cwd, depth: script.depth },
+    scan,
+  );
 }
 
-/** The word the shell passes, with run-time parts replaced by `DYNAMIC`. */
+/**
+ * The word the shell passes, with run-time parts replaced by `DYNAMIC`, or
+ * `SPLIT` when the shell may turn it into several words.
+ */
 function wordOf(node: SyntaxNode): string {
   // Brace expansion (`{.,src}`) turns one word into several; the parser
   // only marks the `{1..3}` form.
@@ -273,7 +305,7 @@ function wordOf(node: SyntaxNode): string {
     (node.type === 'word' || node.type === 'concatenation') &&
     /\{[^{}]*,[^{}]*\}/.test(node.text)
   ) {
-    return DYNAMIC;
+    return SPLIT;
   }
   switch (node.type) {
     case 'command_name':
@@ -299,15 +331,41 @@ function wordOf(node: SyntaxNode): string {
             : DYNAMIC,
         )
         .join('');
-    case 'concatenation':
-      return node.namedChildren.map(wordOf).join('');
+    case 'concatenation': {
+      const parts = node.namedChildren.map(wordOf);
+      return parts.some((part) => part.includes(SPLIT))
+        ? SPLIT
+        : parts.join('');
+    }
     default:
-      return DYNAMIC;
+      // Unquoted expansions and substitutions.
+      return SPLIT;
   }
 }
 
+/** The part of a word known before the command runs. */
+function literalOf(word: string): string {
+  for (let i = 0; i < word.length; i++) {
+    if (word[i] === DYNAMIC || word[i] === SPLIT) return word.slice(0, i);
+  }
+  return word;
+}
+
 function isDynamic(word: string): boolean {
-  return word.includes(DYNAMIC);
+  return literalOf(word) !== word;
+}
+
+/** A literal script path, normalized so `./x.sh` and `x.sh` match. */
+function scriptPath(word: string | undefined): string | undefined {
+  return word && !isDynamic(word) ? path.posix.normalize(word) : undefined;
+}
+
+function recordWrite(scan: Scan, file: string | undefined, writer: string) {
+  if (!file) return;
+  scan.writtenFiles.set(
+    file,
+    `${scan.writtenFiles.get(file) ?? ''}\n${writer}`,
+  );
 }
 
 function programName(word: string): string {
@@ -326,7 +384,10 @@ function isInterpreted(word: string): boolean {
     IAC_TOOLS.has(name) ||
     SHELLS.has(name) ||
     SCRIPT_RUNNERS.has(name) ||
-    DIRECTORY_CHANGES.has(name)
+    DIRECTORY_CHANGES.has(name) ||
+    name === 'tee' ||
+    name === '.' ||
+    name === 'source'
   );
 }
 
@@ -351,11 +412,37 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
     return;
   }
   if (PRINTERS.has(program)) return;
+  if (program === 'tee') {
+    // What tee writes comes from the pipeline in front of it.
+    let writer = ctx.node;
+    while (
+      writer.parent?.type === 'redirected_statement' ||
+      writer.parent?.type === 'pipeline'
+    ) {
+      writer = writer.parent;
+    }
+    for (const file of args.filter((arg) => !arg.startsWith('-'))) {
+      recordWrite(scan, scriptPath(file), writer.text);
+    }
+    return;
+  }
+  if (program === '.' || program === 'source') {
+    const file = scriptPath(args[0]);
+    if (file) scan.scriptRuns.push(file);
+    return;
+  }
+  const file = head.includes('/') ? scriptPath(head) : undefined;
+  if (file) scan.scriptRuns.push(file);
   // sudo, env, xargs, timeout, npx and similar run the rest of their argv,
-  // possibly from another directory.
+  // possibly from another directory. `find -exec` and `xargs -I` put a
+  // run-time argument where `{}` stands, and xargs appends what it reads.
   for (let i = 1; i < argv.length; i++) {
     if (isDynamic(argv[i]!) || isInterpreted(argv[i]!)) {
-      runArgv(argv.slice(i), { ...ctx, cwd: undefined }, scan);
+      const suffix = argv
+        .slice(i)
+        .map((word) => (word === '{}' ? DYNAMIC : word));
+      if (program === 'xargs') suffix.push(SPLIT);
+      runArgv(suffix, { ...ctx, cwd: undefined }, scan);
     }
   }
 }
@@ -365,7 +452,7 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
   let i = 0;
   for (; i < args.length; i++) {
     const arg = args[i]!;
-    const literal = arg.split(DYNAMIC)[0]!;
+    const literal = literalOf(arg);
     if (!literal.startsWith('-')) break;
     const equals = literal.indexOf('=');
     const option = equals < 0 ? literal : literal.slice(0, equals);
@@ -375,6 +462,8 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
       continue;
     }
     const value = equals < 0 ? (args[++i] ?? '') : arg.slice(equals + 1);
+    // A split value can push other words in front of the subcommand.
+    if (value.includes(SPLIT)) flagIfMayRunProtected(ctx.text, scan);
     if (option === '-C') {
       dir =
         dir === undefined || isDynamic(value)
@@ -400,7 +489,8 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
   const rest = args.slice(i + 1);
   if (subcommand === 'reset') {
     const parsed = parseOptions(rest);
-    report(scan, hasLong(parsed, 'hard'), parsed.dynamic, 'git reset --hard');
+    const hard = hasLong(parsed, 'hard');
+    report(scan, hard, parsed.dynamicOption, 'git reset --hard');
   } else if (subcommand === 'checkout') {
     const parsed = parseOptions(
       rest,
@@ -412,12 +502,15 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
     const wholeTree = parsed.operands.some((operand) =>
       WHOLE_TREE_PATHSPEC.test(operand),
     );
-    report(scan, wholeTree, parsed.dynamic, 'git checkout -- .');
+    const mayBeWholeTree = parsed.dynamicOperands.some((prefix) =>
+      /^[./]*$/.test(prefix),
+    );
+    report(scan, wholeTree, mayBeWholeTree, 'git checkout -- .');
   } else if (subcommand === 'clean') {
     const parsed = parseOptions(rest, 'e', words('exclude'));
     if (parsed.short.has('n') || hasLong(parsed, 'dry-run')) return;
     const force = parsed.short.has('f') || hasLong(parsed, 'force');
-    report(scan, force, parsed.dynamic, 'git clean -f');
+    report(scan, force, parsed.dynamicOption, 'git clean -f');
   } else if (subcommand === 'stash') {
     const action = rest[0] ?? '';
     report(scan, action === 'drop', isDynamic(action), 'git stash drop');
@@ -430,7 +523,7 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
       ),
     );
     if (hasLong(parsed, 'amend', 2)) scan.amendTargets.push(dir);
-    else if (parsed.dynamic) scan.unverifiable = true;
+    else if (parsed.dynamicOption) scan.unverifiable = true;
   } else if (
     subcommand === 'rebase' ||
     subcommand === 'submodule' ||
@@ -460,8 +553,10 @@ interface ParsedOptions {
   short: Set<string>;
   long: string[];
   operands: string[];
-  /** A word known only at run time may be an option or an operand. */
-  dynamic: boolean;
+  /** A word known only at run time may add options. */
+  dynamicOption: boolean;
+  /** Literal prefixes of operands known only at run time. */
+  dynamicOperands: string[];
 }
 
 /** Git-style options; listed value options consume their value. */
@@ -474,35 +569,54 @@ function parseOptions(
     short: new Set(),
     long: [],
     operands: [],
-    dynamic: false,
+    dynamicOption: false,
+    dynamicOperands: [],
+  };
+  const unknownWords = () => {
+    parsed.dynamicOption = true;
+    parsed.dynamicOperands.push('');
+  };
+  // An option value the shell may split can also add options and operands.
+  const consume = (value: string | undefined) => {
+    if (value?.includes(SPLIT)) unknownWords();
   };
   let operandsOnly = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
-    const literal = arg.split(DYNAMIC)[0]!;
+    const literal = literalOf(arg);
     const dynamic = literal !== arg;
     if (!operandsOnly && arg === '--') {
       operandsOnly = true;
-    } else if (operandsOnly || !literal.startsWith('-') || literal === '-') {
-      if (dynamic) parsed.dynamic = true;
+    } else if (
+      operandsOnly ||
+      arg === '-' ||
+      (literal !== '' && !literal.startsWith('-'))
+    ) {
+      // After `--`, even a split word only adds operands.
+      if (dynamic) parsed.dynamicOperands.push(literal);
       else parsed.operands.push(arg);
+    } else if (literal === '') {
+      unknownWords();
     } else if (literal.startsWith('--')) {
       const equals = literal.indexOf('=');
       if (dynamic && equals < 0) {
-        parsed.dynamic = true;
+        parsed.dynamicOption = true;
         continue;
       }
       const name = literal.slice(2, equals < 0 ? undefined : equals);
       parsed.long.push(name);
-      if (equals < 0 && longWithValue.has(name)) i++;
+      if (equals < 0 && longWithValue.has(name)) consume(args[++i]);
     } else {
-      for (let j = 1; j < literal.length; j++) {
+      let j = 1;
+      while (j < literal.length && !shortWithValue.includes(literal[j]!)) {
+        parsed.short.add(literal[j++]!);
+      }
+      if (j < literal.length) {
         parsed.short.add(literal[j]!);
-        if (shortWithValue.includes(literal[j]!)) {
-          if (j === arg.length - 1) i++;
-          break;
-        }
-        if (dynamic && j === literal.length - 1) parsed.dynamic = true;
+        if (j === arg.length - 1) consume(args[++i]);
+      } else if (dynamic) {
+        // The bundle continues at run time.
+        parsed.dynamicOption = true;
       }
     }
   }
@@ -566,7 +680,11 @@ function checkShell(args: string[], ctx: CommandContext, scan: Scan): void {
     return;
   }
   // Otherwise a script file, unless the program comes from stdin.
-  if (i < args.length && !readsStdin) return;
+  if (i < args.length && !readsStdin) {
+    const file = scriptPath(args[i]);
+    if (file) scan.scriptRuns.push(file);
+    return;
+  }
   runStdinProgram(ctx, scan);
 }
 
