@@ -2883,9 +2883,13 @@ public class ManagedAgentStore implements AgentStateStore {
                 new ArrayList<>(
                         jdbc.query(
                                 // Every blocked lifecycle shape is
-                                // re-driven: only CLOSE and DELETE are ever
-                                // delivered (an archive completes at
-                                // admission), and both publish their waits.
+                                // re-driven. CLOSE, DELETE and CWD_CHANGE
+                                // are the delivered kinds (an archive
+                                // completes at admission): CLOSE and DELETE
+                                // publish their writer-live and stale-boot
+                                // waits, and a cwd change stays bounded by
+                                // its own attempt budget in the coordinator
+                                // (review round 2, R2-15).
                                 "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE"
                                     + " operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE',"
                                     + " 'CWD_CHANGE') AND state IN ('PENDING', 'RUNNING',"

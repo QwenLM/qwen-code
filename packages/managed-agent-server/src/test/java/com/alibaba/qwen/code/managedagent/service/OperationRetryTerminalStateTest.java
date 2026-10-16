@@ -37,7 +37,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
-import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -69,18 +69,25 @@ class OperationRetryTerminalStateTest {
     // budget the wait is also published — the row reads recovery_blocked
     // with its code instead of a healthy pending retry — and the attempt is
     // recorded budget-exempt so the wait never consumes the budget the close
-    // itself still has.
-    @ParameterizedTest(name = "attemptCount = {0}, lifecycleProtocol = {1}")
-    @CsvSource({"10, 0", "40, 0", "10, 1", "40, 1"})
+    // itself still has. Publication reads the raw attempt count, not the
+    // charged one: every attempt of a row that only ever waited is exempt,
+    // so its charged count stays 0 and a charged-count gate would never
+    // publish it — the rows whose exempt count equals the attempt count pin
+    // that (review round 4, R4-2).
+    @ParameterizedTest(name = "attemptCount = {0}, lifecycleProtocol = {1},"
+            + " budgetExemptAttempt = {2}")
+    @CsvSource({"10, 0, 0", "40, 0, 0", "10, 1, 0", "40, 1, 0", "10, 0, 10",
+        "40, 0, 40"})
     void lifecycleOperationKeepsWaitingPastTheBudgetWhileAWriterIsLive(
-            int attemptCount, int lifecycleProtocol) {
+            int attemptCount, int lifecycleProtocol, int budgetExemptAttempt) {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
-                attemptCount, null, null, null, null, 0, lifecycleProtocol, null, null);
+                attemptCount, null, null, null, null, budgetExemptAttempt,
+                lifecycleProtocol, null, null);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
@@ -191,13 +198,18 @@ class OperationRetryTerminalStateTest {
     // waiting past the budget instead of recording an unrecoverable
     // terminal (review round 6, R6-3) — but the wait is published, because
     // an unbounded wait that reads as a healthy pending retry is invisible
-    // to the operator who has to restart this replica.
-    @Test
-    void aStaleHarnessViewPublishesItsWaitPastTheBudget() {
+    // to the operator who has to restart this replica. As with the writer
+    // wait, publication reads the raw attempt count: with every attempt
+    // exempt (10 of 10) the charged count is 0 and the wait still publishes
+    // (review round 4, R4-2).
+    @ParameterizedTest(name = "budgetExemptAttempt = {0}")
+    @ValueSource(ints = {0, 10})
+    void aStaleHarnessViewPublishesItsWaitPastTheBudget(
+            int budgetExemptAttempt) {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
-        OperationRecord claimed = lifecycleOperation(10);
+        OperationRecord claimed = lifecycleOperation(10, budgetExemptAttempt);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -2453,6 +2465,10 @@ class OperationRetryTerminalStateTest {
                 anyLong());
         verify(sessions, never()).retryOperation(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyLong(), anyBoolean());
+        // One Action read per inspection — before the delivery, in the
+        // refusal arm, and in the catch block — and the expiry check reuses
+        // the catch block's read instead of querying the row again (R2-11).
+        verify(actions, times(3)).find("tenant", "session", "action-1");
     }
 
     // A capability digest mismatch is a refusal to serve, not the Harness
@@ -2850,6 +2866,12 @@ class OperationRetryTerminalStateTest {
         when(actions.find("tenant", "session", "action-1")).thenReturn(
                 Optional.of(new ManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
+        // Every renewal succeeds, so the renewals counted below are real
+        // renewals of a held lease, not ticks of one already lost (review
+        // round 1, R1-7).
+        when(sessions.renewLifecycleOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), eq(3L),
+                eq(Duration.ofMillis(30)))).thenReturn(true);
         // The Harness answers 200 after outlasting the 30ms lease.
         doAnswer(invocation -> {
             Thread.sleep(150);
@@ -2863,7 +2885,14 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-action");
 
-            verify(sessions, atLeastOnce()).renewLifecycleOperation(
+            // The renewal period is a third of the lease (10ms here), so
+            // the 150ms call leaves room for about 14 renewals. A period
+            // equal to the lease renews on the expiry boundary, where
+            // scheduler jitter lets the lease lapse mid-call, yet still fits
+            // about five renewals into the window; eight sits above that and
+            // well below the expected count (review round 3, R3-2; review
+            // round 1, R1-7).
+            verify(sessions, atLeast(8)).renewLifecycleOperation(
                     eq("tenant"), eq("session"), eq("op-action"), anyString(),
                     eq(3L), eq(Duration.ofMillis(30)));
             // The answer is still recorded budget-exempt afterwards.
