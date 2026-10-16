@@ -6610,6 +6610,9 @@ it('probes every inconclusive background binding within one timeout window', asy
 });
 
 it('settles grant-proven bindings before waiting for process probes', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
   const realSetTimeout = globalThis.setTimeout;
   const realClearTimeout = globalThis.clearTimeout;
   vi.useFakeTimers();
@@ -6678,6 +6681,10 @@ it('settles grant-proven bindings before waiting for process probes', async () =
         params: { stopReason: 'start_failed', started: false },
       },
     ]);
+    // Grant-owner proof is not process-ledger proof.
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('from durable process-ledger absence'),
+    );
 
     await vi.advanceTimersByTimeAsync(30_000);
     const { rejection } = await outcome;

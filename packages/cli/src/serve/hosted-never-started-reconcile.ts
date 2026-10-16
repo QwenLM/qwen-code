@@ -60,6 +60,8 @@ function rejectionDetail(cause: unknown): string {
   if (typeof bag['status'] === 'number') parts.push(`status ${bag['status']}`);
   if (typeof bag['code'] === 'string') parts.push(`code ${bag['code']}`);
   if (parts.length > 0) return parts.join(', ');
+  // A fetch timeout's DOMException has Error.prototype, so this arm reports
+  // its name; its numeric `code` cannot pass the route-code check above.
   if (cause instanceof Error) {
     if (cause.message === 'Runtime execution identity changed.')
       return 'identity_changed';
@@ -67,10 +69,6 @@ function rejectionDetail(cause: unknown): string {
       return 'outcome_unknown';
     return `error ${cause.name}`;
   }
-  // AbortSignal.timeout rejects fetch with a DOMException, which is not an
-  // Error subclass; its legacy numeric `code` is not a route code and must
-  // not pass as one, so the name is its only redacted discriminator.
-  if (cause instanceof DOMException) return `error ${cause.name}`;
   return 'no status';
 }
 
