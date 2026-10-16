@@ -44,6 +44,13 @@ public class ChildWorkspaceStore {
      * asked for.
      */
     public static final String DISCARD_PINNED = "discard_pinned";
+    /** A child Workspace that merges back when its child completes (I2). */
+    public static final String WORKTREE = "worktree";
+    /**
+     * A read-only child Workspace (#13753 I3): its child reads a frozen copy
+     * and every finish is a discard.
+     */
+    public static final String SNAPSHOT = "snapshot";
 
     private static final Set<String> SETTLED_SESSION_STATES = Set.of("CLOSED", "ARCHIVED", "DELETED");
     /** The columns a transition may set besides the state; anything else is refused. */
@@ -51,7 +58,7 @@ public class ChildWorkspaceStore {
             "base_commit", "result_commit", "parent_tree", "merged_tree", "finish_request", "outcome_code",
             "conflict_paths", "last_error");
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String SELECT = "SELECT w.tenant_id, w.parent_session_id, w.child_run_id, w.child_workspace_id, w.parent_workspace_id AS workspace_id, w.workspace_generation, w.storage_id, w.parent_cwd_relative, w.repository_relative, w.child_cwd_relative, w.base_commit, w.result_commit, w.parent_tree, w.merged_tree, w.child_state AS state, w.finish_request, w.outcome_code, w.conflict_paths, w.last_error, o.claim_owner AS claimed_by, FLOOR(o.claim_until) AS claimed_until, o.claim_generation, o.attempt_count AS attempts, o.available_at AS next_retry_at, w.gmt_create, w.gmt_modified FROM ma_workspace w JOIN ma_operation o ON o.tenant_id = w.tenant_id AND o.operation_id = w.child_workspace_id AND o.operation_kind = 'CHILD_WORKSPACE'";
+    private static final String SELECT = "SELECT w.tenant_id, w.parent_session_id, w.child_run_id, w.child_workspace_id, w.parent_workspace_id AS workspace_id, w.workspace_generation, w.storage_id, w.parent_cwd_relative, w.repository_relative, w.child_cwd_relative, w.base_commit, w.result_commit, w.parent_tree, w.merged_tree, w.child_state AS state, w.finish_request, w.outcome_code, w.conflict_paths, w.last_error, o.claim_owner AS claimed_by, FLOOR(o.claim_until) AS claimed_until, o.claim_generation, o.attempt_count AS attempts, o.available_at AS next_retry_at, w.gmt_create, w.gmt_modified, o.request_json FROM ma_workspace w JOIN ma_operation o ON o.tenant_id = w.tenant_id AND o.operation_id = w.child_workspace_id AND o.operation_kind = 'CHILD_WORKSPACE'";
     private static final WorkspaceOperations.Kind KIND = WorkspaceOperations.Kind.CHILD_WORKSPACE;
 
     /** One child Workspace row. */
@@ -61,7 +68,11 @@ public class ChildWorkspaceStore {
             String baseCommit, String resultCommit, String parentTree, String mergedTree,
             String state, String finishRequest, String outcomeCode, List<String> conflictPaths,
             String lastError, String claimedBy, Long claimedUntil, long claimGeneration,
-            int attempts, long nextRetryAt, long createdAt, long updatedAt) {
+            int attempts, long nextRetryAt, long createdAt, long updatedAt, String workspaceMode) {
+        /** Whether the row is a read-only snapshot, whose every finish is a discard. */
+        public boolean snapshot() {
+            return SNAPSHOT.equals(workspaceMode);
+        }
     }
 
     private final JdbcTemplate jdbc;
@@ -86,12 +97,24 @@ public class ChildWorkspaceStore {
         }
     }
 
-    /**
-     * Admits the preparation of one child run's Workspace from the
-     * parent's binding, or answers the row an earlier admission wrote.
-     */
+    /** Admits a worktree, the mode I1 and I2 prepare. */
     public Row admit(String tenantId, String parentSessionId, String childRunId,
             ContextBinding parent, long now) {
+        return admit(tenantId, parentSessionId, childRunId, parent, WORKTREE, now);
+    }
+
+    /**
+     * Admits the preparation of one child run's Workspace from the
+     * parent's binding, or answers the row an earlier admission wrote. A
+     * run's mode is fixed on its record and kept in the operation's
+     * request, which nothing rewrites; a row admitted for the other mode
+     * is a conflict, never a second Workspace (#13753 I3).
+     */
+    public Row admit(String tenantId, String parentSessionId, String childRunId,
+            ContextBinding parent, String workspaceMode, long now) {
+        if (!WORKTREE.equals(workspaceMode) && !SNAPSHOT.equals(workspaceMode)) {
+            throw new IllegalArgumentException("Unknown child Workspace mode " + workspaceMode);
+        }
         return transaction.execute(status -> {
             String childId = childWorkspaceId(tenantId, parentSessionId, childRunId);
             jdbc.update("INSERT IGNORE INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
@@ -103,15 +126,25 @@ public class ChildWorkspaceStore {
                     childId, parent.getCwdRelative(), PREPARING, now, now, tenantId, parent.getWorkspaceId());
             WorkspaceOperations operations = new WorkspaceOperations(jdbc, tenantId);
             if (operations.find(KIND, childId, true) == null) {
+                // A worktree's request stays exactly as before; only a
+                // snapshot names its mode, so a row without one is a worktree.
+                Map<String, Object> request = new LinkedHashMap<>(Map.of("tenantId", tenantId,
+                        "parentSessionId", parentSessionId, "childRunId", childRunId, "childWorkspaceId", childId));
+                if (SNAPSHOT.equals(workspaceMode)) {
+                    request.put("workspaceMode", SNAPSHOT);
+                }
                 operations.create(KIND, childId, WorkspaceOperations.values("session_id", parentSessionId,
                         "storage_id", parent.getStorageId(), "state", PREPARING, "phase", PREPARING, "delivery_state", "PENDING", "available_at", now,
-                        "request_json", JSON.valueToTree(Map.of("tenantId", tenantId, "parentSessionId", parentSessionId,
-                                "childRunId", childRunId, "childWorkspaceId", childId)).toString()));
+                        "request_json", JSON.valueToTree(request).toString()));
             }
             Row row = find(tenantId, parentSessionId, childRunId);
             if (row == null) {
                 throw new ApiException(HttpStatus.CONFLICT, "child_workspace_conflict",
                         "The child Workspace is unavailable.");
+            }
+            if (!workspaceMode.equals(row.workspaceMode())) {
+                throw new ApiException(HttpStatus.CONFLICT, "child_workspace_conflict",
+                        "The child Workspace was admitted for another mode.");
             }
             return row;
         });
@@ -259,7 +292,9 @@ public class ChildWorkspaceStore {
      * merge whose result is not pinned yet (one not started, or one that
      * ended blocked before its pin) is recorded as {@link #DISCARD_PINNED}:
      * the merge was asked because the child completed, so its work stays
-     * at the result ref although it does not land.
+     * at the result ref although it does not land. A snapshot's every
+     * finish is a discard (#13753 I3), so a merge asked of one is recorded
+     * as the discard it is: nothing ever waits for a merge that cannot run.
      */
     public Row requestFinish(String tenantId, String parentSessionId, String childRunId,
             String finish, long now) {
@@ -274,12 +309,13 @@ public class ChildWorkspaceStore {
                         "The child run has no child Workspace.");
             }
             Row row = rows.getFirst();
-            if (finish.equals(row.finishRequest())
-                    || DISCARD.equals(finish) && DISCARD_PINNED.equals(row.finishRequest())) {
+            String asked = MERGE.equals(finish) && row.snapshot() ? DISCARD : finish;
+            if (asked.equals(row.finishRequest())
+                    || DISCARD.equals(asked) && DISCARD_PINNED.equals(row.finishRequest())) {
                 return row;
             }
-            String recorded = finish;
-            if (MERGE.equals(finish)) {
+            String recorded = asked;
+            if (MERGE.equals(asked)) {
                 if (row.finishRequest() != null) {
                     throw new ApiException(HttpStatus.CONFLICT, "child_workspace_conflict",
                             "The child Workspace is already being discarded.");
@@ -347,7 +383,18 @@ public class ChildWorkspaceStore {
                 result.getString("last_error"), result.getString("claimed_by"),
                 result.getObject("claimed_until", Long.class), result.getLong("claim_generation"),
                 result.getInt("attempts"), result.getLong("next_retry_at"),
-                result.getLong("gmt_create"), result.getLong("gmt_modified"));
+                result.getLong("gmt_create"), result.getLong("gmt_modified"),
+                workspaceMode(result.getString("request_json")));
+    }
+
+    /** The mode a row's request names; a request naming none is a worktree's. */
+    static String workspaceMode(String request) {
+        try {
+            var mode = JSON.readTree(request).path("workspaceMode");
+            return mode.isTextual() ? mode.asText() : WORKTREE;
+        } catch (JsonProcessingException error) {
+            throw new IllegalStateException("A child Workspace's request is unreadable", error);
+        }
     }
 
     private static List<String> paths(String json) {

@@ -134,6 +134,7 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
     readonly status: number,
     readonly remoteCode: string,
     message: string,
+    readonly contentionExhausted?: boolean,
   ) {
     super(message);
     this.name = 'ManagedSessionStoreHttpError';
@@ -344,6 +345,8 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     appendTransaction: rejectWrite,
     blockRecovery: rejectWrite,
     seal: rejectWrite,
+    // A snapshot-inspection handle has no open writer; nothing can append.
+    writerSealed: true,
     abort: rejectWrite,
   };
   const resourceStore: ManagedSessionResourceStore = {
@@ -420,6 +423,10 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
 
   seal(): Promise<void> {
     return this.client.seal();
+  }
+
+  get writerSealed(): boolean {
+    return this.client.writerSealed;
   }
 
   abort(): Promise<void> {
@@ -604,6 +611,10 @@ class ManagedSessionStoreHttpClient {
   private renewTimer: NodeJS.Timeout | undefined;
   private sealed = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
+
+  get writerSealed(): boolean {
+    return this.sealed;
+  }
 
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void {
     this.lifecycleAuthority = authority;
@@ -873,6 +884,13 @@ class ManagedSessionStoreHttpClient {
       resources: commitResources,
     };
     let committed: unknown;
+    // One contention budget shared by the whole commit: the guard retries
+    // inside json() and publicationRequest() stop at this deadline and each
+    // guard retry's own timeout shrinks to it, and once guard retries have
+    // spent it the outer loop starts no restart either — so three attempts
+    // cannot each spend a fresh requestTimeoutMs behind one held tenant
+    // guard (#13800).
+    const contentionDeadline = Date.now() + this.requestTimeoutMs;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         committed =
@@ -883,10 +901,13 @@ class ManagedSessionStoreHttpClient {
                   : '/transactions:commit',
                 'POST',
                 commitBody,
+                contentionDeadline,
               )
             : await this.publicationRequest(
                 `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
                 commitBody,
+                undefined,
+                contentionDeadline,
               );
         break;
       } catch (error) {
@@ -917,7 +938,15 @@ class ManagedSessionStoreHttpClient {
           error instanceof TypeError ||
           (error instanceof DOMException &&
             ['AbortError', 'TimeoutError'].includes(error.name));
-        if (!uncertain || attempt === 2) throw error;
+        // withRetry marks its terminal error as exhausted only when guard
+        // retries actually consumed the shared budget; without the mark
+        // one attempt's own stall burned its own time, so the baseline
+        // restart stays allowed instead of being gated off by wall-clock
+        // inference alone (#13800 P2, R2-2).
+        const contentionSpent =
+          error instanceof ManagedSessionStoreHttpError &&
+          error.contentionExhausted === true;
+        if (!uncertain || attempt === 2 || contentionSpent) throw error;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
@@ -996,6 +1025,7 @@ class ManagedSessionStoreHttpClient {
     path: string,
     body: Record<string, unknown>,
     token?: string,
+    contentionDeadline?: number,
   ): Promise<unknown> {
     await this.ensureWriter();
     if (
@@ -1004,41 +1034,55 @@ class ManagedSessionStoreHttpClient {
       )
     )
       throw new ManagedSessionRecordError('Publication owner path is invalid.');
-    const url = `${this.baseUrl}/internal/managed-tool-publications/v1/sessions/${encodeURIComponent(
-      this.sessionKey.sessionId,
-    )}${path}?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`;
     const readOnly = path.endsWith('/finished');
-    const response = await this.fetchFn(url, {
-      method: readOnly ? 'GET' : 'POST',
-      headers: {
-        Accept: 'application/json',
-        'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
-        ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
-        [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
-          this.sessionKey.tenantId,
-        [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
-          this.writerToken,
-        'X-Qwen-Managed-Writer-Id': this.writerId,
-        'X-Qwen-Managed-Writer-Generation': String(
-          this.requireGrant().writerGeneration,
-        ),
-        ...(token ? { 'X-Qwen-Tool-Publication-Token': token } : {}),
+    const method = readOnly ? 'GET' : 'POST';
+    // Same engine as the commit lane: the caller's shared contention
+    // deadline caps each attempt, and a contended 503 earns the guard
+    // retry instead of returning uncapped (#13800 R2-2).
+    return this.withRetry(
+      readOnly,
+      method,
+      path,
+      async (timeoutMs) => {
+        const url = `${this.baseUrl}/internal/managed-tool-publications/v1/sessions/${encodeURIComponent(
+          this.sessionKey.sessionId,
+        )}${path}?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`;
+        const response = await this.fetchFn(url, {
+          method,
+          headers: {
+            Accept: 'application/json',
+            'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
+            ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
+            [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
+              this.sessionKey.tenantId,
+            [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
+              this.writerToken,
+            'X-Qwen-Managed-Writer-Id': this.writerId,
+            'X-Qwen-Managed-Writer-Generation': String(
+              this.requireGrant().writerGeneration,
+            ),
+            ...(token ? { 'X-Qwen-Tool-Publication-Token': token } : {}),
+          },
+          ...(readOnly ? {} : { body: JSON.stringify(body) }),
+          redirect: 'error',
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!response.ok) {
+          const error = await readHttpError(response);
+          throw new ManagedSessionStoreHttpError(
+            response.status,
+            error.code,
+            error.message,
+          );
+        }
+        if (response.headers.get('Cache-Control') !== 'no-store')
+          throw corrupt(
+            'Publication response is missing Cache-Control: no-store.',
+          );
+        return readBoundedPublicationJson(response);
       },
-      ...(readOnly ? {} : { body: JSON.stringify(body) }),
-      redirect: 'error',
-      signal: AbortSignal.timeout(this.requestTimeoutMs),
-    });
-    if (!response.ok) {
-      const error = await readHttpError(response);
-      throw new ManagedSessionStoreHttpError(
-        response.status,
-        error.code,
-        error.message,
-      );
-    }
-    if (response.headers.get('Cache-Control') !== 'no-store')
-      throw corrupt('Publication response is missing Cache-Control: no-store.');
-    return readBoundedPublicationJson(response);
+      contentionDeadline,
+    );
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
@@ -1307,6 +1351,7 @@ class ManagedSessionStoreHttpClient {
     path: string,
     method: 'GET' | 'POST',
     body?: Readonly<Record<string, unknown>>,
+    contentionDeadline?: number,
   ): Promise<unknown> {
     return this.withRetry(
       method === 'GET' || path === '/writers:renew',
@@ -1331,6 +1376,7 @@ class ManagedSessionStoreHttpClient {
           );
         }
       },
+      contentionDeadline,
     );
   }
 
@@ -1341,33 +1387,95 @@ class ManagedSessionStoreHttpClient {
    * history on a cold restore. Those calls retry the whole exchange twice
    * with a short jittered backoff, all inside one `requestTimeoutMs`
    * budget, so a wedged endpoint blocks no longer than before. Commits are
-   * deliberately not retried here; their callers handle the outcome
-   * themselves. A terminal failure names the endpoint and, once a retry
-   * actually ran, the attempt count.
+   * not retried here for transport failures; their callers handle that
+   * outcome themselves. A bounded `tenant_guard_contended` refusal is the
+   * exception: the store rolled the transaction back before writing
+   * anything, so it is a definite non-commit and is retried on any route,
+   * commits included, until the call's budget (or the caller's shared
+   * contention deadline) is spent. A terminal failure names the endpoint
+   * and, once a retry actually ran, the attempt count.
    */
   private async withRetry<T>(
     retryable: boolean,
     method: 'GET' | 'POST',
     path: string,
     run: (timeoutMs: number) => Promise<T>,
+    contentionDeadline?: number,
   ): Promise<T> {
     const deadline = Date.now() + this.requestTimeoutMs;
+    // A caller that retries this helper itself passes one contention
+    // deadline for all of its calls, so their guard retries share a single
+    // budget instead of each restarting a fresh requestTimeoutMs (#13800).
+    const guardDeadline = Math.min(deadline, contentionDeadline ?? deadline);
     let attempt = 0;
+    // Guard retries are counted apart so they never spend the transient
+    // path's three-attempt allowance.
+    let guardRetries = 0;
+    // The latest contention refusal seen: when the shared deadline
+    // aborts a later attempt instead of the store answering again, the
+    // terminal throw keeps the guard's own name instead of renaming it
+    // a transport failure (#13800 R1-7).
+    let contendedRefusal: ManagedSessionStoreHttpError | undefined;
     for (;;) {
       attempt++;
       try {
-        return await run(Math.max(1, deadline - Date.now()));
+        // Guard retries run inside the caller's shared contention deadline:
+        // a slower guard answer aborts there rather than each retry
+        // restarting the full requestTimeoutMs (#13800 P2). A call's first
+        // attempt keeps its own budget, so a restart the caller earned after
+        // a non-contention failure is not issued already expired (#13800
+        // R2-2).
+        const attemptDeadline = guardRetries > 0 ? guardDeadline : deadline;
+        return await run(Math.max(1, attemptDeadline - Date.now()));
       } catch (error) {
+        // A bounded tenant-guard wait is a definite non-commit: the store
+        // rolled the transaction back before writing anything. Keep retrying
+        // it — on any route — for the rest of this request budget instead of
+        // spending the three-attempt cap in ~15 s and latching the Session's
+        // writes behind a contention window it could have outlasted (#13800).
+        const contended =
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 503 &&
+          error.remoteCode === 'tenant_guard_contended';
+        if (contended) contendedRefusal = error;
+        if (contended && guardDeadline - Date.now() > 250) {
+          debugLogger.debug(
+            `Managed Session Store ${method} ${path} attempt ${attempt} found the tenant guard contended; retrying.`,
+          );
+          guardRetries++;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
+        }
         const transient =
           error instanceof ManagedSessionStoreTransportError ||
           (error instanceof ManagedSessionStoreHttpError &&
             [500, 502, 503, 504].includes(error.status));
+        // Past its window a contended guard is terminal: a transient retry
+        // there would only time out and rename it a transport failure.
         if (
           !retryable ||
           !transient ||
-          attempt >= 3 ||
+          contended ||
+          attempt - guardRetries >= 3 ||
           Date.now() >= deadline
         ) {
+          if (
+            contendedRefusal !== undefined &&
+            guardDeadline - Date.now() <= 250
+          ) {
+            throw new ManagedSessionStoreHttpError(
+              contendedRefusal.status,
+              contendedRefusal.remoteCode,
+              attempt > 1
+                ? `Managed Session Store ${method} ${path} failed after ${attempt} attempts: ${contendedRefusal.message}`
+                : `Managed Session Store ${method} ${path} failed: ${contendedRefusal.message}`,
+              // Report upward whether guard retries actually consumed
+              // the shared budget (#13800 R2-2): a first attempt that
+              // only collided with the near-deadline instant did not
+              // spend it, and the caller's restart stays allowed.
+              guardRetries > 0 || undefined,
+            );
+          }
           if (transient) {
             const detail =
               attempt > 1
@@ -1388,7 +1496,10 @@ class ManagedSessionStoreHttpClient {
           `Managed Session Store ${method} ${path} attempt ${attempt} failed (${error instanceof Error ? error.message : String(error)}); retrying.`,
         );
         await new Promise((resolve) =>
-          setTimeout(resolve, 200 * attempt + Math.floor(Math.random() * 100)),
+          setTimeout(
+            resolve,
+            200 * (attempt - guardRetries) + Math.floor(Math.random() * 100),
+          ),
         );
       }
     }

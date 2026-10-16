@@ -240,7 +240,7 @@ public class ManagedSchemaBusinessStoreTest {
                 throw new IllegalStateException("connection lost");
             }
             @Override public InputStream open(String object) { throw new UnsupportedOperationException(); }
-            @Override public void requireUnversioned() { }
+            @Override public void validateConfiguration() { }
         };
         assertThatThrownBy(() -> retention.put(key, scope, "capture", "object", new byte[] {1}, unknown))
                 .hasMessageContaining("connection lost");
@@ -410,7 +410,7 @@ public class ManagedSchemaBusinessStoreTest {
                 }
                 return new java.io.ByteArrayInputStream(body.get());
             }
-            @Override public void requireUnversioned() { }
+            @Override public void validateConfiguration() { }
         };
         assertThatThrownBy(() -> retention.put(key, scope, "capture", "original-key", expected, objects)).hasMessageContaining("reply lost");
         body.set(new byte[] {1});

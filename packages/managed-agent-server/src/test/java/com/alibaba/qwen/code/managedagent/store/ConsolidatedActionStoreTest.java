@@ -98,11 +98,11 @@ class ConsolidatedActionStoreTest {
         OperationRecord original = admit("key1", "request1", response("allow")).operation();
         jdbc.update("UPDATE ma_operation SET claim_owner=?,claim_generation=2,claim_until=(" + ManagedSchemaTime.SQL_NOW + " + 100000),state='RUNNING',delivery_state='LEASED'",
                 "worker");
-        actions.complete(original, "worker", null, "decision", 100);
+        actions.complete(original, "worker", null, "decision", true, 100);
         assertThat(actions.response("tenant", "session", original.operationId()).decisionReceiptId()).isNull();
         OperationRecord current = new OperationRecord("tenant", "session", original.operationId(), OperationKind.ACTION_RESPONSE,
                 "request1", "RUNNING", "JAVA_DURABLE", "LEASED", "ACTIVE", null, "worker", 2, 0);
-        actions.complete(current, "worker", null, "decision", 100);
+        actions.complete(current, "worker", null, "decision", true, 100);
         assertThat(actions.response("tenant", "session", original.operationId()).decisionReceiptId()).isEqualTo("decision");
         jdbc.update("UPDATE ma_operation SET state='UNKNOWN',delivery_state='LEASED',claim_until=?", 0L);
         assertThat(actions.deliverable(100)).isEmpty();
