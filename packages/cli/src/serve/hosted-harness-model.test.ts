@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import { LlmEventType, Turn } from '@qwen-code/qwen-code-core/core/turn.js';
+import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
 import type { Content, Part } from '@google/genai';
 import type { ConfigInitializeOptions } from '@qwen-code/qwen-code-core/config/config.js';
@@ -20,7 +21,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import { HostedModelUnavailableError } from './hosted-agent-definition.js';
+import { HostedSkillCatalog } from './hosted-skill-catalog.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import type { HostedModelRequest } from './hosted-model-recovery.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -61,6 +64,8 @@ function config(
   const shutdown = vi.fn(async () => undefined);
   const setHistory = vi.fn();
   const setUserMemory = vi.fn();
+  const setPromptToolSnapshot = vi.fn();
+  const setPromptAgentReachable = vi.fn();
   const refreshSystemInstruction = vi.fn(async () => undefined);
   const initialize = vi
     .fn<(options?: ConfigInitializeOptions) => Promise<void>>()
@@ -101,6 +106,8 @@ function config(
     }),
     getModel: () => 'test-model',
     setUserMemory,
+    setPromptToolSnapshot,
+    setPromptAgentReachable,
     getTurnBudget: () => budget,
     shutdown,
   };
@@ -110,6 +117,8 @@ function config(
     shutdown,
     setHistory,
     setUserMemory,
+    setPromptToolSnapshot,
+    setPromptAgentReachable,
     refreshSystemInstruction,
     initialize,
     refreshAuth,
@@ -423,7 +432,115 @@ describe('Hosted Harness model boundary', () => {
     ).resolves.toMatchObject({ text: 'done', model: 'test-model' });
     expect(toolTurn.execute).toHaveBeenCalledOnce();
     expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
-    expect(order).toEqual(['request', 'inject', 'refresh', 'request']);
+    expect(order).toEqual([
+      'refresh',
+      'request',
+      'inject',
+      'refresh',
+      'request',
+    ]);
+  });
+
+  it('refreshes changed tool names and context together without refreshing for reordered names', async () => {
+    const model = config([]);
+    const names = [
+      ['read_file', 'monitor'],
+      ['monitor', 'read_file'],
+      ['read_file', 'glob', 'agent'],
+      [],
+    ];
+    const refreshes: number[] = [];
+    const chatTools = vi.fn();
+    let round = 0;
+    let context = 'project rules';
+    let output: Content = { role: 'model', parts: [] };
+    const client = state.config.getLlmClient();
+    state.config.getLlmClient = () => ({
+      ...client,
+      getChat: () => ({ setHistory: vi.fn(), setTools: chatTools }),
+      getHistory: () => [output],
+      async *sendMessageStream() {
+        refreshes.push(model.refreshSystemInstruction.mock.calls.length);
+        round++;
+        if (round < names.length) {
+          output = {
+            role: 'model',
+            parts: [{ functionCall: { name: 'read_file' } }],
+          };
+          yield {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: `call-${round}`,
+              name: 'read_file',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: input.promptId,
+            },
+          };
+        } else {
+          output = { role: 'model', parts: [{ text: 'done' }] };
+          yield { type: LlmEventType.Content, value: 'done' };
+        }
+        yield { type: LlmEventType.Finished };
+      },
+    });
+    await runHostedHarnessTextTurn({
+      ...input,
+      workspaceContext: { read: () => context },
+      toolTurn: {
+        declarations: async () => names[round]!.map((name) => ({ name })),
+        consumeResults: async () => undefined,
+        setPromptHookRunner: () => undefined,
+        execute: async () => {
+          if (round === 2) context = 'revised rules';
+          if (round === 3) context = '';
+          return [
+            {
+              functionResponse: {
+                id: `call-${round}`,
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ];
+        },
+      },
+    });
+    expect(refreshes).toEqual([1, 1, 2, 3]);
+    expect(model.setPromptToolSnapshot.mock.calls).toEqual([
+      [new Set(names[0])],
+      [new Set(names[2])],
+      [new Set()],
+    ]);
+    expect(model.setPromptAgentReachable.mock.calls).toEqual([
+      [false],
+      [true],
+      [false],
+    ]);
+    expect(model.setUserMemory.mock.calls).toEqual([
+      ['project rules'],
+      ['revised rules'],
+      [''],
+    ]);
+    expect(chatTools.mock.calls).toEqual(
+      names.map((tools) => [
+        tools.length
+          ? [{ functionDeclarations: tools.map((name) => ({ name })) }]
+          : [],
+      ]),
+    );
+  });
+
+  it('does not send a fresh model request if prompt synchronization fails', async () => {
+    const model = config([]);
+    model.refreshSystemInstruction.mockRejectedValue(
+      new Error('prompt refresh failed'),
+    );
+    await expect(runHostedHarnessTextTurn(input)).rejects.toThrow(
+      'prompt refresh failed',
+    );
+    expect(model.sendMessageStream).not.toHaveBeenCalled();
+    expect(model.shutdown).toHaveBeenCalledOnce();
   });
 
   it('does not reapply a completed SessionStart on later turns', async () => {
@@ -1215,6 +1332,84 @@ it.each(['decision', 'continue'] as const)(
 describe('Hosted Harness resume and retraction', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('replays a saved request unchanged and synchronizes the next fresh model round', async () => {
+    const model = config([
+      { type: LlmEventType.Content, value: 'answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    model.getHistory.mockReturnValueOnce([
+      { role: 'model', parts: [{ functionCall: { name: 'read_file' } }] },
+    ]);
+    const prepared = {
+      request: {
+        model: 'saved-model',
+        config: {
+          systemInstruction: 'SAVED_SYSTEM_INSTRUCTION',
+          tools: [{ functionDeclarations: [{ name: 'read_file' }] }],
+        },
+        contents: [],
+      },
+    } as unknown as LlmPreparedRequest;
+    const original = structuredClone(prepared);
+    const replay = vi
+      .spyOn(Turn.prototype, 'run')
+      .mockImplementation(async function* () {
+        expect(model.setPromptToolSnapshot).not.toHaveBeenCalled();
+        expect(model.refreshSystemInstruction).not.toHaveBeenCalled();
+        yield {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'saved-call',
+            name: 'read_file',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: input.promptId,
+          },
+        };
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: undefined },
+        };
+      });
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        resumeModel: { round: 0, prepared } as HostedModelRequest,
+        toolTurn: {
+          declarations: async () => [
+            { name: 'read_file' },
+            { name: 'monitor' },
+          ],
+          execute: async () => [
+            {
+              functionResponse: {
+                id: 'saved-call',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+          consumeResults: async () => undefined,
+          setPromptHookRunner: () => undefined,
+        },
+      });
+      expect(replay).toHaveBeenCalledWith(
+        'saved-model',
+        [],
+        input.signal,
+        prepared,
+      );
+      expect(prepared).toEqual(original);
+      expect(model.setPromptToolSnapshot).toHaveBeenCalledExactlyOnceWith(
+        new Set(['read_file', 'monitor']),
+      );
+      expect(model.refreshSystemInstruction).toHaveBeenCalledOnce();
+      expect(model.sendMessageStream).toHaveBeenCalledOnce();
+    } finally {
+      replay.mockRestore();
+    }
+  });
+
   function configWithTools(
     events: Array<{
       type: LlmEventType;
@@ -1238,6 +1433,7 @@ describe('Hosted Harness resume and retraction', () => {
       }),
       getLlmClient: () => ({
         setTools: vi.fn(async () => undefined),
+        refreshSystemInstruction: vi.fn(async () => undefined),
         getChat: () => ({
           setHistory: vi.fn(),
           setTools: vi.fn(async () => undefined),
@@ -1256,6 +1452,8 @@ describe('Hosted Harness resume and retraction', () => {
       }),
       getModel: () => 'test-model',
       setUserMemory: vi.fn(),
+      setPromptToolSnapshot: vi.fn(),
+      setPromptAgentReachable: vi.fn(),
       shutdown: vi.fn(async () => undefined),
     };
     return { requests, types };
@@ -1521,4 +1719,25 @@ it('keeps agent instructions ahead of refreshed project context', async () => {
   expect(mocks.setUserMemory).toHaveBeenLastCalledWith(
     '# Agent instructions\n\nAGENT_SECTION\n\nPROJECT_SECTION',
   );
+});
+
+it('advertises only the published Skill catalog while keeping host Skill discovery disabled', async () => {
+  const mocks = config([{ type: LlmEventType.Finished }]);
+  await runHostedHarnessTextTurn({
+    ...input,
+    skills: new HostedSkillCatalog([
+      { name: 'published', description: 'PUBLISHED_DESCRIPTION', body: 'BODY' },
+    ]),
+    workspaceContext: { read: () => 'PROJECT_SECTION' },
+  });
+  expect(mocks.initialize).toHaveBeenCalledWith(
+    expect.objectContaining({ skipSkillManager: true }),
+  );
+  expect(mocks.setUserMemory).toHaveBeenLastCalledWith(
+    expect.stringContaining('PUBLISHED_DESCRIPTION'),
+  );
+  expect(mocks.setUserMemory.mock.calls.at(-1)?.[0]).toContain(
+    'PROJECT_SECTION',
+  );
+  expect(mocks.refreshSystemInstruction).toHaveBeenCalled();
 });

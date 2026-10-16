@@ -100,6 +100,7 @@ describe('assertTrustedForIntent', () => {
   it('passes when trusted regardless of intent', () => {
     expect(() => assertTrustedForIntent(true, 'read')).not.toThrow();
     expect(() => assertTrustedForIntent(true, 'write')).not.toThrow();
+    expect(() => assertTrustedForIntent(true, 'delete')).not.toThrow();
     expect(() => assertTrustedForIntent(true, 'list')).not.toThrow();
   });
 
@@ -129,6 +130,12 @@ describe('assertTrustedForIntent', () => {
   it('throws untrusted_workspace for edit intent when untrusted', () => {
     expect(() => assertTrustedForIntent(false, 'edit')).toThrowError(
       /edit operations are forbidden/,
+    );
+  });
+
+  it('throws untrusted_workspace for delete intent when untrusted', () => {
+    expect(() => assertTrustedForIntent(false, 'delete')).toThrowError(
+      /delete operations are forbidden/,
     );
   });
 });

@@ -511,6 +511,9 @@ describe('build artifact — transcript entry (#11031)', () => {
     // both locales; its parser, worker and markup stay inside the lazily
     // imported SpreadsheetPreview chunk, so only the copy enters this graph.
     // Merging 6212189f with that copy measured 1,330,011 UTF-16 code units.
+    // File-tree mutation actions are excluded from the transcript build.
+    // At 31e02ace main measures 1,330,293; the read-only artifact hook with
+    // those actions excluded measures 1,330,497.
     // Teammate activity notices add attributed tool and inter-agent message
     // bubbles to this entry; merged with main at 3071807d the remainder
     // measures 1,332,271, which the 1,333,500 ceiling still bounds.
@@ -520,6 +523,21 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js.length).toBeLessThan(1_333_500);
+  });
+
+  it('keeps workspace mutations out of the read-only transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const method of [
+      'writeWorkspaceFile',
+      'createWorkspaceDirectory',
+      'deleteWorkspaceDirectory',
+      'uploadWorkspaceFile',
+    ]) {
+      expect(packaged).toContain(method);
+      expect(transcript).not.toContain(method);
+    }
+    expect(transcript).toContain('dirList');
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {
