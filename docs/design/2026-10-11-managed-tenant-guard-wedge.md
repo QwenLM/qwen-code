@@ -151,18 +151,29 @@ The defect is therefore not the fences but their **placement and window**:
 
 ## Goals
 
-- G1: A fresh Session's ordinary turn **completes** while another
-  transaction holds the tenant's guard rows — i.e. ordinary traffic no
-  longer queues behind tenant-wide guard rows it does not need.
+- G1: Ordinary traffic no longer queues behind tenant-wide guard rows it
+  does not need: renew, ordinary authorization and recovery state of a
+  Session complete while another transaction holds the tenant's guard
+  rows. A turn also needs lanes that keep a guard (the ordinary record
+  commit's bounded placement, F4; Turn submit; writer acquisition), so it
+  **completes** only while the hold is shorter than the client's request
+  budget; for a longer hold those lanes fail fast and bounded with the
+  named 503 `tenant_guard_contended`, never a freeze.
 - G2: When a guard a covered hot path genuinely needs is contended beyond a
   short budget, the call fails **fast with a named reason** instead of a
-  30 s client timeout; the reason is visible to the caller and, for turns,
-  model-visible rather than a silent freeze.
-- G3: The journal-wide `FOR UPDATE` scan in `requireIdleJournal` is
-  restructured to snapshot unlocked and re-verify under the locked head
-  (D3). The lifecycle recovery/verify transactions keep their unbounded
-  acquisitions and their journal-side work under the tenant row in this
-  change; bounding them is a Follow-up.
+  30 s client timeout. The name reaches the store client, which retries it
+  for the rest of its request budget and keeps it on the terminal error. A
+  turn whose contention outlasts that budget settles under the generic
+  `error` stop reason rather than as a silent freeze: the harness names
+  only transport and 5xx store failures (`managed_session_store_unavailable`)
+  in the settled turn result, and does not call a bounded tenant-guard
+  refusal a store outage.
+- G3: The journal-wide `FOR UPDATE` scan in `requireIdleJournal` first runs
+  unlocked and is trusted only when it reaches the locked head's revision;
+  otherwise it is repeated as a locking read (D3). The lifecycle
+  recovery/verify transactions keep their unbounded acquisitions and their
+  journal-side work under the tenant row in this change; bounding them is
+  a Follow-up.
 - G4: A witness integration test pins the geometry: red when the coupling
   is restored, green after the change.
 
@@ -242,11 +253,23 @@ timeoutSeconds)` overload and an equivalent bounded variant for
 
 ### D3. Restructure the known unbounded holders
 
-- `requireIdleJournal` (`WorkspaceLifecycleStore`): drop the journal-wide
-  `FOR UPDATE` scan. The existing head-row `FOR UPDATE` taken first is the
-  per-Session fence — every writer appends revisions only behind it — so the
-  ordered read is already consistent; no revision can commit mid-scan. The
-  head row stays the only serialization point for the idle check.
+- `requireIdleJournal` (`WorkspaceLifecycleStore`): the journal scan first
+  runs without `FOR UPDATE`. The existing head-row `FOR UPDATE` taken first
+  is the per-Session fence — every writer appends revisions only behind
+  it — so no revision can commit mid-scan, and the head row stays the only
+  serialization point for the idle check. The unlocked scan is a snapshot
+  read, though, and the enclosing lifecycle transaction may have pinned its
+  REPEATABLE READ snapshot with plain reads (`beginWorkspaceLifecycle`'s
+  replay and open-operation reads) before the head lock was granted. A
+  revision committed in that window is invisible to the scan. The scan is
+  therefore trusted only when its highest revision reaches the locked
+  head's `journal_revision`; otherwise it is repeated as a locking read,
+  which reads the journal as committed now, and the verdict (`turn_active`
+  or admission) is taken from that. A journal that falls short of its own
+  head even then fails closed with `workspace_lifecycle_journal_unverified`.
+  The first version of this change refused whenever the snapshot was
+  stale, which answered 409 for an idle Session whose last Turn had just
+  committed (corrected in the 2026-10-16 review round).
 - Lifecycle recovery transactions (`recoverEffects`/`saveEffects`) keep
   their lock set in this change; with D1 their tenants' ordinary traffic no
   longer queues on those guards, and bounding their window is follow-up
@@ -296,12 +319,15 @@ schedule and on manual dispatch, so its mutation guarantee is manual.
    blocks again (the test's fixture therefore hard-codes the expected call
    matrix).
 
-For `requireIdleJournal`, only the fail-closed re-verification is
-witnessed:
-`WorkspaceLifecycleMySqlIT#idleJournalCheckReVerifiesARevisionItsSnapshotCannotSee`
-asserts `workspace_lifecycle_journal_unverified` when the head revision is
-ahead of the scan's snapshot. That the idle check completes under an
-externally held guard is not witnessed.
+For `requireIdleJournal`,
+`WorkspaceLifecycleMySqlIT#idleJournalCheckReadsARevisionItsSnapshotCannotSee`
+pins a REPEATABLE READ snapshot, commits a revision that leaves a Turn
+pending from another connection, and asserts `turn_active` both from the
+idle check directly and through `beginWorkspaceLifecycle`;
+`#idleJournalCheckFailsClosedOnAJournalShortOfItsHead` asserts
+`workspace_lifecycle_journal_unverified` for a journal behind its head.
+That the idle check completes under an externally held guard is not
+witnessed.
 
 ## Risks and mitigations
 
@@ -319,8 +345,10 @@ externally held guard is not witnessed.
   family must stay green; the publication commit goes through
   `publicationRequest` → `ToolPublicationStore`'s own locks).
 - **R4 — `requireIdleJournal` unlocked read shows a stale pending set.**
-  Mitigated by the head-revision re-verification under the head lock; a
-  mismatch fails closed (blocked, not admitted).
+  Mitigated by comparing the scan's highest revision with the locked
+  head's: a scan that stops short is repeated as a locking read, and only a
+  journal that still falls short of its head fails closed (blocked, not
+  admitted).
 - **R5 — MySQL/MariaDB dialect.** The bounded acquisition uses statement
   query timeouts (Connector/J), not `NOWAIT`/vendor clauses; measured on
   MariaDB 10.11.18 (the image of the scheduled CI lane) and MySQL 8.4.7.
@@ -523,6 +551,45 @@ skipped a fence:
 - The CSI runtime-marker probe's two plain reads now carry the guard
   class's 10 s statement timeout, since plain reads still wait on metadata
   locks.
+
+## Review corrections (2026-10-16)
+
+The review of `e1ba36ad4b` found:
+
+- **A deadlock at a bounded acquisition could escape the named mapping.**
+  The bounded wrapper caught `CannotAcquireLockException` and
+  `QueryTimeoutException`. Through this stack's default translator a
+  MySQL/MariaDB 1213 (SQLState 40001) arrives as
+  `CannotAcquireLockException` (observed on MariaDB 10.11.18 by the witness
+  below), so it was named; the error-code translator reports it as
+  `DeadlockLoserDataAccessException`, a sibling class, which was not. The
+  wrapper now catches the whole `PessimisticLockingFailureException`
+  family. Witness: `ManagedSessionGuardMappingTest`.
+- **The pinned CSI cycle's other victim was unnamed.** A pinned Session's
+  continuation takes its root and then the tenant guards (D1 keeps
+  ordinary Sessions off the guards, so it cannot take them first), while
+  every other lane on that Session, retention reads and collectors among
+  them, takes the guards and then the root. InnoDB may roll back either
+  side. The continuation's waits were already named; a root wait behind a
+  guard (`lockSessionRoot`, the legacy `isPrivate` probe) now names a 1213
+  `tenant_guard_contended` too, recognized by its vendor code so both
+  translators' shapes match. Moving the retention side to root-first
+  instead was tried and rejected: publication, lifecycle authorization and
+  writer acquisition take the tenant CAS row before the root on every
+  Session, so it formed a cycle on ordinary Sessions as well. Witnesses:
+  `ToolPublicationLockOrderMySqlIT#pinnedSessionDeadlockNamesTheRetentionVictim`
+  and `#ordinaryPublicationBesideARetentionOwnerDoesNotDeadlock`. Collectors
+  skip pinned Sessions in their candidate queries, so in practice the
+  retention side of this cycle is a request-path retention read.
+- **`requireIdleJournal` refused legitimate admissions** when the enclosing
+  transaction's snapshot predated the head lock (D3 above, corrected).
+- **Client contention budget.** A guard retry runs inside the commit's
+  shared contention deadline, but a call's first attempt keeps its own
+  request budget, so a restart earned after a stall or an early contended
+  refusal is not issued already expired. A contended refusal followed by a
+  deadline abort keeps the guard's name and reports the shared budget as
+  spent, which stops the outer restarts; the publication commit lane goes
+  through the same retry engine as the transaction lane.
 
 ## Follow-ups (not in this change)
 

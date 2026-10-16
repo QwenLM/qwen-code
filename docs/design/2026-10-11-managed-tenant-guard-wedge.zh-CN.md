@@ -133,14 +133,21 @@ placement 行的获取列在「后续」中。
 
 ## 目标
 
-- G1：另一事务持有租户守卫行时，全新会话的普通回合**仍能完成**——普通
-  流量不再在它不需要的租户级守卫行后排队。
+- G1：普通流量不再在它不需要的租户级守卫行后排队：另一事务持有租户守卫
+  行时，会话的续租、普通准入与恢复状态都能完成。一个回合还要经过仍持守卫
+  的车道（普通记录提交的有界 placement，见 F4；回合提交；writer 获取），
+  因此只有在持有时长短于客户端请求预算时它才**能完成**；持有更久时，这些
+  车道以具名 503 `tenant_guard_contended` 有界快速失败，而不是冻结。
 - G2：覆盖车道上的热路径真正需要的守卫争用超过短预算时，调用**快速具名
-  失败**而不是 30 秒客户端超时；原因对调用方可见，对回合则模型可见，而
-  非静默冻结。
-- G3：`requireIdleJournal` 的整 journal `FOR UPDATE` 扫描改为无锁快照 +
-  在已锁 head 下复核（D3）。生命周期恢复/校验事务在本改动中保留无界获取，
-  也仍在租户行下做 journal 侧工作；给它们加界列为后续。
+  失败**而不是 30 秒客户端超时。这个名字送达 store 客户端，客户端在剩余请
+  求预算内重试，并把它保留在最终错误上。争用超出该预算的回合以通用的
+  `error` 停止原因落地，而不是静默冻结：harness 只把传输层与 5xx 存储故障
+  在落地的回合结果中命名为 `managed_session_store_unavailable`，不会把有
+  界的租户守卫拒绝称作存储故障。
+- G3：`requireIdleJournal` 的 journal 扫描先以无锁方式运行，只有扫到已锁
+  head 的 revision 时才被采信，否则改以加锁读重扫（D3）。生命周期恢复/校
+  验事务在本改动中保留无界获取，也仍在租户行下做 journal 侧工作；给它们加
+  界列为后续。
 - G4：一条见证集成测试钉住该几何：耦合恢复时红、改动后绿。
 
 ## 非目标
@@ -210,10 +217,18 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
 
 ### D3. 已知无界持有者的重构
 
-- `requireIdleJournal`（`WorkspaceLifecycleStore`）：摘掉 journal 级
-  `FOR UPDATE` 扫描。已有的 head 行 `FOR UPDATE` 先取——每个写者都只在
-  它之后追加 revision——所以按序读过半不会被并发提交插入，扫描本身一
-  致；head 行维持为 idle 检查的唯一序列化点。
+- `requireIdleJournal`（`WorkspaceLifecycleStore`）：journal 扫描先不带
+  `FOR UPDATE` 运行。已有的 head 行 `FOR UPDATE` 先取——每个写者都只在
+  它之后追加 revision——所以扫描过程中不会有 revision 提交，head 行仍是
+  idle 检查的唯一序列化点。但无锁扫描是快照读，而外层生命周期事务可能在
+  head 锁授予之前就用普通读（`beginWorkspaceLifecycle` 的重放与未结操作
+  读取）钉住了 REPEATABLE READ 快照，这个窗口内提交的 revision 对扫描不可
+  见。因此只有当扫描到的最大 revision 达到已锁 head 的 `journal_revision`
+  时才采信它；否则改以加锁读重扫——加锁读读取当前已提交的 journal——并据
+  此给出结论（`turn_active` 或放行）。加锁重扫后仍落后于自身 head 的
+  journal 以 `workspace_lifecycle_journal_unverified` 失败闭。本改动的第一
+  版在快照过期时一律拒绝，会让最后一个回合刚提交、实际空闲的 Session 得到
+  409（已在 2026-10-16 的评审轮修正）。
 - 生命周期恢复事务（`recoverEffects`/`saveEffects`）本次不动；D1 之后
   同租户普通流量已不再在这些守卫后面排队，其窗口压界列为后续。
 
@@ -252,11 +267,13 @@ MariaDB 10.11 上运行。它不是 PR 门禁：#14205 起 Java 数据库车道�
 5. 变异反证：恢复 `checkLifecycleWriter` 的无条件获取后 D1 情形重新被
    拖死（测试夹具由此硬编码预期调用矩阵）。
 
-`requireIdleJournal` 只有失败闭的复核有见证：
-`WorkspaceLifecycleMySqlIT#idleJournalCheckReVerifiesARevisionItsSnapshotCannotSee`
-在 head revision 超前于扫描快照时断言
-`workspace_lifecycle_journal_unverified`。「外部持守卫时 idle 检查仍可完成」
-没有见证。
+`requireIdleJournal` 的见证：
+`WorkspaceLifecycleMySqlIT#idleJournalCheckReadsARevisionItsSnapshotCannotSee`
+钉住 REPEATABLE READ 快照，从另一连接提交一个让回合保持未决的 revision，
+然后分别直接调用 idle 检查与经 `beginWorkspaceLifecycle` 调用，断言
+`turn_active`；`#idleJournalCheckFailsClosedOnAJournalShortOfItsHead` 对落后
+于 head 的 journal 断言 `workspace_lifecycle_journal_unverified`。「外部持守
+卫时 idle 检查仍可完成」没有见证。
 
 ## 风险与缓解
 
@@ -272,8 +289,9 @@ MariaDB 10.11 上运行。它不是 PR 门禁：#14205 起 Java 数据库车道�
   `lockTenant`；见证断言 publication commit 路径不受影响
   （`ToolPublicationStoreTest` 族必须全绿；publication commit 经
   `publicationRequest` → `ToolPublicationStore` 自有锁）。
-- **R4——`requireIdleJournal` 无锁读会看到过期的未决集合。** 以 head 锁下
-  的 head-revision 复核缓解；不一致则失败闭（blocked，不放行）。
+- **R4——`requireIdleJournal` 无锁读会看到过期的未决集合。** 以扫描到的最
+  大 revision 与已锁 head 的 revision 对比来缓解：扫描落后则改以加锁读重
+  扫，只有重扫后仍落后于 head 的 journal 才失败闭（blocked，不放行）。
 - **R5——MySQL/MariaDB 方言。** 有界获取走 Connector/J 语句超时，不用
   `NOWAIT`/厂商子句；已在 MariaDB 10.11.18（计划内 CI 车道的镜像）与
   MySQL 8.4.7 上实测。
@@ -435,6 +453,39 @@ O4 门控的迟到 writer 在应被拒绝处径直获得授权
   `WorkspaceProfileLifecycleTest#duplicateOrdinaryCommitIsFencedByAVersionTwoClaim`。
 - CSI 运行时标记探测的两条普通读现在带守卫类的 10 秒语句超时，因为普通读
   仍会等元数据锁。
+
+## 评审修正（2026-10-16）
+
+对 `e1ba36ad4b` 的评审发现：
+
+- **有界获取点上的死锁可能逃出具名映射。** 有界封装原先只捕获
+  `CannotAcquireLockException` 与 `QueryTimeoutException`。经本栈默认的翻
+  译器，MySQL/MariaDB 的 1213（SQLState 40001）以
+  `CannotAcquireLockException` 到达（下方见证在 MariaDB 10.11.18 上实测），
+  因此已被具名；而按错误码翻译的翻译器把它报为兄弟类
+  `DeadlockLoserDataAccessException`，原先不会被具名。封装现在捕获整个
+  `PessimisticLockingFailureException` 族。见证：
+  `ManagedSessionGuardMappingTest`。
+- **CSI 钉住环的另一个牺牲者未具名。** 钉住 Session 的续接先取根行再取租
+  户守卫（D1 让普通 Session 不碰守卫，所以它无法先取守卫），而该 Session
+  上的其他车道——包括 retention 读与各 collector——先取守卫再取根行。
+  InnoDB 可能回滚任一方。续接一侧的等待原本就已具名；现在守卫之后的根行等
+  待（`lockSessionRoot`、遗留的 `isPrivate` 探测）遇到 1213 也具名为
+  `tenant_guard_contended`，按厂商错误码识别，因此两种翻译器的形态都能匹
+  配。曾尝试改为让 retention 一侧根行优先，但被否决：publication、生命周期
+  授权与 writer 获取在每个 Session 上都先取租户 CAS 行再取根行，这样会在普
+  通 Session 上也形成环。见证：
+  `ToolPublicationLockOrderMySqlIT#pinnedSessionDeadlockNamesTheRetentionVictim`
+  与 `#ordinaryPublicationBesideARetentionOwnerDoesNotDeadlock`。各 collector
+  的候选查询已排除钉住 Session，因此实际上这个环的 retention 一侧是请求路
+  径上的 retention 读。
+- **`requireIdleJournal` 会拒绝合法准入**：外层事务的快照早于 head 锁时
+  （见上文 D3，已修正）。
+- **客户端争用预算。** 守卫重试在 commit 的共享争用截止时间内运行，但一次
+  调用的首个尝试保有自己的请求预算，因此在停顿或较早的争用拒绝之后赢得的
+  重启不会一发出就已过期。争用拒绝之后的截止 abort 保留守卫自己的名字，并
+  报告共享预算已耗尽，从而停止外层重启；publication commit 车道与事务车道
+  走同一个重试引擎。
 
 ## 后续（不在本次改动）
 
