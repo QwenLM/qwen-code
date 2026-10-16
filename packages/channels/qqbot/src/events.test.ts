@@ -2600,6 +2600,45 @@ describe('inbound media', () => {
     stderr.mockRestore();
   });
 
+  it('keeps a file that is over the image cap under the file cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // 8 MB + 1 is over the image cap and under the file cap, so the download
+    // only succeeds when the file kind routes to QQ_FILE_MAX_BYTES.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(DOCX_BYTES, {
+            headers: {
+              'content-type': 'file',
+              'content-length': String(QQ_IMAGE_MAX_BYTES + 1),
+            },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('file');
+    expect(attachment?.fileName).toBe('report.docx');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(DOCX_BYTES);
+    expect(
+      stderr.mock.calls.some(([line]) =>
+        String(line).includes('skipping file attachment'),
+      ),
+    ).toBe(false);
+    stderr.mockRestore();
+  });
+
   it('preserves the sender extension for a file and falls back to .bin', async () => {
     stubFetchBytes(DOCX_BYTES, 'file');
     const ch = makeChannel();
@@ -2758,6 +2797,45 @@ describe('inbound media', () => {
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('[QQ:test-bot] skipping voice attachment:'),
     );
+    stderr.mockRestore();
+  });
+
+  it('keeps a voice message over the image cap under the voice cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // 8 MB + 1 is over the image cap and under the voice cap, so the download
+    // only succeeds when the voice kind routes to QQ_VOICE_MAX_BYTES.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(SILK_BYTES, {
+            headers: {
+              'content-type': 'voice',
+              'content-length': String(QQ_IMAGE_MAX_BYTES + 1),
+            },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.fileName).toBe('qq_voice.silk');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(SILK_BYTES);
+    expect(
+      stderr.mock.calls.some(([line]) =>
+        String(line).includes('skipping voice attachment'),
+      ),
+    ).toBe(false);
     stderr.mockRestore();
   });
 
