@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -122,7 +123,7 @@ public final class WorkspaceOperatorRecoveryStore {
             String recoveryId = UUID.randomUUID().toString();
             new WorkspaceOperations(jdbc, saved.getRequest().getScope().getTenantId()).create(KIND, recoveryId,
                     WorkspaceOperations.values("state", "PREPARED", "binding_id", bindingId,
-                            "session_id", saved.getRequest().getIsolationKey(),
+                            "session_id", sessionOwner(saved, current.runtimeSessionId()),
                             "runtime_generation", generation, "storage_id", saved.getRequest().getStorageId(),
                             "storage_key", current.storageKey(), "holder_key", current.holderKey(),
                             "runtime_session_id", current.runtimeSessionId(),
@@ -167,10 +168,12 @@ public final class WorkspaceOperatorRecoveryStore {
             WorkspaceOperations operations = new WorkspaceOperations(jdbc, (String) row.get("tenant_id"));
             String target = digest((String) row.get("blocked_execution_call_id"));
             String owner = WorkspaceOperations.hash(operations.key(KIND, operation.recoveryId()), "RECOVERY_EVIDENCE", target);
+            String sessionId = HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                    ? (String) row.get("session_id") : binding.getRequest().getIsolationKey();
             String resource = WorkspaceEvidenceResources.publish(jdbc, (String) row.get("tenant_id"),
-                    binding.getRequest().getScope().getWorkspaceId(), binding.getRequest().getIsolationKey(), owner, evidence);
+                    binding.getRequest().getScope().getWorkspaceId(), sessionId, owner, evidence);
             operations.insertWork(KIND, operation.recoveryId(), "RECOVERY_EVIDENCE", target,
-                    (String) row.get("blocked_execution_call_id"), binding.getRequest().getIsolationKey(),
+                    (String) row.get("blocked_execution_call_id"), sessionId,
                     WorkspaceOperations.values("evidence_resource_key", resource, "evidence_sha256", digest), "COMPLETE");
             operations.update(KIND, operation.recoveryId(), WorkspaceOperations.values("attestation_resource_key", resource,
                     "attestation_sha256", digest, "attested_at", Instant.now().toString(), "state", "ATTESTED"));
@@ -224,6 +227,20 @@ public final class WorkspaceOperatorRecoveryStore {
                     WorkspaceOperations.values("completed_at", row.get("completed_at") == null
                             ? Instant.now().toString() : row.get("completed_at"), "state", "COMPLETED"));
         });
+    }
+
+    /** The held Runtime Session's Harness Session: a shared binding's isolation key names no owner. */
+    private String sessionOwner(RuntimeBindingRecord binding, String runtimeSessionId) {
+        if (!HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
+            return binding.getRequest().getIsolationKey();
+        }
+        List<String> owners = jdbc.queryForList("SELECT harness_session_id FROM ma_runtime_session WHERE binding_id = ?"
+                + " AND runtime_generation = ? AND runtime_session_id = ?", String.class,
+                binding.getBindingId(), binding.getGeneration(), runtimeSessionId);
+        if (owners.size() != 1) {
+            throw blocked();
+        }
+        return owners.getFirst();
     }
 
     private Map<String, Object> row(String recoveryId, boolean lock) {

@@ -105,6 +105,32 @@ class WorkspaceRuntimeTransportTest {
     }
 
     @Test
+    void sharedLocalBindingAnswersEachRuntimeSessionForItsOwnHarnessSession() {
+        var scope = new RuntimeScope("tenant", "workspace", "7", "/workspace", WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                "workspace");
+        var seed = new RuntimeProvisionSeed("provision", "binding-a", "incarnation", "lease", 1, "token");
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:1"), seed.getToken(),
+                seed.getLeaseId(), seed.getEpoch());
+        var runtime = new RuntimeBindingRecord("binding-a", new RuntimeProvisionRequest(scope, null, "local-process", "storage"),
+                seed, 1, RuntimeBindingRecord.State.READY, lease, new RuntimeResourceHandle("local-process", 2, Map.of("fixture", "shared")),
+                3, false, null, null, 0, 1, null, Instant.now(), Instant.now());
+        var bindings = mock(RuntimeBindingRepository.class);
+        when(bindings.findById("binding-a")).thenReturn(runtime);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var http = mock(HttpRuntimeTransport.class);
+        var transport = new WorkspaceRuntimeTransport(http, mock(WorkspaceExecutionStore.class), bindings, sessions,
+                harness -> new ContextBinding("tenant", "workspace", 7, "storage", ".", "config", 1));
+        for (String harness : new String[] {"harness-a", "harness-b"}) {
+            var session = new RuntimeSession(harness, harness + "-turn", "continuation", scope);
+            when(sessions.findById(scope, session.getRuntimeSessionId())).thenReturn(
+                    new RuntimeSessionRecord(session, "binding-a", 1, RuntimeSessionRecord.State.RELEASING, 1, Instant.now()));
+            assertThat(transport.release(lease, session).toCompletableFuture().join()).isTrue();
+        }
+        unavailable(() -> transport.release(lease, new RuntimeSession("harness-b", "harness-a-turn", "continuation", scope)));
+        verifyNoInteractions(http);
+    }
+
+    @Test
     void refusesACoherentlyChangedBootAndCrossedOriginalSessions() throws Exception {
         var fixture = fixture();
         var boot = with(fixture.boot(), "context", with(map(fixture.boot().get("context")), "runtimeIncarnation", "other-incarnation"));

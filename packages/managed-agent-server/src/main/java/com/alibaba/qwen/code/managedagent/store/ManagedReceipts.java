@@ -13,7 +13,7 @@ final class ManagedReceipts {
     record Receipt(String tenantId, String scopeId, String idempotencyKey,
             String requestDigest, String sessionId, String turnId, String state,
             String sessionStatusBefore, byte[] actorKey, Boolean workspaceBound, long createdAt,
-            long updatedAt) {
+            long updatedAt, String operation, String resultJson) {
     }
 
     private ManagedReceipts() {}
@@ -38,7 +38,7 @@ final class ManagedReceipts {
                 jdbc.query(
                         "SELECT tenant_id, scope_id, idempotency_key, request_digest, session_id,"
                             + " turn_id, state, session_status_before, actor_id, workspace_bound, gmt_create,"
-                            + " gmt_modified FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
+                            + " gmt_modified, operation, result_json FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
                             + " AND tenant_key = ? AND scope_key = ?"
                                 + (lock ? " FOR UPDATE" : ""),
                         (row, index) -> new Receipt(
@@ -52,7 +52,8 @@ final class ManagedReceipts {
                                 row.getString("session_status_before"),
                                 row.getBytes("actor_id"),
                                 row.getObject("workspace_bound", Boolean.class),
-                                row.getLong("gmt_create"), row.getLong("gmt_modified")),
+                                row.getLong("gmt_create"), row.getLong("gmt_modified"),
+                                row.getString("operation"), row.getString("result_json")),
                         ManagedSchemaKeys.receiptKey(
                                 namespace, tenant, scopeKind, scopeId, idempotencyKey),
                         namespace.name(),
