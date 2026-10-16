@@ -69,6 +69,10 @@ BIGINT Unix epoch 毫秒。K2 的完整 typed inventory、terminal 期望像和 
 且必须精确表示毫秒。旧时间目录和旧冻结像均拒绝准入，不在准入时重命名列或
 重写已保存证据。
 
+Session 初始行、审批模式固化和创建事件共用同一个已捕获的准入时间。
+审批更新仍显式写入 `gmt_modified`，使用该次 CREATE 的时间，不再读取第二个
+时钟。这样保留严格的初始创建事实及后续整行比较，无需两个时钟恰好落在同一毫秒。
+
 在这套新 canonical baseline 内，Broker 初始化和 Flyway 只识别精确 V1/V2/V3
 目录形状，再应用 additive K2 V4 扩展，保留匹配的数据和迁移历史行，最后验证
 完整 V4 目录。这不提供早期 DATETIME 或 legacy 目录的升级路径。部署本修订时

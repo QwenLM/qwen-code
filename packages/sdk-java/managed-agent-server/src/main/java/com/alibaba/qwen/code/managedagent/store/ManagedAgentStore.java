@@ -941,7 +941,8 @@ public class ManagedAgentStore implements AgentStateStore {
         // the column default unless bound.
         if (workspace != null || pin.digest() != null) {
             jdbc.update(
-                    "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", approval_mode = ? WHERE tenant_id = ? AND session_id = ?",
+                    "UPDATE ma_session SET gmt_modified = ?, approval_mode = ? WHERE tenant_id = ? AND session_id = ?",
+                    now,
                     pin.approvalMode(),
                     tenantId,
                     sessionId);

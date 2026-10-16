@@ -1,3 +1,4 @@
+import process from 'node:process';
 import {
   MODEL_PORT,
   MODEL_BASE_URL,

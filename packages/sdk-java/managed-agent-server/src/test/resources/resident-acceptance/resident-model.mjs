@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer';
+import process from 'node:process';
 import { saveResidentToolEvidence } from './resident-tool-evidence.mjs';
 import http from 'node:http';
 export const MODEL_PORT = 4191;

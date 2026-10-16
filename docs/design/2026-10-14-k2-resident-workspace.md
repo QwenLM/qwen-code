@@ -87,6 +87,12 @@ cut protocol timestamps remain canonical ISO strings and must represent exact
 milliseconds. Old timestamp catalogs and old frozen images are refused, without
 renaming columns or rewriting saved evidence during admission.
 
+A Session's initial row, approval-mode pin and creation event use the same
+captured admission time. The approval update still explicitly writes
+`gmt_modified`; it uses that CREATE's time rather than a second clock read.
+This preserves the strict initial creation facts and their whole-row comparison
+without depending on two clocks landing in the same millisecond.
+
 Within this new canonical baseline, Broker initialization and Flyway recognize
 only the exact V1/V2/V3 shapes before applying the additive K2 V4 extension. They
 preserve matching rows and migration-history entries, then validate the complete
