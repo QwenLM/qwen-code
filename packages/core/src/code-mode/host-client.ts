@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { CodeModeBindingPlan } from '../tools/code-mode.js';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
+import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 import {
   CodeModeTurnTerminated,
   type CodeModeToolResult,
@@ -50,10 +51,11 @@ export class CodeModeExecutionError extends Error {
 
 function hostCommand(): { command: string; args: string[] } {
   const currentFile = fileURLToPath(import.meta.url);
+  const { command } = getJsInterpreterCommand(import.meta.url);
   if (currentFile.endsWith('.ts')) {
     const require = createRequire(import.meta.url);
     return {
-      command: process.execPath,
+      command,
       args: [
         '--import',
         pathToFileURL(require.resolve('tsx')).href,
@@ -63,10 +65,10 @@ function hostCommand(): { command: string; args: string[] } {
   }
   const sibling = path.join(path.dirname(currentFile), 'host.js');
   if (existsSync(sibling)) {
-    return { command: process.execPath, args: [sibling] };
+    return { command, args: [sibling] };
   }
   return {
-    command: process.execPath,
+    command,
     args: [path.join(resolveBundleDir(import.meta.url), 'codeModeHost.js')],
   };
 }

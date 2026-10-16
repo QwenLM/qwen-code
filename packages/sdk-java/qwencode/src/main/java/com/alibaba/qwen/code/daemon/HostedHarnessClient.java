@@ -246,14 +246,32 @@ public final class HostedHarnessClient implements AutoCloseable {
                 request.getPayloadDigest(), request.getModelSelection(), request.getApprovalSelection());
         ActivePrompt existing = activePrompts.putIfAbsent(
                 session.getHarnessSessionId(), candidate);
-        if (existing != null
-                && (!existing.promptId.equals(candidate.promptId)
-                        || !existing.payloadDigest.equals(candidate.payloadDigest)
-                        || !java.util.Objects.equals(existing.modelSelection,
-                                candidate.modelSelection)
-                        || !java.util.Objects.equals(existing.approvalSelection, candidate.approvalSelection))) {
-            throw new DaemonException(
-                    "Hosted Harness session already has a running turn");
+        if (existing != null && !existing.matches(candidate)) {
+            // A prompt whose admission outcome was never learned (an
+            // ambiguous answer, then a terminal coordinator failure) must
+            // not pin the Session for every later Turn: ask the Harness,
+            // which drops the entry when nothing is running there. The
+            // probe is fail-closed — only a successful idle read clears the
+            // entry — and its own failure must not leak the probe's
+            // exception types: the dispatcher maps DaemonHttpException and
+            // DaemonProtocolException to a terminal Turn failure, while the
+            // plain busy-turn refusal below retries. A generation change
+            // still propagates, so the dispatcher adopts the new
+            // generation instead of flattening it into a busy retry.
+            try {
+                getStatus(session);
+            } catch (HostedHarnessGenerationException generationChange) {
+                throw generationChange;
+            } catch (DaemonException probeFailure) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
+            existing = activePrompts.putIfAbsent(
+                    session.getHarnessSessionId(), candidate);
+            if (existing != null && !existing.matches(candidate)) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
         }
         boolean ownsActivePrompt = existing == null;
         HttpResponse<HttpSupport.Body> raw;
@@ -708,7 +726,15 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/lifecycle",
                 request, ref.getHarnessClientId(), operation);
         requireMutationStatus(response, 200, operation);
-        Map<String, Object> receipt = JsonSupport.parseObject(response.getBody(), operation);
+        // Past this point the Harness has answered 200: a failure to decode
+        // or match the receipt is a post-answer failure, which the
+        // coordinator must not read as "the settle never happened".
+        Map<String, Object> receipt;
+        try {
+            receipt = JsonSupport.parseObject(response.getBody(), operation);
+        } catch (DaemonProtocolException error) {
+            throw new HostedHarnessSettleAnsweredException(error.getMessage(), error);
+        }
         if (!java.util.Objects.equals(request.get("sessionKey"), receipt.get("sessionKey"))
                 || !java.util.Objects.equals(request.get("kind"), receipt.get("kind"))
                 || v2 && (!java.util.Objects.equals(request.get("phase"), receipt.get("phase"))
@@ -716,7 +742,8 @@ public final class HostedHarnessClient implements AutoCloseable {
                         || !java.util.Objects.equals(request.get("toolProfile"), receipt.get("toolProfile"))
                         || !java.util.Objects.equals(JsonSupport.requiredObject(request, "authority", operation).get("operationId"),
                                 receipt.get("operationId")))) {
-            throw new DaemonProtocolException("Hosted lifecycle receipt identity differs");
+            throw new HostedHarnessSettleAnsweredException(
+                    "Hosted lifecycle receipt identity differs", null);
         }
         return receipt;
     }
@@ -1561,6 +1588,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             this.payloadDigest = payloadDigest;
             this.modelSelection = modelSelection;
             this.approvalSelection = approvalSelection;
+        }
+
+        boolean matches(ActivePrompt other) {
+            return promptId.equals(other.promptId)
+                    && payloadDigest.equals(other.payloadDigest)
+                    && java.util.Objects.equals(modelSelection, other.modelSelection)
+                    && java.util.Objects.equals(approvalSelection, other.approvalSelection);
         }
     }
 
