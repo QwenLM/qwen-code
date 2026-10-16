@@ -858,6 +858,32 @@ public final class JdbcToolExecutionRepository
                         excludingExecutionCallIds));
     }
 
+    @Override
+    public boolean hasUnprovenCaptureByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT binding_id, runtime_session_id, result_json FROM"
+                            + " ma_tool_execution WHERE binding_id = ? AND runtime_generation = ?"
+                            + " AND runtime_session_key = ? AND execution_state = 'SETTLED'")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
+                statement.setLong(2, runtimeGeneration);
+                statement.setString(3, JdbcRepositorySupport.valueKey(runtimeSessionId));
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        if (bindingId.equals(result.getString("binding_id"))
+                                && runtimeSessionId.equals(result.getString("runtime_session_id"))
+                                && ToolExecutionRepository.captureStopUnproven(
+                                        fromJson(result.getString("result_json")))) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        });
+    }
+
     static boolean hasActiveByRuntimeSession(Connection connection,
             String bindingId, long runtimeGeneration, String runtimeSessionId)
             throws SQLException {

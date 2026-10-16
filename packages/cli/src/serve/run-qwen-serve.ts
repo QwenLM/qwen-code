@@ -5096,6 +5096,7 @@ async function runQwenServeImpl(
       stopLiveCoordinator?: () => void;
       stopAgentHostRestore?: () => void;
       stopWebTerminalRegistry?: () => void;
+      stopHostedMountHandbacks?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
     const stopSafely = (name: string, stop: (() => void) | undefined) => {
@@ -5115,6 +5116,7 @@ async function runQwenServeImpl(
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
     stopSafely('Agent Host reconnect', locals.stopAgentHostRestore);
     stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
+    stopSafely('Hosted mount handbacks', locals.stopHostedMountHandbacks);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);

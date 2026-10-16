@@ -216,6 +216,28 @@ export {
 };
 
 const ACQUIRE_BUSY_POLL_MS = 250;
+// The owed handback's cadence: a quick backoff for the common late settle,
+// then a steady one-minute tail — the chain stays owed until the handback
+// lands, every timer unref'd so a blocked Session never holds the daemon's
+// event loop open, and every attempt re-reads the Broker's gate, never
+// bypasses it.
+const BLOCK_MOUNT_RETRY_GAPS_MS = [1000, 3000, 5000, 10000, 30000, 60000];
+// The block verdict never waits out a slow Broker round-trip: it proceeds
+// once the first handback attempt settles or this bound passes, whichever
+// is first — the attempt itself keeps running inside the retry chain.
+const RELEASE_MOUNT_VERDICT_BOUND_MS = 2000;
+// A reply that decided nothing earns a re-send — the holder-conditioned
+// clear is idempotent — and so do the busy refusal, whose executions settle
+// on their own clock, and the Broker's internal error. Every other refusal
+// is final: a superseded claim, a lifecycle drain, a writer that never
+// proved it stopped, a Session the Broker no longer holds.
+function retryableMountHandback(cause: unknown): boolean {
+  if (!(cause instanceof HostedWorkspaceBrokerRejection)) return true;
+  return (
+    (cause.status === 409 && cause.code === 'runtime_session_busy') ||
+    (cause.status === 500 && cause.code === 'runtime_broker_internal_error')
+  );
+}
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -1560,6 +1582,7 @@ export class HostedWorkspaceToolTurn {
   private readonly warmed: Promise<void>;
   private acquired = false;
   private cleanupOwed = false;
+  private cleanedUp = false;
   private retiredOwnerResults = false;
   private uncertain = false;
   // Agent calls never write a `tool.intent` (the Broker pipeline they
@@ -2090,6 +2113,11 @@ export class HostedWorkspaceToolTurn {
           await oweHostedTurnCleanup(this.session, this.promptId, original);
           this.cleanupOwed = original.runtime !== undefined;
         }
+        // The claim commits under the ORIGINAL turn's identity: remember
+        // the broker that actually acquires before the attempt, so the
+        // recovery-block handback can target it — this.broker's identity
+        // never held that mount.
+        this.mountOwner = original;
         await original.acquire();
         const state = await original.fileHistory({
           kind: 'raw-file-history',
@@ -7102,6 +7130,97 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
+  // The recovery-blocked exit ends the turn's Workspace exclusion the way
+  // finish() does on the settled path (#13800: one leaked mount wedged
+  // every unrelated tool turn on the same storage). Only the mount goes
+  // back — releaseMount(), never the RELEASED-forever release() — so the
+  // Runtime Session keeps its READY identity for the recovery fleet, and
+  // the handback names the claim of the acquire that owes it: a re-drive
+  // that acquires again supersedes that claim, so the old handback can
+  // never free the live mount. The plain lane hands back its own broker's
+  // claim (or the takeover branch's original identity); the Hook and MCP
+  // lanes own a Session-scoped mount and answer through their own
+  // discipline. A failed attempt is logged, never thrown — the block
+  // verdict must still reach the Session, and it waits for the first
+  // attempt only up to RELEASE_MOUNT_VERDICT_BOUND_MS. The chain retries
+  // on the BLOCK_MOUNT_RETRY_GAPS_MS cadence until the handback lands or a
+  // final refusal ends it, and the daemon stops it at shutdown.
+  blockMountRetry?: Promise<void>;
+  private mountOwner?: HostedWorkspaceBroker;
+
+  async releaseForRecoveryBlock(): Promise<void> {
+    if (this.blockMountRetry) return;
+    const attempt = this.mountHandbackAttempt();
+    if (!attempt) return;
+    let stopped = false;
+    let wake: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = () => {
+      stopped = true;
+      clearTimeout(timer);
+      wake?.();
+    };
+    let reported: string | undefined;
+    const once = async (): Promise<boolean> => {
+      try {
+        await attempt();
+        return false;
+      } catch (cause) {
+        const retry = retryableMountHandback(cause);
+        const line = String(cause);
+        // One line per distinct failure, not one per retry.
+        if (line !== reported) {
+          reported = line;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness turn ${this.promptId} could not release the Workspace mount after its recovery block${retry ? ' (retrying)' : ''}: ${line}`,
+          );
+        }
+        return retry;
+      }
+    };
+    const first = once();
+    const handbacks = this.options.mountHandbacks;
+    handbacks?.add(stop);
+    this.blockMountRetry = (async () => {
+      let again = await first;
+      for (let attempts = 0; again && !stopped; attempts++) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          timer = setTimeout(
+            resolve,
+            BLOCK_MOUNT_RETRY_GAPS_MS[
+              Math.min(attempts, BLOCK_MOUNT_RETRY_GAPS_MS.length - 1)
+            ],
+          );
+          timer.unref();
+        });
+        if (!stopped) again = await once();
+      }
+    })().finally(() => handbacks?.delete(stop));
+    await Promise.race([
+      first,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, RELEASE_MOUNT_VERDICT_BOUND_MS).unref();
+      }),
+    ]);
+  }
+
+  private mountHandbackAttempt(): (() => Promise<void>) | undefined {
+    if (this.mcp)
+      return this.mcp.mountHandback(
+        () => this.hooks?.mountWorkUnproven() ?? false,
+      );
+    if (this.hooks) return this.hooks.mountHandback();
+    const owner = this.mountOwner ?? this.broker;
+    const claim = owner.mountClaim();
+    // A turn that never sent an acquire holds nothing to hand back.
+    if (claim === undefined) return undefined;
+    return async () => {
+      await owner.releaseMount(claim);
+      this.acquired = false;
+    };
+  }
+
   // The publisher lives on the Session across turns, so a turn's close
   // deliberately does not touch it: the Session's ordered close (H3's
   // fifth slice) drains the stores, and background traffic keeps its
@@ -7116,6 +7235,16 @@ export class HostedWorkspaceToolTurn {
       );
     else if (this.acquired) await this.broker.release();
     this.acquired = false;
+    this.cleanedUp = true;
+  }
+
+  /**
+   * finish() leaves a turn owing the cleanup debt holding its mount for
+   * cleanup(), which runs only after the terminal record lands; a turn that
+   * exits before then still holds it (#13800).
+   */
+  get cleanupPending(): boolean {
+    return this.cleanupOwed && !this.cleanedUp;
   }
 
   async close(): Promise<void> {}

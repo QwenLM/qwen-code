@@ -159,6 +159,16 @@ REFERENCED 重放。这避免嵌套原生 commit 引入的旧 LOCAL tenant/domai
 删除和结果投影既有的 tenant-before-Session 顺序。不能用普通 profile 快照跳过完整的
 current CSI 判别。既有 retention 等待与整体事务 deadline 仍需资格验证。
 
+同步 main `1319c10e` 后，普通 Managed Session 入口先锁自己的 Session root，判别
+不可变 CSI pin。没有 pin 或 CSI runtime marker 的 Session 在取得租户 guard 前返回。
+已 pin 的 continuation 再以每语句五秒上限取得 placement 与 retention guard，重新
+加载原权威，并保留 ApplicationProgress、固定结算期限和 dispatch ceiling。这次
+root-first 判别是私有工作流 guard-first 前缀的明确例外：并发 guard-first 操作可能
+形成 InnoDB deadlock。这些 Managed Session 入口将实际 deadlock victim 与租户 guard 超时映射为具名
+`tenant_guard_contended` 拒绝；普通 root 超时保留既有失败语义。参见
+[租户 guard 设计](2026-10-11-managed-tenant-guard-wedge.zh-CN.md)。私有退役、
+application 与物理事务保持原共同前缀。普通 H2 检查不能资格化这些 InnoDB 等待。
+
 首批生产消费者为 binding provision、Runtime Session admission 与直接 CAS、原生
 writer acquire/renew/recovery/commit/resource publication，以及普通 release。
 此 profile 只允许原 UUID Runtime Session，released 历史仍参加成员检查。Worker RPC

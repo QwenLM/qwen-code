@@ -1072,9 +1072,12 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        requireLegacyMutation(tenantId, sessionId);
-        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        // A per-turn admission: a long holder of the tenant's placement row
+        // answers tenant_guard_contended within the hot-path bound instead
+        // of parking the submit past the caller's budget (#13800).
+        ManagedSessionStore.lockBounded(() -> WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
         // on the bound Workspace while the Session's creator-keyed
@@ -3778,8 +3781,13 @@ public class ManagedAgentStore implements AgentStateStore {
                 pairs.append(" OR ");
             }
             pairs.append("(environment.session_id = ? AND environment.turn_id = ?)");
-            arguments.add(turn.sessionId());
-            arguments.add(turn.turnId());
+            // Identity bytes keep parameters typed as VARBINARY even when
+            // H2 recompiles the command after binding. They compare the
+            // same on MySQL and MariaDB.
+            arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
+                    .identity(turn.sessionId()));
+            arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
+                    .identity(turn.turnId()));
         }
         arguments.add(tenantId);
         // One row per session: the latest environment event of its latest

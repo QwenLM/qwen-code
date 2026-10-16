@@ -641,6 +641,6 @@ public class ToolPublicationRetentionStoreTest {
         protected final Map<String, byte[]> bytes = new HashMap<>();
         @Override public void putIfAbsent(String key, byte[] value) { bytes.putIfAbsent(key, value.clone()); }
         @Override public InputStream open(String key) { return new ByteArrayInputStream(bytes.get(key)); }
-        @Override public void requireUnversioned() {}
+        @Override public void validateConfiguration() {}
     }
 }

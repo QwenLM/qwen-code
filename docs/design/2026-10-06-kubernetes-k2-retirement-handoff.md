@@ -201,6 +201,20 @@ tenant-before-Session order of deletion and result projection. No ordinary
 profile snapshot bypasses the complete current CSI discriminator. Existing
 retention waits and the overall transaction deadline still need qualification.
 
+After synchronizing main `1319c10e`, ordinary Managed Session entry points first
+lock their own Session root to classify its immutable CSI pin. An unpinned
+Session without a CSI runtime marker returns before taking tenant guards. A
+pinned continuation then acquires the placement and retention guards with
+five-second statement bounds and reloads its original authority, retaining
+ApplicationProgress, the fixed settlement deadline and dispatch ceiling. This
+root-first classification is an explicit exception to the private workflow's
+guard-first prefix: a concurrent guard-first operation may cause an InnoDB
+deadlock. These Managed Session entry points map actual deadlock victims and tenant-guard timeouts to the named
+`tenant_guard_contended` refusal; ordinary root timeouts keep their existing
+failure semantics. See the [tenant guard design](2026-10-11-managed-tenant-guard-wedge.md).
+The private retirement, application and physical transactions retain their
+existing common prefix. Ordinary H2 checks do not qualify these InnoDB waits.
+
 Its initial production consumers are binding provision, Runtime Session admission
 and direct CAS, native writer acquire/renew/recovery/commit/resource publication,
 and ordinary release. Only the original UUID Runtime Session joins this profile;

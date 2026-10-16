@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Connection;
 import java.time.Instant;
@@ -29,7 +30,7 @@ class CsiApplicationProgressTest {
             var progress = JdbcCsiApplicationProgress.lock(connection, original(false));
             assertNull(progress.sealedBindingVersion());
             progress.requireCurrentTime(connection);
-            sql(connection, "UPDATE managed_workspace_execution_lease SET binding_id = 'foreign'");
+            sql(connection, "UPDATE ma_storage_owner SET binding_id = 'foreign'");
             assertThrows(RuntimeBrokerException.class, () -> JdbcCsiApplicationProgress.lock(connection, original(false)));
             connection.rollback();
         }
@@ -40,12 +41,12 @@ class CsiApplicationProgressTest {
         var source = source();
         try (var connection = source.getConnection()) {
             connection.setAutoCommit(false);
-            sql(connection, "UPDATE managed_workspace_execution_lease SET csi_revision = 4");
+            sql(connection, "UPDATE ma_storage_owner SET csi_revision = 4");
             var ready = JdbcCsiApplicationProgress.lock(connection, original(false));
             assertNull(ready.sealedBindingVersion());
             retire(connection, Instant.now(), 4);
             assertEquals(7L, JdbcCsiApplicationProgress.lock(connection, original(true)).sealedBindingVersion());
-            sql(connection, "UPDATE managed_workspace_execution_lease SET csi_revision = 8");
+            sql(connection, "UPDATE ma_storage_owner SET csi_revision = 8");
             assertThrows(RuntimeBrokerException.class, () -> JdbcCsiApplicationProgress.lock(connection, original(true)));
             connection.rollback();
         }
@@ -84,7 +85,7 @@ class CsiApplicationProgressTest {
                     "settlement_deadline_ms = settlement_deadline_ms + 1", "frozen_request_bytes = X'01'",
                     "cut_sha256 = 'unexpected'", "finalize_receipt_bytes = X'01'"}) {
                 var savepoint = connection.setSavepoint();
-                sql(connection, "UPDATE managed_workspace_csi_retirement SET " + change);
+                sql(connection, "UPDATE ma_operation SET " + change);
                 assertThrows(RuntimeBrokerException.class, () -> JdbcCsiApplicationProgress.lock(connection, original(true)), change);
                 connection.rollback(savepoint);
             }
@@ -100,11 +101,11 @@ class CsiApplicationProgressTest {
             connection.setAutoCommit(false);
             retire(connection, Instant.now());
             for (String change : new String[] {
-                    "UPDATE managed_workspace_csi_registration SET storage_id = 'foreign'",
-                    "UPDATE managed_workspace_execution_lease SET csi_registration_revision = 2",
-                    "UPDATE managed_workspace_execution_lease SET csi_reservation_id = 'foreign'",
-                    "UPDATE managed_workspace_csi_retirement SET retirement_id = 'foreign'",
-                    "UPDATE managed_workspace_csi_retirement SET phase = 'RELEASED'"}) {
+                    "UPDATE ma_storage SET storage_id = 'foreign'",
+                    "UPDATE ma_storage_owner SET csi_registration_revision = 2",
+                    "UPDATE ma_storage_owner SET csi_reservation_id = 'foreign'",
+                    "UPDATE ma_operation SET operation_id = 'foreign'",
+                    "UPDATE ma_operation SET phase = 'RELEASED'"}) {
                 var savepoint = connection.setSavepoint();
                 sql(connection, change);
                 assertThrows(RuntimeBrokerException.class, () -> JdbcCsiApplicationProgress.lock(connection, original(true)), change);
@@ -145,17 +146,33 @@ class CsiApplicationProgressTest {
         identity.put("attestationGeneration", 1);
         identity.put("startedAt", started.toString());
         long deadline = Math.addExact(started.toEpochMilli(), 300_000);
-        sql(connection, "UPDATE managed_workspace_execution_lease SET csi_phase = 'DRAINING', csi_revision = "
+        sql(connection, "UPDATE ma_storage_owner SET csi_phase = 'DRAINING', csi_revision = "
                 + CsiOwnershipRevision.next(revision));
-        try (var statement = connection.prepareStatement("INSERT INTO managed_workspace_csi_retirement"
-                + " (retirement_id, binding_id, runtime_generation, physical_key, phase, identity_json,"
-                + " progress_format, progress_version, progress_stage, settlement_deadline_ms)"
-                + " VALUES (?, ?, 1, ?, 'DRAINING', ?, 'qwen-csi-application-retirement/1', 1, 'SETTLING', ?)")) {
-            statement.setString(1, (String) identity.get("operationId"));
-            statement.setString(2, BINDING);
-            statement.setString(3, PHYSICAL);
-            statement.setString(4, new ObjectMapper().writeValueAsString(identity));
-            statement.setLong(5, deadline);
+        String operation = (String) identity.get("operationId");
+        String encoded = new ObjectMapper().writeValueAsString(identity);
+        String result = new ObjectMapper().writeValueAsString(Map.of("schemaVersion", 1, "data", Map.of(
+                "identity_json", encoded, "binding_id", BINDING, "runtime_generation", 1,
+                "storage_id", "storage", "physical_key", PHYSICAL)));
+        try (var statement = connection.prepareStatement("INSERT INTO ma_operation"
+                + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,target_kind,target_id,target_key,target_revision,"
+                + "storage_key,physical_key,payload_version,request_json,request_digest,result_json,state,phase,"
+                + "progress_format,progress_version,progress_stage,settlement_deadline_ms,gmt_create,gmt_modified)"
+                + " VALUES (?,?,?,'CSI_RETIREMENT',?,'RUNTIME_BINDING',?,?,1,?,?,1,?,?,?,'DRAINING','DRAINING',"
+                + "'qwen-csi-application-retirement/1',1,'SETTLING',?,?,?)")) {
+            statement.setString(1, ManagedSchemaKeys.key("CSI_RETIREMENT", "tenant", operation));
+            statement.setString(2, ManagedSchemaKeys.key("tenant"));
+            JdbcRepositorySupport.setIdentity(statement, 3, operation);
+            JdbcRepositorySupport.setIdentity(statement, 4, "tenant");
+            JdbcRepositorySupport.setIdentity(statement, 5, BINDING);
+            statement.setString(6, ManagedSchemaKeys.key(BINDING));
+            statement.setString(7, ALIAS);
+            statement.setString(8, PHYSICAL);
+            statement.setString(9, encoded);
+            statement.setString(10, ManagedSchemaKeys.key(encoded));
+            statement.setString(11, result);
+            statement.setLong(12, deadline);
+            statement.setLong(13, started.toEpochMilli());
+            statement.setLong(14, started.toEpochMilli());
             statement.executeUpdate();
         }
         return deadline;
@@ -164,25 +181,24 @@ class CsiApplicationProgressTest {
     private static JdbcDataSource source() throws Exception {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:application-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        JdbcRuntimeBrokerSchema.initialize(source);
         try (var connection = source.getConnection()) {
-            sql(connection, "CREATE TABLE managed_workspace_csi_registration (alias_key VARCHAR(64) PRIMARY KEY,"
-                    + " tenant_id VARCHAR(64), storage_id VARCHAR(64), physical_key VARCHAR(64), registration_revision BIGINT)");
-            sql(connection, "INSERT INTO managed_workspace_csi_registration VALUES ('" + ALIAS + "', 'tenant', 'storage', '" + PHYSICAL + "', 1)");
-            sql(connection, "CREATE TABLE managed_workspace_execution_lease (storage_key VARCHAR(64) PRIMARY KEY,"
-                    + " storage_kind VARCHAR(8), csi_phase VARCHAR(16), csi_revision BIGINT, csi_reservation_id VARCHAR(64),"
-                    + " csi_registration_key VARCHAR(64), csi_registration_revision BIGINT, binding_id VARCHAR(64),"
-                    + " runtime_generation BIGINT, csi_provision_request_id VARCHAR(64))");
-            sql(connection, "INSERT INTO managed_workspace_execution_lease VALUES ('" + PHYSICAL + "', 'CSI', 'RESERVED',"
+            sql(connection, "INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
+                    + " storage_kind, registration_state, physical_key, registration_revision, registration_json) VALUES ('"
+                    + ALIAS + "', '" + ManagedSchemaKeys.key("tenant") + "', '" + ManagedSchemaKeys.key("storage")
+                    + "', 'tenant', 'storage', 'CSI', 'REGISTERED', '" + PHYSICAL + "', 1, '{}')");
+            sql(connection, "INSERT INTO ma_storage_owner (storage_key, storage_kind, csi_phase, csi_revision,"
+                    + " csi_reservation_id, csi_registration_key, csi_registration_revision, binding_id, runtime_generation,"
+                    + " csi_provision_request_id) VALUES ('" + PHYSICAL + "', 'CSI', 'RESERVED',"
                     + " 1, '" + RESERVATION + "', '" + ALIAS + "', 1, '" + BINDING + "', 1, 'provision')");
-            sql(connection, "CREATE TABLE managed_workspace_csi_retirement (retirement_id VARCHAR(64), binding_id VARCHAR(64),"
-                    + " runtime_generation BIGINT, physical_key VARCHAR(64), phase VARCHAR(16), identity_json CLOB,"
-                    + " progress_format VARCHAR(64), progress_version BIGINT, progress_stage VARCHAR(16), settlement_deadline_ms BIGINT,"
-                    + " frozen_request_bytes BLOB, frozen_request_sha256 VARCHAR(64), cut_bytes BLOB, cut_sha256 VARCHAR(64),"
-                    + " finalize_receipt_bytes BLOB, finalize_receipt_sha256 VARCHAR(64))");
-            sql(connection, "CREATE TABLE qwen_runtime_binding (binding_id VARCHAR(64), provisioner_kind VARCHAR(64),"
-                    + " provision_request_id VARCHAR(64), resource_handle_version INT, resource_handle_json CLOB,"
-                    + " runtime_instance_id VARCHAR(64), runtime_lease_id VARCHAR(64), runtime_epoch BIGINT, attestation_generation BIGINT)");
-            sql(connection, "INSERT INTO qwen_runtime_binding VALUES ('" + BINDING + "', 'kubernetes-workspace',"
+            sql(connection, "INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id,"
+                    + " workspace_generation, canonical_cwd, capability_digest, isolation_class, isolation_key, storage_id,"
+                    + " runtime_generation, binding_state, drain_requested, operation_generation, record_version, last_active_at,"
+                    + " provisioner_kind, provision_request_id, resource_handle_version, resource_handle_json, runtime_instance_id,"
+                    + " runtime_lease_id, runtime_epoch, attestation_generation) VALUES ('" + BINDING + "', '"
+                    + original(false).request().requestKey() + "', '" + JdbcRepositorySupport.scopeKey(original(false).request().getScope())
+                    + "', 'tenant', 'workspace', '1', '/workspace', '" + original(false).request().getScope().getCapabilityDigest()
+                    + "', 'session', '2815c6b8-468c-449a-869a-8794b0d52fca', 'storage', 1, 'READY', FALSE, 0, 9, 0, 'kubernetes-workspace',"
                     + " 'provision', 3, '{\"pod\":\"original\"}', 'runtime', 'lease', 1, 1)");
         }
         return source;

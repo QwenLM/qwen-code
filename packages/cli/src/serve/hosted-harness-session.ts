@@ -22,7 +22,6 @@ import {
   readHostedTurnModelSelection,
   type HostedModelSelection,
 } from './hosted-model-selection.js';
-import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import {
   findHostedApprovalContinuation,
   type RestoredHostedApprovalContinuation,
@@ -335,6 +334,50 @@ const debugLogger = createDebugLogger('HOSTED_HARNESS_SESSION');
  */
 const HOSTED_HOOK_RECONCILE_BUDGET_MS = 30_000;
 
+/**
+ * The wedge family #13800 names: a turn that dies against its Session store
+ * ends with a named, caller-visible reason, never a silent freeze. Only
+ * transport and server-5xx failures reclassify: per-Session refusals
+ * (writer conflicts, recovery blocks) keep their own names. A bounded
+ * tenant-guard wait is not an outage either — the store answered it
+ * promptly with a retryable contention refusal — so it stays unattributed
+ * rather than naming the store unavailable.
+ */
+function namedStoreFailure(cause: unknown): string | undefined {
+  if (
+    cause instanceof ManagedSessionStoreTransportError ||
+    (cause instanceof ManagedSessionStoreHttpError &&
+      cause.status >= 500 &&
+      cause.remoteCode !== 'tenant_guard_contended')
+  ) {
+    return 'managed_session_store_unavailable';
+  }
+  return undefined;
+}
+
+/**
+ * Lifts a Session's recovery block. The named reason belongs to the block,
+ * so it is cleared with it here rather than by hand at each lift site.
+ */
+function liftRecoveryBlock(session: HostedSession): void {
+  session.blocked = false;
+  session.recoveryReason = undefined;
+  session.cleanupBlocked = false;
+}
+
+/**
+ * Blocks a Session on recovery under the name of the failure blocking it
+ * now — `namedStoreFailure`'s, or none — so a block never carries the
+ * reason an earlier block left behind (#13800 R2-14).
+ */
+function blockRecovery(
+  session: HostedSession,
+  storeFailure: string | undefined,
+): void {
+  session.blocked = true;
+  session.recoveryReason = storeFailure;
+}
+
 interface HostedSession {
   streamOwner: { bootId: string; eventEpoch: string };
   managed: ManagedSession;
@@ -348,6 +391,11 @@ interface HostedSession {
   active?: { promptId: string; digest: string; abort: AbortController };
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
+  /** #13800 D4: the named store failure kept in memory once a settlement's
+   * own journal write could not commit — surfaced via /session/:id/status
+   * until the block clears. Only `managed_session_store_unavailable` goes
+   * here; other recovery blocks keep naming themselves at the caller. */
+  recoveryReason?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
   shell?: HostedShellTurnOptions;
@@ -1794,8 +1842,7 @@ export async function settleCancelledHookTurn(
         },
       ),
     );
-    session.blocked = false;
-    session.cleanupBlocked = false;
+    liftRecoveryBlock(session);
   } finally {
     session.hooksBusy = false;
   }
@@ -1903,11 +1950,13 @@ function runSettleProjection(
       );
       if (brokerOptions) await retryHostedCleanup(session, brokerOptions);
     });
-    session.blocked = false;
-    session.cleanupBlocked = false;
+    liftRecoveryBlock(session);
   })()
     .catch((cause: unknown) => {
-      session.blocked = true;
+      // A projection whose commit met the store names the block the way
+      // the turn routes do; a writer conflict or a harness-shape failure
+      // leaves it unnamed (#13800 R2-14).
+      blockRecovery(session, namedStoreFailure(cause));
       writeStderrLineSafe(
         'qwen serve: Hosted Harness final settlement remained blocked: ' +
           sanitizeDaemonLogLine(String(cause)),
@@ -1926,7 +1975,7 @@ async function retryHostedCleanup(
   try {
     if (hasHostedCleanupDebt(session.managed))
       await reconcileHostedTurnCleanup(session.managed, options);
-    if (session.cleanupBlocked) session.blocked = false;
+    if (session.cleanupBlocked) liftRecoveryBlock(session);
     session.cleanupBlocked = false;
   } catch (cause) {
     if (!session.blocked) {
@@ -2649,6 +2698,8 @@ async function eventEnvelope(
     const expired = event.payload['stopReason'] === 'deadline_exceeded';
     const modelUnavailable =
       event.payload['stopReason'] === 'model_unavailable';
+    const storeUnavailable =
+      event.payload['stopReason'] === 'managed_session_store_unavailable';
     return {
       v: 1,
       id: event.sequence,
@@ -2661,7 +2712,9 @@ async function eventEnvelope(
           ? 'hosted_turn_deadline_exceeded'
           : modelUnavailable
             ? 'model_unavailable'
-            : 'hosted_turn_failed',
+            : storeUnavailable
+              ? 'managed_session_store_unavailable'
+              : 'hosted_turn_failed',
         message: expired
           ? 'The Hosted Harness Turn exceeded its deadline.'
           : 'Hosted Harness turn failed.',
@@ -2726,6 +2779,10 @@ async function startHostedRecoveredTurn(
     resolveReady = resolve;
     rejectReady = reject;
   });
+  // The record reaches this callback even when its own commit later dies,
+  // so the turn's already-computed stopReason outlives the raw cause —
+  // an armed write latch reports that only as ManagedSessionWritesStoppedError.
+  let turnResult: ChatRecord | undefined;
   const resumed = executeHostedTurn(
     session,
     sessionId,
@@ -2735,7 +2792,9 @@ async function startHostedRecoveredTurn(
     abort,
     brokerOptions,
     resumeApproval || resumeModel ? undefined : resume.parts,
-    undefined,
+    (result) => {
+      turnResult = result;
+    },
     resolveReady,
     resumeApproval,
     resumeModel,
@@ -2746,6 +2805,21 @@ async function startHostedRecoveredTurn(
   void resumed
     .catch((cause: unknown) => {
       session.blocked = true;
+      // The automatic bare-load recovery drives the turn entirely inside
+      // this helper — without routing through the prompt-route or
+      // manual-continue fallbacks that already keep the named store
+      // failure. Classify the original cause here too; when a terminal
+      // write died on the armed write latch the cause only reads back as
+      // ManagedSessionWritesStoppedError, so fall back to the stopReason
+      // the turn already computed, exactly as the prompt route does
+      // (#13800; memory only, never a persisted terminal claim).
+      const storeFailure = namedStoreFailure(cause);
+      const recordedStopReason = (
+        turnResult?.systemPayload as { stopReason?: unknown } | undefined
+      )?.['stopReason'];
+      if (storeFailure !== undefined) session.recoveryReason = storeFailure;
+      else if (recordedStopReason === 'managed_session_store_unavailable')
+        session.recoveryReason = 'managed_session_store_unavailable';
       writeStderrLineSafe(
         'qwen serve: Hosted Harness recovery remained blocked: ' +
           String(cause),
@@ -2756,8 +2830,7 @@ async function startHostedRecoveredTurn(
       session.active = undefined;
     });
   await ready;
-  session.blocked = false;
-  session.cleanupBlocked = false;
+  liftRecoveryBlock(session);
 }
 
 async function executeHostedTurn(
@@ -3165,13 +3238,7 @@ async function executeHostedTurn(
             result.model,
           );
         } catch (cause) {
-          if (
-            cause instanceof HostedToolRecoveryRequiredError ||
-            cause instanceof HostedMcpRecoveryRequiredError ||
-            cause instanceof HostedHookRecoveryRequiredError ||
-            cause instanceof LlmRequestPreparationError
-          )
-            throw cause;
+          if (monitorWakeNeedsRecovery(cause)) throw cause;
           const outcome = settledTurnOutcome(abort);
           state = outcome.state;
           stopReason = outcome.stopReason;
@@ -3192,6 +3259,10 @@ async function executeHostedTurn(
             // one — the Workflow tool answers the same error as cancelled.
             state = 'cancelled';
             stopReason = 'cancelled';
+          }
+          if (stopReason === 'error') {
+            const storeFailure = namedStoreFailure(cause);
+            if (storeFailure !== undefined) stopReason = storeFailure;
           }
           if (state === 'error') {
             // The model layer surfaces any abort as a cancellation, so a
@@ -3228,6 +3299,10 @@ async function executeHostedTurn(
             'qwen serve: Turn completed with cleanup still owed: ' +
               String(cause),
           );
+          // The owed cleanup keeps retrying its full release; the mount
+          // goes back now, or the parked Session wedges its storage until
+          // that release lands (#13800).
+          await toolTurn?.releaseForRecoveryBlock();
         }
         // H4b: the tool-arm results this turn answered are consumed
         // facts only once the turn's own settlement commits durably — a
@@ -3264,14 +3339,29 @@ async function executeHostedTurn(
   // unbounded, and a stalled Session Store would otherwise leave the Session
   // permanently unavailable and undeletable. Each turn owns its publisher,
   // so a next turn shares no listener or capture state with this drain.
-  await running.finally(() => {
-    void toolTurn?.close().catch((cause: unknown) => {
-      session.blocked = true;
-      writeStderrLineSafe(
-        'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
-      );
+  try {
+    await running.finally(() => {
+      void toolTurn?.close().catch((cause: unknown) => {
+        session.blocked = true;
+        writeStderrLineSafe(
+          'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
+        );
+      });
     });
-  });
+  } catch (cause) {
+    // The recovery-blocked exit hands back the Workspace mount before the
+    // block verdict parks the Session: the lease is the turn's, and a turn
+    // that never runs again must not hold it against every later Session
+    // on the same storage (#13800). finish() kept it for the uncertain
+    // case; the block transition is exactly where the turn proves it will
+    // never replay, so this is where the exclusion ends. A turn whose
+    // terminal record never landed skipped the cleanup its release is owed
+    // to; the route may park it blocked over that write, and the durable
+    // cleanup debt keeps owing the full release, so its mount goes back too.
+    if (monitorWakeNeedsRecovery(cause) || toolTurn?.cleanupPending)
+      await toolTurn?.releaseForRecoveryBlock();
+    throw cause;
+  }
   if (!turnResult) throw new Error('Hosted turn did not settle.');
   return turnResult;
 }
@@ -3282,6 +3372,16 @@ export function registerHostedHarnessSessionRoutes(
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
 ): { owns: (id: string) => boolean } {
+  // The owed mount handbacks of recovery-blocked turns (#13800) outlive
+  // their Session, whose close never frees a parked turn's mount; the
+  // daemon owns them and stops them at shutdown.
+  const mountHandbacks = new Set<() => void>();
+  (
+    app.locals as { stopHostedMountHandbacks?: () => void }
+  ).stopHostedMountHandbacks = () => {
+    for (const stop of [...mountHandbacks]) stop();
+  };
+  if (brokerOptions) brokerOptions = { ...brokerOptions, mountHandbacks };
   const sessions = new Map<string, HostedSession>();
   const opening = new Set<string>();
   const epoch = contract.bootId.replaceAll('-', '_');
@@ -3352,8 +3452,7 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     refusedAdoptions.delete(sessionId);
-    resident.blocked = false;
-    resident.cleanupBlocked = false;
+    liftRecoveryBlock(resident);
     // The projection owes the terminal record and holds the busy flag until
     // it lands; the undriven marker's guard ends with the park's payability
     // — the first load's bare branch arms no marker on this arm either.
@@ -4829,8 +4928,7 @@ export function registerHostedHarnessSessionRoutes(
                 // path's fleet, never this generic aftermath.
                 const aftermath = await wakeAftermath(turn.turnId);
                 if (aftermath === 'settled') {
-                  session.blocked = false;
-                  session.cleanupBlocked = false;
+                  liftRecoveryBlock(session);
                 }
               }
               if (
@@ -4881,8 +4979,7 @@ export function registerHostedHarnessSessionRoutes(
             if (first === undefined) return;
             const aftermath = await wakeAftermath(first.turnId);
             if (aftermath === 'settled') {
-              session.blocked = false;
-              session.cleanupBlocked = false;
+              liftRecoveryBlock(session);
             }
           },
           failed: (cause) => {
@@ -6463,12 +6560,7 @@ export function registerHostedHarnessSessionRoutes(
         );
         settled = true;
       } catch (cause) {
-        if (
-          cause instanceof HostedToolRecoveryRequiredError ||
-          cause instanceof HostedMcpRecoveryRequiredError ||
-          cause instanceof HostedHookRecoveryRequiredError ||
-          cause instanceof LlmRequestPreparationError
-        ) {
+        if (monitorWakeNeedsRecovery(cause)) {
           if (admitted) session.blocked = true;
           else if (!res.headersSent)
             error(res, 503, 'hosted_mcp_recovery_required');
@@ -6481,13 +6573,38 @@ export function registerHostedHarnessSessionRoutes(
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} could not finish after admission; retrying settlement: ${String(cause)}`,
           );
+          const outcome = settledTurnOutcome(abort);
+          const storeFailure =
+            outcome.stopReason === 'error'
+              ? namedStoreFailure(cause)
+              : undefined;
           try {
-            const outcome = settledTurnOutcome(abort);
             await session.managed.sink.write(
-              turnResult ?? turnResultRecord(outcome.state, outcome.stopReason),
+              turnResult ??
+                turnResultRecord(
+                  outcome.state,
+                  storeFailure ?? outcome.stopReason,
+                ),
             );
           } catch (settleCause) {
             session.blocked = true;
+            // The settlement write couldn't commit (#13800): keep the named
+            // failure for the status surface instead of a bare boolean. The
+            // name describes the block, not the turn's outcome, so the outer
+            // cause counts even for a cancelled turn, and a settlement write
+            // that was the first to meet the store names it too.
+            const recordedStopReason = (
+              turnResult?.systemPayload as { stopReason?: unknown } | undefined
+            )?.['stopReason'];
+            const blockStoreFailure =
+              namedStoreFailure(cause) ?? namedStoreFailure(settleCause);
+            if (blockStoreFailure !== undefined) {
+              session.recoveryReason = blockStoreFailure;
+            } else if (
+              recordedStopReason === 'managed_session_store_unavailable'
+            ) {
+              session.recoveryReason = 'managed_session_store_unavailable';
+            }
             writeStderrLineSafe(
               `qwen serve: Hosted Harness turn ${promptId} could not settle: ${String(settleCause)}`,
             );
@@ -8451,6 +8568,8 @@ export function registerHostedHarnessSessionRoutes(
           if (state === 'error' && cause instanceof HostedModelUnavailableError)
             failureReason = 'model_unavailable';
           if (state === 'error') {
+            const storeFailure = namedStoreFailure(cause);
+            if (storeFailure !== undefined) failureReason = storeFailure;
             writeStderrLineSafe(
               `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
             );
@@ -8475,7 +8594,17 @@ export function registerHostedHarnessSessionRoutes(
               promptId,
             );
           } catch (foldCause) {
-            session.blocked = true;
+            // A fold exit names its block the way the settlement exits do
+            // (#13800 R2-15): a model stage that met the store keeps its
+            // name — the write latch it armed leaves the fold only
+            // ManagedSessionWritesStoppedError — and otherwise the fold's
+            // own cause decides.
+            blockRecovery(
+              session,
+              failureReason === 'managed_session_store_unavailable'
+                ? failureReason
+                : namedStoreFailure(foldCause),
+            );
             writeStderrLineSafe(
               `qwen serve: Hosted Harness turn ${promptId} could not answer its committed calls: ${String(foldCause)}`,
             );
@@ -8532,6 +8661,24 @@ export function registerHostedHarnessSessionRoutes(
           );
           return;
         }
+        // The terminal write (and toolTurn.finish() / the continuation
+        // consumption flush) sits outside the model-stage catch above: a
+        // store failure thrown from them lands here with failureReason
+        // still at its 'error' initial value. Classify the original cause
+        // once so the fallback record and the status surface keep the name
+        // (#13800 P2). It runs ahead of the fold below, so a fold exit
+        // names its block too (#13800 R2-15).
+        // An already-named failure (a model-route one) keeps its name: only
+        // the generic value is reclassified, as executeHostedTurn does.
+        const storeFailure = namedStoreFailure(cause);
+        if (storeFailure !== undefined && failureReason === 'error')
+          failureReason = storeFailure;
+        // A block this arm leaves is named by whichever of the turn, its
+        // outer cause or the failing write met the store (#13800).
+        const blockStoreFailure = (blockCause: unknown) =>
+          failureReason === 'managed_session_store_unavailable'
+            ? failureReason
+            : (storeFailure ?? namedStoreFailure(blockCause));
         // The happy-path settle answers the drive's committed sibling calls
         // before the terminal record; this compensating arm owes the same
         // fold, or the durable settle strands a committed team/task call
@@ -8541,7 +8688,7 @@ export function registerHostedHarnessSessionRoutes(
         try {
           await answerRecoveredTurnCommittedCalls(session, sessionId, promptId);
         } catch (foldCause) {
-          session.blocked = true;
+          blockRecovery(session, blockStoreFailure(foldCause));
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} could not answer its committed calls: ${String(foldCause)}`,
           );
@@ -8561,7 +8708,10 @@ export function registerHostedHarnessSessionRoutes(
             );
           }
         } catch (settleCause) {
-          session.blocked = true;
+          // The fallback terminal write couldn't commit either: keep the
+          // named store failure for the status surface (#13800), whichever
+          // of the turn, its outer cause or the settlement met the store.
+          blockRecovery(session, blockStoreFailure(settleCause));
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} could not settle: ${String(settleCause)}`,
           );
@@ -8571,8 +8721,11 @@ export function registerHostedHarnessSessionRoutes(
         // discipline in executeHostedTurn. A recovery-blocked exit keeps the
         // adopted lease held: the parked Turn still owns it, and a release
         // would persist RELEASED, wedging the later takeover's same-identity
-        // re-acquire on runtime_session_not_acquirable.
+        // re-acquire on runtime_session_not_acquirable. Every arm that parks
+        // the re-drive blocked hands its Workspace mount back here, the way
+        // the prompt route's turn does (#13800).
         if (!session.blocked) releaseRecoveredRuntime(session);
+        else await toolTurn?.releaseForRecoveryBlock();
         session.active = undefined;
         void toolTurn?.close().catch((cause: unknown) => {
           session.blocked = true;
@@ -9101,15 +9254,16 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 400, 'invalid_event_cursor');
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-store');
+    // Disable proxy buffering (nginx): the keepalives below exist to put
+    // bytes on the wire during quiet phases, and a buffering intermediary
+    // would hold them until the client's idle watchdog aborts a healthy
+    // stream. The event-stream content type alone doesn't always reach
+    // the client through every proxy.
+    res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('X-Qwen-Event-Epoch', epoch);
     res.flushHeaders();
     let cursor = after;
     let busy = false;
-    const stop = (): void => {
-      clearInterval(timer);
-      if (!res.destroyed && !res.writableEnded) res.end();
-    };
-    session.streams.add(stop);
     // Seeded once per stream, then updated as deltas flow: a committed
     // message whose text streamed must not project a second chunk.
     const streamedDeltaIds = new Set(
@@ -9155,8 +9309,28 @@ export function registerHostedHarnessSessionRoutes(
       void pump();
     }, 250);
     timer.unref();
+    // Mirror the primary route's keepalive: while no event is committed
+    // the pump writes nothing, and clients bound that silence with an
+    // idle watchdog (the Java SDK defaults to 45s), so a healthy but
+    // quiet stream must still put bytes on the wire.
+    const keepaliveTimer = setInterval(() => {
+      if (res.destroyed || res.writableEnded) return;
+      res.write(': keepalive\n\n');
+    }, 15_000);
+    keepaliveTimer.unref();
+    // stop funnels every teardown path — backpressure, pump failure,
+    // session close — through both timer clears; it is declared after
+    // the timers so it can clear them unconditionally, and the
+    // synchronous route body registers it before any path can fire.
+    const stop = (): void => {
+      clearInterval(timer);
+      clearInterval(keepaliveTimer);
+      if (!res.destroyed && !res.writableEnded) res.end();
+    };
+    session.streams.add(stop);
     res.on('close', () => {
       clearInterval(timer);
+      clearInterval(keepaliveTimer);
       session.streams.delete(stop);
     });
     void pump();
@@ -9172,6 +9346,9 @@ export function registerHostedHarnessSessionRoutes(
         session.blocked ||
         (session.mcp?.recoveryBlocked ?? false) ||
         (session.hooks?.hasPendingOperations ?? false),
+      ...(session.recoveryReason === undefined
+        ? {}
+        : { recoveryReason: session.recoveryReason }),
     });
   });
   app.get('/session/:id/transcript', (req, res) => {
@@ -9966,8 +10143,7 @@ export function registerHostedHarnessSessionRoutes(
               if (first !== undefined) {
                 const aftermath = await session.wakeAftermath(first.turnId);
                 if (aftermath === 'settled') {
-                  session.blocked = false;
-                  session.cleanupBlocked = false;
+                  liftRecoveryBlock(session);
                   repaired = true;
                 }
               }

@@ -346,8 +346,19 @@
                                  (HostedMonitorRunFaultGatesIT: seven cases
                                  with real background processes and >16 MiB
                                  captures) add ~310 s measured on the lane,
-                                 inside the same 1800 s fork. -->
-                            <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                                 inside the same 1800 s fork. The FG9
+                                 session/relay fault gates
+                                 (HostedSessionRelayFaultGatesIT: two
+                                 letters measuring 166–175 s healthy
+                                 locally on JDK 21 + MariaDB 10.11 across
+                                 three acceptance runs, ~300 s budgeted
+                                 at >1.7× the heaviest measured run)
+                                 then raise the healthy sum again, so
+                                 the fork moves 1800→2100 in the same
+                                 diff that adds the letters; one 600 s
+                                 ceiling plus the re-derived healthy
+                                 runtime still fits with headroom. -->
+                            <forkedProcessTimeoutInSeconds>2100</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -434,6 +445,30 @@
                          (600 s) plus the healthy runtime must fit, the
                          per-ceiling relation the CI profile pins. -->
                     <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-session-relay-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedSessionRelay*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- The FG9 letters are independent fixtures sharing
+                         one fork — each letter boots its own Spring,
+                         Harness, and proxies on its own tenant prefix,
+                         so a stall in one letter leaves the other
+                         running — like the FG8 letters' shape. The
+                         per-ceiling relation is pinned against the
+                         hosted-harness-mysql lane's fork budget (the
+                         profile CI actually runs these letters under);
+                         this local-run profile keeps step with that
+                         budget (#14164). -->
+                    <forkedProcessTimeoutInSeconds>2100</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

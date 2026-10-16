@@ -419,7 +419,7 @@ class ToolPublicationStoreTest {
             @Override
             public InputStream open(String key) { return new ByteArrayInputStream(objects.get(key)); }
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         return new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
@@ -468,7 +468,7 @@ class ToolPublicationStoreTest {
             public InputStream open(String key) { throw new AssertionError("Unexpected object read"); }
 
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
@@ -614,7 +614,7 @@ class ToolPublicationStoreTest {
             public InputStream open(String key) { throw new AssertionError("Unexpected OSS read"); }
 
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
@@ -655,7 +655,7 @@ class ToolPublicationStoreTest {
             }
 
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
@@ -705,7 +705,7 @@ class ToolPublicationStoreTest {
             public InputStream open(String key) { return new ByteArrayInputStream(objects.get(key)); }
 
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         var recoveryBudget = new ToolPublicationDataStore.VerificationBudget(256, Duration.ofMinutes(25));
         var first = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
@@ -897,7 +897,7 @@ class ToolPublicationStoreTest {
             }
 
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
@@ -967,7 +967,7 @@ class ToolPublicationStoreTest {
             public InputStream open(String key) { throw new AssertionError("Unexpected read"); }
 
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
@@ -1043,7 +1043,7 @@ class ToolPublicationStoreTest {
             }
 
             @Override
-            public void requireUnversioned() {
+            public void validateConfiguration() {
             }
         };
         sessions.setPublicationObjects(bucket);
@@ -1158,7 +1158,7 @@ class ToolPublicationStoreTest {
             }
 
             @Override
-            public void requireUnversioned() {
+            public void validateConfiguration() {
             }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
@@ -1526,7 +1526,7 @@ class ToolPublicationStoreTest {
             }
 
             @Override
-            public void requireUnversioned() {
+            public void validateConfiguration() {
             }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
@@ -1565,7 +1565,7 @@ class ToolPublicationStoreTest {
             }
 
             @Override
-            public void requireUnversioned() {
+            public void validateConfiguration() {
             }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
@@ -1632,7 +1632,7 @@ class ToolPublicationStoreTest {
             }
 
             @Override
-            public void requireUnversioned() {
+            public void validateConfiguration() {
             }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
@@ -1658,7 +1658,7 @@ class ToolPublicationStoreTest {
             public InputStream open(String key) { throw new AssertionError("Unexpected object read"); }
 
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofSeconds(1), Duration.ofMillis(500),
@@ -1717,7 +1717,7 @@ class ToolPublicationStoreTest {
             }
 
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         var publisher = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
@@ -1823,7 +1823,7 @@ class ToolPublicationStoreTest {
             }
 
             @Override
-            public void requireUnversioned() {
+            public void validateConfiguration() {
             }
         };
         ToolPublicationDataStore data = new ToolPublicationDataStore(metadataJdbc, manager, store, sessions,
@@ -2783,7 +2783,7 @@ class ToolPublicationStoreTest {
                     }
 
                     @Override
-                    public void requireUnversioned() {}
+                    public void validateConfiguration() {}
                 };
         var data =
                 new ToolPublicationDataStore(

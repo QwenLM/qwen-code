@@ -80,7 +80,7 @@ public final class ToolPublicationCollector {
                             claim.publication(),
                             claim.cursor());
             if (page.stream().anyMatch(object -> object.key() != null)) {
-                objects.requireUnversioned();
+                objects.validateConfiguration();
             }
             for (var object : page) {
                 if (!renew(claim)) {

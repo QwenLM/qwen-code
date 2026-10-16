@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.O
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.aliyun.oss.OSSException;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -544,7 +543,8 @@ public final class ToolPublicationDataStore {
                 || error instanceof ToolPublicationContract.ContractViolationException) {
             return new ApiException(HttpStatus.BAD_REQUEST, "invalid_request", "Publication verification failed");
         }
-        if (error instanceof OSSException storage && "AccessDenied".equals(storage.getErrorCode())) {
+        if (error instanceof ToolPublicationStorageException storage
+                && storage.getReason() == ToolPublicationStorageException.Reason.ACCESS_DENIED) {
             return new ApiException(HttpStatus.FORBIDDEN, "managed_tool_publication_storage_denied",
                     "Publication storage rejected verification");
         }
@@ -1987,13 +1987,10 @@ public final class ToolPublicationDataStore {
     }
 
     private void lockTenant(JsonNode key) {
-        String tenant = text(key, "tenantId");
-        String tenantKey = ManagedSchemaKeys.key(tenant);
-        jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
-                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
-        String storedTenant = jdbc.queryForObject("SELECT tenant_id FROM ma_tenant_guard"
-                + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE", String.class, tenantKey);
-        require(tenant.equals(storedTenant), "Publication tenant conflicts");
+        // The entry point's first tenant-guard acquisition on this lane, so
+        // it runs bounded with the shared named-failure mapping (#13800).
+        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
+                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private List<Map<String, Object>> sealRows(String scope, String publicationId, String streamId) {
@@ -2146,7 +2143,7 @@ public final class ToolPublicationDataStore {
         VerificationTask task = verificationTask.get();
         Runnable guard = task == null ? () -> {} : verificationHeartbeat(task);
         guard.run();
-        objects.requireUnversioned();
+        objects.validateConfiguration();
         try (InputStream stream = retention.open(scope, publicationId, objectKey, objects, guard)) {
             var hash = DigestUtils.getSha256Digest();
             byte[] buffer = new byte[64 * 1024];

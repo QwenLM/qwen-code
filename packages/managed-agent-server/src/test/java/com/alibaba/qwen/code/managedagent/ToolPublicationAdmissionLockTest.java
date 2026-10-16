@@ -59,7 +59,7 @@ class ToolPublicationAdmissionLockTest {
             @Override
             public InputStream open(String key) { throw new AssertionError("Unexpected object read"); }
             @Override
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         var data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, fixture.store, fixture.sessions,
                 bucket, Duration.ofMinutes(2), Duration.ofSeconds(30),

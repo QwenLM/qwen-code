@@ -385,7 +385,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         addObject("inline", null, new byte[] {4});
         retire();
         var objects = new DeletingObjects() {
-            @Override public void requireUnversioned() {
+            @Override public void validateConfiguration() {
                 throw new IllegalStateException("OSS versioning unavailable");
             }
         };
