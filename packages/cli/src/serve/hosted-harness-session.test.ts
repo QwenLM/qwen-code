@@ -1866,7 +1866,13 @@ describe('Hosted Harness no-tool session', () => {
     await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
       .send({ prompt, promptId: PROMPT_ID, payloadDigest })
       .expect(202);
-    await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce());
+    await vi.waitFor(
+      () => expect(state.model).toHaveBeenCalledOnce(),
+      // #14101: the admission crosses fsync-backed journal commits before
+      // the model call; the default 1s waitFor window flaked on a loaded
+      // CI runner (#13219).
+      { timeout: 10_000 },
+    );
     const original =
       LocalManagedSessionAuthority.prototype.appendExecutionEvent;
     const append = vi
@@ -1890,12 +1896,18 @@ describe('Hosted Harness no-tool session', () => {
       append.mockRestore();
       finish();
     }
-    await vi.waitFor(async () => {
-      const status = await authorize(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      );
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      // #14101: the cancelled turn's settle crosses fsync-backed journal
+      // commits before the active flag clears; the default 1s waitFor
+      // window flaked on a loaded CI runner (#13219).
+      { timeout: 10_000 },
+    );
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/detach`),
     ).expect(204);
@@ -1932,7 +1944,13 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
         .send({ prompt, promptId: PROMPT_ID, payloadDigest })
         .expect(202);
-      await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+      await vi.waitFor(
+        () => expect(state.model).toHaveBeenCalledTimes(1),
+        // #14101: the admission crosses fsync-backed journal commits before
+        // the model call; the default 1s waitFor window flaked on a loaded
+        // CI runner (#13219).
+        { timeout: 10_000 },
+      );
       state.authorizeOrdinary.mockClear();
       state.authorizeOrdinary.mockRejectedValue(cause);
       try {
@@ -1948,12 +1966,18 @@ describe('Hosted Harness no-tool session', () => {
       } finally {
         finish();
       }
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.hasActivePrompt).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        // #14101: the cancelled turn's settle crosses fsync-backed journal
+        // commits before the active flag clears; the default 1s waitFor
+        // window flaked on a loaded CI runner (#13219).
+        { timeout: 10_000 },
+      );
       state.authorizeOrdinary.mockResolvedValue(undefined);
       await authorize(
         supertest(server).post(`/session/${SESSION_ID}/detach`),
@@ -11337,6 +11361,68 @@ describe('Hosted Harness no-tool session', () => {
       (await authorize(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
     ).toBe(204);
+  });
+
+  it('deregisters the Session when the close sealed the writer but the release failed', async () => {
+    // A plain Session (no hooks): the close reaches managed.close()
+    // directly, so the boundary release fails inside it, after its finally
+    // sealed the writer (review round 11, R11-3).
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'releaseActivation',
+    ).mockRejectedValue(new Error('resource store unavailable'));
+    const failed = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(failed.status).toBe(503);
+    expect(failed.body.code).toBe('managed_session_close_failed');
+    // The sealed-but-rejected session is deregistered: a follow-up gets a
+    // clean 404 instead of a stranded entry answering against a dead
+    // journal. A retried DELETE does not re-run the release either.
+    const followUp = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(followUp.status).toBe(404);
+    expect(followUp.body.code).toBe('hosted_session_not_found');
+  });
+
+  it('keeps the Session when the close rejected before the writer seal landed', async () => {
+    // A pre-seal seal() rejection leaves the writer open: the Session must
+    // stay registered so a retry can reach it (review round 13, R13-1).
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+    vi.spyOn(
+      LocalJsonlManagedSessionJournalHandle.prototype,
+      'seal',
+    ).mockRejectedValue(new Error('seal candidate already exists'));
+    const failed = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(failed.status).toBe(503);
+    expect(failed.body.code).toBe('managed_session_close_failed');
+    // The pre-seal rejection keeps the Session: a follow-up DELETE reaches
+    // the same entry and fails the same way instead of answering 404.
+    const followUp = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(followUp.status).toBe(503);
+    expect(followUp.body.code).toBe('managed_session_close_failed');
   });
 
   it('names a retained Hook hold when DELETE cannot release its owner', async () => {

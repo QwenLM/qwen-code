@@ -77,18 +77,21 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class), harness, warmer,
                     relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor, Clock.systemUTC(), new ManagedAgentProperties());
             coordinator.setWorkspaceLifecycleStore(lifecycle);
-            var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class);
+            var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class,
+                    java.util.concurrent.atomic.AtomicBoolean.class);
             settle.setAccessible(true);
             try {
                 if (recovery) {
-                    assertThat(settle.invoke(coordinator, operation)).isEqualTo(true);
+                    assertThat(settle.invoke(coordinator, operation,
+                            new java.util.concurrent.atomic.AtomicBoolean())).isEqualTo(true);
                     Mockito.verify(lifecycle).requireSettledExecutions(operation);
                     Mockito.verify(lifecycle).verifyResources(operation);
                     Mockito.verify(lifecycle).verifyOutputContents(operation);
                     Mockito.verify(harness).detachLifecycle(operation);
                 } else {
                     var thrown = org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
-                            () -> settle.invoke(coordinator, operation));
+                            () -> settle.invoke(coordinator, operation,
+                                    new java.util.concurrent.atomic.AtomicBoolean()));
                     assertThat(thrown.getCause()).isSameAs(failure);
                     Mockito.verify(lifecycle, Mockito.never()).verifyResources(operation);
                 }
@@ -131,14 +134,17 @@ class SessionLifecycleCoordinatorTest {
                 Mockito.when(harness.supportsLifecycle(WorkspaceExecutionProfile.PROFILE)).thenReturn(false);
                 assertThat(coordinator.supportsWorkspaceLifecycle(session)).isFalse();
                 Mockito.when(harness.supportsLifecycle(WorkspaceExecutionProfile.PROFILE)).thenReturn(true);
-                var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class);
+                var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class,
+                        java.util.concurrent.atomic.AtomicBoolean.class);
                 settle.setAccessible(true);
                 if (supported) {
-                    assertThat(settle.invoke(coordinator, operation)).isEqualTo(protocol != 0);
+                    assertThat(settle.invoke(coordinator, operation,
+                            new java.util.concurrent.atomic.AtomicBoolean())).isEqualTo(protocol != 0);
                     Mockito.verify(warmer).closeWorkspace("tenant", "session");
                 } else {
                     var error = org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
-                            () -> settle.invoke(coordinator, operation));
+                            () -> settle.invoke(coordinator, operation,
+                                    new java.util.concurrent.atomic.AtomicBoolean()));
                     if (protocol == 0) {
                         assertThat(error.getCause()).isInstanceOfSatisfying(
                                 com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class,
