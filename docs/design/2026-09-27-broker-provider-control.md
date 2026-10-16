@@ -80,17 +80,29 @@ This diagnostic evidence does not establish whether execution started.
 Control requests and responses are bounded at 8 MiB for `bind-history`,
 `checkpoint` and `history`, and 1 MiB for other operations. Tool arguments
 also have the existing core limit of 256 KiB of canonical JSON; fitting the
-outer envelope does not bypass that limit. An `execute`, `status` or `cancel`
-result that would exceed its operation's response budget is fitted rather
-than refused: the worker first evicts oldest progress events (announced
-through `firstAvailableSeq`/`progressGap`), then cuts bulk text fields
-head-and-tail with an inline notice and sets `truncated` on shell displays.
-When even fully cut text could not fit beside what the cut cannot reach, a
-structured display (such as an edit's file diff, which only feeds the UI), then
-artifacts, which also only feed a client surface, and then hook results are
-dropped before any text is cut, and content the cut
-cannot reach at all (inline media) turns the model content into an explicit
-stub.
+outer envelope does not bypass that limit. An `execute`, `status`, `cancel` or
+`confirmation` result that would exceed its operation's response budget is
+fitted rather than refused: for execution, status and cancel observations, the worker
+first evicts oldest progress events (announced through
+`firstAvailableSeq`/`progressGap`), then cuts bulk text fields head-and-tail
+with an inline notice and sets `truncated` on shell displays. For
+`confirmation` results, bulk text fields are collected per variant (`command`
+for `exec`, and `prompt` for `info`); for `edit` confirmations, `originalContent`
+(if a string) is dropped to `null`, and `fileDiff` is replaced with an omission diff
+stub only while the result is still over budget and cutting bulk slots cannot absorb
+the remaining excess, so `fileDiff` is preserved whenever possible and `newContent`
+survives intact, and remaining bulk fields are cut head-and-tail if still over budget;
+when the serialized envelope still exceeds the wire limit, the route answers 413
+`managed_runtime_provider_too_large`; variant-required fields and variant structures
+are never removed, `originalContent: null` survives, and a fitted `edit` confirmation
+is returned with `hideModify: true` and an omission notice in `warnings`; unlike
+observations, confirmations undergo no progress eviction and set no `truncated`
+flag.
+For observations, when even fully cut text could not fit beside what the cut
+cannot reach, a structured display (which, like artifacts, only feeds a client
+surface), then artifacts, and then hook results are dropped before any text is
+cut, and content the cut cannot reach at all (inline media) turns the model
+content into an explicit stub.
 The cut is measured in JSON-encoded UTF-8 bytes, the unit of the wire limit,
 and removes whole code points, so a surrogate pair is never split; the notice
 reports how many characters (code points) were omitted. When several fields

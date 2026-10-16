@@ -34,6 +34,7 @@ import {
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import type {
   ManagedToolCallIdentity,
+  ManagedToolConfirmationDetails,
   ManagedToolInvocationReference,
   ManagedToolPrepareResponse,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
@@ -1629,6 +1630,106 @@ const timer = setInterval(() => {
       result: { executionStatus: 'success' },
     });
     expect(body).toContain('Managed Runtime provider omitted');
+  });
+
+  it('fits an oversized edit confirmation at the route (issue #13038)', async () => {
+    await begin();
+    const output = path.join(workspace, 'output.txt');
+    const ref = reference(
+      await prepare(
+        'write_file',
+        { file_path: output, content: 'new contents\n' },
+        'write',
+      ),
+    );
+    const limit = managedRuntimeProviderLimit('confirmation');
+    const oversizedConfirmation: ManagedToolConfirmationDetails = {
+      type: 'edit',
+      title: 'Edit',
+      fileName: 'large.txt',
+      filePath: path.join(workspace, 'large.txt'),
+      fileDiff: 'd'.repeat(limit),
+      originalContent: 'o'.repeat(limit / 2),
+      newContent: 'n'.repeat(limit / 2),
+      hideModify: false,
+    };
+    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockResolvedValue(
+      oversizedConfirmation,
+    );
+    const response = await post({ kind: 'confirmation', reference: ref });
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(limit);
+    expect(body).toContain('Managed Runtime provider omitted');
+    const parsed = JSON.parse(body);
+    expect(parsed.result).toMatchObject({
+      type: 'edit',
+      hideModify: true,
+    });
+    expect(typeof parsed.result.fileDiff).toBe('string');
+    expect(typeof parsed.result.newContent).toBe('string');
+    expect(Array.isArray(parsed.result.warnings)).toBe(true);
+  });
+
+  it('fits an oversized exec confirmation at the route and includes warnings', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('run_shell_command', { command: 'echo hello\n' }, 'exec'),
+    );
+    const limit = managedRuntimeProviderLimit('confirmation');
+    const oversizedConfirmation: ManagedToolConfirmationDetails = {
+      type: 'exec',
+      title: 'Run command',
+      command: 'echo ' + 'x'.repeat(limit * 2),
+      rootCommand: 'echo',
+    };
+    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockResolvedValue(
+      oversizedConfirmation,
+    );
+    const response = await post({ kind: 'confirmation', reference: ref });
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(limit);
+    expect(body).toContain('Managed Runtime provider omitted');
+    const parsed = JSON.parse(body);
+    expect(parsed.result).toMatchObject({
+      type: 'exec',
+    });
+    expect(typeof parsed.result.command).toBe('string');
+    expect(Array.isArray(parsed.result.warnings)).toBe(true);
+    expect(
+      parsed.result.warnings.some((w: string) => /truncat|omitted/.test(w)),
+    ).toBe(true);
+  });
+
+  it('refuses an unfittable confirmation whose envelope exceeds the wire limit', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('run_shell_command', { command: 'echo hello\n' }, 'exec'),
+    );
+    const limit = managedRuntimeProviderLimit('confirmation');
+    const mcpConfirmation: Extract<
+      ManagedToolConfirmationDetails,
+      { type: 'mcp' }
+    > = {
+      type: 'mcp',
+      title: 'Call Tool',
+      serverName: 'mcp-server',
+      toolName: '',
+      toolDisplayName: 'Tool',
+    };
+    const padding = limit - Buffer.byteLength(JSON.stringify(mcpConfirmation));
+    mcpConfirmation['toolName'] = 'x'.repeat(padding);
+    expect(Buffer.byteLength(JSON.stringify(mcpConfirmation))).toBe(limit);
+    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockResolvedValue(
+      mcpConfirmation,
+    );
+    const response = await post({ kind: 'confirmation', reference: ref });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      code: 'managed_runtime_provider_too_large',
+      error: 'Managed Runtime provider response exceeds its body size limit.',
+    });
   });
 
   it('refuses an unfitted manifest whose envelope exceeds the wire limit', async () => {
