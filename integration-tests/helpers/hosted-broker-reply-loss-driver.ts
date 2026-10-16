@@ -84,9 +84,18 @@ const proxy = createServer(async (req, res) => {
       : Object.fromEntries(route.searchParams);
     const operation =
       req.method === 'GET' ? 'status' : route.pathname.split(':').at(-1)!;
+    const harnessScoped =
+      req.method === 'POST' &&
+      [
+        '/internal/runtime-broker/v1/runtimes:warm',
+        '/internal/runtime-broker/v1/tool-sessions:active-holds',
+      ].includes(route.pathname);
     const executionCallId = route.pathname.match(/\/executions\/([^/:]+)/)?.[1];
     assert.equal(fields['harnessSessionId'], sessionId);
-    assert.equal(fields['runtimeSessionId'], promptId);
+    assert.equal(
+      fields['runtimeSessionId'],
+      harnessScoped ? undefined : promptId,
+    );
     // Keep the background cleanup pump from paying the debt before the
     // reload witness starts observing retries.
     if (operation === 'release' && fault.startsWith('release') && dropped > 0)
@@ -98,7 +107,8 @@ const proxy = createServer(async (req, res) => {
       return;
     }
     const { text, reply } = await upstream(req.url!, body);
-    exchanges.push({ operation, executionCallId, fields, reply });
+    if (!(harnessScoped && operation === 'active-holds'))
+      exchanges.push({ operation, executionCallId, fields, reply });
     if (fault === 'cancel' && operation === 'prepare')
       await json(`/session/${sessionId}/cancel`, {}, 204);
     const lose =

@@ -9,6 +9,7 @@ import { CopyIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
 import type { TrajectoryLifecycleEntry } from '../../trajectory/project-trajectory-lifecycle';
+import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
 import type { TrajectoryRow } from '../../trajectory/types';
 import styles from './TrajectoryInspector.module.css';
 
@@ -37,6 +38,8 @@ function statusTone(value: unknown): 'success' | 'error' | undefined {
 export function TrajectoryInspector({
   row,
   lifecycle,
+  execution,
+  onLocateExecution,
   title,
   stale = false,
   turnSelected = false,
@@ -50,6 +53,8 @@ export function TrajectoryInspector({
 }: {
   row?: TrajectoryRow;
   lifecycle?: TrajectoryLifecycleEntry;
+  execution?: TrajectoryExecutionRow;
+  onLocateExecution?: () => void;
   title?: string;
   stale?: boolean;
   turnSelected?: boolean;
@@ -78,16 +83,19 @@ export function TrajectoryInspector({
   }, []);
 
   const rowKind = row?.kind;
+  const executionKey = execution?.key;
   const tabs = useMemo<Tab[]>(
     () =>
-      !rowKind
-        ? []
-        : rowKind === 'request'
-          ? ['summary', 'metrics']
-          : rowKind === 'tool'
-            ? ['summary', 'input', 'output', 'metrics']
-            : ['summary', 'body'],
-    [rowKind],
+      executionKey
+        ? ['summary', 'metrics']
+        : !rowKind
+          ? []
+          : rowKind === 'request'
+            ? ['summary', 'metrics']
+            : rowKind === 'tool'
+              ? ['summary', 'input', 'output', 'metrics']
+              : ['summary', 'body'],
+    [rowKind, executionKey],
   );
 
   useEffect(() => {
@@ -95,11 +103,69 @@ export function TrajectoryInspector({
     setTab((current) => (tabs.includes(current) ? current : 'summary'));
     setExpanded(false);
     setCopyStatus(undefined);
-  }, [row?.key, tabs]);
+  }, [row?.key, execution?.key, tabs]);
 
   const selectedTab = tabs.includes(tab) ? tab : 'summary';
 
   const fields = useMemo<DetailField[]>(() => {
+    if (execution) {
+      const event = execution.entry.event;
+      if (selectedTab === 'metrics')
+        return [
+          [
+            t('trajectory.inspector.start'),
+            execution.startedAt === undefined
+              ? undefined
+              : new Date(execution.startedAt).toLocaleString(language),
+          ],
+          [
+            t('trajectory.inspector.end'),
+            execution.endedAt === undefined
+              ? undefined
+              : new Date(execution.endedAt).toLocaleString(language),
+          ],
+          [
+            t('trajectory.inspector.duration'),
+            execution.durationMs === undefined
+              ? undefined
+              : formatDuration(execution.durationMs),
+          ],
+        ];
+      return [
+        [
+          t('trajectory.inspector.status'),
+          t(`trajectory.executions.status.${execution.status}`),
+        ],
+        [t('trajectory.inspector.executionId'), event.executionId],
+        [t('trajectory.inspector.kind'), event.kind],
+        [
+          t('trajectory.inspector.model'),
+          event.kind === 'request' ? event.model : undefined,
+        ],
+        [
+          t('trajectory.inspector.tool'),
+          event.kind === 'tool' ? event.toolName : undefined,
+        ],
+        [
+          t('trajectory.inspector.promptId'),
+          event.kind === 'request' ? event.promptId : undefined,
+        ],
+        [
+          t('trajectory.inspector.callId'),
+          event.kind === 'tool' ? event.callId : undefined,
+        ],
+        [t('trajectory.inspector.subagent'), event.subagentId],
+        [
+          t('trajectory.executions.executionStatus'),
+          event.kind === 'tool' ? event.executionStatus : undefined,
+        ],
+        [
+          t('trajectory.executions.outcome'),
+          event.phase === 'ended' ? event.outcome : undefined,
+        ],
+        [t('trajectory.inspector.details'), execution.entry],
+      ];
+    }
     if (!row) return [];
     if (row.kind === 'request') {
       if (selectedTab === 'summary') {
@@ -265,7 +331,7 @@ export function TrajectoryInspector({
       }
     }
     return [];
-  }, [row, lifecycle, selectedTab, t, language]);
+  }, [row, lifecycle, execution, selectedTab, t, language]);
 
   const formattedFields = useMemo(
     () =>
@@ -274,10 +340,10 @@ export function TrajectoryInspector({
         formatted: formatValue(value),
         tone:
           label === t('trajectory.inspector.status')
-            ? statusTone(value)
+            ? statusTone(execution?.status ?? value)
             : undefined,
       })),
-    [fields, t],
+    [fields, t, execution?.status],
   );
   const limit = expanded ? EXPANDED_LENGTH : PREVIEW_LENGTH;
   const displayed = formattedFields.map(({ label, formatted, tone }) => {
@@ -364,7 +430,19 @@ export function TrajectoryInspector({
           </button>
         </div>
       )}
-      {!row ? (
+      {execution && (
+        <div className={styles.notice}>
+          {t('trajectory.executions.metadata')}{' '}
+          {onLocateExecution ? (
+            <button type="button" onClick={onLocateExecution}>
+              {t('trajectory.executions.locate')}
+            </button>
+          ) : (
+            t('trajectory.executions.unlinked')
+          )}
+        </div>
+      )}
+      {!row && !execution ? (
         <p className={styles.notice}>
           {t(
             stale

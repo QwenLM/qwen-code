@@ -1833,6 +1833,23 @@ export function collectNestedResourceRefs(
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
   }
+  if (ref.kind === 'managed-file_history') {
+    const record = asRecord(
+      parseManagedSessionRecordJson(
+        bytes.toString('utf8'),
+        MANAGED_SESSION_LIMITS.maxEventBytes,
+      ),
+      'file history',
+    );
+    // Only `preparation` is walked: a bind/result record's previousRecordRef
+    // belongs to its original journal transaction, while a prepared record
+    // re-admits its predecessor through preparation.intentRef, which SQL's
+    // activation proof reads from this transaction.
+    return record['schemaVersion'] === 2 &&
+      record['profile'] === 'csi-files-retirement/1'
+      ? collectRefs([record['preparation']])
+      : [];
+  }
   if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
     return hostedRecoveryReferences(parseHostedRecoveryResource(bytes));
   }
@@ -1890,7 +1907,9 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-definition',
       'managed-checkpoint',
+      'managed-file_history',
       'managed-action-options',
       'managed-hook-plan',
       'managed-hook-message-chunks',
