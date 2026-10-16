@@ -26,7 +26,7 @@ The probe exited 0 because its refusal/control assertions passed. This is not a 
 
 ## Publication prerequisite
 
-Production [publication configuration](../../../packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/config/ToolPublicationConfiguration.java) is disabled by default. Enabling it requires explicit capacity/deadline budgets and a real regional HTTPS OSS endpoint, region, private bucket without versioning and configured credentials. The [OSS object store constructor](../../../packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/AliyunToolPublicationObjectStore.java) validates bucket versioning and ACL even before a small inline-output control can run.
+Production [publication configuration](../../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/config/ToolPublicationConfiguration.java) is disabled by default. Enabling it requires explicit capacity/deadline budgets and a real regional HTTPS OSS endpoint, region, private bucket without versioning and configured credentials. The [OSS object store constructor](../../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/AliyunToolPublicationObjectStore.java) validates bucket versioning and ACL even before a small inline-output control can run.
 
 No explicit Managed Agent test bucket/namespace or publication configuration was found in the bounded acceptance configuration search. General cloud login profiles are not evidence of an approved test bucket. No cloud credentials were copied to the VM or used for this probe.
 
@@ -91,7 +91,7 @@ Broker、Spring SQL Store、打包 CLI 与 Runtime worker 均为真实进程；�
 
 ## Publication 前置条件
 
-生产 [publication 配置](../../../packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/config/ToolPublicationConfiguration.java)默认关闭。启用要求显式容量/时限预算、真实区域 HTTPS OSS endpoint、region、私有且未开启版本控制的 bucket，以及配置好的凭据。[OSS 对象存储构造器](../../../packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/AliyunToolPublicationObjectStore.java)会先校验 bucket 版本控制与 ACL，即使只想跑小型 inline-output 控制也一样。
+生产 [publication 配置](../../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/config/ToolPublicationConfiguration.java)默认关闭。启用要求显式容量/时限预算、真实区域 HTTPS OSS endpoint、region、私有且未开启版本控制的 bucket，以及配置好的凭据。[OSS 对象存储构造器](../../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/AliyunToolPublicationObjectStore.java)会先校验 bucket 版本控制与 ACL，即使只想跑小型 inline-output 控制也一样。
 
 限定范围的验收配置搜索未找到明确的 Managed Agent 测试 bucket/namespace 或 publication 配置。一般云登录 profile 不能证明某 bucket 已指定用于测试。本次没有向 VM 复制或使用云凭据。
 
