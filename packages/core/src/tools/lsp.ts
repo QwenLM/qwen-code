@@ -213,7 +213,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP go-to-definition failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!definitions.length) {
@@ -254,7 +258,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP go-to-implementation failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!implementations.length) {
@@ -296,7 +304,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP find-references failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!references.length) {
@@ -338,7 +350,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP hover failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!hoverText || hoverText.trim().length === 0) {
@@ -375,7 +391,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP document symbols failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!symbols.length) {
@@ -421,7 +441,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP workspace symbol search failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!symbols.length) {
@@ -514,7 +538,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP call hierarchy prepare failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!items.length) {
@@ -555,7 +583,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP incoming calls failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!calls.length) {
@@ -612,7 +644,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP outgoing calls failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!calls.length) {
@@ -802,7 +838,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP code actions failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!actions.length) {

@@ -17,6 +17,7 @@ import type {
   LspSymbolInformation,
 } from '../lsp/types.js';
 import { LspTool, type LspToolParams, type LspOperation } from './lsp.js';
+import { ToolErrorType } from './tool-error.js';
 
 const abortSignal = new AbortController().signal;
 const workspaceRoot = '/test/workspace';
@@ -313,6 +314,54 @@ describe('LspTool', () => {
   });
 
   describe('execute', () => {
+    const queryOperations = [
+      ['goToDefinition', 'definitions'],
+      ['goToImplementation', 'implementations'],
+      ['findReferences', 'references'],
+      ['hover', 'hover'],
+      ['documentSymbol', 'documentSymbols'],
+      ['workspaceSymbol', 'workspaceSymbols'],
+      ['prepareCallHierarchy', 'prepareCallHierarchy'],
+      ['incomingCalls', 'incomingCalls'],
+      ['outgoingCalls', 'outgoingCalls'],
+      ['diagnostics', 'diagnostics'],
+      ['workspaceDiagnostics', 'workspaceDiagnostics'],
+      ['codeActions', 'codeActions'],
+    ] as const;
+    const queryParams = (operation: LspOperation) =>
+      at(operation, {
+        query: 'fn',
+        endLine: 5,
+        endCharacter: 10,
+        callHierarchyItem: testItem(),
+      });
+
+    it.each(queryOperations)(
+      'reports %s query failures as execution errors',
+      async (operation, method) => {
+        const { result } = await run(queryParams(operation), (client) =>
+          client[method].mockRejectedValue(
+            new Error('workspace scope refused'),
+          ),
+        );
+        expect(result.error).toEqual({
+          message: result.llmContent,
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.returnDisplay).toBe(result.llmContent);
+        expect(result.llmContent).toContain('failed: workspace scope refused');
+      },
+    );
+
+    it.each(queryOperations)(
+      'keeps successful empty %s queries successful',
+      async (operation) => {
+        const { result } = await run(queryParams(operation));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).not.toContain('failed:');
+      },
+    );
+
     it.each([
       ['goToDefinition', 'definitions'],
       ['goToImplementation', 'implementations'],
@@ -1005,6 +1054,7 @@ describe('LspTool', () => {
 
         // Should still return symbols even if references fail
         expectContains(result.llmContent, 'Widget', 'References lookup failed');
+        expect(result.error).toBeUndefined();
       });
     });
 
