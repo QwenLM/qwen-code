@@ -1186,7 +1186,7 @@ class Issue13181QueryBudgetTest {
             }
 
             @Override
-            public void requireUnversioned() {}
+            public void validateConfiguration() {}
         };
         ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
                 publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofMillis(300),
@@ -1231,7 +1231,7 @@ class Issue13181QueryBudgetTest {
                     }
                 };
             }
-            @Override public void requireUnversioned() {}
+            @Override public void validateConfiguration() {}
         };
         // A five-minute lease gives a 100-second interval, well beyond this bounded read.
         ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
@@ -1304,7 +1304,7 @@ class Issue13181QueryBudgetTest {
             }
 
             @Override
-            public void requireUnversioned() {
+            public void validateConfiguration() {
             }
         };
         ToolPublicationDataStore data = new ToolPublicationDataStore(

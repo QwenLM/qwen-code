@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.config.AliyunToolPublicationStorageAutoConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
@@ -76,7 +77,7 @@ class ToolPublicationConfigurationTest {
         settings.setServiceBaseUrl("https://test.invalid");
         var credentials = new com.aliyun.oss.common.auth.DefaultCredentialProvider(
                 new com.aliyun.oss.common.auth.DefaultCredentials("test", "test"));
-        var client = (com.aliyun.oss.OSSClient) ToolPublicationConfiguration.buildOss(properties, credentials);
+        var client = (com.aliyun.oss.OSSClient) AliyunToolPublicationStorageAutoConfiguration.buildOss(properties, credentials);
         try {
             assertThat(client.getCredentialsProvider()).isSameAs(credentials);
             assertThat(client.getClientConfiguration().getSignatureVersion())
@@ -93,7 +94,7 @@ class ToolPublicationConfigurationTest {
             client.shutdown();
         }
         settings.setOssEndpoint("http://oss-cn-hangzhou.aliyuncs.com");
-        assertThatThrownBy(() -> ToolPublicationConfiguration.buildOss(properties, credentials))
+        assertThatThrownBy(() -> AliyunToolPublicationStorageAutoConfiguration.buildOss(properties, credentials))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("regional HTTPS");
     }
 
@@ -102,6 +103,7 @@ class ToolPublicationConfigurationTest {
         var configuration = new ToolPublicationConfiguration();
         var properties = new ManagedAgentProperties();
         var settings = properties.getToolPublication();
+        settings.setServiceBaseUrl("https://test.invalid");
         settings.setExecutionBytes(1024L * 1024 * 1024);
         settings.setSessionBytes(1024L * 1024 * 1024);
         settings.setTenantBytes(1024L * 1024 * 1024);
