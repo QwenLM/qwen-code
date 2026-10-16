@@ -131,10 +131,11 @@ const PROTECTED_OPERATIONS = words('reset checkout clean stash commit destroy');
 const PROTECTED_OPERATION = new RegExp(
   `\\b(?:${[...PROTECTED_OPERATIONS].join('|')})\\b`,
 );
-const PROTECTED_PROGRAM = /\b(?:git|terraform|pulumi|cdk)\b/;
+// Whole words only: `git-clean.sh`, `.git/` and `reset.ts` name files.
+const PROTECTED_PROGRAM = /(?<![\w.-])(?:git|terraform|pulumi|cdk)(?![\w./-])/;
 /** Text that may spell a protected operation; a commit only when amended. */
 const MENTIONED_OPERATION =
-  /\b(?:reset|checkout|clean|stash|destroy|amend)\b|--am/;
+  /(?<![\w./-])(?:reset|checkout|clean|stash|destroy|amend)(?![\w./-])|--am/;
 
 /** A pathspec that resolves to the current directory or one of its parents. */
 const WHOLE_TREE_PATHSPEC = /^\.\.?(?:\/+(?:\.\.?)?)*$/;
@@ -289,14 +290,25 @@ async function scanScript(script: Script, scan: Scan): Promise<void> {
 function visitCommand(node: SyntaxNode, script: Script, scan: Scan): void {
   const name = node.childForFieldName('name');
   if (!name) return;
-  const argv = [wordOf(name), ...argumentNodes(node).map(wordOf)];
+  const args = argumentNodes(node);
+  const argv = [wordOf(name), ...args.map(wordOf)];
   const program = programName(argv[0]!);
   if (
     (program === 'git' || IAC_TOOLS.has(program)) &&
     !argv.some((word) => isDynamic(word))
   ) {
-    // Checked word for word, so its text is no sign of hidden code.
-    script.checked.push([node.startIndex, node.endIndex]);
+    // Checked word for word, so the words naming its operation are no sign
+    // of hidden code. Its other arguments stay: it may print them, as a
+    // commit message or a log format.
+    let i = 1;
+    while (i < argv.length && argv[i]!.startsWith('-')) {
+      if (program === 'git' && GIT_GLOBAL_OPTIONS_WITH_VALUE.has(argv[i]!)) {
+        i++;
+      }
+      i++;
+    }
+    const subcommand = args[Math.min(i, args.length) - 1];
+    script.checked.push([node.startIndex, (subcommand ?? name).endIndex]);
   }
   runArgv(argv, { node, script, cwd: script.cwd }, scan);
 }

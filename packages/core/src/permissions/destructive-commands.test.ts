@@ -200,6 +200,9 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     `printf 'git reset --hard\\n' > f.sh && chmod +x f.sh && timeout 60 ./f.sh`,
     `bash <(echo 'git reset --hard')`,
     `source <(printf 'git reset --hard\\n')`,
+    // Git prints what it is given: a commit message, a log format.
+    `git commit -q --allow-empty -m 'git reset --hard' && git log -1 --format=%s | bash`,
+    `git log -1 --format='git stash drop' | sh`,
     // Code handed to another interpreter.
     `python3 -c "import os; os.system('git reset --hard')"`,
     `node -e "require('child_process').execSync('git clean -fd')"`,
@@ -247,6 +250,9 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     './scripts/build.sh && git checkout main',
     `timeout 300 bash -c 'npm ci && ./scripts/test.sh && git checkout -- package-lock.json'`,
     './scripts/test.sh # then git reset --hard if it fails',
+    // File names are not words.
+    `printf 'echo cleaning\\n' > git-clean-branches.sh && bash git-clean-branches.sh`,
+    'bash ./scripts/git-reset-hooks.sh .git/hooks',
   ])('allows %j, which cannot reach a protected operation', async (command) => {
     expect(await reasonFor(command)).toBeNull();
   });
