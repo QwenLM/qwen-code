@@ -218,7 +218,11 @@ describe('DaemonSessionClient', () => {
       },
     });
 
-    await expect(session.continueSession()).resolves.toEqual({
+    await expect(
+      session.continueSession(undefined, {
+        confirmCancellation: 'legacy-daemon',
+      }),
+    ).resolves.toEqual({
       accepted: false,
       interruption: 'none',
     });
@@ -228,6 +232,10 @@ describe('DaemonSessionClient', () => {
       '/session/s-1/continue',
     ]);
     expect(calls[2]?.headers['x-qwen-client-id']).toBe('fresh-client');
+    expect([calls[0]?.body, calls[2]?.body]).toEqual([
+      JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
+      JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
+    ]);
   });
 
   it('does not retry an unknown continuation admission outcome', async () => {

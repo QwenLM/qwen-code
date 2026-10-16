@@ -452,6 +452,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             if (candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
                 throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
             }
+            if (!broker.getWorkspaceCreationRoot().isBlank()
+                    && candidate.startsWith(Path.of(broker.getWorkspaceCreationRoot()).toRealPath())) {
+                throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
+            }
             for (var mount : broker.getWorkspaceMounts()) {
                 if (candidate.startsWith(Path.of(mount.root()).toRealPath())) {
                     throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
