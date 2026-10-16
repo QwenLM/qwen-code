@@ -644,16 +644,16 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (50 + 16×10 + 20 + 50 = 280 — the Verify, admission
+    # The step ceilings (55 + 16×10 + 20 + 50 = 285 — the Verify, admission
     # and O4 steps sit above their failsafe fork timeouts (the hosted fork
-    # now needs 2400 s after 1767 s of passing classes left its final crash
-    # class only 33 s, with the FG8 monitor/run letters sharing that fork;
+    # needs 2700 s: the contended 2400 s budget plus 300 s for the new FG9
+    # session/relay letters, with the FG8 monitor/run letters sharing it;
     # the admission gates share a 2400 s fork for both witness
     # classes)) plus ~13 minutes for the uncapped setup steps
-    # (Checkout..Install MySQL binaries, the report checks) need ~293; 295
+    # (Checkout..Install MySQL binaries, the report checks) need ~298; 300
     # keeps a thin margin, and each arm buys its own 10 instead of sharing
     # an envelope.
-    timeout-minutes: 295
+    timeout-minutes: 300
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     services:
@@ -735,15 +735,14 @@ jobs:
           wait "$smoke" || true
           rmdir /sys/fs/cgroup/fg8/smoke
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        # Must outlive the hosted-harness-mysql failsafe fork timeout (2400 s,
-        # raised after the passing classes consumed 1767 s of its 1800 s
-        # budget before the final crash class, now shared by the FG8
-        # monitor/run letters) plus the wrapped
+        # Must outlive the hosted-harness-mysql failsafe fork timeout (2700 s,
+        # the contended 2400 s budget plus the 300 s healthy allowance added
+        # with the FG9 session/relay letters) plus the wrapped
         # compile/surefire/spotbugs/checkstyle work: a step killed before its
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering.
-        timeout-minutes: 50
+        timeout-minutes: 55
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -853,6 +852,7 @@ jobs:
             packages/managed-agent-server/target/hosted-latency-baseline.json
             packages/managed-agent-server/target/fg7-cases/
             packages/managed-agent-server/target/fg8-cases/
+            packages/managed-agent-server/target/fg9-cases/
             packages/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
       # A separate artifact keeps the reports' layout: a .qwen/ path in the

@@ -1,3 +1,4 @@
+import { pierreResources } from './pierre-build';
 import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
@@ -162,6 +163,10 @@ function injectCssModules(): Plugin {
 // Windows build would blow the budget this exists to protect.
 const TRANSCRIPT_STUBS = new Map(
   [
+    [
+      './client/trajectory/execution-messages.ts',
+      './client/trajectory/execution-messages.transcript-stub.ts',
+    ],
     ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
     [
       './client/browser-notifications/messages.ts',
@@ -231,6 +236,7 @@ function stubTranscriptModules(): Plugin {
 
 export default defineConfig(({ mode }) => ({
   plugins: [
+    pierreResources(),
     ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
@@ -287,6 +293,7 @@ export default defineConfig(({ mode }) => ({
           'clsx',
           'tailwind-merge',
           'vaul',
+          'react-resizable-panels',
           '@qwen-code/sdk',
           /^@qwen-code\/sdk\//,
           '@datafe-open/markdown-chart',

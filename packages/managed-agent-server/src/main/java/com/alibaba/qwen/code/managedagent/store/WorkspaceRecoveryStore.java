@@ -558,7 +558,8 @@ public final class WorkspaceRecoveryStore {
             text(binding, key);
         }
         check(binding.path("workspaceGeneration").asLong() > 0 && binding.path("contextRevision").asLong() > 0, "source_drift");
-        fields(source, row, "configRef", "workspace_config_ref", "policyRef", "workspace_policy_ref", "approvalMode", "approval_mode");
+        fields(source, row, "configRef", "workspace_config_ref", "policyRef", "workspace_policy_ref", "approvalMode", "approval_mode",
+                "selectedApprovalMode", "selected_approval_mode", "approvalRevision", "approval_revision");
         // The pinned definition identity (D8c-1); null for qwen-code.
         fields(source, row, "agentRevision", "agent_revision",
                 "agentDefinitionDigest", "agent_definition_digest");
