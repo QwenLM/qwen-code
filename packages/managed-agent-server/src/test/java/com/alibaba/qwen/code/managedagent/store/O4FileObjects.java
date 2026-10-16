@@ -43,5 +43,5 @@ class O4FileObjects implements ToolPublicationObjectStore {
             throw new IllegalStateException("Test DELETE failed", error);
         }
     }
-    @Override public void requireUnversioned() {}
+    @Override public void validateConfiguration() {}
 }

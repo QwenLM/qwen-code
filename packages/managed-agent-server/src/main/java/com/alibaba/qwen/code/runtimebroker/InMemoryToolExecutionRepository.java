@@ -422,6 +422,16 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
+    public synchronized boolean hasUnprovenCaptureByRuntimeSession(
+            String bindingId, long runtimeGeneration, String runtimeSessionId) {
+        return recordsById.values().stream().anyMatch(record -> record.isSettled()
+                && record.getBindingId().equals(bindingId)
+                && record.getRuntimeGeneration() == runtimeGeneration
+                && record.getRuntimeSessionId().equals(runtimeSessionId)
+                && ToolExecutionRepository.captureStopUnproven(record.getResult()));
+    }
+
+    @Override
     public synchronized boolean hasActiveByBinding(String bindingId,
             long runtimeGeneration) {
         String id = BrokerValues.requireId(bindingId, "bindingId");

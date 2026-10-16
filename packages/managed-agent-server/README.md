@@ -75,6 +75,14 @@ Actions (Hosted permission approvals): [English](../../docs/design/2026-09-30-ma
 AgentDefinition revisions: [English](../../docs/design/2026-10-01-managed-agent-definitions.md) |
 [简体中文](../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
 
+## Tool publication storage
+
+Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.
+
+Implement atomic create without overwrite, guarded reads, idempotent physical deletion and `validateConfiguration()` for private, durable, immutable storage. Throw `ToolPublicationStorageException` with `ACCESS_DENIED` for definite storage denial or `FAILURE` for other backend failures, preserving the original cause. Even with scheduled GC disabled, failed-publication cleanup requires deletion. Do not automatically replay completed writes or a returned stream. All server instances sharing a SQL catalog must use the same byte namespace: replacing the bean does not migrate retained objects or enable fallback to another backend.
+
+The extension applies to the Spring server. Standalone `WorkspaceRecoveryMain` and `WorkspaceCsiWorkerAckMain` still construct their documented OSS/inline storage directly; custom-backend deployments must integrate the same backend into their maintenance tooling. No additional production backend is included. Design: [English](../../docs/design/2026-10-16-managed-tool-storage-interface.md) | [简体中文](../../docs/design/2026-10-16-managed-tool-storage-interface.zh-CN.md).
+
 ## Managed tool results (O3)
 
 O3 publishes durable Hosted foreground Shell outcomes to Items, events and
