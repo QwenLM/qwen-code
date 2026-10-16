@@ -44,7 +44,7 @@ The semantics under gate, with their load-bearing lines at `main` =
   the entry's own commit, and the decision-4 timeout lock is durable
   (`harnessCommandLocked` re-arms across restarts).
 - The Java relay `SessionMessageRelay.workCommand`
-  (`packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/SessionMessageRelay.java:487-598`)
+  (`packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/SessionMessageRelay.java:487-598`)
   passes the command `planned → handover → execute → answered`: the lead's
   Harness runs `execute` /
   `executeMemberMessage`
@@ -82,7 +82,7 @@ The semantics under gate, with their load-bearing lines at `main` =
   `record_resource_id`) and `ma_delivery` (relay ledger:
   `transport_state`, `claim_generation`, `attempt_count`,
   `available_at`, `last_error`), both in
-  `packages/sdk-java/runtime-broker/src/main/resources/db/managed-schema/V1__managed_schema.sql:285-325`,
+  `packages/managed-agent-server/src/main/resources/db/managed-schema/V1__managed_schema.sql:285-325`,
   `:943-981`.
 
 ## Current state
@@ -426,7 +426,7 @@ ran). The update set, in one diff per slice:
   (`@Timeout` + healthy allowance ≤ fork budget), and any moved
   lane budgets (fork / Verify step / job) change in the same diff as
   the yaml, re-measured with the new class green.
-- `packages/sdk-java/managed-agent-server/pom.xml` — a
+- `packages/managed-agent-server/pom.xml` — a
   `hosted-session-relay-gates` focused profile copies
   `hosted-monitor-run-gates` for local runs.
 

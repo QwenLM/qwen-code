@@ -40,7 +40,7 @@ proxy 的 TypeScript fault driver、每用例一个「故障确实点火」的�
   分钟，decision 4 的超时锁是持久的（`harnessCommandLocked` 跨重启重新
   武装）。
 - Java relay `SessionMessageRelay.workCommand`
-  （`packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/SessionMessageRelay.java:487-598`）
+  （`packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/SessionMessageRelay.java:487-598`）
   把命令按 `planned → handover → execute → answered` 传递：lead 的
   Harness 运行 `execute` / `executeMemberMessage`
   （`packages/cli/src/serve/hosted-session-command-session.ts:556-930`），
@@ -72,7 +72,7 @@ proxy 的 TypeScript fault driver、每用例一个「故障确实点火」的�
   `record_resource_id`）与 `ma_delivery`（relay 台账：
   `transport_state`、`claim_generation`、`attempt_count`、
   `available_at`、`last_error`），均在
-  `packages/sdk-java/runtime-broker/src/main/resources/db/managed-schema/V1__managed_schema.sql:285-325`、
+  `packages/managed-agent-server/src/main/resources/db/managed-schema/V1__managed_schema.sql:285-325`、
   `:943-981`。
 
 ## 现状
@@ -368,7 +368,7 @@ include；`check-failsafe-reports.js hosted` 强制它必须跑过）。每
   `@Timeout` 预算按 FG8 先例钉住（`@Timeout` + 健康时长 ≤ fork
   预算），任何移动的车道预算（fork / Verify 步骤 / job）与 yaml 在
   同一 diff 变更，按新类全绿重测。
-- `packages/sdk-java/managed-agent-server/pom.xml` —— 加
+- `packages/managed-agent-server/pom.xml` —— 加
   `hosted-session-relay-gates` 聚焦 profile，拷贝
   `hosted-monitor-run-gates` 用于本地运行。
 
