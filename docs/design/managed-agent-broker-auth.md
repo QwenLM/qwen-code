@@ -8,7 +8,7 @@ Tracks [#13180](https://github.com/QwenLM/qwen-code/issues/13180).
 
 ## 1. Problem statement
 
-The Managed Agent Runtime Broker (`packages/sdk-java/managed-agent-server`)
+The Managed Agent Runtime Broker (`packages/managed-agent-server`)
 currently trusts client-asserted identity and client-minted credentials.
 Five gaps combine into cross-tenant read/write of any hosted Session's
 durable transcript when the broker is reachable without a gateway:

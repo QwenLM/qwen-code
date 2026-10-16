@@ -4890,7 +4890,7 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(existsSync('scripts/check-flyway-migrations.js')).toBe(true);
     expect(flat).toContain('the module list `sdk-java.yml` passes it');
     expect(readFileSync('.github/workflows/sdk-java.yml', 'utf8')).toContain(
-      'node scripts/check-flyway-migrations.js packages/sdk-java/',
+      'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode',
     );
 
     // #13352 R5: a `chmod 555` test was red on the clean tree as root and
@@ -7464,9 +7464,12 @@ describe('qwen-triage verify Java toolchain', () => {
   }
 
   function moduleCoordinates() {
-    return readdirSync('packages/sdk-java', { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml'))
+    return [
+      'packages/managed-agent-server/pom.xml',
+      ...readdirSync('packages/sdk-java', { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml')),
+    ]
       .filter((pom) => existsSync(pom))
       .map((pom) => {
         const xml = readFileSync(pom, 'utf8').replace(
@@ -7484,9 +7487,13 @@ describe('qwen-triage verify Java toolchain', () => {
     const resolve = stepIn('verify', 'Resolve PR and snapshot metadata');
     const javaLine = resolve
       .split('\n')
-      .find((line) => line.includes("grep -qE '^packages/sdk-java/'"));
-    expect(javaLine).toContain("grep -qE '^packages/sdk-java/' <<<");
-    expect(javaLine).not.toContain('|');
+      .find((line) =>
+        line.includes("grep -qE '^packages/(sdk-java|managed-agent-server)/'"),
+      );
+    expect(javaLine).toContain(
+      "grep -qE '^packages/(sdk-java|managed-agent-server)/' <<<",
+    );
+    expect(javaLine.trimStart().startsWith('if grep -qE ')).toBe(true);
     expect(resolve).toContain('echo "java=true" >> "$GITHUB_OUTPUT"');
     expect(job('tmux-testing')).not.toContain('Install Java toolchain');
   });
@@ -7585,7 +7592,7 @@ describe('qwen-triage verify Java toolchain', () => {
     expect(restore).toContain('0057852bfaa89a56745cba8c7296529d2fc39830');
   });
 
-  it('strips exactly the artifact ids published by packages/sdk-java', () => {
+  it('strips exactly the artifact ids published by the Maven modules', () => {
     const coords = moduleCoordinates();
     expect(coords.length).toBeGreaterThan(0);
     const strip = mavenRepoProducerWorkflow.slice(
@@ -7603,24 +7610,20 @@ describe('qwen-triage verify Java toolchain', () => {
       expect(coord.groupId).toBe('com.alibaba');
     }
     expect(strip).toContain('${repo}/com/alibaba/${artifact}');
-    const qwencode = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/qwencode/pom.xml',
+    const buildAt = mavenRepoProducerWorkflow.indexOf(
+      "      - name: 'Populate verify Maven repo'",
     );
-    const broker = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/runtime-broker/pom.xml',
-    );
-    const server = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/managed-agent-server/pom.xml',
-    );
-    const client = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/client/pom.xml',
-    );
-    expect(qwencode).toBeLessThan(broker);
-    expect(broker).toBeLessThan(server);
+    expect(buildAt).toBeGreaterThan(-1);
+    const build = mavenRepoProducerWorkflow.slice(buildAt);
+    const qwencode = build.indexOf('packages/sdk-java/qwencode/pom.xml');
+    const server = build.indexOf('packages/managed-agent-server/pom.xml');
+    const client = build.indexOf('packages/sdk-java/client/pom.xml');
+    expect(qwencode).toBeGreaterThan(-1);
+    expect(qwencode).toBeLessThan(server);
     expect(server).toBeLessThan(client);
-    expect(
-      mavenRepoProducerWorkflow.indexOf('# verify-maven-repo-strip-begin'),
-    ).toBeGreaterThan(client);
+    expect(build.indexOf('# verify-maven-repo-strip-begin')).toBeGreaterThan(
+      client,
+    );
   });
 
   it('installs sibling modules as node, capped, without failing the job', () => {
@@ -7637,7 +7640,7 @@ describe('qwen-triage verify Java toolchain', () => {
     expect(modules).toContain('-u ACTIONS_RUNTIME_TOKEN');
     expect(modules).toContain('-u GITHUB_TOKEN');
     expect(modules).toContain('-Dgpg.skip=true');
-    expect(modules).toContain('-Dspotbugs.skip=true');
+    expect(modules).not.toContain('runtime-broker/pom.xml');
     expect(modules).toContain('java-prepare.log');
     expect(modules).toContain('steps.maven-repo.outputs.cache-hit');
     expect(modules).toContain("GITHUB_TOKEN: ''");

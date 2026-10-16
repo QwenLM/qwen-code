@@ -9,6 +9,7 @@ import {
   reconcileHostedTurnCleanup,
   confirmReplacedHostedTurnOwner,
 } from './hosted-turn-cleanup.js';
+import { rejectionDetail } from './hosted-never-started-reconcile.js';
 
 import {
   readHostedFileHistory,
@@ -156,6 +157,7 @@ import {
   hostedPromptKey,
   hostedRouteDetails,
   memberPreambleIdentity,
+  lostMessagesAction,
   neverStartedClause,
   neverStartedPhrase,
   teamMemberPreamble,
@@ -180,6 +182,11 @@ import { hostedHookOccurrenceId } from './hosted-hook-session.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { waitForTurn } from './hosted-turn-wait.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
+import {
+  HOSTED_SKILL_APPROVAL_REFUSAL,
+  HOSTED_SKILL_BATCH_REFUSAL,
+  type HostedSkillCatalog,
+} from './hosted-skill-catalog.js';
 import {
   endHostedAction,
   HOSTED_APPROVAL_OPTIONS,
@@ -742,26 +749,25 @@ type HostedChildMessageRoute = Awaited<
 type HostedSentRoute = Exclude<HostedChildMessageRoute, { kind: 'refused' }>;
 
 /**
- * H4e-b2: the continuation taken before this one never started, so the
- * work it carried and the messages it lost are asked for again — unless
- * the send carries them, or, when this send did not arrive either, the
- * resend it asks for.
+ * H4e-b2: the continuation taken before this one never started, so its
+ * work is asked for again unless this send carries it. A lost message is
+ * asked for only when its own answer has not already done so.
  */
 function previousNote(route: HostedSentRoute): string {
   const previous = route.previousNeverStarted;
   if (previous === undefined) return '';
-  const lost = previous.lostMessages > 0;
-  const what = `that work${lost ? ' and those messages' : ''}`;
-  const them = lost ? 'them' : 'it';
   const carrier =
     route.ownNeverStarted === undefined
       ? 'this message'
       : 'your resend of this message';
-  return ` Its previous continuation ${neverStartedClause(previous)}; ${
-    previous.cancelled
-      ? `send ${what} again only if ${lost ? 'they are' : 'it is'} still wanted and ${carrier} does not carry ${them}`
-      : `send ${what} again unless ${carrier} carries ${them}`
-  }.`;
+  const action = previous.cancelled
+    ? `send that work again only if it is still wanted and ${carrier} does not carry it`
+    : `send that work again unless ${carrier} carries it`;
+  const lost =
+    previous.lostMessages === 0
+      ? ''
+      : ` ${lostMessagesAction(previous.lostMessages)}.`;
+  return ` Its previous continuation ${neverStartedClause(previous)}; ${action}.${lost}`;
 }
 
 /**
@@ -794,6 +800,15 @@ export function hostedRouteAnswer(
           : ` Member "${member.name}" has ended; ${own.cancelled ? 'if this work is still wanted, launch a new member under a new name for it' : 'for more work, launch a new member under a new name'}.`;
     return told + resend + previousNote(route);
   }
+  if (route.deliveryUnconfirmed) {
+    const recipient =
+      member === undefined
+        ? `child agent ${task}`
+        : `member "${member.name}" (task ${task})`;
+    const check =
+      member === undefined ? 'the child agent' : `member "${member.name}"`;
+    return `Message was queued for ${recipient}, but its delivery could not be confirmed. Check with ${check} before sending it again.`;
+  }
   // A message whose delivery ended with no receipt did not arrive; what a
   // resend meets depends on the chain now.
   if (route.deliveryFailed !== undefined) {
@@ -805,6 +820,10 @@ export function hostedRouteAnswer(
       return `${told} Send it again with send_message to ${address} if it is still needed.`;
     if (chain === 'settling')
       return `${told} Its latest continuation is being stopped before it started; if that continuation ends without starting, send it again with send_message to ${address} if it is still needed.`;
+    if (chain === 'stopping')
+      return member === undefined
+        ? `${told} That child agent is being stopped; launch a new agent for this work after it ends if it is still needed.`
+        : `${told} Member "${member.name}" is being stopped; for more work after it ends, launch a new member under a new name.`;
     return member === undefined
       ? `${told} That child agent has ended; launch a new agent for this work if it is still needed.`
       : `${told} Member "${member.name}" has ended; for more work, launch a new member under a new name.`;
@@ -827,8 +846,14 @@ export function hostedRouteAnswer(
 /** Whether a committed send reached its recipient as far as is known. */
 function hostedRouteArrived(route: HostedSentRoute): boolean {
   return (
-    route.ownNeverStarted === undefined && route.deliveryFailed === undefined
+    route.ownNeverStarted === undefined &&
+    route.deliveryFailed === undefined &&
+    !route.deliveryUnconfirmed
   );
+}
+
+function hostedRouteUnconfirmed(route: HostedSentRoute): boolean {
+  return route.deliveryUnconfirmed === true;
 }
 
 /** H4e-b2: one broadcast recipient's line in the call's answer. */
@@ -841,10 +866,12 @@ function hostedRouteLine(
   const own = route.ownNeverStarted;
   if (route.kind === 'message')
     return own !== undefined
-      ? `queued for task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.`
-      : route.deliveryFailed !== undefined
-        ? `queued for task ${task}, but its delivery was ${route.deliveryFailed.state}, so the message did not arrive.${route.deliveryFailed.chain === 'ended' ? ' It has ended and takes no messages.' : ''}`
-        : `queued for its running task ${task}.`;
+      ? `queued for task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.${route.member !== undefined && own.predecessorChildRunId === null ? ` Member "${route.member.name}" has ended and takes no messages.` : ''}`
+      : route.deliveryUnconfirmed
+        ? `queued for task ${task}, but its delivery could not be confirmed. Check with the member before sending it again.`
+        : route.deliveryFailed !== undefined
+          ? `queued for task ${task}, but its delivery was ${route.deliveryFailed.state}, so the message did not arrive.${route.deliveryFailed.chain === 'ended' ? ' It has ended and takes no messages.' : route.deliveryFailed.chain === 'stopping' ? ' It is being stopped and takes no messages.' : ''}`
+          : `queued for its running task ${task}.`;
   return (
     (own === undefined
       ? `had completed; continued as task ${task}.`
@@ -860,9 +887,11 @@ export interface HostedBroadcastRecipient {
   readonly name: string | undefined;
   /** The roster entry's run the recipient's chain started from. */
   readonly rootChildRunId: string;
-  /** False when the run it reached proved it never started, or the
-   * message's delivery ended with no receipt. */
+  /** False when the run never started, delivery failed, or delivery is
+   * unconfirmed. Mutually exclusive with `unconfirmed`. */
   readonly arrived: boolean;
+  /** The message may have arrived, so it is neither arrived nor failed. */
+  readonly unconfirmed: boolean;
   readonly text: string;
 }
 
@@ -927,6 +956,7 @@ export function hostedBroadcastCommitted(input: {
         input.authority,
         sent,
         sent.kind === 'message' ? sent.messageId : undefined,
+        chains,
       ),
     };
     const rootChildRunId = chains.root(route.childRunId);
@@ -935,6 +965,7 @@ export function hostedBroadcastCommitted(input: {
       name: hostedTeamMembership(teams, rootChildRunId)?.name,
       rootChildRunId,
       arrived: hostedRouteArrived(route),
+      unconfirmed: hostedRouteUnconfirmed(route),
       text: hostedRouteLine(input.children, route),
     });
   }
@@ -1446,6 +1477,7 @@ interface HostedPreparedRequest {
   team: boolean;
   message: boolean;
   command: boolean;
+  skill: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -1500,6 +1532,7 @@ export class HostedWorkspaceToolTurn {
   private readonly teams?: HostedTeamSession;
   /** H4e-b3: the member's command funnel to its parent, beside its messages. */
   private readonly commands?: HostedSessionCommandSession;
+  private readonly skills?: HostedSkillCatalog;
   /** b3b: whether this Session's run carries a member preamble (once read). */
   private memberPreamble?: boolean;
   /** b3b: the member board vocabulary declared, refreshed per declarations. */
@@ -1557,6 +1590,7 @@ export class HostedWorkspaceToolTurn {
       messages?: HostedSessionMessageSession;
       teams?: HostedTeamSession;
       commands?: HostedSessionCommandSession;
+      skills?: HostedSkillCatalog;
       /**
        * H4e-b3 decisions 5/9: this run's first input carried an unescaped
        * `plan-mode="required"` preamble; its calls admit reads only.
@@ -1579,6 +1613,7 @@ export class HostedWorkspaceToolTurn {
     this.messages = extras?.messages;
     this.teams = extras?.teams;
     this.commands = extras?.commands;
+    this.skills = extras?.skills;
     this.memberPlanMode = extras?.memberPlanMode === true;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -1636,6 +1671,7 @@ export class HostedWorkspaceToolTurn {
     // b3c: a member's widened send_message rides the same gate as its
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
+    const skill = this.skills?.declaration();
     this.advertised = [
       ...(this.publication || this.shell
         ? search
@@ -1657,6 +1693,7 @@ export class HostedWorkspaceToolTurn {
           : tool,
       ),
       ...(this.mcp?.tools() ?? []),
+      ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
       // Shell-laned Session whose own child orchestrator exists (never in
       // a child's), behind the kind gate — files profiles and the public
@@ -1886,6 +1923,26 @@ export class HostedWorkspaceToolTurn {
 
   async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
     if (this.acquired) return;
+    if (this.skills && !this.hooks && !this.mcp) {
+      const history = (await this.session.sink.project()).filter(
+        (entry) => entry.daemonPromptId === this.promptId,
+      );
+      const calls = history.flatMap((entry) =>
+        (entry.message?.parts ?? []).flatMap((part) =>
+          part.functionCall ? [part.functionCall] : [],
+        ),
+      );
+      const answered = await journaledToolResultIds(
+        this.session,
+        this.promptId,
+        history,
+      );
+      if (
+        calls.length &&
+        calls.every((call) => call.name === 'skill' && answered.has(call.id!))
+      )
+        return;
+    }
     await this.warmed;
     const saved = await readHostedFileHistory(this.session);
     if (saved?.pendingTurn) {
@@ -2307,7 +2364,8 @@ export class HostedWorkspaceToolTurn {
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
-        ((HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
+        (((call.name === 'skill' && this.skills !== undefined) ||
+          HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
             this.commands?.command(
               sessionCommandId({
@@ -2545,6 +2603,7 @@ export class HostedWorkspaceToolTurn {
           team: false,
           message: false,
           command: false,
+          skill: item.call.name === 'skill' && this.skills !== undefined,
         });
       }
       this.logicalRound = plan.round;
@@ -2723,7 +2782,11 @@ export class HostedWorkspaceToolTurn {
     const declarations = this.advertised ?? (await this.declarations(signal));
     this.hookPermission.clear();
     this.agentDispatched.clear();
-    if (this.hooks && this.approval) {
+    const mixedSkillBatch =
+      this.skills !== undefined &&
+      calls.some((call) => call.name === 'skill') &&
+      calls.some((call) => call.name !== 'skill');
+    if (this.hooks && this.approval && !mixedSkillBatch) {
       calls = await Promise.all(
         calls.map(async (call) => {
           const asks = hostedApprovalAsks(
@@ -2731,7 +2794,7 @@ export class HostedWorkspaceToolTurn {
             call.name,
             this.searchProfile,
           );
-          if (!asks) return call;
+          if (!asks || (call.name === 'skill' && this.skills)) return call;
           const output = await this.hooks!.fire(
             HookEventName.PermissionRequest,
             `${this.promptId}:${call.callId}`,
@@ -2776,6 +2839,10 @@ export class HostedWorkspaceToolTurn {
           runtimeCallId,
         );
         const isShell = call.name === 'run_shell_command';
+        const skill =
+          mcpInput === undefined &&
+          call.name === 'skill' &&
+          this.skills !== undefined;
         if (
           !declarations.some((tool) => tool.name === call.name) ||
           ids.has(call.callId) ||
@@ -2833,6 +2900,11 @@ export class HostedWorkspaceToolTurn {
           input = { ...call.args };
         } else if (mcpInput) {
           input = { ...mcpInput.input };
+        } else if (skill) {
+          validationError = source.some((other) => other.name !== 'skill')
+            ? HOSTED_SKILL_BATCH_REFUSAL
+            : this.skills!.validationError(call.args);
+          input = { ...call.args };
         } else if (isShell) {
           const args = call.args;
           const unsupportedKey = Object.keys(args).find(
@@ -3396,6 +3468,7 @@ export class HostedWorkspaceToolTurn {
             mcpInput === undefined && messageAdmitted && !memberMessageCommand,
           team,
           command,
+          skill,
         };
       });
     };
@@ -3447,7 +3520,8 @@ export class HostedWorkspaceToolTurn {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
-    await waitForTurn(this.warmed, signal);
+    if (this.hooks || this.mcp || requests.some((request) => !request.skill))
+      await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
     // needs no Runtime at all — holding the parent's mount across the
     // child's wait is exactly the deadlock a shared Workspace creates
@@ -3465,7 +3539,8 @@ export class HostedWorkspaceToolTurn {
           request.workflow !== true &&
           request.message !== true &&
           !request.team &&
-          request.command !== true,
+          request.command !== true &&
+          !request.skill,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -3614,6 +3689,10 @@ export class HostedWorkspaceToolTurn {
               'PreToolUse Hook denied the call.';
             continue;
           }
+          if (request.skill && permission === 'ask') {
+            refusals[index] = HOSTED_SKILL_APPROVAL_REFUSAL;
+            continue;
+          }
           const input = output?.hookSpecificOutput?.['updatedInput'];
           if (
             input &&
@@ -3628,6 +3707,7 @@ export class HostedWorkspaceToolTurn {
             inputRefs.delete(index);
             if (
               this.approval &&
+              !request.skill &&
               hostedApprovalAsks(
                 this.approval.settings,
                 request.call.name,
@@ -3780,6 +3860,7 @@ export class HostedWorkspaceToolTurn {
           request.message ||
           request.team ||
           request.command ||
+          request.skill ||
           request.workflow
         )
           continue;
@@ -4217,6 +4298,20 @@ export class HostedWorkspaceToolTurn {
           );
           continue;
         }
+        if (request.skill) {
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text: this.skills!.response(request.call.args) }],
+          );
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted Skill result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
         if (request.team) {
           responses.push(
             ...(await this.acceptTeamTool(request, model, signal)),
@@ -4455,13 +4550,23 @@ export class HostedWorkspaceToolTurn {
       }
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
-      await Promise.allSettled(
-        [...reserved.values()].map((id) => this.broker.cancel(id)),
+      const cancellationBarriers = new Set<string>();
+      const reservedIds = [...reserved.values()];
+      const cancellationResults = await Promise.allSettled(
+        reservedIds.map((id) => this.broker.cancel(id)),
       );
+      cancellationResults.forEach((result, index) => {
+        if (result.status === 'fulfilled')
+          cancellationBarriers.add(reservedIds[index]!);
+      });
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
+        const request = requests.find(
+          (_, index) => reserved.get(index) === executionCallId,
+        );
         let proven = false;
+        let grantOwnerState: unknown;
         try {
           const owner = this.publication!.owner;
           const closed = await owner.request(
@@ -4475,11 +4580,9 @@ export class HostedWorkspaceToolTurn {
             },
             saved.publicationToken,
           );
-          if (
-            typeof closed !== 'object' ||
-            closed === null ||
-            (closed as Record<string, unknown>)['state'] !== 'NOT_STARTED'
-          )
+          if (typeof closed === 'object' && closed !== null)
+            grantOwnerState = (closed as Record<string, unknown>)['state'];
+          if (grantOwnerState !== 'NOT_STARTED')
             throw new Error('Original execution was not proven unstarted.');
           proven = true;
         } catch (closeCause) {
@@ -4488,15 +4591,26 @@ export class HostedWorkspaceToolTurn {
               String(closeCause),
           );
         }
+        if (
+          !proven &&
+          grantOwnerState === undefined &&
+          request?.background &&
+          cancellationBarriers.has(executionCallId)
+        ) {
+          try {
+            proven =
+              (await this.broker.backgroundProcessStatus(executionCallId)) ===
+              undefined;
+          } catch (cause) {
+            writeStderrLineSafe(
+              `qwen serve: Background process absence could not be confirmed for ${executionCallId} (${rejectionDetail(cause)}).`,
+            );
+          }
+        }
         if (!proven) continue;
-        // The grant owner proved this start never happened, yet the run
-        // record admitted for the same execution was already committed
-        // dispatch_started — and nothing beyond this catch can ever settle
-        // it again. Settle it under the same proof so the projection stops
-        // reporting a run that never started.
-        const request = requests.find(
-          (_, index) => reserved.get(index) === executionCallId,
-        );
+        // The grant owner proved a Shell or Monitor start never happened,
+        // or the original process ledger proved it for a background Shell.
+        // Publication absence alone proves nothing.
         if (request?.background)
           await this.childRuns
             ?.settleFailed(executionCallId, {
@@ -4994,11 +5108,23 @@ export class HostedWorkspaceToolTurn {
       // delivery fail, which only a replay can find.
       let sent = 0;
       let arrived = 0;
+      let unconfirmed = 0;
       // A cancelled Turn sends to no further member: each send may launch
       // a continuation, which spends the Session's launches.
       let cancelled = false;
+      const committedByPosition = new Map(
+        committed.map((each) => [each.position, each]),
+      );
       for (const [index, member] of team.members.entries()) {
         const position = index + 1;
+        const replayed = committedByPosition.get(position);
+        if (replayed !== undefined) {
+          sent += 1;
+          if (replayed.arrived) arrived += 1;
+          if (replayed.unconfirmed) unconfirmed += 1;
+          lines.push(`- ${member.name}: ${replayed.text}`);
+          continue;
+        }
         if (signal.aborted) {
           cancelled = true;
           lines.push(`- ${member.name}: not sent: the turn was cancelled.`);
@@ -5017,6 +5143,7 @@ export class HostedWorkspaceToolTurn {
         if (route.kind !== 'refused') {
           sent += 1;
           if (hostedRouteArrived(route)) arrived += 1;
+          if (hostedRouteUnconfirmed(route)) unconfirmed += 1;
         }
         lines.push(`- ${member.name}: ${hostedRouteLine(children, route)}`);
       }
@@ -5026,10 +5153,11 @@ export class HostedWorkspaceToolTurn {
           true,
         );
       this.agentDispatched.add(callId);
+      const notArrived = sent - arrived - unconfirmed;
       return answer(
         arrived === team.members.length
           ? `Message sent to every member of team "${team.name}". There is no inline reply: each member answers through its result notification or a message to you.\n${lines.join('\n')}`
-          : `Message sent to ${sent} of ${team.members.length} members of team "${team.name}"${arrived < sent ? `, but it did not arrive at ${sent - arrived} of them` : ''}${cancelled ? `; the turn was cancelled before the rest` : ''}. Send it by name to any member below that did not get it and still needs it.\n${lines.join('\n')}`,
+          : `Message sent to ${sent} of ${team.members.length} members of team "${team.name}"${notArrived > 0 ? `, but it did not arrive at ${notArrived} of them` : ''}${unconfirmed > 0 ? `; delivery could not be confirmed for ${unconfirmed}` : ''}${cancelled ? `; the turn was cancelled before the rest` : ''}. Send it by name only to a member whose line says it did not get it, that can still take messages, and still needs it.${unconfirmed > 0 ? ' Check with a member before resending any unconfirmed delivery.' : ''}\n${lines.join('\n')}`,
         false,
       );
     }
@@ -5844,6 +5972,7 @@ export class HostedWorkspaceToolTurn {
             | 'rejected'
             | 'cancelled'
             | 'unknown',
+          record.kind,
         ),
       );
       if (!journaled?.has(callId))
@@ -6754,6 +6883,7 @@ export class HostedWorkspaceToolTurn {
       if (index < nextOrdinal) continue;
       if (
         refusals[index] ||
+        (request.call.name === 'skill' && this.skills !== undefined) ||
         this.hookPermission.get(request.call.callId) === 'allow' ||
         !hostedApprovalAsks(approval.settings, request.call.name, searchProfile)
       )

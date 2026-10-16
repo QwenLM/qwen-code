@@ -906,6 +906,271 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('creates directories exclusively in the selected workspace', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      await fsp.mkdir(path.join(h.secondaryCwd, 'src'));
+      const create = (directory: string) =>
+        request(h.app)
+          .post(
+            `/workspaces/${encodeURIComponent(h.secondaryId)}/directory/create`,
+          )
+          .set('Authorization', 'Bearer secret')
+          .set('Host', host())
+          .send({ path: directory });
+      const result = await create('src/新 folder');
+      expect(result.status).toBe(201);
+      expect(result.body).toEqual({
+        kind: 'directory_create',
+        path: 'src/新 folder',
+      });
+      expect(
+        (
+          await fsp.stat(path.join(h.secondaryCwd, 'src/新 folder'))
+        ).isDirectory(),
+      ).toBe(true);
+      await expect(
+        fsp.stat(path.join(h.primaryCwd, 'src')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await create('src/新 folder')).status).toBe(409);
+      expect((await create('target.txt')).status).toBe(409);
+      expect(
+        await fsp.readFile(path.join(h.secondaryCwd, 'target.txt'), 'utf8'),
+      ).toBe('secondary');
+      const unauthorized = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/directory/create`,
+        )
+        .set('Host', host())
+        .send({ path: 'blocked' });
+      expect(unauthorized.status).toBe(401);
+      await expect(
+        fsp.stat(path.join(h.secondaryCwd, 'blocked')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(
+        (
+          await request(h.app)
+            .post('/directory/create')
+            .set('Host', host())
+            .set('Authorization', 'Bearer secret')
+            .send({ path: 'blocked' })
+        ).status,
+      ).toBe(404);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses untrusted directory creation without primary fallback', async () => {
+    const h = await makeHarness({ token: 'secret', secondaryTrusted: false });
+    try {
+      const result = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/directory/create`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ path: 'blocked' });
+      expect(result.status).toBe(403);
+      expect(result.body.code).toBe('untrusted_workspace');
+      for (const cwd of [h.primaryCwd, h.secondaryCwd]) {
+        await expect(fsp.stat(path.join(cwd, 'blocked'))).rejects.toMatchObject(
+          { code: 'ENOENT' },
+        );
+      }
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses directory creation for unknown, draining and removed owners', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const create = (selector: string) =>
+        request(h.app)
+          .post(`/workspaces/${encodeURIComponent(selector)}/directory/create`)
+          .set('Authorization', 'Bearer secret')
+          .set('Host', host())
+          .send({ path: 'blocked' });
+      expect((await create('unknown')).status).toBe(400);
+      const runtime = h.workspaceRegistry.getByWorkspaceId(h.secondaryId)!;
+      expect(h.workspaceRegistry.beginDrain(runtime)).toBe(true);
+      expect((await create(h.secondaryId)).status).toBe(503);
+      h.workspaceRegistry.completeDrain(runtime);
+      expect((await create(h.secondaryId)).status).toBe(400);
+      for (const cwd of [h.primaryCwd, h.secondaryCwd]) {
+        await expect(fsp.stat(path.join(cwd, 'blocked'))).rejects.toMatchObject(
+          { code: 'ENOENT' },
+        );
+      }
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['ssh', 'custom'])(
+    'refuses unsupported %s directory creation',
+    async (kind) => {
+      const h = await makeHarness({ token: 'secret' });
+      const factory = h.workspaceRegistry.getByWorkspaceId(
+        h.secondaryId,
+      )!.routeFileSystemFactory;
+      const original = factory.forRequest.bind(factory);
+      const spy = vi.spyOn(factory, 'forRequest').mockImplementation((ctx) => {
+        const fs = original(ctx);
+        if (kind === 'custom') fs.createDirectory = undefined;
+        return fs;
+      });
+      if (kind === 'ssh')
+        Object.defineProperty(factory, 'sshWorkspace', {
+          value: { host: 'remote', directory: '/workspace' },
+        });
+      try {
+        const result = await request(h.app)
+          .post(
+            `/workspaces/${encodeURIComponent(h.secondaryId)}/directory/create`,
+          )
+          .set('Authorization', 'Bearer secret')
+          .set('Host', host())
+          .send({ path: 'blocked' });
+        expect(result.status).toBe(kind === 'ssh' ? 501 : 422);
+        if (kind === 'ssh')
+          expect(result.body.code).toBe('ssh_workspace_operation_unsupported');
+        await expect(
+          fsp.stat(path.join(h.secondaryCwd, 'blocked')),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        spy.mockRestore();
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('deletes nonempty directories only in the selected workspace and requires authentication', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      for (const cwd of [h.primaryCwd, h.secondaryCwd]) {
+        await fsp.mkdir(path.join(cwd, 'folder/nested'), { recursive: true });
+        await fsp.writeFile(path.join(cwd, 'folder/nested/keep.txt'), 'keep');
+      }
+      const route = `/workspaces/${encodeURIComponent(h.secondaryId)}/directory/delete`;
+      const denied = await request(h.app)
+        .post(route)
+        .set('Host', host())
+        .send({ path: 'folder' });
+      expect(denied.status).toBe(401);
+      const unknownClient = await request(h.app)
+        .post(route)
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'unknown')
+        .send({ path: 'folder' });
+      expect(unknownClient.status).toBe(400);
+      expect(unknownClient.body.code).toBe('invalid_client_id');
+      expect(
+        await fsp.readFile(
+          path.join(h.secondaryCwd, 'folder/nested/keep.txt'),
+          'utf8',
+        ),
+      ).toBe('keep');
+      const deleted = await request(h.app)
+        .post(route)
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ path: 'folder' });
+      expect(deleted.status).toBe(200);
+      expect(deleted.body).toEqual({
+        kind: 'directory_delete',
+        path: 'folder',
+      });
+      await expect(
+        fsp.stat(path.join(h.secondaryCwd, 'folder')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(
+        await fsp.readFile(
+          path.join(h.primaryCwd, 'folder/nested/keep.txt'),
+          'utf8',
+        ),
+      ).toBe('keep');
+      expect(
+        (
+          await request(h.app)
+            .post('/directory/delete')
+            .set('Host', host())
+            .set('Authorization', 'Bearer secret')
+            .send({ path: 'folder' })
+        ).status,
+      ).toBe(404);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses directory deletion for untrusted, unknown, draining and removed owners', async () => {
+    const h = await makeHarness({ token: 'secret', secondaryTrusted: false });
+    try {
+      for (const cwd of [h.primaryCwd, h.secondaryCwd])
+        await fsp.mkdir(path.join(cwd, 'keep'));
+      const remove = (selector: string) =>
+        request(h.app)
+          .post(`/workspaces/${encodeURIComponent(selector)}/directory/delete`)
+          .set('Host', host())
+          .set('Authorization', 'Bearer secret')
+          .send({ path: 'keep' });
+      expect((await remove('unknown')).status).toBe(400);
+      expect((await remove(h.secondaryId)).status).toBe(403);
+      const runtime = h.workspaceRegistry.getByWorkspaceId(h.secondaryId)!;
+      expect(h.workspaceRegistry.beginDrain(runtime)).toBe(true);
+      expect((await remove(h.secondaryId)).status).toBe(503);
+      h.workspaceRegistry.completeDrain(runtime);
+      expect((await remove(h.secondaryId)).status).toBe(400);
+      for (const cwd of [h.primaryCwd, h.secondaryCwd])
+        expect((await fsp.stat(path.join(cwd, 'keep'))).isDirectory()).toBe(
+          true,
+        );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['ssh', 'custom'])(
+    'refuses unsupported %s directory deletion',
+    async (kind) => {
+      const h = await makeHarness({ token: 'secret' });
+      const factory = h.workspaceRegistry.getByWorkspaceId(
+        h.secondaryId,
+      )!.routeFileSystemFactory;
+      const original = factory.forRequest.bind(factory);
+      const spy = vi.spyOn(factory, 'forRequest').mockImplementation((ctx) => {
+        const fs = original(ctx);
+        if (kind === 'custom') fs.deleteDirectory = undefined;
+        return fs;
+      });
+      if (kind === 'ssh')
+        Object.defineProperty(factory, 'sshWorkspace', {
+          value: { host: 'remote', directory: '/workspace' },
+        });
+      try {
+        await fsp.mkdir(path.join(h.secondaryCwd, 'keep'));
+        const result = await request(h.app)
+          .post(
+            `/workspaces/${encodeURIComponent(h.secondaryId)}/directory/delete`,
+          )
+          .set('Host', host())
+          .set('Authorization', 'Bearer secret')
+          .send({ path: 'keep' });
+        expect(result.status).toBe(kind === 'ssh' ? 501 : 422);
+        expect(
+          (await fsp.stat(path.join(h.secondaryCwd, 'keep'))).isDirectory(),
+        ).toBe(true);
+      } finally {
+        spy.mockRestore();
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('routes workspace-qualified file writes and trust-gates untrusted writes', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {
@@ -941,6 +1206,39 @@ describe('workspace-qualified core REST', () => {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
     }
   });
+
+  it.each([false, true])(
+    'refuses qualified file create through a symlink when its target exists=%s',
+    async (targetExists) => {
+      const h = await makeHarness({ token: 'secret' });
+      try {
+        const target = path.join(h.secondaryCwd, 'fresh.txt');
+        const alias = path.join(h.secondaryCwd, 'alias.txt');
+        if (targetExists) await fsp.writeFile(target, 'keep');
+        await fsp.symlink('fresh.txt', alias, 'file');
+        const result = await request(h.app)
+          .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/write`)
+          .set('Authorization', 'Bearer secret')
+          .set('Host', host())
+          .send({ path: 'alias.txt', content: '', mode: 'create' });
+        expect(result.status).toBe(400);
+        expect(result.body.errorKind).toBe('symlink_escape');
+        expect((await fsp.lstat(alias)).isSymbolicLink()).toBe(true);
+        expect(await fsp.readlink(alias)).toBe('fresh.txt');
+        if (targetExists)
+          expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+        else
+          await expect(fsp.stat(target)).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+        await expect(
+          fsp.stat(path.join(h.primaryCwd, 'fresh.txt')),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('routes workspace-qualified file uploads and never falls back to primary', async () => {
     const h = await makeHarness({ token: 'secret' });

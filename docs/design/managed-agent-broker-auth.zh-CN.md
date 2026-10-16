@@ -8,7 +8,7 @@
 
 ## 1. 问题陈述
 
-Managed Agent Runtime Broker（`packages/sdk-java/managed-agent-server`）
+Managed Agent Runtime Broker（`packages/managed-agent-server`）
 目前信任客户端自证的身份和客户端自铸的凭证。当 broker 在没有网关的
 情况下可达时，五个缺口组合成对任意 hosted 会话持久 transcript 的
 跨租户读写：
