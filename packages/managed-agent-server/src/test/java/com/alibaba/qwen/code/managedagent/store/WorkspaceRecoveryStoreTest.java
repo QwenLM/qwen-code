@@ -426,6 +426,10 @@ class WorkspaceRecoveryStoreTest {
                 + " WHERE session_id = ?", pinned);
         var instructions = new ManagedSessionStore(jdbc).publishAgentInstructions(
                 "tenant", "workspace-b", pinned, "Keep the agent instructions. 保留指令。");
+        var skillCatalog = List.<Map<String, Object>>of(Map.of(
+                "name", "review", "description", "Review", "body", "Check the diff. 检查差异。"));
+        var skills = new ManagedSessionStore(jdbc).publishAgentSkills(
+                "tenant", "workspace-b", pinned, skillCatalog);
         JsonNode sources = call(capture(), "sessions").path("sessions");
         assertThat(sources).hasSize(3);
         JsonNode pinnedSource = null;
@@ -453,25 +457,28 @@ class WorkspaceRecoveryStoreTest {
                 .isEqualTo("1");
         assertThat(builtinSource.path("agentDefinitionDigest").isNull())
                 .isTrue();
-        // The recovery read of the PUBLISHED instructions resource must
+        // The recovery read of the PUBLISHED agent resources must
         // return the published bytes (resource_layout_unsupported before
         // the reader accepted the kind).
         var capture = capture();
-        ObjectNode ref = object().put("resourceId", instructions.resourceId())
-                .put("kind", instructions.kind())
-                .put("schemaVersion", instructions.schemaVersion())
-                .put("byteLength", (int) instructions.byteLength())
-                .put("digest", instructions.digest());
-        ObjectNode read = object().put("sessionId", pinned);
-        read.set("ref", ref);
-        assertThat(capture.call("resource", read).path("bytesBase64").asText())
-                .isEqualTo(java.util.Base64.getEncoder().encodeToString(
-                        "Keep the agent instructions. 保留指令。"
-                                .getBytes(StandardCharsets.UTF_8)));
-        capture.call("enqueueRef", read);
-        assertThat(capture.call("nextRef", object().put("sessionId", pinned)).toString())
-                .isEqualTo(ref.toString());
-        capture.call("completeRef", read);
+        for (var resource : List.of(instructions, skills)) {
+            ObjectNode ref = object().put("resourceId", resource.resourceId())
+                    .put("kind", resource.kind())
+                    .put("schemaVersion", resource.schemaVersion())
+                    .put("byteLength", (int) resource.byteLength())
+                    .put("digest", resource.digest());
+            ObjectNode read = object().put("sessionId", pinned);
+            read.set("ref", ref);
+            byte[] expected = resource == instructions
+                    ? "Keep the agent instructions. 保留指令。".getBytes(StandardCharsets.UTF_8)
+                    : AgentDefinitionExtensions.skillsBytes(skillCatalog);
+            assertThat(capture.call("resource", read).path("bytesBase64").asText())
+                    .isEqualTo(java.util.Base64.getEncoder().encodeToString(expected));
+            capture.call("enqueueRef", read);
+            assertThat(capture.call("nextRef", object().put("sessionId", pinned)).toString())
+                    .isEqualTo(ref.toString());
+            capture.call("completeRef", read);
+        }
         assertThat(capture.inspect().path("pendingReferences").asLong())
                 .isZero();
 

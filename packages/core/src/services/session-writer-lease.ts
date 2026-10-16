@@ -2857,10 +2857,29 @@ export class SessionWriterLease {
   sealForHandoff(commitProof?: SessionWriterCommitProof): Promise<void> {
     if (this.terminalOperation === 'release') return this.release();
     this.terminalOperation = 'seal';
-    this.terminalPromise ??= this.runExclusive(() =>
+    if (this.terminalPromise) return this.terminalPromise;
+    const terminal = this.runExclusive(() =>
       this.sealForHandoffOnce(commitProof),
-    );
-    return this.terminalPromise;
+    ).catch((error: unknown) => {
+      // A retryable seal failure must not be memoized forever: a later
+      // close() retries the seal rather than replaying the rejection
+      // (review round 14, R14-4). A rolled-back seal left the writer
+      // unsealed (released === false), so the retry re-runs it. The
+      // terminal operation resets with it, or a later release() would
+      // read a cleared promise as a seal in flight.
+      if (
+        this.releaseRetryable &&
+        !this.released &&
+        !(error instanceof SessionWriterLostError) &&
+        this.terminalPromise === terminal
+      ) {
+        this.terminalPromise = undefined;
+        this.terminalOperation = undefined;
+      }
+      throw error;
+    });
+    this.terminalPromise = terminal;
+    return terminal;
   }
 
   get isReleased(): boolean {

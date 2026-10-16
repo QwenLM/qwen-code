@@ -324,6 +324,9 @@ class WorkspaceLifecycleStoreTest {
             effects.addObject().put("event", event).set("recordRef", ref);
         }
         if (recover) {
+            // recoverEffects synthesizes the receipt from the journal and
+            // marks it as its own build (review round 14, R14-2).
+            receipt.put("storeSynthesized", true);
             JsonNode recovered = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
             assertThat(recovered).isNotNull();
             assertThat(fixture.json.readTree(recovered.toString())).isEqualTo(receipt);
@@ -341,6 +344,91 @@ class WorkspaceLifecycleStoreTest {
 
     static Stream<Arguments> hookReceiptPaths() {
         return Stream.of(OperationKind.CLOSE, OperationKind.DELETE).flatMap(kind -> Stream.of(false, true).map(recover -> Arguments.of(kind, recover)));
+    }
+
+    // A close whose effects were saved before its terminal fail parks the
+    // fence in DRAINING with the dead operation still named. The resumed
+    // close rebinds that fence and carries the validated receipt, whose
+    // hook executions stay in the failed operation's namespace: completion
+    // verifies the carried receipt against those records and finishes
+    // (review round 13, R13-1).
+    @Test
+    void aResumedCloseVerifiesTheCarriedReceiptAgainstTheFailedOperationsHooks() throws Exception {
+        var fixture = fixture();
+        var journal = new ManagedSessionStore(fixture.jdbc);
+        var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
+                "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
+        byte[] definition = "{\"toolProfile\":\"hosted-workspace-files/1\",\"hookCatalog\":{}}".getBytes(StandardCharsets.UTF_8);
+        String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(definition));
+        var header = fixture.json.createObjectNode().put("subtype", "managed_session_header_v1");
+        header.putObject("managedSession").putObject("definitionRef").put("resourceId", "definition")
+                .put("kind", "managed-session-definition").put("schemaVersion", 1).put("byteLength", definition.length).put("digest", digest);
+        byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n" + header + "\n").getBytes(StandardCharsets.UTF_8);
+        var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
+                0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
+                Base64.getEncoder().encodeToString(bytes), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
+                List.of(new ManagedSessionStoreModels.CommitResource("definition", "managed-session-definition", 1,
+                        definition.length, digest, Base64.getEncoder().encodeToString(definition))));
+        fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32), commit));
+        var first = fixture.admit(OperationKind.CLOSE);
+        // The SessionEnd hook execution was recorded under the first
+        // operation's occurrence namespace.
+        String occurrence = "hook-plan-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(
+                ("[\"SessionEnd\",\"" + first.operationId() + "\"]").getBytes(StandardCharsets.UTF_8)));
+        var plan = fixture.json.createObjectNode();
+        plan.putObject("input").put("hook_event_name", "SessionEnd").put("session_id", fixture.session);
+        var planRef = fixture.resource("SessionEnd-plan", "hook-data", plan);
+        var resultRef = fixture.resource("SessionEnd-result", "hook-data", fixture.json.createObjectNode());
+        var record = fixture.json.createObjectNode().put("hookExecutionId", occurrence).put("occurrenceId", first.operationId())
+                .put("runtimeSessionId", "original").put("registrationId", "registration").put("eventName", "SessionEnd")
+                .put("ordinal", 0).put("hookId", "__plan__").put("cancelRequested", false);
+        record.putNull("onceKey");
+        record.set("planRef", planRef);
+        record.set("inputRef", planRef);
+        record.set("resultRef", resultRef);
+        var run = record.putObject("run").put("state", "settled").put("effectId", occurrence).put("execution", "settled");
+        run.putObject("definition").put("definitionId", "catalog").put("definitionRevision", 1).put("definitionDigest", "b".repeat(64));
+        for (String key : List.of("reason", "executionCallId", "dispatchId", "deliveryId", "runtime", "delivery")) {
+            run.putNull(key);
+        }
+        ManagedHookRecords.requireExecution(record);
+        var ref = fixture.resource("SessionEnd-record", "hook-execution", record);
+        fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
+                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
+                + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
+                ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
+                ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", occurrence),
+                fixture.session, occurrence, "a".repeat(64), ref.path("resourceId").asText());
+        // The first close persists its effects — the fence moves to
+        // DRAINING — and only then fails terminally; the writer is sealed
+        // first so the resumed completion's writer check can pass.
+        JsonNode effects = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(first));
+        assertThat(effects.path("effects").size()).isOne();
+        assertThat(fixture.jdbc.queryForObject("SELECT phase FROM ma_session_head", String.class)).isEqualTo("DRAINING");
+        fixture.transactions.executeWithoutResult(ignored -> journal.sealWriter("tenant", fixture.session, "w".repeat(32),
+                new ManagedSessionStoreModels.SealWriterRequest("workspace", "original", writer.writerGeneration()),
+                WorkspaceLifecycleStore.authority(first)));
+        fixture.transactions.executeWithoutResult(ignored -> fixture.store.failOperation("tenant", fixture.session,
+                first.operationId(), "worker", first.claimGeneration(), "session_close_completion_unsettled"));
+        assertThat(fixture.jdbc.queryForObject("SELECT operation_id FROM ma_session_head", String.class))
+                .isEqualTo(first.operationId());
+
+        String secondId = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant",
+                fixture.session, OperationKind.CLOSE, "owner", "b".repeat(64), "close-2", "digest", true, 1)
+                .operation().operationId());
+        var second = fixture.transactions.execute(ignored -> fixture.store.claimOperation("tenant", fixture.session,
+                secondId, "worker", Duration.ofSeconds(30)).orElseThrow());
+        // The DRAINING fence rebound to the resumed close, and the carried
+        // receipt still names the failed operation that ran the hooks.
+        assertThat(fixture.jdbc.queryForObject("SELECT operation_id FROM ma_session_head", String.class))
+                .isEqualTo(secondId);
+        assertThat(fixture.jdbc.queryForObject("SELECT phase FROM ma_session_head", String.class)).isEqualTo("DRAINING");
+        JsonNode recovered = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(second));
+        assertThat(fixture.json.readTree(recovered.toString()))
+                .isEqualTo(fixture.json.readTree(effects.toString()));
+        assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.completeOperation("tenant", fixture.session,
+                secondId, "worker", second.claimGeneration(), true))).isTrue();
+        assertThat(fixture.store.requireSession("tenant", fixture.session).status()).isEqualTo("CLOSED");
     }
 
     @Test

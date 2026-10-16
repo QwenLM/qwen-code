@@ -72,8 +72,16 @@ import {
 } from './hosted-tool-approval.js';
 import * as stdio from '../utils/stdioHelpers.js';
 import { monitorUnitNameOf } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
+import {
+  HOSTED_SKILL_APPROVAL_REFUSAL,
+  HOSTED_SKILL_BATCH_REFUSAL,
+  HostedSkillCatalog,
+} from './hosted-skill-catalog.js';
+import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 
 const broker = vi.hoisted(() => ({
+  capabilityDigest:
+    'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91',
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
@@ -86,6 +94,7 @@ const broker = vi.hoisted(() => ({
   acknowledgeV3: vi.fn(),
   cancel: vi.fn(),
   release: vi.fn(),
+  releaseMount: vi.fn(),
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
   backgroundProcessStatus: vi.fn(),
@@ -102,11 +111,19 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    readonly capabilityDigest = broker.capabilityDigest;
+    // Like the real client: the claim is recorded before the acquire
+    // request leaves, so a lost reply still names it.
+    private claim?: string;
+    mountClaim = () => this.claim;
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
     warm = broker.warm;
-    acquire = broker.acquire;
+    acquire = (...args: unknown[]) => {
+      this.claim = `claim-${broker.acquire.mock.calls.length + 1}`;
+      return broker.acquire(...args);
+    };
     prepare = broker.prepare;
     prepareV3 = broker.prepareV3;
     execute = broker.execute;
@@ -114,6 +131,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     acknowledgeV3 = broker.acknowledgeV3;
     cancel = broker.cancel;
     release = broker.release;
+    releaseMount = broker.releaseMount;
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
     backgroundProcessStatus = broker.backgroundProcessStatus;
@@ -169,6 +187,7 @@ function createTurn(
   shell = false,
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
   hooks?: HostedHookSession,
+  skills?: HostedSkillCatalog,
 ) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -188,7 +207,7 @@ function createTurn(
       },
       waiters,
     },
-    { hooks },
+    { hooks, skills },
   );
 }
 const calls = ['read_file', 'edit'].map((name, index) => ({
@@ -215,6 +234,7 @@ beforeEach(async () => {
     broker.acquire,
     broker.cancel,
     broker.release,
+    broker.releaseMount,
   ])
     method.mockResolvedValue(undefined);
   root = await mkdtemp(path.join(tmpdir(), 'hosted-tool-turn-'));
@@ -295,6 +315,300 @@ afterEach(async () => {
     await expect(session.close()).rejects.toThrow(/writes stopped/);
   else await session?.close();
   await rm(root, { recursive: true, force: true });
+});
+
+const publishedSkills = () =>
+  new HostedSkillCatalog([
+    {
+      name: 'review',
+      description: 'Review code changes.',
+      body: 'Consult scripts/review.js before reviewing.',
+      base_directory: '.qwen/skills/review',
+    },
+  ]);
+
+it('loads a published static Skill durably without Runtime execution or approval', async () => {
+  const skills = publishedSkills();
+  turn = createTurn(false, { mode: 'default' }, undefined, skills);
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  const original: Part[] = [
+    { functionCall: { id: call.callId, name: call.name, args: call.args } },
+  ];
+  expect(await turn.declarations(new AbortController().signal)).toContainEqual(
+    skills.declaration(),
+  );
+  const responses = await turn.execute(
+    [call],
+    original,
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['output']).toBe(
+    skills.response(call.args),
+  );
+  const history = await session.sink.project();
+  expect(history.map((entry) => entry.type)).toEqual([
+    'assistant',
+    'tool_result',
+  ]);
+  expect(history[1].message?.parts).toEqual(responses);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .some((event) => event.kind === 'action.changed'),
+  ).toBe(false);
+  await turn.finish();
+  const reloaded = createTurn(false, undefined, undefined, skills);
+  await reloaded.resumeCommittedResults(new AbortController().signal);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
+  const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
+  turn = createTurn(
+    false,
+    { mode: 'default' },
+    hookSession(fire),
+    publishedSkills(),
+  );
+  const batch = [
+    { ...calls[0], name: 'skill', args: { skill: 'review' } },
+    {
+      ...calls[1],
+      name: 'write_file',
+      args: { file_path: 'output.txt', content: 'must not write' },
+    },
+  ];
+  const responses = await turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBe(
+    HOSTED_SKILL_BATCH_REFUSAL,
+  );
+  expect(responses[1].functionResponse?.response?.['error']).toContain(
+    'not executed',
+  );
+  expect(actionIds()).toEqual([]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(fire.mock.calls.map(([event]) => event)).toEqual([
+    HookEventName.PostToolBatch,
+  ]);
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .some((event) => event.kind === 'hosted.batch.planned'),
+  ).toBe(false);
+});
+
+it.each([{ skill: 'unknown' }, { skill: 'review', args: '--post' }])(
+  'persists a correctable Skill refusal without executing anything: %j',
+  async (args) => {
+    turn = createTurn(false, undefined, undefined, publishedSkills());
+    const call = { ...calls[0], name: 'skill', args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBeTypeOf(
+      'string',
+    );
+    expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('recovers the original Skill body after the assistant commits but its result does not', async () => {
+  const skills = publishedSkills();
+  const originalCommit = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('Store response lost');
+    return originalCommit(...args);
+  };
+  turn = createTurn(false, undefined, undefined, skills);
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+    'assistant',
+  ]);
+  const recovery = {
+    session,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    skills,
+  };
+  expect(await answerResumedTurnCalls(recovery)).toBe(1);
+  expect(await answerResumedTurnCalls(recovery)).toBe(0);
+  const history = await session.sink.project();
+  expect(history).toHaveLength(2);
+  expect(history[1].message?.parts?.[0].functionResponse).toMatchObject({
+    id: call.callId,
+    name: 'skill',
+    response: { output: skills.response(call.args) },
+  });
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('preserves a mixed-batch Skill refusal when its result was not committed', async () => {
+  const skills = publishedSkills();
+  const originalCommit = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('Store refusal lost');
+    return originalCommit(...args);
+  };
+  turn = createTurn(false, { mode: 'default' }, undefined, skills);
+  const batch = [
+    { ...calls[0], name: 'skill', args: { skill: 'review' } },
+    calls[1],
+  ];
+  await expect(
+    turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+    'assistant',
+  ]);
+  const recovery = {
+    session,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    skills,
+  };
+  expect(await answerResumedTurnCalls(recovery)).toBe(1);
+  expect(await answerResumedTurnCalls(recovery)).toBe(0);
+  const history = await session.sink.project();
+  expect(history).toHaveLength(2);
+  expect(history[1].message?.parts?.[0].functionResponse).toMatchObject({
+    id: batch[0].callId,
+    name: 'skill',
+    response: { error: HOSTED_SKILL_BATCH_REFUSAL },
+  });
+  expect(JSON.stringify(history[1])).not.toContain(
+    'Consult scripts/review.js before reviewing.',
+  );
+  expect(actionIds()).toEqual([]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it.each(['deny', 'ask'] as const)(
+  'preserves a PreToolUse %s for a static Skill without creating an Action',
+  async (permissionDecision) => {
+    const fire = vi.fn<HostedHookSession['fire']>(async (event) =>
+      event === HookEventName.PreToolUse
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              permissionDecision,
+              permissionDecisionReason: 'Skill policy refused the load.',
+            },
+          }
+        : undefined,
+    );
+    turn = createTurn(
+      false,
+      { mode: 'default' },
+      hookSession(fire),
+      publishedSkills(),
+    );
+    const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBe(
+      permissionDecision === 'ask'
+        ? HOSTED_SKILL_APPROVAL_REFUSAL
+        : 'Skill policy refused the load.',
+    );
+    expect(fire.mock.calls.map(([event]) => event)).toEqual([
+      HookEventName.PreToolUse,
+      HookEventName.PostToolBatch,
+    ]);
+    expect(actionIds()).toEqual([]);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('loads the Skill selected by PreToolUse updatedInput without a new approval', async () => {
+  const skills = new HostedSkillCatalog([
+    {
+      name: 'review',
+      description: 'Review code.',
+      body: 'Original review body.',
+    },
+    {
+      name: 'testing',
+      description: 'Test code.',
+      body: 'Replacement test body.',
+    },
+  ]);
+  const fire = vi.fn<HostedHookSession['fire']>(async (event) =>
+    event === HookEventName.PreToolUse
+      ? {
+          hookSpecificOutput: {
+            hookEventName: event,
+            updatedInput: { skill: 'testing' },
+          },
+        }
+      : undefined,
+  );
+  turn = createTurn(false, { mode: 'default' }, hookSession(fire), skills);
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['output']).toBe(
+    skills.response({ skill: 'testing' }),
+  );
+  expect(fire.mock.calls.map(([event]) => event)).toEqual([
+    HookEventName.PreToolUse,
+    HookEventName.PostToolUse,
+    HookEventName.PostToolBatch,
+  ]);
+  expect(actionIds()).toEqual([]);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
 });
 
 it('commits the whole batch before the first dispatch and each receipt before resolving it', async () => {
@@ -380,6 +694,7 @@ async function shellReceiptScenario(
     | 'sentinel'
     | 'lost-admission'
     | 'lost-reserve',
+  approval?: { mode: HostedApprovalMode },
 ) {
   const shellCall = {
     ...calls[0],
@@ -549,6 +864,10 @@ async function shellReceiptScenario(
       mode !== 'large' ||
       Buffer.byteLength(JSON.stringify(messageParts)) <= 64 * 1024,
     { owner, captureBytes: 1024 * 1024 },
+    undefined,
+    approval
+      ? { settings: { mode: approval.mode, timeoutMs: 1000 }, waiters }
+      : undefined,
   );
   const execution = shellTurn.execute(
     [shellCall],
@@ -649,6 +968,11 @@ async function shellReceiptScenario(
   ).toHaveLength(1);
 }
 
+it('runs Full Access Shell without ordinary Actions through durable result and replay acceptance', async () => {
+  await shellReceiptScenario('normal', { mode: 'yolo' });
+  expect(actionIds()).toEqual([]);
+});
+
 it.each([
   'normal',
   'abandoned',
@@ -660,7 +984,7 @@ it.each([
   'lost-reserve',
 ] as const)(
   'uses only the original Shell publication after Broker %s',
-  shellReceiptScenario,
+  (mode) => shellReceiptScenario(mode),
 );
 
 it('records a durable receipt for a proven unstarted Shell', async () => {
@@ -1006,7 +1330,7 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob only under the /2 Workspace profiles', async () => {
+it('offers glob only under the /2 and the read Workspace profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (
@@ -1040,6 +1364,91 @@ it('offers glob only under the /2 Workspace profiles', async () => {
     ...shellTools,
     'glob',
   ]);
+  // #13753 I3: the read profile declares its two read tools, whatever
+  // lane the Session has.
+  await expect(advertised('hosted-workspace-read/1')).resolves.toEqual([
+    'read_file',
+    'glob',
+  ]);
+  await expect(advertised('hosted-workspace-read/1', true)).resolves.toEqual([
+    'read_file',
+    'glob',
+  ]);
+});
+
+// #13753 I3: the read profile's two tools dispatch like any profile's.
+it('dispatches read_file and glob on the read profile', async () => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-read/1' },
+  );
+  const reads = [
+    { ...calls[0], name: 'read_file', args: { file_path: 'a.txt' } },
+    {
+      ...calls[0],
+      callId: 'call-glob',
+      name: 'glob',
+      args: { pattern: '**/*.ts' },
+    },
+  ];
+  await turn.execute(
+    reads,
+    reads.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(
+    broker.execute.mock.calls.map(
+      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+    ),
+  ).toEqual(['read_file', 'glob']);
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+// #13753 I3: every tool that writes, and every other tool, is refused on
+// the read profile before the Broker is acquired.
+it.each([
+  ['write_file', { file_path: 'a.txt', content: 'x' }],
+  ['edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b' }],
+  ['run_shell_command', { command: 'touch a.txt' }],
+  ['monitor', { command: 'tail -f a.txt' }],
+  ['agent', { description: 'd', prompt: 'p' }],
+  ['send_message', { to: 'parent', message: 'm' }],
+])('refuses %s on the read profile before the Broker', async (name, args) => {
+  const reader = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    { resources: session.resources, assertWritable: async () => {} },
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-read/1' },
+  );
+  await reader.declarations(new AbortController().signal);
+  const call = { ...calls[0], name, args };
+  await expect(
+    reader.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
 });
 
 function createSearchTurn() {
@@ -1632,6 +2041,225 @@ it('keeps release failures recovery blocked', async () => {
   await expect(turn.finish()).rejects.toBeInstanceOf(
     HostedToolRecoveryRequiredError,
   );
+});
+
+it('hands back only the Workspace mount on the recovery-block path', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  expect(broker.acquire).toHaveBeenCalledOnce();
+  await turn.releaseForRecoveryBlock();
+  // #13800: the mount lease goes back so later Sessions on the same
+  // storage are never wedged by this turn's block; the Runtime Session
+  // itself never sees the RELEASED-forever full release, and the handback
+  // names the claim of the acquire that owes it.
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  expect(broker.releaseMount).toHaveBeenCalledWith('claim-1');
+  expect(broker.release).not.toHaveBeenCalled();
+  // A repeated block-side handback is a no-op.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+});
+
+it('keeps the block verdict deliverable when the mount handback fails, and keeps the handback owed until it lands', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  vi.useFakeTimers();
+  try {
+    // The failure is logged, never thrown: the recovery-block verdict must
+    // still reach the Session.
+    await expect(turn.releaseForRecoveryBlock()).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    // Owed until it lands: the cadence keeps asking on a widening backoff
+    // and then a steady one-minute tail instead of dropping the debt after
+    // two gaps — the freeze stays honest while the turn's work is unproven.
+    for (const [gap, calls] of [
+      [1000, 2],
+      [3000, 3],
+      [5000, 4],
+      [10000, 5],
+      [30000, 6],
+      [60000, 7],
+      [60000, 8],
+    ] as const) {
+      await vi.advanceTimersByTimeAsync(gap);
+      expect(broker.releaseMount).toHaveBeenCalledTimes(calls);
+    }
+    // One line for the repeated refusal, not one per minute.
+    expect(log).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('hands the mount back once a busy refusal settles', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount
+    .mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+    )
+    .mockResolvedValue(undefined);
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  [503, 'runtime_reconciliation_required'],
+  [409, 'runtime_session_conflict'],
+  [409, 'runtime_admission_closed'],
+  [409, 'workspace_writer_unproven'],
+])(
+  'makes one attempt for a final %s %s refusal without retrying',
+  async (status, code) => {
+    await turn.execute(calls, parts, 'model', new AbortController().signal);
+    // A Session the Broker no longer holds, a claim a re-drive superseded,
+    // a lifecycle drain that frees the mount itself, or a writer that never
+    // proved it stopped: waiting settles none of them.
+    broker.releaseMount.mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(status, code),
+    );
+    await turn.releaseForRecoveryBlock();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    await turn.blockMountRetry;
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([
+  ['a lost reply', () => new TypeError('fetch failed')],
+  [
+    "the Broker's internal error",
+    () =>
+      new HostedWorkspaceBrokerRejection(500, 'runtime_broker_internal_error'),
+  ],
+])('re-sends the handback after %s', async (_label, failure) => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount
+    .mockRejectedValueOnce(failure())
+    .mockResolvedValue(undefined);
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  // Neither decided anything, and the holder-conditioned clear is
+  // idempotent, so the chain re-sends on the cadence until it lands.
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+});
+
+it('delivers the block verdict without waiting out a hung handback', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  let rejectFirst!: (cause: unknown) => void;
+  broker.releaseMount
+    .mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectFirst = reject;
+        }),
+    )
+    .mockResolvedValue(undefined);
+  vi.useFakeTimers();
+  try {
+    const verdict = turn.releaseForRecoveryBlock();
+    await vi.advanceTimersByTimeAsync(2000);
+    // The verdict proceeded on its own short bound, not on the Broker's
+    // 30s fetch timeout; the attempt itself is still alive in the chain.
+    await expect(verdict).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    rejectFirst(new TypeError('fetch failed'));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+    await turn.blockMountRetry;
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('hands nothing back when the turn never sent an acquire', async () => {
+  // Only an acquire's claim can name a mount: a turn blocked before its
+  // first acquire holds nothing.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).not.toHaveBeenCalled();
+  expect(turn.blockMountRetry).toBeUndefined();
+});
+
+it('stops the owed handback when the daemon shuts down', async () => {
+  const mountHandbacks = new Set<() => void>();
+  const owned = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test', mountHandbacks },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+  );
+  await owned.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+  await owned.releaseForRecoveryBlock();
+  expect(mountHandbacks.size).toBe(1);
+  for (const stop of mountHandbacks) stop();
+  await owned.blockMountRetry;
+  expect(mountHandbacks.size).toBe(0);
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+});
+
+it('hands the mount back even when the acquire answer was lost after the grant', async () => {
+  broker.acquire.mockRejectedValue(new TypeError('fetch failed'));
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  // The reply loss means no acquired flag — but the Broker may have
+  // committed the claim, so the handback still runs under the claim the
+  // request carried; the holder-conditioned clear is a no-op when nothing
+  // was granted.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  expect(broker.releaseMount).toHaveBeenCalledWith('claim-1');
+});
+
+it("hands the Hook and MCP lanes' Session-scoped mounts back through their own discipline", async () => {
+  const mcpAttempt = vi.fn(async () => undefined);
+  const mcpHandback = vi.fn(() => mcpAttempt);
+  const mcpTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    {
+      mcp: {
+        broker: { ...broker, runtimeSessionId: 'mcp:session' },
+        ensureReady: async () => undefined,
+        refresh: async () => undefined,
+        tools: () => [],
+        toolInput: () => undefined,
+        mountHandback: mcpHandback,
+      } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
+  );
+  await mcpTurn.releaseForRecoveryBlock();
+  expect(mcpHandback).toHaveBeenCalledOnce();
+  expect(mcpAttempt).toHaveBeenCalledOnce();
+  const hookAttempt = vi.fn(async () => undefined);
+  const hooksTurn = createTurn(false, undefined, {
+    acquire: vi.fn(async () => undefined),
+    mountHandback: () => hookAttempt,
+  } as unknown as HostedHookSession);
+  await hooksTurn.releaseForRecoveryBlock();
+  expect(hookAttempt).toHaveBeenCalledOnce();
+  // The lanes' Session-scoped mounts never go back through the turn's
+  // own per-turn broker.
+  expect(broker.releaseMount).not.toHaveBeenCalled();
 });
 
 it('keeps an empty Runtime error visible to the model instead of reporting success', async () => {
