@@ -11,9 +11,10 @@ status: 'confirmed'
 > [#8535](https://github.com/QwenLM/qwen-code/issues/8535). Verdict reached independently by four reviewers on
 > different model families, cross-checked against each other, and verified
 > directly by the consolidator against
-> [`fix/geminichat-thought-consolidation`](https://github.com/QwenLM/qwen-code/tree/fix/geminichat-thought-consolidation)
+> [`fix/geminichat-thought-consolidation`](https://github.com/QwenLM/qwen-code/tree/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e)
 > @ [`f907a0f5c`](https://github.com/QwenLM/qwen-code/commit/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e)
-> (PR #8260's tip commit at audit time; the branch has since moved).
+> (PR #8260's tip commit at audit time; #8260 has since merged and the head
+> branch was deleted, so the tree link pins to `f907a0f5c` itself).
 
 ## Verdict: **BUG**
 

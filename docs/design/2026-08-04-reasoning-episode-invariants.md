@@ -13,13 +13,16 @@ status: 'draft'
 > reviewers (different model families, working without coordination) auditing
 > the same codebase, cross-checked against each other, and independently
 > re-verified line-by-line by the consolidator against
-> [`fix/geminichat-thought-consolidation`](https://github.com/QwenLM/qwen-code/tree/fix/geminichat-thought-consolidation)
+> [`fix/geminichat-thought-consolidation`](https://github.com/QwenLM/qwen-code/tree/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e)
 > @ [`f907a0f5c`](https://github.com/QwenLM/qwen-code/commit/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e)
-> (PR #8260's tip commit at audit time; the branch has since moved). All four reviewers independently discovered that
+> (PR #8260's tip commit at audit time; #8260 has since merged and the head
+> branch was deleted, so the tree link pins to `f907a0f5c` itself). All four reviewers independently discovered that
 > the ambient checkout at review time (`dogfood/reasoning-fidelity`) predates
-> PR #8260 and does not contain the fix chain at all — every citation below
-> is against `f907a0f5c`, linked as a permanent GitHub blob URL so it resolves
-> regardless of what branch is later checked out.
+> PR #8260 and does not contain the fix chain at all — every qwen-code citation
+> below is against `f907a0f5c`, linked as a permanent GitHub blob URL so it
+> resolves regardless of what branch is later checked out. The one exception is
+> the "Prior art: how `opencode` handles the same problem" section, whose links
+> pin to commits in the external `anomalyco/opencode` repository.
 
 ## Problem
 
@@ -371,6 +374,14 @@ package (an Effect-TS rewrite, still gated behind an experimental flag and
 coexisting with a legacy Vercel-AI-SDK-direct path) makes a **narrower, more
 deliberate version of the same one-shape choice** qwen-code made, with one
 structural difference worth naming precisely.
+
+**Every citation in this section is external prior art, not qwen-code source.**
+The five line-range citations below all pin to `github.com/anomalyco/opencode`
+(the repository `sst/opencode` was renamed to) at
+[`aefaf140c1`](https://github.com/anomalyco/opencode/commit/aefaf140c19e25494da27739ae979f31b8cfe474),
+the real release commit (`v1.18.13`) those line ranges were read from. The
+paths they cite (`packages/llm`, `packages/schema`, `packages/opencode`) exist
+only in that repository, not in qwen-code.
 
 **It does have one closed, shared union type across every provider** —
 [`ContentPart`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/llm/src/schema/messages.ts#L177-L180)
