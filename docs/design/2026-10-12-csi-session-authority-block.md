@@ -53,8 +53,8 @@ to file authorization; it does not introduce a Hosted execution entry point.
 | Resource reads    | Persist OPEN/RETURNED/UNKNOWN read ownership and recheck original writer, resource bytes/metadata and delivery bounds. Uncertain reads remain recorded.                           |
 | Schema            | Fresh unpublished migrations for request pin, first activation, native authorization and resource-read ownership. Published migrations are unchanged.                             |
 
-The principal affected areas are `packages/sdk-java/runtime-broker` and
-`packages/sdk-java/managed-agent-server`. Existing shared stores, transport,
+The principal affected areas are `packages/managed-agent-server` and
+`packages/managed-agent-server`. Existing shared stores, transport,
 schema and configuration receive only required CSI changes; new private
 classes and their tests are extracted from the frozen source. Main's existing
 workspace execution lease schema and later ordinary reader, collection,
