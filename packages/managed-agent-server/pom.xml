@@ -367,11 +367,18 @@
                                  cases, 15.9–16.2 s healthy locally on
                                  macOS JDK 26 + MySQL 8.4.6 across four
                                  acceptance runs, ~33 s budgeted at
-                                 2×) joins the same fork — one 600 s
-                                 ceiling plus the re-derived healthy
-                                 sum (2963 s) still fits the 3600 s
-                                 fork with headroom. -->
-                            <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
+                                 2×) joins the same fork. The FG9 slice
+                                 3 letters (FG9b store failures, FG9c
+                                 Harness crashes) bring that class to
+                                 six letters measuring 528–557 s
+                                 (~950 s budgeted, ~416 s over slice
+                                 2's): with FG8c and FG10a inside it,
+                                 one 600 s ceiling plus the re-derived
+                                 3380 s healthy sum no longer fits
+                                 3600 s, so the fork moves to 3990 s and
+                                 the Verify step to 80 minutes to keep
+                                 its 600 s wrap plus margin. -->
+                            <forkedProcessTimeoutInSeconds>3990</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
