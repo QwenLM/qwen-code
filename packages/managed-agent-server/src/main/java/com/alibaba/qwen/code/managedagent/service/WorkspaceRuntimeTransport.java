@@ -41,6 +41,11 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private final WorkspaceExecutionStore ownership;
     private final RuntimeBindingRepository bindings;
     private final RuntimeSessionRepository sessions;
+    // READY Sessions whose mount went back early (#13800): the worker still
+    // holds their installation, so their full release must reach it even
+    // though the holder is already gone. In memory only — a Broker restart
+    // drops the debt and leaves it to the worker's own lifetime.
+    private final java.util.Set<String> detachOwed = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     WorkspaceRuntimeTransport(HttpRuntimeTransport delegate, WorkspaceRuntimeResolver resolver,
             WorkspaceExecutionStore ownership, RuntimeBindingRepository bindings,
@@ -374,9 +379,12 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.release(lease, session);
         }
         Context context = context(lease, session, false);
-        // RELEASING fences later claims; an absent holder needs no physical release.
+        String detach = detachKey(context);
+        // RELEASING fences later claims; an absent holder needs no physical
+        // release unless a mount handback left the worker's detach owed.
         if (context.session().getState() == RuntimeSessionRecord.State.RELEASING
                 && !context.runtime().isDrainRequested()
+                && !detachOwed.contains(detach)
                 && !ownership.isHeld(context.binding(), context.session())) {
             return CompletableFuture.completedFuture(true);
         }
@@ -388,8 +396,49 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         })
                 .thenApply(ignored -> {
                     ownership.release(context.binding(), context.session());
+                    detachOwed.remove(detach);
                     return true;
                 });
+    }
+
+    @Override
+    public CompletionStage<Boolean> releaseMount(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            return RuntimeTransport.super.releaseMount(lease, session);
+        }
+        // Only the execution mount: the Session row stays READY so the
+        // recovery fleet can still adopt this identity. The worker keeps the
+        // installation a re-drive reuses, so the detach stays owed to the
+        // later full release, recorded before the holder clears so that
+        // release can never take the absent-holder shortcut past it. A
+        // RELEASING Session still holding the mount is one whose physical
+        // release has not landed yet (a cleanup release that failed at the
+        // worker), so it owes the same detach; one with no holder never
+        // installed anything and keeps the shortcut.
+        Context context = context(lease, session, false);
+        if (context.session().getState() == RuntimeSessionRecord.State.READY
+                || ownership.isHeld(context.binding(), context.session())) {
+            detachOwed.add(detachKey(context));
+        }
+        ownership.release(context.binding(), context.session());
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public CompletionStage<Void> reclaimMount(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Context context = context(lease, session, false);
+        if (!ownership.isHeld(context.binding(), context.session())) {
+            ownership.claim(context.binding(), context.session());
+        }
+        return CompletableFuture.completedFuture(null);
+    }
+
+    private static String detachKey(Context context) {
+        return context.runtime().getBindingId() + '\0' + context.session().getRuntimeGeneration()
+                + '\0' + context.session().getRuntimeSessionId();
     }
 
     private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize) {
