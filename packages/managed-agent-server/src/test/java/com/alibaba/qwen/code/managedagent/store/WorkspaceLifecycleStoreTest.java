@@ -9,11 +9,16 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
@@ -557,6 +562,34 @@ class WorkspaceLifecycleStoreTest {
         assertThat(fixture.transactions.<com.fasterxml.jackson.databind.JsonNode>execute(ignored -> fixture.lifecycle.recoverEffects(operation))).isNull();
         assertThat(fixture.jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM ma_operation", String.class)).isNull();
         assertThat(fixture.jdbc.queryForObject("SELECT phase FROM ma_session_head", String.class)).isEqualTo("LIFECYCLE_ONLY");
+    }
+
+    @Test
+    void sharedRuntimeSessionsBlockTheNeverInitializedReceipt() throws Exception {
+        var fixture = fixture();
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null, "local-process", "storage");
+        var initial = fixture.bindings.findOrCreate(request);
+        var claimed = fixture.bindings.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
+        var seed = claimed.getProvisionSeed();
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), java.net.URI.create("http://127.0.0.1:9999"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        var handle = new RuntimeResourceHandle("local-process", 2, java.util.Map.of("resource", "original"));
+        var attested = fixture.bindings.compareAndSet(claimed,
+                claimed.withAttestation(lease, handle, java.time.Instant.now(), java.time.Instant.now()));
+        var binding = fixture.bindings.releaseOperation(attested.getBindingId(), "setup", attested.getOperationGeneration());
+        var sessions = new JdbcRuntimeSessionRepository(fixture.jdbc.getDataSource());
+        fixture.bindings.admitSession(sessions, new RuntimeSessionRecord(
+                new RuntimeSession(fixture.session, UUID.randomUUID().toString(), "bootstrap", scope), binding.getBindingId(),
+                binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, java.time.Instant.now()));
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
+        String id = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant", fixture.session,
+                OperationKind.DELETE, "owner", "a".repeat(64), "operation", "digest", true, 2).operation().operationId());
+        var operation = fixture.transactions.execute(ignored -> fixture.store.claimOperation("tenant", fixture.session, id,
+                "worker", Duration.ofSeconds(30)).orElseThrow());
+        assertThat(fixture.transactions.<JsonNode>execute(ignored -> fixture.lifecycle.recoverEffects(operation))).isNull();
+        assertThat(fixture.jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM ma_operation", String.class)).isNull();
     }
 
     @Test

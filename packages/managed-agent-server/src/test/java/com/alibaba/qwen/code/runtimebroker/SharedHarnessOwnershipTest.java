@@ -62,6 +62,32 @@ class SharedHarnessOwnershipTest {
     }
 
     @Test
+    void cleanupAuthorityFollowsTheRuntimeSessionsHarnessClaim() throws Exception {
+        var binding = ready(bindings, SHARED);
+        var authority = new RuntimeLifecycleAuthority("close", 1);
+        assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a", authority));
+        bindings.requestHarnessDrain("tenant", "harness-a");
+        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
+                "UPDATE ma_session_head SET operation_id = ?, claim_generation = 1, claim_lease_until = ?"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, "close");
+            statement.setLong(2, System.currentTimeMillis() + 30_000);
+            JdbcRepositorySupport.setIdentity(statement, 3, "tenant");
+            JdbcRepositorySupport.setIdentity(statement, 4, "harness-a");
+            assertEquals(1, statement.executeUpdate());
+        }
+        bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a", authority);
+        assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("other", 1)));
+        assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("close", 2)));
+        assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-b", authority));
+        assertClosed(() -> bindings.requireHookAdmission(SHARED, SCOPE, "harness-a", authority));
+        assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", authority));
+        assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(binding.getBindingId()).getState());
+    }
+
+    @Test
     void executionAdmissionUsesTheExecutionsHarnessSession() {
         var binding = ready(bindings, SHARED);
         var a = sessionReady(bindings.admitSession(sessions, candidate(binding, "harness-a", "a-1")));
