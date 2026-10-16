@@ -1304,7 +1304,7 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob only under the /2 Workspace profiles', async () => {
+it('offers glob only under the /2 and the read Workspace profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (
@@ -1338,6 +1338,91 @@ it('offers glob only under the /2 Workspace profiles', async () => {
     ...shellTools,
     'glob',
   ]);
+  // #13753 I3: the read profile declares its two read tools, whatever
+  // lane the Session has.
+  await expect(advertised('hosted-workspace-read/1')).resolves.toEqual([
+    'read_file',
+    'glob',
+  ]);
+  await expect(advertised('hosted-workspace-read/1', true)).resolves.toEqual([
+    'read_file',
+    'glob',
+  ]);
+});
+
+// #13753 I3: the read profile's two tools dispatch like any profile's.
+it('dispatches read_file and glob on the read profile', async () => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-read/1' },
+  );
+  const reads = [
+    { ...calls[0], name: 'read_file', args: { file_path: 'a.txt' } },
+    {
+      ...calls[0],
+      callId: 'call-glob',
+      name: 'glob',
+      args: { pattern: '**/*.ts' },
+    },
+  ];
+  await turn.execute(
+    reads,
+    reads.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(
+    broker.execute.mock.calls.map(
+      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+    ),
+  ).toEqual(['read_file', 'glob']);
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+// #13753 I3: every tool that writes, and every other tool, is refused on
+// the read profile before the Broker is acquired.
+it.each([
+  ['write_file', { file_path: 'a.txt', content: 'x' }],
+  ['edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b' }],
+  ['run_shell_command', { command: 'touch a.txt' }],
+  ['monitor', { command: 'tail -f a.txt' }],
+  ['agent', { description: 'd', prompt: 'p' }],
+  ['send_message', { to: 'parent', message: 'm' }],
+])('refuses %s on the read profile before the Broker', async (name, args) => {
+  const reader = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    { resources: session.resources, assertWritable: async () => {} },
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-read/1' },
+  );
+  await reader.declarations(new AbortController().signal);
+  const call = { ...calls[0], name, args };
+  await expect(
+    reader.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
 });
 
 function createSearchTurn() {

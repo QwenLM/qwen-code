@@ -585,10 +585,16 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.CONFLICT, "child_run_settled",
                     "The child run already settled; creation owes no more Session.");
         }
-        if (childCwdRelative != null) {
-            requireReadyChildWorkspace(tenantId, parentSessionId,
-                    lineage.parentChildRunId(), parent.workspace(),
-                    childCwdRelative);
+        // A child bound to a snapshot reads with the read-only profile
+        // whatever its parent's is (#13753 I3): the mode comes from the row
+        // this transaction locks, so no caller can bind a snapshot copy to
+        // a profile that writes. Only the profile differs from the parent.
+        String toolProfile = null;
+        if (childCwdRelative != null
+                && ChildWorkspaceStore.SNAPSHOT.equals(requireReadyChildWorkspace(
+                        tenantId, parentSessionId, lineage.parentChildRunId(),
+                        parent.workspace(), childCwdRelative))) {
+            toolProfile = WorkspaceToolProfiles.READ;
         }
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
@@ -612,13 +618,14 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " workspace_storage_id, "
                         + (childCwdRelative == null ? "cwd_relative" : "?")
                         + ", context_config_ref, context_revision,"
-                        + " workspace_config_ref, workspace_policy_ref,"
-                        + " tool_profile, creator_actor_key, approval_mode,"
+                        + " workspace_config_ref, workspace_policy_ref, "
+                        + (toolProfile == null ? "tool_profile" : "?")
+                        + ", creator_actor_key, approval_mode,"
                         + " ?, ?, ?, ?"
                         + " FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 childInsertArgs(sessionId, title, now, childCwdRelative,
-                        lineage, tenantId, parentSessionId));
+                        toolProfile, lineage, tenantId, parentSessionId));
         jdbc.update("INSERT INTO ma_event_stream"
                         + " (tenant_id, session_id, stream_kind, stream_id,"
                         + " covered_sequence, gmt_modified) VALUES"
@@ -641,12 +648,15 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private static Object[] childInsertArgs(String sessionId, String title,
-            long now, String childCwdRelative,
+            long now, String childCwdRelative, String toolProfile,
             StoreModels.SessionLineage lineage, String tenantId,
             String parentSessionId) {
         List<Object> args = new ArrayList<>(List.of(sessionId, title, now, now));
         if (childCwdRelative != null) {
             args.add(childCwdRelative);
+        }
+        if (toolProfile != null) {
+            args.add(toolProfile);
         }
         args.addAll(List.of(lineage.parentSessionId(), lineage.rootSessionId(),
                 lineage.parentChildRunId(), lineage.depth(), tenantId,
@@ -657,9 +667,10 @@ public class ManagedAgentStore implements AgentStateStore {
     /**
      * Decision 13 of the isolation slice: an isolated child binds only to a ready, unfinished child
      * Workspace prepared from the parent's current Workspace and storage. The locking read
-     * serializes the creation against a finish request, which locks the same row.
+     * serializes the creation against a finish request, which locks the same row. Answers
+     * the row's mode (#13753 I3), which its operation's request fixed when it was admitted.
      */
-    private void requireReadyChildWorkspace(String tenantId,
+    private String requireReadyChildWorkspace(String tenantId,
             String parentSessionId, String childRunId, ContextBinding parent,
             String childCwdRelative) {
         List<Boolean> ready =
@@ -686,6 +697,19 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.CONFLICT, "child_workspace_not_ready",
                     "The child run's Workspace is not ready to bind a child Session.");
         }
+        // The request is written once, when the row is admitted, so the
+        // locked row's mode needs no lock of its own.
+        List<String> requests = jdbc.queryForList("SELECT o.request_json FROM ma_workspace w"
+                        + " JOIN ma_operation o ON o.tenant_id = w.tenant_id"
+                        + " AND o.operation_id = w.child_workspace_id AND o.operation_kind = 'CHILD_WORKSPACE'"
+                        + " WHERE w.workspace_kind = 'CHILD_GIT' AND w.parent_session_id = ?"
+                        + " AND w.child_run_id = ? AND w.tenant_id = ?",
+                String.class, parentSessionId, childRunId, tenantId);
+        if (requests.size() != 1) {
+            throw new ApiException(HttpStatus.CONFLICT, "child_workspace_not_ready",
+                    "The child run's Workspace is not ready to bind a child Session.");
+        }
+        return ChildWorkspaceStore.workspaceMode(requests.getFirst());
     }
 
     @Override
