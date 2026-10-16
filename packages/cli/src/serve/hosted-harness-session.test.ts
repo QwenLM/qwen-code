@@ -13935,6 +13935,138 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
+    'persists the SSH foreground-only surface through resident and cold loads of %s',
+    async (profile) => {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      const server = await app(true);
+      const surface = async (clientId: string) => {
+        let names: Array<string | undefined> = [];
+        state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+          const declarations = await toolTurn!.declarations(signal);
+          names = declarations.map((tool) => tool.name);
+          for (const tool of declarations) {
+            if (tool.name === 'run_shell_command') {
+              expect(tool.parametersJsonSchema).not.toHaveProperty(
+                'properties.is_background',
+              );
+            }
+          }
+          return { text: 'ok', model: 'test-model' };
+        });
+        const prompt = [{ type: 'text', text: randomUUID() }];
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId: randomUUID(),
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+          .expect(202);
+        await vi.waitFor(
+          async () => {
+            const status = await headers(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', clientId);
+            expect(status.body.hasActivePrompt).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
+        expect(names).toEqual([
+          'read_file',
+          'write_file',
+          'edit',
+          ...(profile.includes('shell') ? ['run_shell_command'] : []),
+        ]);
+      };
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: profile,
+          foregroundOnly: true,
+          ...(profile.includes('shell') ? { captureBytes: 1024 * 1024 } : {}),
+        })
+        .expect(200);
+      let clientId = created.body.clientId as string;
+      await surface(clientId);
+      for (const foregroundOnly of [undefined, true]) {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+          .send({
+            managedSessionStore: store(),
+            passiveManagedRuntimeRecovery: true,
+            ...(foregroundOnly === undefined ? {} : { foregroundOnly }),
+          })
+          .expect(200);
+        await surface(clientId);
+      }
+      await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: store(),
+          foregroundOnly: false,
+        })
+        .expect(409);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: store(),
+          childWorkspaces: true,
+        })
+        .expect(409);
+      await surface(clientId);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+      for (const incompatible of [
+        { foregroundOnly: false },
+        { childWorkspaces: true },
+      ]) {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+          .send({
+            managedSessionStore: store(),
+            ...incompatible,
+          })
+          .expect(409);
+      }
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: store(),
+        })
+        .expect(200);
+      clientId = loaded.body.clientId as string;
+      await surface(clientId);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+    },
+  );
+
+  it.each([
+    { foregroundOnly: 'true' },
+    { childWorkspaces: true },
+    { mcpServers: [] },
+    { hookCatalog: {} },
+    { lineage: {} },
+    { toolProfile: 'hosted-workspace-mcp/1' },
+  ])('refuses incompatible SSH foreground-only creation: %j', async (extra) => {
+    const server = await app(true);
+    await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        foregroundOnly: true,
+        ...extra,
+      })
+      .expect(400);
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
   // #13753 I2: `childWorkspaces` describes the host, not the Session: the
   // create that carries it advertises isolation, and a later load answers
   // whatever that load restates, since nothing persists it.
@@ -15089,6 +15221,81 @@ describe('Hosted Harness no-tool session', () => {
       loaded.body.clientId as string,
     );
   });
+
+  // A fenced writer fails the refusal's cleanup as well: the seal, and with
+  // it possibly the activation release, reports the writer conflict. The load
+  // must still answer that self-healing 409, whose wait the coordinator does
+  // not charge to the retry budget, rather than the generic open failure.
+  it.each([
+    ['the seal fails', false],
+    ['both the release and the seal fail', true],
+  ])(
+    'answers a writer conflict when %s while refusing a load',
+    async (_label, releaseFails) => {
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      });
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        created.body.clientId as string,
+      );
+      const conflict = () =>
+        new ManagedSessionStoreHttpError(
+          409,
+          'managed_session_writer_conflict',
+          'Writer fenced',
+        );
+      const spies: Array<{ mockRestore(): void }> = [];
+      // Armed by the refusal itself, so only the refusal's close fails.
+      state.assertWritable.mockImplementationOnce(async () => {
+        if (releaseFails)
+          spies.push(
+            vi
+              .spyOn(
+                LocalManagedSessionAuthority.prototype,
+                'releaseActivation',
+              )
+              .mockRejectedValueOnce(conflict()),
+          );
+        spies.push(
+          vi
+            .spyOn(LocalManagedSessionAuthority.prototype, 'close')
+            .mockRejectedValueOnce(conflict()),
+        );
+        throw new Error('writer lost');
+      });
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      try {
+        const refused = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({ managedSessionStore: store() });
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('managed_session_writer_conflict');
+        const lines = log.mock.calls.map(([line]) => String(line));
+        expect(
+          lines.some((line) => line.includes('close failed during open')),
+        ).toBe(releaseFails);
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+        log.mockRestore();
+      }
+      expect(state.model).not.toHaveBeenCalled();
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(loaded.status).toBe(200);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        loaded.body.clientId as string,
+      );
+    },
+  );
 
   it('clears predispatch partial intent file history before the cancelled terminal', async () => {
     let originalManaged: Awaited<ReturnType<typeof openManagedSession>>;

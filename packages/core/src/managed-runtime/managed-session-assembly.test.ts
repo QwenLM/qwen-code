@@ -17,6 +17,7 @@ import {
   ManagedSessionNotFoundError,
 } from './managed-session-authority.js';
 import {
+  ManagedSessionCloseError,
   openManagedSession,
   type ManagedSession,
 } from './managed-session-assembly.js';
@@ -254,6 +255,65 @@ describe('managed session assembly', () => {
       'activation store unavailable',
     );
     expect(sealAttempted).toHaveBeenCalled();
+  });
+
+  it('rejects with both failures when the seal fails too', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const releaseError = new Error('activation store unavailable');
+    vi.spyOn(session.authority, 'releaseActivation').mockRejectedValue(
+      releaseError,
+    );
+    // The seal's own failures usually carry a cause; it must survive.
+    const sealCause = new Error('ENOSPC: no space left on device');
+    const sealError = new Error('journal seal failed', { cause: sealCause });
+    vi.spyOn(session.authority, 'close').mockRejectedValue(sealError);
+
+    const failure = await session.close().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(ManagedSessionCloseError);
+    expect(failure).toBeInstanceOf(AggregateError);
+    // A caller classifies a close failure on what the seal reported.
+    expect((failure as ManagedSessionCloseError).sealError).toBe(sealError);
+    expect((failure as ManagedSessionCloseError).releaseError).toBe(
+      releaseError,
+    );
+    expect((failure as AggregateError).errors).toEqual([
+      sealError,
+      releaseError,
+    ]);
+    expect((failure as AggregateError).message).toContain(
+      'journal seal failed',
+    );
+    expect((failure as AggregateError).message).toContain(
+      'activation store unavailable',
+    );
+    expect(sealError.cause).toBe(sealCause);
+  });
+
+  // The lease memoizes a seal rejection and hands the same instance to
+  // every later seal, so a close must never annotate it: a later close whose
+  // release succeeded would otherwise report the earlier one's failure.
+  it('leaves a memoized seal rejection untouched for a later close', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    vi.spyOn(session.authority, 'releaseActivation')
+      .mockRejectedValueOnce(new Error('activation store unavailable'))
+      .mockResolvedValue(undefined);
+    const sealError = new Error('journal seal failed');
+    vi.spyOn(session.authority, 'close').mockRejectedValue(sealError);
+
+    await expect(session.close()).rejects.toBeInstanceOf(
+      ManagedSessionCloseError,
+    );
+    const second = await session.close().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(second).toBe(sealError);
+    expect(sealError.cause).toBeUndefined();
   });
 
   it('stops renewal and seals an externally fenced writer without appending activation release', async () => {
