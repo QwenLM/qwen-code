@@ -35,7 +35,7 @@ class ManagedAgentDefinitionServiceTest {
     private static final AgentDefinitionRequest REQUEST =
             new AgentDefinitionRequest(Map.of("id", "test-model"),
                     "Review the change.", List.of(Map.of("name", "read_file")),
-                    null, null, Map.of("mode", "default"), null, null);
+                    null, null, null, Map.of("mode", "default"), null, null);
     private static final DefinitionRevision WINNER = new DefinitionRevision(
             AGENT_ID, 1, "a".repeat(64), "{\"metadata\":{\"team\":\"x\"}}", 7);
     private static final Map<String, Object> CONTENT = Map.of(

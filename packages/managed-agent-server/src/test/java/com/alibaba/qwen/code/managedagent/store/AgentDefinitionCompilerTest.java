@@ -180,4 +180,21 @@ class AgentDefinitionCompilerTest {
                         assertThat(error.getDetails().get("field"))
                                 .isEqualTo("model"));
     }
+    @Test
+    void extensionsCompileOnlyWithTheirCompatibleAllowlistedProfile() {
+        String pins = ",\"skills\":[{\"name\":\"review\",\"description\":\"Review\",\"body\":\"Read the diff.\"}],"
+                + "\"mcp_servers\":[{\"server_id\":\"docs\",\"server_revision\":1,\"definition_digest\":\""
+                + "a".repeat(64) + "\"}],\"hook_catalog\":{\"catalog_id\":\"review\",\"catalog_revision\":1,"
+                + "\"definition_digest\":\"" + "b".repeat(64) + "\"}}";
+        String base = definition(hostedProfile(WorkspaceToolProfiles.MCP), "{\"approval_mode\":\"default\"}");
+        String configured = base.substring(0, base.length() - 1) + pins;
+        assertThat(AgentDefinitionCompiler.compile(configured, true, "yolo", List.of(WorkspaceToolProfiles.MCP))
+                .toolProfile()).isEqualTo(WorkspaceToolProfiles.MCP);
+        assertThatThrownBy(() -> AgentDefinitionCompiler.compile(configured, true, "yolo", FILES_ONLY))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.getDetails()).containsEntry("field", "tools"));
+        assertThatThrownBy(() -> AgentDefinitionCompiler.compile(base, true, "yolo", List.of(WorkspaceToolProfiles.MCP)))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.getDetails()).containsEntry("field", "mcp_servers"));
+    }
 }
