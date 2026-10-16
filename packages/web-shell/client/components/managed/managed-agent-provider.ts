@@ -19,9 +19,49 @@ export type ManagedAgentRuntimeState =
   | 'ready'
   | 'failed';
 
+export type ManagedApprovalMode = 'default' | 'auto-edit' | 'yolo';
+
+export function isManagedApprovalMode(
+  value: unknown,
+): value is ManagedApprovalMode {
+  return value === 'default' || value === 'auto-edit' || value === 'yolo';
+}
+
+export interface ManagedSessionOptions {
+  approvalMode: ManagedApprovalMode;
+  availableApprovalModes: ManagedApprovalMode[];
+}
+
+export interface ManagedModelContext {
+  modelId: string;
+  inputTokens?: number;
+  contextWindowSize?: number;
+  observedAt: number;
+}
+
+export interface ManagedModelSelection {
+  modelId?: string;
+  revision: number;
+}
+
+export interface ManagedSessionModels {
+  models: { modelId: string; label: string }[];
+  modelSelection: ManagedModelSelection;
+  supported: boolean;
+}
+
+export interface ManagedModelChangeResult {
+  sessionId: string;
+  modelSelection: ManagedModelSelection;
+  replayed: boolean;
+}
+
 export interface ManagedAgentSessionSummary {
   sessionId: string;
   agentId?: string;
+  approvalMode?: ManagedApprovalMode;
+  modelContext?: ManagedModelContext;
+  modelSelection?: ManagedModelSelection;
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
@@ -46,6 +86,7 @@ export interface ManagedAgentSessionSummary {
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
     cwdChange?: boolean;
+    modelChange?: boolean;
   };
   failure?: { code: string; message: string };
 }
@@ -189,6 +230,17 @@ export interface ManagedAgentProvider {
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedCwdOperation>;
   };
+  readonly modelChange?: {
+    queryOptions(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionModels>;
+    submit(
+      sessionId: string,
+      request: { modelId: string; expectedRevision: number },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedModelChangeResult>;
+  };
   readonly workspaceBinding?: {
     readonly agentId: string;
     /** Host-published model-specific AgentDefinitions available for new Sessions. */
@@ -200,13 +252,28 @@ export interface ManagedAgentProvider {
       defaultWorkspace?: ManagedAgentWorkspace | null;
       nextCursor?: string;
       supported: boolean;
+      canCreateWorkspace?: boolean;
+      supportsApprovalModeSelection?: boolean;
     }>;
     get(
       workspaceId: string,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedAgentWorkspace>;
+    createWorkspace?(
+      request: { displayName: string },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedAgentWorkspace>;
+    getSessionOptions?(
+      agentId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionOptions>;
     createEmpty(
-      request: { agentId: string; workspaceId: string; cwdRelative: string },
+      request: {
+        agentId: string;
+        workspaceId: string;
+        cwdRelative: string;
+        approvalMode?: ManagedApprovalMode;
+      },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
     createSession?(
@@ -215,6 +282,7 @@ export interface ManagedAgentProvider {
         workspaceId: string;
         cwdRelative: string;
         text: string;
+        approvalMode?: ManagedApprovalMode;
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;

@@ -47,8 +47,8 @@ message、model-attempt 和 tool-result record，因为它们是文件授权的�
 | 资源读取         | 持久化 OPEN/RETURNED/UNKNOWN 读 ownership，并重查原 writer、resource 字节/metadata 和 delivery 边界。不确定读取仍有记录。                                    |
 | Schema           | 为 request pin、首次 activation、native authorization 和 resource-read ownership 使用新的未发布 migration。已发布 migration 不变。                           |
 
-主要影响 `packages/sdk-java/runtime-broker` 和
-`packages/sdk-java/managed-agent-server`。既有共享 store、transport、schema 和
+主要影响 `packages/managed-agent-server` 和
+`packages/managed-agent-server`。既有共享 store、transport、schema 和
 configuration 仅接入必要 CSI 增量；从固定来源拆出私有类及测试。保留主干已有
 workspace execution lease schema，以及后续普通 reader、collection、definition、
 rename 和 cancellation 行为。
