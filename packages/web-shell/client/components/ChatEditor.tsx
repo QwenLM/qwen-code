@@ -89,8 +89,6 @@ import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
-  ArrowDownIcon,
-  ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FolderClosedIcon,
@@ -3200,28 +3198,6 @@ export const ChatEditor = memo(
                 className={styles.mobileEditingActions}
                 data-web-shell-mobile-editing-actions
               >
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.previousInput')}
-                  title={t('composerMobile.previousInput')}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={core.navigatePrevHistory}
-                >
-                  <ArrowUpIcon />
-                </button>
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.nextInput')}
-                  title={t('composerMobile.nextInput')}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={core.navigateNextHistory}
-                >
-                  <ArrowDownIcon />
-                </button>
                 {!showAddMenuAction && (
                   <button
                     type="button"

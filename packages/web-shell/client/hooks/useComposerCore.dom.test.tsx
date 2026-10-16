@@ -1049,6 +1049,54 @@ describe('useComposerCore history and drafts', () => {
     expect(latest!.searchState.searchMatches).toEqual([]);
   });
 
+  it('keeps submitted slash commands out of desktop history search matches', async () => {
+    const workspaceCwd = '/workspace/desktop-slash-filter';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['/theme dark', 'plain prompt']),
+    );
+    await mount({
+      sessionId: 'session-desktop-slash',
+      atWorkspaceCwd: workspaceCwd,
+    });
+
+    act(() => latest!.searchState.openHistorySearch());
+    // The desktop panel hides slash entries because the slash completion
+    // menu re-offers them; only the touch backend lists them (pinned by the
+    // mobile suite).
+    expect(latest!.searchState.searchMatches).toEqual(['plain prompt']);
+  });
+
+  it('keeps the stored draft when a history panel recall is followed by a session switch', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/panel-recall',
+    });
+    act(() => {
+      latest!.setText('older saved input');
+      latest!.submitText();
+      latest!.setText('my draft');
+    });
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    expect(latest!.getText()).toBe('older saved input');
+    // The panel click flow closes without restoring the pre-search draft.
+    act(() => latest!.searchState.closeSearch(false));
+
+    mounted.switchSession('session-b', '/workspace/panel-recall');
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    mounted.switchSession('session-a', '/workspace/panel-recall');
+    expect(latest!.getText()).toBe('my draft');
+  });
+
   it('flushes the draft to localStorage on visibilitychange and pagehide', async () => {
     vi.useFakeTimers();
     await mount({
