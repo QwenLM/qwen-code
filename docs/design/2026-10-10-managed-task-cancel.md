@@ -38,7 +38,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
   - Their only caller is the close cascade in `SessionLifecycleCoordinator`, which waits for a child's active Turn to end on its own.
   - The child result relay watches a child's Turn. A `CANCELLED` or `FAILED` Turn settles the run as `failed` by `child_failed`.
 - **Other task kinds.**
-  - `background_shell` and `monitor` are disabled behind the H3 acceptance gates (#13532/#13533). The Shell publisher settles `exited` even after `stopRequested`, and `monitor_run` has no stop flag.
+  - `background_shell` and `monitor` were disabled behind the H3 acceptance gates (#13532/#13533) when this doc was written; after #13856/#13889 enabled them, the Shell publisher settles a stop-requested run `cancelled` / `stop_requested` via `settleStopRequested`, never `exited`. `monitor_run` has no stop flag.
   - `workflow` has no runtime (H4c registered it disabled).
   - `automation_run` has no stop request at all.
 - **Channel deliveries.** `channel_delivery` projects no task, so a delivery is not a task. H5's public channel routes are read-only. Their mutations (resend) are deferred, and the Hosted `cancel_delivery` verb is internal.

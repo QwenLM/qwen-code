@@ -32392,6 +32392,87 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('atomically refuses a required-idle close until active work settles', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true, holds: [] }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        {
+          sessionId: session.sessionId,
+          holds: [agentHold('a1')],
+          hasRunningBackgroundTasks: true,
+        },
+      ]);
+
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireIdle: true,
+        }),
+      ).rejects.toThrow(SessionBusyError);
+      expect(bridge.sessionCount).toBe(1);
+
+      await sendActiveWorkSnapshot(handle, 2, [
+        {
+          sessionId: session.sessionId,
+          holds: [],
+          hasRunningBackgroundTasks: false,
+        },
+      ]);
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireIdle: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('keeps a required-idle session when child work starts after the cached snapshot', async () => {
+      let childBusy = true;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          expect(params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]).toBe(true);
+          return childBusy
+            ? { closed: false, holds: [agentHold('late-agent')] }
+            : { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        {
+          sessionId: session.sessionId,
+          holds: [],
+          hasRunningBackgroundTasks: false,
+        },
+      ]);
+
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireIdle: true,
+        }),
+      ).rejects.toThrow(SessionBusyError);
+      expect(bridge.sessionCount).toBe(1);
+      expect(handle.killed).toBe(false);
+
+      childBusy = false;
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireIdle: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
     it('continues closing the session when attachment close fails', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({

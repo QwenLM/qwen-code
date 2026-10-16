@@ -62,7 +62,8 @@ final class WorkspaceMigrationAdmission {
         if (alias.get("physical_key") == null || "CSI".equals(alias.get("storage_kind"))) {
             return;
         }
-        String physical = LocalStorageOwners.key(jdbc, tenant, storage);
+        String physical = "SSH_LOCAL".equals(alias.get("storage_kind"))
+                ? SshWorkspaceStore.physicalKey(jdbc, tenant, storage) : LocalStorageOwners.key(jdbc, tenant, storage);
         var states = jdbc.queryForList("SELECT mount_state FROM ma_storage_owner WHERE storage_key = ?"
                 + (lock ? " FOR UPDATE" : ""), String.class, physical);
         if (states.size() != 1 || !"READY".equals(states.getFirst())) {
