@@ -17,6 +17,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return "legacy";
     }
 
+    /** Exact provider identities a routing provisioner may dispatch. */
+    default boolean supportsKind(String provisionerKind) {
+        return kind().equals(provisionerKind);
+    }
+
     /** Creates placement identity from trusted embedding configuration. */
     default RuntimeProvisionRequest createRequest(RuntimeScope scope,
             String isolationKey) {
@@ -89,6 +94,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
 
     default boolean supportsDrainedStop() {
         return false;
+    }
+
+    /** Stop eligibility belongs to the saved placement, not another routed provider. */
+    default boolean supportsDrainedStop(RuntimeBindingRecord binding) {
+        return binding != null && supportsKind(binding.getRequest().getProvisionerKind()) && supportsDrainedStop();
     }
 
     default CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
