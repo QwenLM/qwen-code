@@ -526,6 +526,23 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  if (rawArgv.length === 1 && rawArgv[0] === 'managed-runtime-bootstrap') {
+    const { runManagedRuntimeBootstrap } = await import(
+      './serve/managed-runtime-bootstrap.js'
+    );
+    await runManagedRuntimeBootstrap();
+    return;
+  }
+  if (
+    rawArgv.length === 2 &&
+    rawArgv[0] === 'managed-runtime-bootstrap-worker'
+  ) {
+    const { runManagedRuntimeBootstrapWorker } = await import(
+      './serve/managed-runtime-ssh-worker.js'
+    );
+    await runManagedRuntimeBootstrapWorker(rawArgv[1]!);
+    return;
+  }
   // Bundles enter here directly; the npm wrapper dispatches before loading CLI.
   if (rawArgv.length === 1 && rawArgv[0] === '--workspace-recovery-worker') {
     const { runWorkspaceRecoveryWorker } = await import(
