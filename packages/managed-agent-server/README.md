@@ -778,7 +778,9 @@ export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
 After a credential-key rotation, keep each prior key in deployment config
-until no persisted Runtime binding references its key ID:
+until no persisted Runtime binding references its key ID (quote map keys so
+the ID survives YAML parsing exactly — a plain key containing `/`, `:` or a
+space is silently rewritten, and the lookup then matches nothing):
 
 ```yaml
 qwen:
@@ -787,12 +789,12 @@ qwen:
       credential-key-id: local-dev-v2
       credential-key: replace-with-base64-encoded-32-byte-v2-key
       previous-credential-keys:
-        local-dev-v1: replace-with-base64-encoded-32-byte-v1-key
+        'local-dev-v1': replace-with-base64-encoded-32-byte-v1-key
 ```
 
 New credentials use only the active key. Reads select the active or previous
 key by the ID stored with the ciphertext; an unavailable ID fails closed. The
-server does not re-encrypt old rows during reads. See the [rotation design](../../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
+server does not re-encrypt old rows during reads. See the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
 
 The ring is YAML-only: `previous-credential-keys` is a map and cannot be set
 through a `QWEN_MANAGED_AGENT_*` environment variable — relaxed binding

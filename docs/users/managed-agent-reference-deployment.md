@@ -109,8 +109,10 @@ qwen:
       credential-key-id: reference-v2
       credential-key: <base64-encoded-32-byte-v2-key>
       previous-credential-keys:
-        reference-v1: <base64-encoded-32-byte-v1-key>
+        'reference-v1': <base64-encoded-32-byte-v1-key>
 ```
+
+Quote map keys so the key ID survives YAML parsing exactly. An unquoted key containing `/`, `:` or a space is silently rewritten, and the ring then never matches the persisted key ID, so rows written under that ID stay unreadable even though the key is configured.
 
 Restart the single Java control plane, verify that existing bindings load, and verify that new binding rows record `reference-v2`. New secrets use only the active key; old rows remain encrypted under their recorded key ID. Keep `reference-v1` configured until database evidence shows no persisted credential references it. The server does not re-encrypt old rows on read, and removing a still-referenced key makes those rows unreadable.
 

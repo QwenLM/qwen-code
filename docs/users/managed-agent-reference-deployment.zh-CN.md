@@ -109,8 +109,10 @@ qwen:
       credential-key-id: reference-v2
       credential-key: <base64-encoded-32-byte-v2-key>
       previous-credential-keys:
-        reference-v1: <base64-encoded-32-byte-v1-key>
+        'reference-v1': <base64-encoded-32-byte-v1-key>
 ```
+
+请为映射键加引号，确保 key ID 在 YAML 解析后保持原样。未加引号且包含 `/`、`:` 或空格的键会被静默改写，导致 ring 永远无法匹配持久化的 key ID——即使密钥已配置，该 ID 下写入的记录仍不可读。
 
 重启单 Java control plane，验证既有 binding 可以加载，并确认新 binding 记录写入 `reference-v2`。新 secret 只使用 active key；旧记录继续由其已记录的 key ID 加密。在数据库证据证明没有持久化凭据再引用 `reference-v1` 之前，持续配置该密钥。服务器不会在读取时重加密旧记录，删除仍被引用的密钥会使这些记录不可读。
 

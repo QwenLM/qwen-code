@@ -32,7 +32,7 @@ qwen:
       credential-key-id: reference-v2
       credential-key: <base64-encoded-32-byte-v2-key>
       previous-credential-keys:
-        reference-v1: <base64-encoded-32-byte-v1-key>
+        'reference-v1': <base64-encoded-32-byte-v1-key>
 ```
 
 每把已配置密钥解码后都必须正好为 32 字节。active key ID 不得同时出现在 `previous-credential-keys` 中。持久化 key ID 未配置时，系统继续以 `Runtime credential key is unavailable` 失败。

@@ -32,7 +32,7 @@ qwen:
       credential-key-id: reference-v2
       credential-key: <base64-encoded-32-byte-v2-key>
       previous-credential-keys:
-        reference-v1: <base64-encoded-32-byte-v1-key>
+        'reference-v1': <base64-encoded-32-byte-v1-key>
 ```
 
 Every configured key must decode to exactly 32 bytes. The active key ID must not also appear in `previous-credential-keys`. An unknown persisted key ID continues to fail with `Runtime credential key is unavailable`.
