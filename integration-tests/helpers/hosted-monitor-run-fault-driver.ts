@@ -1795,6 +1795,108 @@ function bgStartedFile(): boolean {
   }
 }
 
+// FG8g (H4f-c): the public task cancel of a live background Shell or
+// Monitor watch. The process holds on its gate, so only the cancel can end
+// it: the operation completes from the committed record, the record
+// settles cancelled by stop_requested, and the retained key replays.
+async function api(
+  route: string,
+  init: { method?: string; key?: string } = {},
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await fetch(new URL(route, config.storeUrl), {
+    method: init.method ?? 'GET',
+    headers: {
+      'X-Qwen-Tenant-Id': config.tenantId,
+      ...(init.key ? { 'Idempotency-Key': init.key } : {}),
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  const text = await response.text();
+  return { status: response.status, body: text ? JSON.parse(text) : {} };
+}
+
+async function runCancelCase() {
+  const monitor = current.name.includes('monitor');
+  const cli = await bootHarness();
+  try {
+    execFileSync('mkfifo', [
+      path.join(current.directory, monitor ? 'monitor-gate' : 'run-gate'),
+    ]);
+    const { clientId } = await createSession(cli, config.storeUrl);
+    await submitPrompt(cli, clientId, `fg8 ${current.name} launch`);
+    step('prompt admitted');
+    const sessionRoute = `/v1/agents/sessions/${current.sessionId}`;
+    const kind = monitor ? 'monitor' : 'background_shell';
+    let task: Record<string, unknown> | undefined;
+    await waitUntil(async () => {
+      checkProxy();
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      const live = monitor
+        ? ((state.monitors[0] as { observationSequence?: number })
+            ?.observationSequence ?? 0) >= 1
+        : state.executions.some(
+            (row) =>
+              row.execution_call_id.endsWith(':process') &&
+              row.execution_state === 'PREPARED',
+          );
+      if (!live) return false;
+      const tasks = await api(`${sessionRoute}/tasks`);
+      assert.equal(tasks.status, 200, JSON.stringify(tasks.body));
+      task = (tasks.body['data'] as Array<Record<string, unknown>>).find(
+        (candidate) => candidate['kind'] === kind,
+      );
+      return task !== undefined;
+    }, 120_000);
+    assert.deepEqual(task!['action_capabilities'], ['cancel']);
+    step(`${kind} live as ${task!['id']}`);
+    const cancelRoute = `${sessionRoute}/tasks/${task!['id']}/cancel`;
+    const admitted = await api(cancelRoute, {
+      method: 'POST',
+      key: `fg8g-${current.name}`,
+    });
+    assert.equal(admitted.status, 202, JSON.stringify(admitted.body));
+    assert.equal(admitted.body['type'], 'task_cancel');
+    const operationId = admitted.body['id'] as string;
+    let operation: Record<string, unknown> = admitted.body;
+    await waitUntil(async () => {
+      operation = (await api(`${sessionRoute}/operations/${operationId}`)).body;
+      return operation['status'] === 'completed';
+    }, 120_000);
+    step('cancel completed');
+    const state = await probe<ProbeState>(current.sessionId, 'state');
+    const record = (monitor ? state.monitors[0] : state.childRuns[0]) as {
+      stopReason?: string | null;
+      stopRequested?: boolean;
+      run?: { state?: string };
+    };
+    assert.equal(record.run?.state, 'cancelled');
+    assert.equal(record.stopReason, 'stop_requested');
+    if (!monitor) assert.equal(record.stopRequested, true);
+    const settledTask = (await api(`${sessionRoute}/tasks/${task!['id']}`))
+      .body;
+    assert.equal(settledTask['state'], 'cancelled');
+    assert.deepEqual(settledTask['action_capabilities'], []);
+    const replay = await api(cancelRoute, {
+      method: 'POST',
+      key: `fg8g-${current.name}`,
+    });
+    assert.equal(replay.body['id'], operationId);
+    assert.equal(replay.body['status'], 'completed');
+    assert.equal(replay.body['replayed'], true);
+    return {
+      case: current.name,
+      taskId: task!['id'],
+      operation,
+      operations: [...operations],
+    };
+  } catch (cause) {
+    await diagnose(cli, `operations=${operations.join(',')}`);
+    throw cause;
+  } finally {
+    await cli.close();
+  }
+}
+
 try {
   const reports = [];
   for (current of config.cases) {
@@ -1832,6 +1934,8 @@ try {
       reports.push(await runCancelDrainCase());
     } else if (config.letter === 'fg8f') {
       reports.push(await runPublishCase());
+    } else if (config.letter === 'fg8g') {
+      reports.push(await runCancelCase());
     } else {
       const surface = current.name.startsWith('public') ? 'public' : 'web';
       reports.push(await runStreamCase(surface));
@@ -1850,7 +1954,9 @@ try {
           ? 'FG8_STORE_FAILURE_OK'
           : config.letter === 'fg8d'
             ? 'FG8_CANCEL_DRAIN_OK'
-            : 'FG8_STREAM_GAPS_OK',
+            : config.letter === 'fg8g'
+              ? 'FG8_TASK_CANCEL_OK'
+              : 'FG8_STREAM_GAPS_OK',
   );
 } catch (cause) {
   console.error('FG8 failed at', current?.name, cause);

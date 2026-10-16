@@ -12,11 +12,13 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.Task
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -62,6 +64,7 @@ class TaskCancelCoordinatorTest {
     private AgentStateStore store;
     private ManagedExtensionRecordStore records;
     private HarnessConnector harness;
+    private RuntimeBrokerService broker;
     private TaskCancelCoordinator coordinator;
     private final List<Map<String, Object>> sent = new CopyOnWriteArrayList<>();
     private final AtomicReference<TaskTarget> target = new AtomicReference<>();
@@ -86,6 +89,7 @@ class TaskCancelCoordinatorTest {
         store = mock(AgentStateStore.class);
         records = mock(ManagedExtensionRecordStore.class);
         harness = mock(HarnessConnector.class);
+        broker = mock(RuntimeBrokerService.class);
         doAnswer(args -> {
             sent.add(Map.copyOf(args.getArgument(2)));
             if (harnessFailure.get() != null) {
@@ -104,7 +108,7 @@ class TaskCancelCoordinatorTest {
         when(store.settleTaskCancel(anyString(), anyString(), anyString(),
                 any(), anyLong(), any(), anyLong())).thenReturn(true);
         coordinator = new TaskCancelCoordinator(store, records, harness,
-                new DirectExecutor(),
+                brokers(), new DirectExecutor(),
                 Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
                 new ManagedAgentProperties());
     }
@@ -233,7 +237,7 @@ class TaskCancelCoordinatorTest {
         properties.getDispatch().setLeaseDuration(
                 java.time.Duration.ofMillis(30));
         coordinator = new TaskCancelCoordinator(store, records, harness,
-                new DirectExecutor(),
+                brokers(), new DirectExecutor(),
                 Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
                 properties);
         target.set(childRun("running", false));
@@ -267,7 +271,7 @@ class TaskCancelCoordinatorTest {
             ManagedAgentProperties properties = new ManagedAgentProperties();
             properties.getDispatch().setLeaseDuration(Duration.ofMillis(30));
             coordinator = new TaskCancelCoordinator(store, records, harness,
-                    executor,
+                    broker, executor,
                     Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
                     properties, Duration.ofMillis(300));
             target.set(childRun("running", false));
@@ -330,7 +334,7 @@ class TaskCancelCoordinatorTest {
         CountDownLatch release = new CountDownLatch(1);
         try {
             coordinator = new TaskCancelCoordinator(store, records, harness,
-                    executor,
+                    broker, executor,
                     Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
                     new ManagedAgentProperties(), Duration.ofMillis(200));
             target.set(childRun("running", false));
@@ -368,7 +372,7 @@ class TaskCancelCoordinatorTest {
         AtomicReference<Thread> delivery = new AtomicReference<>();
         try {
             coordinator = new TaskCancelCoordinator(store, records, harness,
-                    executor,
+                    broker, executor,
                     Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
                     new ManagedAgentProperties(), Duration.ofMinutes(1));
             when(store.claimOperation(eq(TENANT), eq(SESSION), eq(OPERATION),
@@ -436,7 +440,8 @@ class TaskCancelCoordinatorTest {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setRequestTimeout(Duration.ofMinutes(2));
         assertThat(new TaskCancelCoordinator(store, records, harness,
-                new DirectExecutor(), Clock.systemUTC(), properties)
+                brokers(), new DirectExecutor(), Clock.systemUTC(),
+                properties)
                 .attemptDeadline()).isEqualTo(Duration.ofMinutes(8));
         assertThat(TaskCancelCoordinator.deadlineFor(null))
                 .isEqualTo(TaskCancelCoordinator.ATTEMPT_DEADLINE);
@@ -481,10 +486,11 @@ class TaskCancelCoordinatorTest {
 
     @Test
     void aTaskWithoutACancelPathFailsWithoutDelivery() {
-        target.set(new TaskTarget("monitor_run", "monitor-1", "monitor",
-                "running", 1, JSON.createObjectNode()));
+        target.set(new TaskTarget("automation_run", "automation-1",
+                "automation_run", "running", 1, JSON.createObjectNode()));
         coordinator.dispatch(TENANT, SESSION, OPERATION);
         assertThat(sent).isEmpty();
+        assertThat(mockingDetails(broker).getInvocations()).isEmpty();
         verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
                 eq(OPERATION), anyString(), eq(1L),
                 eq(TaskCancelOutcome.failed("task_action_unavailable")),
@@ -527,6 +533,132 @@ class TaskCancelCoordinatorTest {
                 eq(0L));
     }
 
+    // H4f-c: a background process is stopped through the Broker, never
+    // the child operation route, and the record its stop-marked end
+    // settled is the only outcome that counts.
+    @Test
+    void aLiveBackgroundShellIsStoppedThroughTheBroker() {
+        target.set(shellRun("running", false, null));
+        stopThen(shellRun("cancelled", true, "stop_requested"));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).isEmpty();
+        verify(broker).stopBackgroundProcess(TENANT, SESSION, "shell-1");
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    // A Monitor's record carries no stop request: its stop_requested
+    // settlement is the statement that the stop was recorded.
+    @Test
+    void aMonitorCompletesFromItsStopRequestedSettlement() {
+        target.set(monitorRun("running", null));
+        stopThen(monitorRun("cancelled", "stop_requested"));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(broker).stopBackgroundProcess(TENANT, SESSION, "monitor-1");
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    // A natural end the stop's own status read found first wins: the
+    // record ended without a stop, so the cancel can never land.
+    @Test
+    void aBackgroundProcessThatEndedFirstKeepsItsOutcome() {
+        target.set(shellRun("running", false, null));
+        stopThen(shellRun("completed", false, "exited"));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.failed("task_already_settled")),
+                eq(0L));
+        target.set(monitorRun("completed", "idle_timeout"));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(broker, never()).stopBackgroundProcess(TENANT, SESSION,
+                "monitor-1");
+        verify(store, org.mockito.Mockito.times(2)).settleTaskCancel(
+                eq(TENANT), eq(SESSION), eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.failed("task_already_settled")),
+                eq(0L));
+    }
+
+    // An unproven stop (the worker could not prove the end) or a missing
+    // Broker proves nothing: the record is read again and the delivery
+    // retries on the budget.
+    @Test
+    void anUnprovenBackgroundStopRetriesFromTheRecord() {
+        target.set(monitorRun("running", null));
+        when(broker.stopBackgroundProcess(TENANT, SESSION, "monitor-1"))
+                .thenReturn(java.util.concurrent.CompletableFuture
+                        .failedFuture(new IllegalStateException(
+                                "the worker answered unknown")));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).retryOperation(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L), anyLong());
+        verify(store, never()).settleTaskCancel(anyString(), anyString(),
+                anyString(), any(), anyLong(), any(), anyLong());
+        coordinator = new TaskCancelCoordinator(store, records, harness,
+                null, new DirectExecutor(),
+                Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
+                new ManagedAgentProperties(), Duration.ofMinutes(1));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store, org.mockito.Mockito.times(2)).retryOperation(
+                eq(TENANT), eq(SESSION), eq(OPERATION), anyString(), eq(1L),
+                anyLong());
+    }
+
+    // A Broker process that holds no context for the Runtime Session (a
+    // fresh one before a turn or the close acquires it again) cannot stop
+    // the process on any retry: the cancel parks at once, so it stops
+    // holding the Session's operation slot and the close goes ahead.
+    @Test
+    void aStopTheBrokerCannotReachHereParksAtOnce() {
+        target.set(shellRun("running", false, null));
+        when(broker.stopBackgroundProcess(TENANT, SESSION, "shell-1"))
+                .thenReturn(java.util.concurrent.CompletableFuture
+                        .failedFuture(new com.alibaba.qwen.code.runtimebroker
+                                .RuntimeBrokerException(404,
+                                        "runtime_session_not_found",
+                                        "Runtime Session is not active in"
+                                                + " this Broker process",
+                                        false)));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.recoveryBlocked(
+                        "task_cancel_unconfirmed")), anyLong());
+        verify(store, never()).retryOperation(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyLong());
+    }
+
+    // The record is read again before the park: a process that ended
+    // while the unreachable stop was tried settles the cancel instead.
+    @Test
+    void anUnreachableStopOverAnEndedProcessSettlesFromTheRecord() {
+        target.set(shellRun("running", false, null));
+        when(broker.stopBackgroundProcess(TENANT, SESSION, "shell-1"))
+                .thenAnswer(ignored -> {
+                    target.set(shellRun("completed", false, "exited"));
+                    return java.util.concurrent.CompletableFuture
+                            .failedFuture(new com.alibaba.qwen.code
+                                    .runtimebroker.RuntimeBrokerException(
+                                            404, "runtime_session_not_found",
+                                            "Runtime Session is not active"
+                                                    + " in this Broker process",
+                                            false));
+                });
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(broker).stopBackgroundProcess(TENANT, SESSION, "shell-1");
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.failed("task_already_settled")),
+                eq(0L));
+        verify(store, never()).settleTaskCancel(anyString(), anyString(),
+                anyString(), any(), anyLong(),
+                eq(TaskCancelOutcome.recoveryBlocked(
+                        "task_cancel_unconfirmed")), anyLong());
+    }
+
     @Test
     void aParkedCancelResolvesOnlyFromEvidence() {
         when(store.findParkedTaskCancels(anyInt()))
@@ -552,6 +684,14 @@ class TaskCancelCoordinatorTest {
         assertThat(sent).isEmpty();
     }
 
+    @SuppressWarnings("unchecked")
+    private ObjectProvider<RuntimeBrokerService> brokers() {
+        ObjectProvider<RuntimeBrokerService> provider =
+                mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(broker);
+        return provider;
+    }
+
     private static int anyInt() {
         return org.mockito.ArgumentMatchers.anyInt();
     }
@@ -560,6 +700,29 @@ class TaskCancelCoordinatorTest {
         return new TaskTarget("child_run", "run-1", "child_agent", state, 3,
                 JSON.createObjectNode().put("kind", "child_agent")
                         .put("stopRequested", stopRequested));
+    }
+
+    private void stopThen(TaskTarget after) {
+        when(broker.stopBackgroundProcess(eq(TENANT), eq(SESSION),
+                anyString())).thenAnswer(ignored -> {
+                    target.set(after);
+                    return java.util.concurrent.CompletableFuture
+                            .completedFuture(null);
+                });
+    }
+
+    private static TaskTarget shellRun(String state, boolean stopRequested,
+            String stopReason) {
+        return new TaskTarget("child_run", "shell-1", "background_shell",
+                state, 3, JSON.createObjectNode().put("kind", "shell")
+                        .put("stopRequested", stopRequested)
+                        .put("stopReason", stopReason));
+    }
+
+    private static TaskTarget monitorRun(String state, String stopReason) {
+        return new TaskTarget("monitor_run", "monitor-1", "monitor", state,
+                3, JSON.createObjectNode().put("monitorId", "monitor-1")
+                        .put("stopReason", stopReason));
     }
 
     private static TaskTarget workflowRun(String state,
