@@ -117,6 +117,12 @@ export interface ManagedSessionJournalHandle
   }): Promise<void>;
   seal(commit: ManagedSessionCommitProof): Promise<void>;
   /**
+   * True once the seal committed. A `seal()` rejection before that point
+   * left the writer open and still able to append, so durability decisions
+   * must key on this outcome rather than on the call having been attempted.
+   */
+  readonly writerSealed: boolean;
+  /**
    * The commit proof this handle took over from a sealed writer, when it did.
    * Durable stores keep the proof server-side and omit it here.
    */
