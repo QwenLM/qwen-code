@@ -16,6 +16,8 @@ SSH Session admission accepts only the qualified `hosted-workspace-files/1` and 
 
 The control plane derives the private Harness `foregroundOnly` flag from trusted SSH storage metadata on every attachment. The Harness persists it in the Session definition, retains it on cold and resident loads, and rejects an explicit change. Such Sessions create no background, Monitor, MCP, Hook or child orchestrators. Their model declarations omit Monitor and background Shell, and actual tool admission rejects those operations even if a caller supplies them directly. Foreground Shell keeps the existing publication, capture and approval path. Ordinary local Harness Sessions omit this flag and retain their capabilities.
 
+Main's resident Workspace files path (#14340) remains a separate, explicitly configured CSI mode. SSH keeps Session isolation, its original capability digest, per-Session worker ownership and physical retirement on normal close. Resident CSI mappings and SSH nodes cannot share the same Broker configuration. Ordinary local and resident CSI admission, logical release and capability gates keep their existing behavior; neither path may reinterpret SSH storage or replace its stop proof.
+
 ## Components and communication
 
 The Java server owns a static node catalog, SSH connections, Workspace registration, authorization and placement. A node contains its ID and label, SSH host alias, absolute Node and CLI entry paths, private state directory, allowed existing directory roots, fixed remote publication port and allowed tenant/actor pairs. SSH credentials and known_hosts stay server-side. Host key verification is mandatory, forwarding listeners bind loopback, and commands receive structured JSON over stdin rather than interpolated user paths or tokens.

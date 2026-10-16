@@ -16,6 +16,8 @@ SSH Session 准入仅接受已验证的 `hosted-workspace-files/1` 和 `hosted-w
 
 控制面在每次挂接时从受信 SSH storage 元数据推导私有 Harness `foregroundOnly` 标记。Harness 将其保存到 Session definition，冷加载和驻留加载均保留，显式改变时拒绝。这类 Session 不创建后台、Monitor、MCP、Hook 或 child 编排器；模型工具声明隐藏 Monitor 和后台 Shell，直接提交这些操作也会被实际准入拒绝。前台 Shell 保留既有结果发布、capture 和审批路径。普通本地 Harness Session 省略该标记，保留原有能力。
 
+main 的常驻 Workspace 文件路径（#14340）仍是独立、显式配置的 CSI 模式。SSH 保留 Session 隔离、原 capability digest、逐 Session worker 所有权，以及正常关闭时的物理退役。同一个 Broker 配置不能同时包含常驻 CSI 映射和 SSH 节点。普通本地及常驻 CSI 的准入、逻辑释放和能力门槛保留既有行为；两条路径均不能重新解释 SSH storage 或代替其停止证明。
+
 ## 组件与通信
 
 Java 服务负责静态节点目录、SSH 连接、Workspace 登记、授权和 placement。节点包含 ID/名称、SSH host 别名、Node/CLI 入口绝对路径、私有状态目录、允许登记的已有目录范围、固定远端结果回传端口及授权 tenant/actor。SSH 凭据和 known_hosts 留在服务端，强制校验 host key，转发监听 loopback，命令通过 stdin 接收结构化 JSON，不插入用户路径或 token。

@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedMonitorProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedShellProtocol;
+import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -77,12 +78,14 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         Context context = context(lease, session, true);
         // Reject a missing directory before a new claim can strand storage ownership.
-        if (LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
-            WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
-        } else if (SshRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
-            resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
-        } else {
-            throw WorkspaceExecutionStore.unavailable();
+        if (!ResidentWorkspaceProfile.selects(session.getScope())) {
+            if (LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
+                WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
+            } else if (SshRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
+                resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
+            } else {
+                throw WorkspaceExecutionStore.unavailable();
+            }
         }
         ownership.claim(context.binding(), context.session());
         // Failure retains ownership: a missing response cannot prove the worker did nothing.
@@ -442,8 +445,9 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !runtime.getRequest().getScope().equals(session.getScope())
                 || (originalCsi
                         ? !"workspace".equals(session.getScope().getIsolationClass()) || runtime.getRequest().getIsolationKey() != null
-                        : !HarnessOwnership.sharesRuntimeSessions(runtime.getRequest())
-                                && !session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey()))
+                        : !(ResidentWorkspaceProfile.selects(runtime.getRequest())
+                                || HarnessOwnership.sharesRuntimeSessions(runtime.getRequest())
+                                || session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey())))
                 || !binding.getStorageId().equals(runtime.getRequest().getStorageId())
                 || !binding.getTenantId().equals(session.getScope().getTenantId())
                 || !binding.getWorkspaceId().equals(session.getScope().getWorkspaceId())
@@ -456,7 +460,8 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static boolean managed(RuntimeSession session) {
-        return WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(session.getScope().getCapabilityDigest());
+        return WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(session.getScope().getCapabilityDigest())
+                || ResidentWorkspaceProfile.selects(session.getScope());
     }
 
     private static boolean sameLease(RuntimeLease left, RuntimeLease right) {

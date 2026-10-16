@@ -142,6 +142,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
+    private final ResidentWorkspaces residentWorkspaces;
     private final WorkspaceCreationRoots createdRoots;
     private static final String SESSION_WITH_STREAM =
             "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
@@ -314,6 +315,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
+        this.residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
         this.createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         if (StringUtils.isBlank(agentRevision)
                 || agentRevision.length() > 128) {
@@ -381,7 +383,16 @@ public class ManagedAgentStore implements AgentStateStore {
         if (sshWorkspace) {
             requireSshToolProfile(pin.toolProfile());
         }
-        if (!input.isEmpty()
+        boolean resident = residentWorkspaces.find(workspace.binding()) != null;
+        if (resident) {
+            if (!workspaceFilesEnabled) {
+                throw workspaceExecutionUnavailable();
+            }
+            residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
+        } else if (!sshWorkspace) {
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
+        }
+        if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
                         || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
@@ -576,7 +587,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         SessionRecord parent = requireSessionForUpdate(tenantId,
                 parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
+        if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
                 || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "child_parent_unavailable",
@@ -2228,6 +2239,9 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!cwdAccess.atLeast(WorkspaceAccess.OPERATOR)) {
             throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
                     "Only a Workspace operator may change the Session directory.");
+        }
+        if (residentWorkspaces.find(binding) != null) {
+            throw workspaceExecutionUnavailable();
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId,
                 binding.getStorageId());

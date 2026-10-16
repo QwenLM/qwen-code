@@ -12826,6 +12826,10 @@ export function App({
     () => (projectFeaturesAvailable ? loadedWorkspaceSettings : []),
     [loadedWorkspaceSettings, projectFeaturesAvailable],
   );
+  const showResponseTokensPerSecond =
+    workspaceSettings.find(
+      (setting) => setting.key === 'ui.showResponseTokensPerSecond',
+    )?.values.effective === true;
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -22310,6 +22314,7 @@ export function App({
                       belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
+                        showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
@@ -22948,6 +22953,7 @@ export function App({
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
+                              showResponseTokensPerSecond={showResponseTokensPerSecond && !approvalOverlayActive}
                               startedAt={
                                 failedPromptRetry?.startedAt ??
                                 activeTurnStartedAt

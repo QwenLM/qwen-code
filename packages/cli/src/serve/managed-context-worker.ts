@@ -48,6 +48,7 @@ import {
   WORKSPACE_ACTIVATION_ROUTE,
   WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CONTEXT_CONFIG_REF,
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
 import {
   ManagedHookRuntime,
@@ -294,11 +295,15 @@ export function registerManagedContextRoutes(
     throw new Error('Private CSI file profile requires its dedicated worker.');
   const installations = new ManagedContextInstallations(boot);
   const activations = new WorkspaceActivations();
+  const resident =
+    boot.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  if (resident && boot.isolationClass !== 'workspace')
+    throw new Error('Resident Workspace requires Workspace isolation.');
   const requiresActivation =
-    boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST;
+    boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST || resident;
   const admissionOpen = (): boolean => executor.isAdmissionOpen;
   const remotePublisher =
-    !capturePublisher && requiresActivation
+    !capturePublisher && requiresActivation && !resident
       ? new RemoteShellResultPublisher()
       : undefined;
   const publisher: ManagedShellCapturePublisher | undefined =
@@ -346,6 +351,7 @@ export function registerManagedContextRoutes(
           if (
             !admissionOpen() ||
             !mount.isAvailable ||
+            resident ||
             !requiresActivation ||
             !activations.isActive(runtimeSessionId)
           )
@@ -359,7 +365,9 @@ export function registerManagedContextRoutes(
             ? directory
             : undefined;
         },
-        loadManagedMcpManifest(process.env['QWEN_MANAGED_MCP_CONFIG']),
+        loadManagedMcpManifest(
+          resident ? undefined : process.env['QWEN_MANAGED_MCP_CONFIG'],
+        ),
       );
   if (mcp) registerManagedMcpRoutes(app, boot, mcp);
   const hooks = sshForegroundOnly
@@ -370,6 +378,7 @@ export function registerManagedContextRoutes(
           if (
             !admissionOpen() ||
             !mount.isAvailable ||
+            resident ||
             !requiresActivation ||
             !activations.isActive(runtimeSessionId)
           )
@@ -383,13 +392,17 @@ export function registerManagedContextRoutes(
             ? directory
             : undefined;
         },
-        loadManagedHookManifest(process.env['QWEN_MANAGED_HOOK_CONFIG']),
+        loadManagedHookManifest(
+          resident ? undefined : process.env['QWEN_MANAGED_HOOK_CONFIG'],
+        ),
       );
   if (hooks) registerManagedHookRoutes(app, boot, hooks);
   // H3 background Shells share the delegation the Hook commands already use;
   // unset or empty both mean no delegation, and the executor keeps its
   // committed refusal then.
-  const cgroupRoot = process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
+  const cgroupRoot = resident
+    ? undefined
+    : process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
   const backgroundSupervisor =
     !sshForegroundOnly && cgroupRoot
       ? ManagedChildRunSupervisor.create({ cgroupRoot })
@@ -419,14 +432,22 @@ export function registerManagedContextRoutes(
         boot.runtimeInstanceId,
         reference.sessionId,
       );
-      return {
-        ...sessionIdContext.run(sessionId, () =>
-          createManagedToolSet(
-            directory,
-            sessionId,
-            requiresActivation ? boot.mountRoot : directory,
-          ),
+      const toolSet = sessionIdContext.run(sessionId, () =>
+        createManagedToolSet(
+          directory,
+          sessionId,
+          requiresActivation ? boot.mountRoot : directory,
         ),
+      );
+      return {
+        ...toolSet,
+        tools: resident
+          ? new Map(
+              [...toolSet.tools].filter(([name]) =>
+                ['read_file', 'write_file', 'edit'].includes(name),
+              ),
+            )
+          : toolSet.tools,
         isActive,
       };
     },
@@ -455,6 +476,7 @@ export function registerManagedContextRoutes(
         ownDirectory !== root;
       for (const [otherId, binding] of installations.bindings()) {
         if (otherId === sessionId) continue;
+        if (resident && !activations.isActive(otherId)) continue;
         const directory = await siblingDirectory(mount, binding.cwdRelative);
         // A binding that cannot be located at all cannot prove the outside
         // target is shared — and it cannot veto the caller's own estate
@@ -548,6 +570,7 @@ export function registerManagedContextRoutes(
             directory,
             workspaceRoot: boot.mountRoot,
             preapproved: true,
+            filesOnly: resident,
             isActive,
           };
     },
