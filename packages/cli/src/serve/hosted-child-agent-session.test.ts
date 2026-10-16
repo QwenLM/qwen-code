@@ -433,7 +433,7 @@ describe('child Workspace receipt (#13753 I2)', () => {
   });
 
   it("carries a worktree child's outcome into its wake notification", async () => {
-    for (const workspaceMode of ['worktree', 'shared'] as const) {
+    for (const workspaceMode of ['worktree', 'shared', 'snapshot'] as const) {
       const harness = await createHarness();
       await withAuthority(harness, async (authority) => {
         const children = new HostedChildAgentSession(
@@ -469,7 +469,8 @@ describe('child Workspace receipt (#13753 I2)', () => {
           (await harness.store.read(contentRef)).toString('utf8'),
         ).text as string;
         // Only the record's own mode decides: a shared child's receipt
-        // never speaks for a Workspace it did not have.
+        // never speaks for a Workspace it did not have, and a snapshot's
+        // copy is always discarded (#13753 I3).
         if (workspaceMode === 'worktree') {
           expect(text).toContain(
             '<workspace>merged into this Workspace as uncommitted changes.</workspace>',

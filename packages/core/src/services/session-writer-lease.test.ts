@@ -50,6 +50,7 @@ import type {
   SessionWriterLeaseTestCommandInput,
   SessionWriterLeaseTestResponse,
 } from './session-writer-lease.test-helper.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const lstatFault = vi.hoisted(() => ({
   path: undefined as string | undefined,
@@ -1320,17 +1321,22 @@ describe('SessionWriterLease', () => {
     await fs.unlink(targetPath);
   });
 
-  itPosix('classifies an unreadable owned lock as unavailable', async () => {
-    const { lease, lockPath } = await leaseFor();
-    await fs.chmod(lockPath, 0o000);
+  // Needs permission bits to bind: root with its DAC capabilities reads the
+  // mode-000 lock anyway, and Windows ignores the mode.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'classifies an unreadable owned lock as unavailable',
+    async () => {
+      const { lease, lockPath } = await leaseFor();
+      await fs.chmod(lockPath, 0o000);
 
-    try {
-      await expectUnavailable(lease.assertOwnedAndUnchanged());
-    } finally {
-      await fs.chmod(lockPath, 0o600);
-      await lease.release();
-    }
-  });
+      try {
+        await expectUnavailable(lease.assertOwnedAndUnchanged());
+      } finally {
+        await fs.chmod(lockPath, 0o600);
+        await lease.release();
+      }
+    },
+  );
 
   it('fails closed on a malformed lock', async () => {
     const fixture = await createFixture();
@@ -2314,6 +2320,21 @@ describe('SessionWriterLease', () => {
       // A failed seal is terminal for the lease; the active lock is left for
       // the owning process, which this test then abandons.
       await lease.release().catch(() => undefined);
+    });
+
+    it('retries a retryable seal failure instead of memoizing the rejection', async () => {
+      const fixture = await createFixture('retryable-seal-session');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      await lease.appendJsonLine({ record: 'a' });
+      // A transient store fault fails the seal once (review round 14, R14-4).
+      vi.spyOn(lease, 'sealForHandoffOnce' as never).mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+      await expect(lease.sealForHandoff()).rejects.toThrow('disk full');
+      // The retryable failure cleared the memoized promise, so a later seal
+      // retries rather than replaying the rejection.
+      await lease.sealForHandoff();
+      expect(lease.isReleased).toBe(true);
     });
 
     it('blocks a baseline writer from a sealed managed lock', async () => {

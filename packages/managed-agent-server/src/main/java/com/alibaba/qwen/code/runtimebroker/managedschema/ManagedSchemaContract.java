@@ -74,7 +74,8 @@ public final class ManagedSchemaContract {
         AGENT_DEFINITION,
         AUTOMATION,
         CHANNEL_INGRESS,
-        ACTION_DECISION
+        ACTION_DECISION,
+        WORKSPACE_CREATE
     }
 
     public enum ReceiptScope {
