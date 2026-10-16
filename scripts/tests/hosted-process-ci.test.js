@@ -478,8 +478,9 @@ describe('Hosted real-process gates', () => {
       // letters finish by ~700 s into the fork while the old 1800 s
       // budget killed the fork before the last letter reported, so the
       // fork doubles to 3600 in the same diff; and the FG9 session/relay
-      // letters, ~170 s measured locally, fit inside that same
-      // lane-measured envelope): the relational check above tolerates
+      // letters, ~170 s measured locally for slice 1 and ~314 s for the
+      // class with slice 2, fit inside that same lane-measured envelope):
+      // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
@@ -496,13 +497,14 @@ describe('Hosted real-process gates', () => {
   // 38848525079 at fee23d2d3c) four letters finished by ~700s into the
   // fork, the fork was still killed at the old 1800s budget before the last
   // letter reported, and the fork now sits at 3600s for the same 2×
-  // headroom — and the FG9 session/relay letters add 166–175s measured
-  // locally on JDK 21 + MariaDB 10.11 across three acceptance runs (~300s
-  // budgeted at >1.7x the heaviest measured run) into the same envelope;
-  // with the fork itself ~14s, 2400s covers them. A larger ceiling lets
-  // failsafe kill the fork mid-run, and the classes left unrun never
-  // report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 2400;
+  // headroom — and the FG9 session/relay letters, four since slice 2,
+  // measure 308–314s for the class locally on JDK 21 + MySQL 8.4 across
+  // three acceptance runs (~534s budgeted at >1.7x the heaviest measured
+  // run, up from slice 1's ~300s) in the same envelope; with the fork
+  // itself ~14s, 2640s covers them. A larger ceiling lets failsafe kill
+  // the fork mid-run, and the classes left unrun never report, failing
+  // the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 2640;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -557,9 +559,9 @@ describe('Hosted real-process gates', () => {
     // Like the FG8 monitor/run letters, the FG9 session/relay letters are
     // independent fixtures sharing the fork — each letter boots its own
     // Spring application, Harness, and proxies under its own tenant
-    // prefix, so a stall in one letter leaves the other running — and one
+    // prefix, so a stall in one letter leaves the others running — and one
     // letter stalling to its @Timeout must still leave the fork enough
-    // healthy runtime and budget for the sibling letter to finish.
+    // healthy runtime and budget for the sibling letters to finish.
     const ceilings = ceilingsOf(
       hostedTestSource('HostedSessionRelayFaultGatesIT'),
     );

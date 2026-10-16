@@ -4026,6 +4026,236 @@
           }
         }
       }
+    },
+    "/api/agent/web-shell/v1/runtime-nodes/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellQueryRuntimeNodes",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists only administrator-configured SSH nodes authorized for the current tenant and actor. Requires a trusted actor. Registration is disabled by default and answers 200 with supported=false and an empty data array; an enabled deployment may answer supported=true with no authorized nodes. Node credentials, SSH aliases and server paths are not exposed. This read starts no worker.",
+        "responses": {
+          "200": {
+            "description": "SSH registration capability and authorized machine display names.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellRuntimeNodePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/check-directory": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellCheckWorkspaceDirectory",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Checks the configured Node.js and pinned qwen-code versions, allowed directory range, existing canonical directory and access permissions over SSH. Requires an enabled deployment and an exact tenant/actor node grant; disabled registration answers 404 ssh_runtime_disabled and an unknown or unauthorized node answers 403 runtime_node_forbidden. This is a preview: registration revalidates the directory and never creates a directory, clones a repository or starts a worker.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellWorkspaceDirectoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validated canonical directory on the selected Linux or macOS node.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellWorkspaceDirectory"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "502": {
+            "description": "The SSH bootstrap response is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/operations/get": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellGetWorkspaceOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. recovery_blocked is terminal and preserves the original physical owner; querying never unlocks it or starts a Runtime worker.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellWorkspaceOperationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Latest durable state of the original actor-owned registration.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellWorkspaceCreateOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/register": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRegisterWorkspace",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Admits actor-scoped, idempotent registration of an existing remote directory. The request body carries idempotencyKey; a retry with the same nodeId, path and displayName returns the original operation and its latest durable state, even after new registration is disabled or node admission is revoked. Reusing the key for different content answers 409 idempotency_conflict. Fresh admission requires an enabled deployment and an authorized node (404 ssh_runtime_disabled or 403 runtime_node_forbidden). A completed operation atomically creates the Workspace and creator OWNER grant. 202 does not mean registration is complete; query the operation, then read the Workspace and its canCreateSession hint. This operation creates no Session and starts no Runtime worker. requestId is trace-only and excluded from the request digest.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellWorkspaceRegisterRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Durable registration operation; repeated requests retain the original identity.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellWorkspaceCreateOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -10572,6 +10802,190 @@
             "maximum": 9007199254740991
           }
         }
+      },
+      "WebShellRuntimeNode": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "displayName"],
+        "properties": {
+          "nodeId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "displayName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "WebShellRuntimeNodePage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["supported", "data"],
+        "properties": {
+          "supported": {
+            "type": "boolean",
+            "default": false
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebShellRuntimeNode"
+            }
+          }
+        },
+        "x-qwen-implementation-status": "implemented",
+        "description": "Disabled registration returns supported=false and no nodes. This capability controls fresh registration only; existing operation queries remain available.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "supported": {
+                  "const": false
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "maxItems": 0
+                }
+              }
+            }
+          }
+        ]
+      },
+      "WebShellWorkspaceDirectoryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "path"],
+        "properties": {
+          "nodeId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Existing absolute directory on the selected node; no directory or repository is created."
+          }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "WebShellWorkspaceDirectory": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "canonicalPath", "platform"],
+        "properties": {
+          "nodeId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "canonicalPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Canonical absolute path after remote directory validation."
+          },
+          "platform": {
+            "type": "string",
+            "enum": ["linux", "darwin"]
+          }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "WebShellWorkspaceOperationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operationId"],
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "WebShellWorkspaceCreateOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operationId", "type", "status", "replayed"],
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "type": {
+            "type": "string",
+            "const": "workspace_create"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "cancelled",
+              "recovery_blocked"
+            ]
+          },
+          "workspaceId": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "failureCode": {
+            "type": ["string", "null"]
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "x-qwen-implementation-status": "implemented",
+        "description": "workspaceId is returned only after completed registration. recovery_blocked preserves the original ownership and requires administrator review; a new browser draft does not release it. replayed=true identifies an existing operation returned by a repeated key or a query."
+      },
+      "WebShellWorkspaceRegisterRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "path", "displayName", "idempotencyKey"],
+        "properties": {
+          "nodeId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "displayName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Actor-scoped registration key. Reuse this key and the same semantic fields until the operation identity is known."
+          },
+          "requestId": {
+            "type": ["string", "null"],
+            "maxLength": 128,
+            "description": "Trace correlation only; excluded from the request digest, so a retry with another requestId still replays. A header-safe value (1 to 128 visible ASCII characters) is echoed as X-Request-Id; any other value is replaced by a server-chosen id."
+          }
+        },
+        "x-qwen-implementation-status": "implemented"
       }
     }
   }

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
+import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
 import com.alibaba.qwen.code.managedagent.api.ApiModels;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
@@ -53,12 +54,16 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
+import com.alibaba.qwen.code.managedagent.api.SshWorkspaceController;
+import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator;
+import com.alibaba.qwen.code.managedagent.service.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -75,11 +80,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
@@ -90,6 +97,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -103,6 +111,9 @@ import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -155,6 +166,13 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
+                    entry(SshWorkspaceController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryRequest")),
+                    entry(SshWorkspaceController.CreateRequest.class, List.of("WebShellWorkspaceRegisterRequest")),
+                    entry(SshWorkspaceController.OperationRequest.class, List.of("WebShellWorkspaceOperationRequest")),
+                    entry(SshWorkspaceService.NodeSummary.class, List.of("WebShellRuntimeNode")),
+                    entry(SshWorkspaceService.NodePage.class, List.of("WebShellRuntimeNodePage")),
+                    entry(SshWorkspaceService.Directory.class, List.of("WebShellWorkspaceDirectory")),
+                    entry(SshWorkspaceStore.Operation.class, List.of("WebShellWorkspaceCreateOperation")),
                     entry(InputBlock.class, List.of("InputBlock")),
                     entry(CreateSessionRequest.class,
                             List.of("CreateSessionRequest")),
@@ -294,6 +312,9 @@ class ManagedAgentApiContractTest {
 
     @Autowired
     private ManagedTaskEventStore taskEvents;
+
+    @Autowired
+    private SshWorkspaceStore sshWorkspaces;
 
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
@@ -534,7 +555,9 @@ class ManagedAgentApiContractTest {
     @Test
     void recordsMatchTheirSchemas() {
         Map<String, String> drift = new TreeMap<>();
-        for (Class<?> type : ApiModels.class.getDeclaredClasses()) {
+        Set<Class<?>> records = new LinkedHashSet<>(Arrays.asList(ApiModels.class.getDeclaredClasses()));
+        records.addAll(RECORD_SCHEMAS.keySet());
+        for (Class<?> type : records) {
             if (!type.isRecord()) {
                 continue;
             }
@@ -1422,12 +1445,126 @@ class ManagedAgentApiContractTest {
         exchangeTurns(drift, tenant, otherTenant);
         exchangeAgents(drift, tenant, otherTenant);
         exchangeChannels(drift, tenant, otherTenant);
+        exchangeWorkspaceRegistration(drift, tenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
                                 operation.status()))
                         .map(Operation::operationId).toList());
         assertKnownGaps(drift, "request", "response");
+    }
+
+    private void exchangeWorkspaceRegistration(Map<String, String> drift, String tenant) throws Exception {
+        var owner = actor(tenant);
+        JsonNode nodes = json(exchange(drift, "webShellQueryRuntimeNodes", 200,
+                post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant).principal(owner), null));
+        assertThat(nodes.path("supported").asBoolean()).isFalse();
+        assertThat(nodes.path("data")).isEmpty();
+        String directory = "{\"nodeId\":\"mac\",\"path\":\"/work/project\"}";
+        String create = """
+                {"nodeId":"mac","path":"/work/project","displayName":"Project",
+                 "idempotencyKey":"contract-registration","requestId":"registration-trace"}
+                """;
+        for (String code : List.of(
+                exchange(drift, "webShellCheckWorkspaceDirectory", 404,
+                        post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant).principal(owner), directory),
+                exchange(drift, "webShellRegisterWorkspace", 404,
+                        post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant).principal(owner), create))) {
+            assertThat(json(code).at("/error/code").asText()).isEqualTo("ssh_runtime_disabled");
+        }
+        exchange(drift, "webShellGetWorkspaceOperation", 404,
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(owner),
+                "{\"operationId\":\"missing\"}");
+        exchange(drift, "webShellQueryRuntimeNodes", 401,
+                post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant), null);
+        exchange(drift, "webShellCheckWorkspaceDirectory", 401,
+                post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant), directory);
+        exchange(drift, "webShellRegisterWorkspace", 401,
+                post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant), create);
+        exchange(drift, "webShellGetWorkspaceOperation", 401,
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant), "{\"operationId\":\"missing\"}");
+    }
+
+    @Test
+    void localWorkspaceCreationRejectsRemotePayloadsBeforeAdmission() throws Exception {
+        String tenant = "contract-local-remote-boundary-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        for (String extra : List.of(
+                ",\"nodeId\":\"mac\",\"path\":\"/work/project\"",
+                ",\"nodeId\":null,\"path\":\"/work/project\"",
+                ",\"nodeId\":null", ",\"path\":null")) {
+            String body = "{\"displayName\":\"Remote\",\"idempotencyKey\":\"original\"" + extra + "}";
+            assertThat(json(exchange(drift, "webShellCreateWorkspace", 400,
+                    post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)), body))
+                    .at("/error/code").asText()).isEqualTo("invalid_request");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?"
+                + " AND namespace = 'WORKSPACE_CREATE'", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+        assertThat(drift).isEmpty();
+    }
+
+    @Test
+    void sshRegistrationOperationsStayActorOwnedWhenNewAdmissionIsDisabled() throws Exception {
+        String tenant = "contract-registration-" + UUID.randomUUID();
+        var operation = sshWorkspaces.begin(tenant, "actor-a", "original", "mac", "/work/project", "Project");
+        var intent = sshWorkspaces.claim(tenant, "actor-a", operation.operationId(), "fixture");
+        sshWorkspaces.fail(intent, "fixture", "ssh_runtime_identity_conflict", false);
+        String body = objectMapper.writeValueAsString(Map.of("operationId", operation.operationId()));
+        Map<String, String> drift = new TreeMap<>();
+        JsonNode saved = json(exchange(drift, "webShellGetWorkspaceOperation", 200,
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant)), body));
+        assertThat(saved.path("operationId").asText()).isEqualTo(operation.operationId());
+        assertThat(saved.path("status").asText()).isEqualTo("recovery_blocked");
+        assertThat(saved.path("replayed").asBoolean()).isTrue();
+        for (var request : List.of(
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant, "actor-b")),
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant + "-other").principal(actor(tenant + "-other")))) {
+            assertThat(json(exchange(drift, "webShellGetWorkspaceOperation", 404, request, body))
+                    .at("/error/code").asText()).isEqualTo("operation_not_found");
+        }
+        assertThat(drift).isEmpty();
+    }
+
+    @Test
+    void sshRegistrationSuccessResponsesMatchTheContractWithoutConnectingToSsh() throws Exception {
+        String tenant = "contract-ssh-proxy";
+        SshWorkspaceService ssh = mock(SshWorkspaceService.class);
+        when(ssh.list(tenant, "actor-a")).thenReturn(new SshWorkspaceService.NodePage(true,
+                List.of(new SshWorkspaceService.NodeSummary("mac", "Build Mac"))));
+        when(ssh.check(tenant, "actor-a", "mac", "/work/project"))
+                .thenReturn(new SshWorkspaceService.Directory("mac", "/work/project", "darwin"));
+        when(ssh.create(tenant, "actor-a", "mac", "/work/project", "Project", "original"))
+                .thenReturn(new SshWorkspaceStore.Operation("registration", "workspace_create", "pending", null, null, false));
+        MockMvc proxy = MockMvcBuilders.standaloneSetup(new SshWorkspaceController(ssh))
+                .setCustomArgumentResolvers(new TenantContextArgumentResolver())
+                .setControllerAdvice(new ApiExceptionHandler())
+                .setMessageConverters(new MappingJackson2HttpMessageConverter(objectMapper))
+                .addFilters(new RequestIdFilter(), new TenantContextFilter(objectMapper)).build();
+        Map<String, String> drift = new TreeMap<>();
+        exchange(proxy, drift, "webShellQueryRuntimeNodes", 200,
+                post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(proxy, drift, "webShellCheckWorkspaceDirectory", 200,
+                post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"nodeId\":\"mac\",\"path\":\"/work/project\"}");
+        exchange(proxy, drift, "webShellRegisterWorkspace", 202,
+                post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant).principal(actor(tenant)),
+                """
+                {"nodeId":"mac","path":"/work/project","displayName":"Project",
+                 "idempotencyKey":"original","requestId":"create-registration-trace"}
+                """);
+        for (String status : List.of("pending", "running", "completed", "failed", "cancelled", "recovery_blocked")) {
+            when(ssh.get(tenant, "actor-a", "registration")).thenReturn(new SshWorkspaceStore.Operation(
+                    "registration", "workspace_create", status, "completed".equals(status) ? "workspace" : null,
+                    "recovery_blocked".equals(status) ? "ssh_runtime_identity_conflict" : null, true));
+            exchange(proxy, drift, "webShellGetWorkspaceOperation", 200,
+                    post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant)),
+                    "{\"operationId\":\"registration\"}");
+        }
+        verify(ssh).check(tenant, "actor-a", "mac", "/work/project");
+        verify(ssh).create(tenant, "actor-a", "mac", "/work/project", "Project", "original");
+        assertThat(drift).isEmpty();
     }
 
     private void exchangeActions(Map<String, String> drift, String tenant) throws Exception {
@@ -2667,6 +2804,10 @@ class ManagedAgentApiContractTest {
     }
 
     private static AuthenticatedTenantActor actor(String tenant) {
+        return actor(tenant, "actor-a");
+    }
+
+    private static AuthenticatedTenantActor actor(String tenant, String actorId) {
         return new AuthenticatedTenantActor() {
             @Override
             public String tenantId() {
@@ -2675,12 +2816,12 @@ class ManagedAgentApiContractTest {
 
             @Override
             public String actorId() {
-                return "actor-a";
+                return actorId;
             }
 
             @Override
             public String getName() {
-                return "actor-a";
+                return actorId;
             }
         };
     }
@@ -2694,6 +2835,12 @@ class ManagedAgentApiContractTest {
     }
 
     private String exchange(Map<String, String> drift, String operationId,
+            int expectedStatus, MockHttpServletRequestBuilder request,
+            String body) throws Exception {
+        return exchange(mvc, drift, operationId, expectedStatus, request, body);
+    }
+
+    private String exchange(MockMvc target, Map<String, String> drift, String operationId,
             int expectedStatus, MockHttpServletRequestBuilder request,
             String body) throws Exception {
         Operation operation = CONTRACT.operation(operationId);
@@ -2710,7 +2857,7 @@ class ManagedAgentApiContractTest {
                         objectMapper.readTree(body)));
             }
         }
-        MockHttpServletResponse response = mvc.perform(request).andReturn()
+        MockHttpServletResponse response = target.perform(request).andReturn()
                 .getResponse();
         String content = response.getContentAsString(StandardCharsets.UTF_8);
         int status = response.getStatus();

@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { MediaMemoryStore, MEDIA_MEMORY_FILE_NAME } from './store.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 let root: string;
 let store: MediaMemoryStore;
@@ -24,10 +25,9 @@ afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
-// chmod-based denial tests are meaningless on Windows and as root.
-const canDropPermissions =
-  process.platform !== 'win32' &&
-  (typeof process.getuid !== 'function' || process.getuid() !== 0);
+// chmod-based denial tests are meaningless where permission bits do not
+// bind: on Windows, and for root with its DAC capabilities.
+const canDropPermissions = arePermissionBitsEnforced();
 
 async function listCorruptBackups(): Promise<string[]> {
   return (await fs.readdir(root)).filter((n) =>
