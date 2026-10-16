@@ -780,6 +780,8 @@ class ManagedAgentPropertiesTest {
             assertThat(selected.command()).containsExactly("node", "/worker/cli.js");
         });
         context.withPropertyValues(TRUSTED_KEY + "=true").run(started -> assertThat(started).hasFailed());
+        context.withPropertyValues(prefix + "workspace-creation-root=/local-workspaces")
+                .run(started -> assertThat(started).hasFailed());
         context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-enabled=true")
                 .run(started -> assertThat(started).hasFailed());
     }

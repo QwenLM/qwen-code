@@ -27,16 +27,16 @@ resident mapping. A registration or a caller-supplied Workspace ID alone does
 not enable CSI execution.
 
 Render the exact storage/namespace protection objects with the existing Java
-registration operator's `render-protection <reviewed-registration-json>
-<policy-name> <binding-name>` command. This prints a Kubernetes JSON List and
+protection operator, passing `<reviewed-registration-json> <policy-name>
+<binding-name>`. This prints a Kubernetes JSON List and
 does not contact the cluster or database. From the server package, invoke the
 built operator with:
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistrationMain \
+java -Dloader.main=com.alibaba.qwen.code.managedagent.service.WorkspaceCsiProtectionMain \
   -cp target/qwen-managed-agent-server-0.1.0-alpha-csi-runtime.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
-  render-protection /absolute/path/registration.json resident-protection resident-binding
+  /absolute/path/registration.json resident-protection resident-binding
 ```
 
 After separately authorized installation, pin its actual namespace/policy/binding

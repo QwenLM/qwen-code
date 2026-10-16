@@ -20,16 +20,16 @@ registry 登记匹配的租户/Workspace、代数和存储。Workspace config/po
 actor 授予 OPERATOR 或 OWNER。每个物理卷只能出现在一条常驻映射中。单有
 注册信息或调用者提供的 Workspace ID 不会启用 CSI 执行。
 
-使用现有 Java 注册 operator 的 `render-protection <reviewed-registration-json>
+使用现有 Java 保护 operator 的 `<reviewed-registration-json>
 <policy-name> <binding-name>` 命令生成精确存储及命名空间保护对象。命令只打印
 Kubernetes JSON List，不访问集群或数据库。在 server 包目录中调用已构建的
 operator：
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistrationMain \
+java -Dloader.main=com.alibaba.qwen.code.managedagent.service.WorkspaceCsiProtectionMain \
   -cp target/qwen-managed-agent-server-0.1.0-alpha-csi-runtime.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
-  render-protection /absolute/path/registration.json resident-protection resident-binding
+  /absolute/path/registration.json resident-protection resident-binding
 ```
 
 在另外授权安装后，钉住实际 namespace、policy、binding 的 UID 和代数。使用不可变
