@@ -112,7 +112,7 @@ Issue #13753 要求三项：
 
 ## 受影响的文件
 
-- `packages/sdk-java/managed-agent-server/src/main/resources/db/migration/V60__managed_child_workspace.sql`：新表与 lease 列。
+- `packages/managed-agent-server/src/main/resources/db/migration/V60__managed_child_workspace.sql`：新表与 lease 列。
 - `service/ChildWorktreeGit.java`：加固的 Git 执行器与各物理步骤（布局检查、快照、创建、结果、合并、写入、丢弃）。`service/ChildWorkspaceException.java`：它们的失败码。
 - `service/ChildWorkspaceProvider.java`：`RuntimeWarmer.childWorkspaces()` 回答的 provider 接口。`EmbeddedRuntimeBroker` 基于 `service/WorkspaceRuntimeResolver.java` 新增的 `storageRoot`（经校验的挂载根）实现它。
 - `service/ChildWorkspaceService.java`：`prepare`、`finish`、`find`、定时 scan 与状态机。

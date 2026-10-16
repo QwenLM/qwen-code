@@ -14,7 +14,7 @@ import {
 
 // TypeScript half of the managed-context/1 envelope contract (W0a-2). The
 // shared fixtures in contracts/managed-context-v1.fixtures.json pin it, and a
-// conformance test in packages/sdk-java/runtime-broker pins the same key sets,
+// conformance test in packages/managed-agent-server pins the same key sets,
 // routes and digests. The Runtime worker serves it for boot v2 (W0c-1).
 
 export const MANAGED_CONTEXT_PROTOCOL = 'managed-context/1';
