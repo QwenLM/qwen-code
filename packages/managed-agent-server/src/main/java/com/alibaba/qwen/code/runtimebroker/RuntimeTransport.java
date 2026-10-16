@@ -185,4 +185,32 @@ public interface RuntimeTransport {
 
     CompletionStage<Boolean> release(RuntimeLease lease,
             RuntimeSession session);
+
+    /**
+     * Frees only the Workspace execution mount the Session holds, leaving
+     * the Session itself — its READY identity, its renewals and every later
+     * full {@link #release} — untouched. The recovery-blocked turn of a
+     * managed Workspace Session parks alive forever by contract; its mount
+     * lease is what must not park with it, or every later tool turn on the
+     * same storage wedges behind it (#13800). Only a Workspace-owning
+     * transport vouches for that distinction, so the default fails closed.
+     */
+    default CompletionStage<Boolean> releaseMount(RuntimeLease lease,
+            RuntimeSession session) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "workspace_mount_release_unsupported",
+                "Runtime transport does not support Workspace mount release.",
+                false));
+    }
+
+    /**
+     * Claims the Workspace execution mount again for an acquired Session
+     * whose mount was handed back by {@link #releaseMount}; a mount the
+     * Session still holds is left as it is. A transport without Workspace
+     * ownership has no mount to claim.
+     */
+    default CompletionStage<Void> reclaimMount(RuntimeLease lease,
+            RuntimeSession session) {
+        return CompletableFuture.completedFuture(null);
+    }
 }

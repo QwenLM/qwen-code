@@ -5,6 +5,7 @@
  */
 
 import { useCallback } from 'react';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import { randomUUID } from 'node:crypto';
 import {
   type Config,
@@ -286,6 +287,7 @@ export function useBranchCommand(
         );
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
+        await getInteractiveModSession(config)?.syncSession('resume');
         clearPendingState?.();
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);

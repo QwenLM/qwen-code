@@ -16,6 +16,7 @@ import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 const discoverProviderModelsMock = vi.hoisted(() =>
   vi.fn().mockResolvedValue(null),
@@ -194,11 +195,23 @@ const moveDownAndWaitForSelection = async (
   await waitForSelectedOption(lastFrame, label);
 };
 
+const QWENCLOUD_MAIN_LABEL = 'QwenCloud';
+
+// \u5343\u95eeAI\u5e73\u53f0 / QwenCloud is the first top-level entry; Alibaba
+// ModelStudio now sits one step below it.
+const selectAlibabaModelStudio = async (
+  stdin: { write: (s: string) => void },
+  lastFrame: () => string | undefined,
+) => {
+  await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+  await moveDownAndWaitForSelection(stdin, lastFrame, 'Alibaba ModelStudio');
+};
+
 const navigateToCustomProtocolSelect = async (
   stdin: { write: (s: string) => void },
   lastFrame: () => string | undefined,
 ) => {
-  await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+  await selectAlibabaModelStudio(stdin, lastFrame);
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Third-party Providers');
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Custom Provider');
   await pressEnterAndWaitFor(
@@ -513,7 +526,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // QWEN OAuth no longer has a UI entry; the dialog falls back to the
-      // default Alibaba ModelStudio option.
+      // default first option, QwenCloud.
+      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
@@ -553,7 +567,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is Alibaba ModelStudio (first option).
+      // Default is QwenCloud (first option).
+      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
@@ -596,7 +611,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default Alibaba ModelStudio option.
+      // it will just show the default first option, QwenCloud.
+      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
   });
@@ -652,7 +668,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         { closeAuthDialog },
         undefined, // config.getAuthType() returns undefined
       );
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
 
       // Simulate pressing escape key
       stdin.write('\u001b'); // ESC key
@@ -835,6 +851,10 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const cases = [
         {
+          label: QWENCLOUD_MAIN_LABEL,
+          childTitle: `${QWENCLOUD_MAIN_LABEL} · Access Method`,
+        },
+        {
           label: 'Alibaba ModelStudio',
           childTitle: 'Alibaba ModelStudio · Access Method',
         },
@@ -852,7 +872,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         const { stdin, lastFrame, unmount } =
           renderAuthDialog(createSettings());
 
-        await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
         while (
           !lastFrame()?.match(
             new RegExp(`›\\s*(?:\\d+\\.\\s*)?${escapeRegExp(testCase.label)}`),
@@ -908,7 +928,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
@@ -974,7 +994,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
@@ -1044,7 +1064,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
@@ -1111,7 +1131,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
@@ -1194,7 +1214,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
@@ -1260,7 +1280,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         { handleProviderSubmit },
       );
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Coding Plan');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
@@ -1341,7 +1361,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Coding Plan');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
@@ -1411,7 +1431,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Coding Plan');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
@@ -1441,6 +1461,163 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         () => {
           expect(lastFrame()).toContain('Alibaba ModelStudio');
           expectSelectedOption(lastFrame(), 'Token Plan');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
+
+      unmount();
+    },
+  );
+
+  it('resolves the view title while rendering, not at import time (T1)', async () => {
+    // Ungated on purpose: every keystroke-driven QwenCloud case in this file is
+    // skipped when CI=true, so this is the only Ink-side guard that runs there.
+    // The module is imported under the default locale, so an eager VIEW_TITLES
+    // would still render 'Connect a Provider' after the switch to zh.
+    await setLanguageAsync('zh');
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { lastFrame, unmount } = renderAuthDialog(settings);
+    try {
+      expect(lastFrame()).toContain('连接服务商');
+    } finally {
+      unmount();
+      await setLanguageAsync('en');
+    }
+  });
+
+  itWhenTuiInputReliable(
+    'renders QwenCloud flow title in Chinese when locale is zh (T1)',
+    async () => {
+      await setLanguageAsync('zh');
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+      try {
+        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+        stdin.write('\r');
+        await waitForSelectedOption(lastFrame, 'Token Plan');
+        // The sub-menu heading comes from VIEW_TITLES, unlike the flowTitle path
+        // asserted below, so it is the assertion that pins render-time lookup.
+        expect(lastFrame()).toContain('千问AI平台 · 接入方式');
+        stdin.write('\r');
+
+        await vi.waitFor(
+          () => {
+            const frame = lastFrame();
+            expect(frame).toContain('千问AI平台');
+            expect(frame).not.toContain('QwenCloud · Step');
+          },
+          { timeout: WAIT_FOR_TIMEOUT },
+        );
+      } finally {
+        unmount();
+        await setLanguageAsync('en');
+      }
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'shows Token Plan and Standard API Key in QwenCloud sub-menu but not Coding Plan (T3+T4)',
+    async () => {
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+
+      await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+      stdin.write('\r');
+
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame();
+          expect(frame).toContain('Token Plan');
+          expect(frame).toContain('Standard API Key');
+          expect(frame).not.toContain('Coding Plan');
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );

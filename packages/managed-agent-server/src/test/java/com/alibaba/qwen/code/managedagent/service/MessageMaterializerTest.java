@@ -8,6 +8,7 @@ import org.springframework.dao.DataAccessResourceFailureException;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -314,6 +315,134 @@ class MessageMaterializerTest {
         assertThat(materializer.materializeNotified("tenant", "poison"))
                 .isFalse();
         verify(store, times(2)).materializeNextBatch("tenant", "poison",
+                200);
+    }
+
+    @Test
+    void aStuckProjectionSurfacesOnceAtTheCap() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        when(store.findMaterializationTargets(33))
+                .thenReturn(List.of(POISON));
+        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("gap"));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(MessageMaterializer.class);
+        ch.qos.logback.core.read.ListAppender<
+                ch.qos.logback.classic.spi.ILoggingEvent> logged =
+                        new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        logger.addAppender(logged);
+        try {
+            // Attempts land on streaks 0, 1, 2, 4, 8, 16, 32 and 64; the
+            // cap attempt (streak 64, pass 65) is the once-only surface,
+            // and the later due attempts (128, 192) must not repeat it.
+            for (int pass = 0; pass < 200; pass++) {
+                materializer.materialize();
+            }
+        } finally {
+            logger.detachAppender(logged);
+        }
+
+        var errors = logged.list.stream()
+                .filter(event -> event.getLevel()
+                        == ch.qos.logback.classic.Level.ERROR)
+                .toList();
+        // One line, no stack: the exponential phase already logged it seven
+        // times, so the escalation is the level, not another stack dump.
+        assertThat(errors).singleElement().satisfies(event -> {
+            assertThat(event.getFormattedMessage())
+                    .contains("projection is stuck");
+            assertThat(event.getThrowableProxy()).isNull();
+        });
+    }
+
+    // A saturated window is truncated: a session crowded out of this
+    // pass's target list is not "gone", so its backoff must survive the
+    // absence instead of restarting on its next appearance (review round
+    // 12, R12-1).
+    @Test
+    void aCrowdedOutFailingSessionKeepsItsBackoff() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        // Two alternating halves of a pool twice the window size: the
+        // poisoned session is absent every second pass while the window
+        // stays saturated throughout, so a prune-on-absence would reset
+        // its streak on every absence.
+        List<MaterializationTarget> pool = new ArrayList<>();
+        pool.add(POISON);
+        for (int i = 0; i < 65; i++) {
+            pool.add(new MaterializationTarget("tenant", "healthy-" + i));
+        }
+        AtomicInteger pass = new AtomicInteger();
+        when(store.findMaterializationTargets(33)).thenAnswer(
+                invocation -> {
+                    int from = pass.getAndIncrement() % 2 == 0 ? 0 : 33;
+                    return new ArrayList<>(pool.subList(from, from + 33));
+                });
+        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("gap"));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(MessageMaterializer.class);
+        ch.qos.logback.core.read.ListAppender<
+                ch.qos.logback.classic.spi.ILoggingEvent> logged =
+                        new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        logger.addAppender(logged);
+        try {
+            // 200 passes, 100 of them visible to the poisoned session.
+            for (int i = 0; i < 200; i++) {
+                materializer.materialize();
+            }
+        } finally {
+            logger.detachAppender(logged);
+        }
+
+        // The streak accumulates across the crowded-out passes, so the
+        // attempts land only on the exponential-gate streaks 0, 1, 2, 4, 8,
+        // 16, 32 and 64 of the 100 visible passes; a pruned streak would
+        // re-attempt on every appearance instead.
+        verify(store, times(8)).materializeNextBatch("tenant", "poison",
+                200);
+        // The once-only surface rides the same streak: it must reach the
+        // cap exactly once despite the absences (every saturated session
+        // surfaces once here, so the count is scoped to the poison one).
+        var errors = logged.list.stream()
+                .filter(event -> event.getLevel()
+                        == ch.qos.logback.classic.Level.ERROR)
+                .filter(event -> event.getFormattedMessage()
+                        .contains("poison"))
+                .toList();
+        assertThat(errors).singleElement().satisfies(event -> {
+            assertThat(event.getFormattedMessage())
+                    .contains("projection is stuck");
+            assertThat(event.getThrowableProxy()).isNull();
+        });
+    }
+
+    @Test
+    void aSessionThatLeavesTheTargetListLosesItsBackoff() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("gap"));
+        when(store.findMaterializationTargets(33))
+                .thenReturn(List.of(POISON))
+                .thenReturn(List.of(POISON))
+                .thenReturn(List.of(POISON))
+                .thenReturn(List.of())
+                .thenReturn(List.of(POISON));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+
+        // Three failures take the streak to 3, which is not a due streak;
+        // the pass with the session gone prunes its entry, so its return
+        // attempts immediately instead of skipping on the stale streak.
+        for (int pass = 0; pass < 5; pass++) {
+            materializer.materialize();
+        }
+
+        verify(store, times(4)).materializeNextBatch("tenant", "poison",
                 200);
     }
 }
