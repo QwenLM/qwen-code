@@ -334,25 +334,32 @@
                                  healthy wall-clock the FG7 sizing never
                                  covered, so a contended main runner killed
                                  the fork before any test reported (#14125).
-                                 A contended run now takes 1767 s before the
-                                 final crash class even starts; 2400 s leaves
-                                 that class its own bounded test time. The FG8
-                                 monitor/run fault gates
-                                 (HostedMonitorRunFaultGatesIT: seven cases
-                                 with real background processes and >16 MiB
-                                 captures) add ~310 s measured on the lane,
-                                 inside the same shared fork. The FG9
+                                 1800 s restores the 2× headroom. The FG8
+                                 monitor/run fault gates grew to five
+                                 letters / twenty-one cases with drain and
+                                 cancel choreography: on #14334's lane
+                                 (run 38848525079) the first three letters
+                                 finished by ~700 s into the fork, but the
+                                 1800 s budget still killed the fork JVM
+                                 before fg8d settled, so it doubles to
+                                 keep the same 2× headroom. The FG9
                                  session/relay fault gates
                                  (HostedSessionRelayFaultGatesIT: two
                                  letters measuring 166–175 s healthy
                                  locally on JDK 21 + MariaDB 10.11 across
                                  three acceptance runs, ~300 s budgeted
                                  at >1.7× the heaviest measured run)
-                                 then raise the healthy sum again. Add
-                                 their 300 s to the contended 1800 s healthy
-                                 reserve and retain one 600 s case ceiling,
-                                 so the shared fork moves 2400→2700. -->
-                            <forkedProcessTimeoutInSeconds>2700</forkedProcessTimeoutInSeconds>
+                                 then raise the healthy sum again — the
+                                 lane-measured 3600 s fork already covers
+                                 them: one 600 s ceiling plus the
+                                 re-derived healthy runtime still fits
+                                 with headroom. Its slice 2 (FG9d, FG9e)
+                                 brings the class to four letters
+                                 measuring 308–314 s healthy locally on
+                                 JDK 21 + MySQL 8.4 (~534 s budgeted at
+                                 the same 1.7×), which the same fork
+                                 still covers. -->
+                            <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -434,11 +441,15 @@
                 <configuration>
                     <includes><include>**/HostedMonitorRun*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <!-- The class's two letters are independent fixtures
-                         sharing one fork: each letter's @Timeout ceiling
-                         (600 s) plus the healthy runtime must fit, the
-                         per-ceiling relation the CI profile pins. -->
-                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                    <!-- The class's five letters (fg8e/fg8f/fg8a/fg8b/fg8d)
+                         are independent fixtures sharing one fork: each
+                         letter's @Timeout ceiling (600 s) plus the healthy
+                         runtime must fit, the per-ceiling relation the CI
+                         profile pins. Fork measured on the lane (run
+                         38848525079): four letters finished green by
+                         ~700 s, the budget still cut fg8d mid-choreography
+                         at exactly 1800 s — 3600 s keeps the 2× headroom. -->
+                    <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
@@ -455,7 +466,7 @@
                     <!-- The FG9 letters are independent fixtures sharing
                          one fork — each letter boots its own Spring,
                          Harness, and proxies on its own tenant prefix,
-                         so a stall in one letter leaves the other
+                         so a stall in one letter leaves the others
                          running — like the FG8 letters' shape. The
                          per-ceiling relation is pinned against the
                          hosted-harness-mysql lane's fork budget (the
