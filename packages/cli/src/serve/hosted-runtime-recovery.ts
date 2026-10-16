@@ -490,10 +490,7 @@ export async function stopParkedRuntimeExecutions(input: {
       unobserved.add(item.executionCallId);
       throw cause;
     }
-    if (before?.state === 'unknown') {
-      unobserved.add(item.executionCallId);
-      throw new Error('Runtime execution outcome is unknown.');
-    }
+    if (before?.state === 'unknown') unobserved.add(item.executionCallId);
     if (before?.state === 'abandoned') {
       unobserved.add(item.executionCallId);
       continue;

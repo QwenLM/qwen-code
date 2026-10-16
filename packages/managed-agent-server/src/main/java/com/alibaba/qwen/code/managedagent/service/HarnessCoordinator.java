@@ -377,6 +377,12 @@ public class HarnessCoordinator {
                     claimed.sessionId(), claimed.turnId(), owner);
             return true;
         }
+        if ("CANCELLING".equals(claimed.status())
+                && claimed.harnessEventEpoch() == null
+                && store.cancelUnadmittedTurn(claimed.tenantId(),
+                        claimed.sessionId(), claimed.turnId(), owner)) {
+            return true;
+        }
         boolean recoveringCancellation =
                 "CANCELLING".equals(claimed.status());
         if (!recoveringCancellation) {
@@ -395,7 +401,8 @@ public class HarnessCoordinator {
         }
         HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
         if (runtimeRecovery != null
-                && runtimeRecovery.hasUnknownOutcome()) {
+                && runtimeRecovery.hasUnknownOutcome()
+                && !recoveringCancellation) {
             return fail(claimed, "managed_runtime_recovery_blocked",
                     "A prior tool execution has an unknown outcome; the"
                             + " Session was blocked without replaying it.");
@@ -407,7 +414,9 @@ public class HarnessCoordinator {
             if (recoveringCancellation
                     ? !runtimeRecovery.isCancellationReady()
                     : !runtimeRecovery.isContinuationReady()) {
-                return fail(claimed, "managed_runtime_recovery_incomplete",
+                return fail(claimed, runtimeRecovery.hasUnknownOutcome()
+                                ? "managed_runtime_recovery_blocked"
+                                : "managed_runtime_recovery_incomplete",
                         "A prior tool execution is not ready for safe"
                                 + (recoveringCancellation
                                         ? " cancellation."
@@ -1048,29 +1057,54 @@ public class HarnessCoordinator {
     // refused while another Turn is live (R6-3). The row is re-read rather
     // than trusted from the claim-time record: the admission the mark
     // precedes may have landed after the claim (R4-1).
-    private void cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn) {
+    private boolean cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn) {
         try {
             TurnRecord current = store.findTurn(turn.tenantId(),
                     turn.sessionId(), turn.turnId()).orElse(null);
-            if (current == null || current.harnessEventEpoch() == null) {
-                return;
+            if (current == null) {
+                return true;
+            }
+            if (current.harnessEventEpoch() == null) {
+                // A lost admission response does not prove the native input idle.
+                // Keep the cancellation entry until recovery can prove ownership.
+                return false;
             }
             SessionRecord session = store.requireSession(turn.tenantId(),
                     turn.sessionId());
             if (session.workspace() != null
                     && !harness.isWorkspaceFilesAvailable()) {
-                return;
+                return false;
             }
             if (session.harnessBootId() != null
                     && store.bindHarness(turn.tenantId(), turn.sessionId(),
                             turn.turnId(), owner, session.harnessBootId())) {
-                harness.cancel(session.tenantId(), session.sessionId());
+                try {
+                    harness.cancel(session.tenantId(), session.sessionId());
+                } catch (DaemonHttpException parked) {
+                    if (parked.getStatusCode() != 409
+                            || !"hosted_turn_recovery_required".equals(parked.getErrorCode())) {
+                        throw parked;
+                    }
+                    Attachment takeover = harness.recoverManagedCancellation(
+                            session.tenantId(), session.sessionId());
+                    HarnessRuntimeRecovery recovery = takeover.runtimeRecovery();
+                    if (recovery != null) {
+                        if (!recovery.isCancellationReady()) {
+                            return false;
+                        }
+                        harness.cancelManagedRuntime(session.tenantId(), session.sessionId(),
+                                current.promptId(), recovery.getCheckpointId(), recovery.getActivationId());
+                    }
+                }
+                return true;
             }
+            return false;
         } catch (RuntimeException error) {
             LOG.warn("Managed Turn post-admission cancel failed tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
                     error.getClass().getSimpleName());
+            return false;
         }
     }
 
@@ -1094,7 +1128,11 @@ public class HarnessCoordinator {
         TurnRecord current = store.findTurn(turn.tenantId(),
                 turn.sessionId(), turn.turnId()).orElse(turn);
         if (current.submissionAttempted()) {
-            cancelAdmittedTurnBeforeTerminalFail(current);
+            boolean reconciled = cancelAdmittedTurnBeforeTerminalFail(current);
+            if (!reconciled && "managed_runtime_recovery_blocked".equals(code)) {
+                return transientFailure(current, true,
+                        new IllegalStateException("Recovery cancellation remains unsettled"), true);
+            }
         }
         store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
                 owner, code, message);
@@ -1106,11 +1144,15 @@ public class HarnessCoordinator {
     // actual cause.
     private boolean failTerminally(TurnRecord turn, String code,
             String message, RuntimeException error) {
+        boolean terminal = fail(turn, code, message);
+        if (!terminal) {
+            return false;
+        }
         LOG.warn("Managed Turn failed terminally tenant={} session={}"
                         + " turn={} code={} message={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(), code,
                 message, error);
-        return fail(turn, code, message);
+        return true;
     }
 
     private boolean transientFailure(TurnRecord turn,

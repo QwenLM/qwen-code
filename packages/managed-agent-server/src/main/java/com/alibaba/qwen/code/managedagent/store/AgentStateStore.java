@@ -634,6 +634,9 @@ public interface AgentStateStore {
     boolean withdrawSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner);
 
+    boolean cancelUnadmittedTurn(String tenantId, String sessionId,
+            String turnId, String owner);
+
     void recordAdmission(String tenantId, String sessionId, String turnId,
             String owner, String eventEpoch, long lastEventId);
 

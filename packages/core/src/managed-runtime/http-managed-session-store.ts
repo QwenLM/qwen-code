@@ -407,8 +407,14 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     return this.client.readJournal(options.maxBytes);
   }
 
-  appendTransaction(records: readonly unknown[]): Promise<void> {
-    return this.client.appendTransaction(records);
+  async appendTransaction(records: readonly unknown[]): Promise<void> {
+    try {
+      await this.client.appendTransaction(records);
+    } catch (error) {
+      if (!(error instanceof ManagedSessionCommitRejectedError))
+        this.client.stopWriterRenewal();
+      throw error;
+    }
   }
 
   blockRecovery(request: {
@@ -609,6 +615,7 @@ class ManagedSessionStoreHttpClient {
   private renewPromise: Promise<void> | undefined;
   private renewingAuthority?: ManagedSessionLifecycleAuthority;
   private renewTimer: NodeJS.Timeout | undefined;
+  private renewalStopped = false;
   private sealed = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
 
@@ -891,7 +898,7 @@ class ManagedSessionStoreHttpClient {
     // cannot each spend a fresh requestTimeoutMs behind one held tenant
     // guard (#13800).
     const contentionDeadline = Date.now() + this.requestTimeoutMs;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; ; attempt++) {
       try {
         committed =
           publicationId === undefined
@@ -946,8 +953,27 @@ class ManagedSessionStoreHttpClient {
         const contentionSpent =
           error instanceof ManagedSessionStoreHttpError &&
           error.contentionExhausted === true;
-        if (!uncertain || attempt === 2 || contentionSpent) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        const exhausted = attempt >= 2;
+        if (
+          !uncertain ||
+          contentionSpent ||
+          (exhausted &&
+            (descriptor.operation !== 'renewActivation' ||
+              this.renewalStopped ||
+              grant.leaseUntil <= Date.now()))
+        )
+          throw error;
+        await new Promise((resolve) =>
+          setTimeout(
+            resolve,
+            exhausted ? Math.min(1000, grant.leaseUntil - Date.now()) : 250,
+          ),
+        );
+        if (
+          exhausted &&
+          (this.renewalStopped || grant.leaseUntil <= Date.now())
+        )
+          throw error;
       }
     }
     const receipt = asRecord(committed, 'commit receipt');
@@ -980,7 +1006,7 @@ class ManagedSessionStoreHttpClient {
       throw corrupt('commit receipt does not match the submitted transaction.');
     }
     this.grant = {
-      ...grant,
+      ...this.requireGrant(),
       journalRevision: revision,
       committedSequence: descriptor.lastSequence,
       lastCommitDigest: descriptor.commitDigest,
@@ -1220,7 +1246,7 @@ class ManagedSessionStoreHttpClient {
   async seal(): Promise<void> {
     if (this.sealed) return;
     const grant = this.grant;
-    this.stopRenewal();
+    this.stopWriterRenewal();
     if (grant === undefined) {
       this.sealed = true;
       this.resources.clear();
@@ -1244,6 +1270,11 @@ class ManagedSessionStoreHttpClient {
     this.sealed = true;
     this.stopRenewal();
     this.resources.clear();
+  }
+
+  stopWriterRenewal(): void {
+    this.renewalStopped = true;
+    this.stopRenewal();
   }
 
   private async ensureWriter(): Promise<void> {
@@ -1293,18 +1324,32 @@ class ManagedSessionStoreHttpClient {
     return this.renewPromise;
   }
 
-  private scheduleRenewal(): void {
+  private scheduleRenewal(retrying = false): void {
     this.stopRenewal();
-    if (this.sealed || this.grant === undefined) return;
+    if (
+      this.renewalStopped ||
+      this.sealed ||
+      this.grant === undefined ||
+      this.grant.leaseUntil <= Date.now()
+    )
+      return;
     const delay = Math.max(
       250,
       Math.min(
-        Math.floor(this.leaseDurationMs / 2),
+        retrying ? 1000 : Math.floor(this.leaseDurationMs / 2),
         this.grant.leaseUntil - Date.now() - 500,
       ),
     );
     this.renewTimer = setTimeout(() => {
-      void this.renewWriter().catch(() => undefined);
+      void this.renewWriter().catch((error: unknown) => {
+        if (
+          error instanceof ManagedSessionStoreTransportError ||
+          (error instanceof ManagedSessionStoreHttpError &&
+            [500, 502, 503, 504].includes(error.status))
+        ) {
+          this.scheduleRenewal(true);
+        }
+      });
     }, delay);
     this.renewTimer.unref();
   }

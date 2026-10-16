@@ -312,6 +312,8 @@ class WorkspaceCsiSessionMainTest {
 
     @Test
     void oldWorkspaceCreationDoesNotAcquireTheNewProfileOrRequestPin() {
+        WorkspaceTestStorage.register(jdbc, "tenant", "legacy-local-storage");
+        jdbc.update("UPDATE ma_workspace SET storage_id = 'legacy-local-storage'");
         var legacy = new TransactionTemplate(manager).execute(status -> store().insertWorkspaceSessionCommand("tenant",
                 "actor", "old", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
                 new WorkspaceSelection("workspace", ".")));

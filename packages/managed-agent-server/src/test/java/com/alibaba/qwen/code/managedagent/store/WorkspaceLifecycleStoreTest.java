@@ -620,6 +620,89 @@ class WorkspaceLifecycleStoreTest {
         return new Fixture();
     }
 
+    @Test
+    void terminalPublicTurnWithoutJournalSettlementStillBlocksClose() {
+        var fixture = fixture();
+        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
+                "original-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
+        fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
+                "dispatch-owner", Duration.ofMinutes(1)));
+        fixture.transactions.executeWithoutResult(ignored -> fixture.store.failTurn("tenant", fixture.session, turn,
+                "dispatch-owner", "managed_runtime_recovery_blocked", "shell_in_flight"));
+        assertThat(fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().status()).isEqualTo("FAILED");
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE record_kind = 'ACTION'"
+                + " AND state = 'requested'", Integer.class)).isZero();
+
+        var journal = new ExtensionRecordJournal(new ManagedSessionStore(fixture.jdbc), "tenant", "workspace", fixture.session);
+        fixture.transactions.executeWithoutResult(ignored -> journal.open());
+        var accepted = fixture.json.createObjectNode();
+        accepted.putObject("managedSession").put("kind", "input.accepted").putObject("payload")
+                .put("turnId", turn).put("source", "user");
+        // Seed only the native journal projection, as the existing queued-input gate test does.
+        // No native turn.settled has landed merely because the public projection failed.
+        fixture.jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?",
+                (accepted + "\n").getBytes(StandardCharsets.UTF_8));
+
+        var cancel = fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
+                "cancel-failed-turn", "digest", fixture.session, turn, "owner"));
+        assertThat(cancel.commandEffect()).isFalse();
+        assertThatThrownBy(() -> fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant",
+                fixture.session, OperationKind.CLOSE, "owner", "a".repeat(64), "close-failed-turn", "digest", true, 1)))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isZero();
+        assertThat(fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().status()).isEqualTo("FAILED");
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"expired-idle", "sealed-idle", "live-idle",
+            "expired-pending", "expired-settled", "expired-other-settled", "expired-compacted", "missing-head", "stale-dispatch", "admitted"})
+    void unacknowledgedCancellationRequiresFencedWriterAndIdleJournal(String cut) {
+        var fixture = fixture();
+        var journal = new ExtensionRecordJournal(new ManagedSessionStore(fixture.jdbc), "tenant", "workspace", fixture.session);
+        fixture.transactions.executeWithoutResult(ignored -> journal.open());
+        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
+                "ambiguous-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
+        fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
+                "dispatch-owner", Duration.ofMinutes(1)));
+        fixture.transactions.executeWithoutResult(ignored -> fixture.store.markSubmissionAttempted("tenant", fixture.session,
+                turn, "dispatch-owner"));
+        fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
+                "cancel-ambiguous", "digest", fixture.session, turn, "owner"));
+        if (!"live-idle".equals(cut)) {
+            fixture.jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0");
+        }
+        switch (cut) {
+            case "sealed-idle" -> fixture.jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");
+            case "expired-pending", "expired-settled", "expired-other-settled" -> {
+                String prompt = "expired-other-settled".equals(cut) ? "other-prompt"
+                        : fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().promptId();
+                var accepted = fixture.json.createObjectNode();
+                accepted.putObject("managedSession").put("kind", "input.accepted").putObject("payload")
+                        .put("turnId", prompt)
+                        .put("source", "user");
+                var settled = fixture.json.createObjectNode();
+                settled.putObject("managedSession").put("kind", "turn.settled").putObject("payload")
+                        .put("turnId", prompt).put("outcome", "completed");
+                String records = accepted + "\n" + (!"expired-pending".equals(cut) ? settled + "\n" : "");
+                fixture.jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?",
+                        records.getBytes(StandardCharsets.UTF_8));
+            }
+            case "expired-compacted" -> fixture.jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 1");
+            case "missing-head" -> fixture.jdbc.update("DELETE FROM ma_session_head");
+            case "stale-dispatch" -> fixture.jdbc.update("UPDATE ma_turn SET dispatch_lease_until = 0");
+            case "admitted" -> fixture.jdbc.update("UPDATE ma_turn SET harness_event_epoch = 'old-epoch'");
+            default -> assertThat(cut).isIn("expired-idle", "live-idle");
+        }
+        boolean expected = List.of("expired-idle", "sealed-idle", "expired-other-settled").contains(cut);
+        assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.cancelUnadmittedTurn("tenant",
+                fixture.session, turn, "dispatch-owner"))).isEqualTo(expected);
+        var result = fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow();
+        assertThat(result.status()).isEqualTo(expected ? "CANCELLED" : "CANCELLING");
+        assertThat(result.submissionAttempted()).isEqualTo(!expected);
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE event_type = 'turn.cancelled'",
+                Integer.class)).isEqualTo(expected ? 1 : 0);
+    }
+
     static final class Fixture {
         final JdbcTemplate jdbc;
         final ObjectMapper json = new ObjectMapper();
