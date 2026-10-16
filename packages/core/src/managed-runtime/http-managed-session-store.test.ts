@@ -833,6 +833,120 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('restarts a publication commit refused once near the contention deadline', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const requests: Array<Record<string, unknown>> = [];
+    let outcomeRef: ManagedSessionDurableRef;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      requestTimeoutMs: 1_200,
+      fetchFn: async (input, init) => {
+        if (!new URL(requestUrl(input)).pathname.endsWith('/receipts/commit'))
+          return server.fetch(input, init);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        requests.push(body);
+        // The first refusal lands ~200 ms before the shared budget ends.
+        // A gate that infers the spend from wall-clock time alone throws
+        // here and the second fetch never happens (#13800 R2-2).
+        if (requests.length === 1)
+          return new Promise<Response>((resolve) => {
+            setTimeout(
+              () =>
+                resolve(
+                  jsonResponse(
+                    {
+                      error: {
+                        code: 'tenant_guard_contended',
+                        message: 'held',
+                      },
+                    },
+                    503,
+                  ),
+                ),
+              1_000,
+            );
+          });
+        const committed = await server.fetch(
+          `http://127.0.0.1:8080/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
+          init,
+        );
+        return jsonResponse({
+          ...(await committed.json()),
+          historyRevision: body['lastSequence'],
+          toolOutcomeRef: outcomeRef,
+        });
+      },
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{}'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{}'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+    });
+    try {
+      outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}'),
+      );
+      stores.publication.rememberAdmission('publication-a', outcomeRef);
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-a',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:a',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-a',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'recordToolResult',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await session.close();
+    }
+  });
+
   it.each([
     'uncommitted-503',
     'lost-commit-response',
@@ -3481,6 +3595,54 @@ describe('HTTP Managed Session store', () => {
     expect(elapsedMs).toBeGreaterThanOrEqual(1_000);
     expect(elapsedMs).toBeLessThan(1_600);
     expect(attempts).toBe(2);
+    await session.close().catch(() => undefined);
+  });
+
+  it('names a budget-closing slow guard after its earlier contended refusal', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server, 1_200);
+    const defaultImpl = server.fetch.getMockImplementation()!;
+    // The first attempt answers contended inside the window; the second
+    // outlives the shared deadline and is aborted, so the terminal error
+    // used to arrive as a transport failure that renamed the guard
+    // contention an unavailable store (#13800 R1-7).
+    server.fetch.mockImplementation(async (input, init) => {
+      if (requestUrl(input).endsWith('/transactions:commit')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'message.commit') {
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              resolve(
+                jsonResponse(
+                  {
+                    error: { code: 'tenant_guard_contended', message: 'held' },
+                  },
+                  503,
+                ),
+              );
+            }, 500);
+            const signal = init?.signal;
+            signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(signal.reason as Error);
+            });
+          });
+        }
+      }
+      return defaultImpl(input, init);
+    });
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      MESSAGE_BODY,
+    );
+    const rejection = appendMessage(session, 1, messageRef);
+    await expect(rejection).rejects.toMatchObject({
+      status: 503,
+      remoteCode: 'tenant_guard_contended',
+    });
+    await expect(rejection).rejects.not.toThrow(
+      ManagedSessionStoreTransportError,
+    );
     await session.close().catch(() => undefined);
   });
 
