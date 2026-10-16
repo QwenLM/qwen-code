@@ -8,7 +8,10 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
-import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
+import {
+  DASHSCOPE_REGIONAL_HOSTS,
+  QWENCLOUD_MAAS_HOSTS,
+} from '../core/openaiContentGenerator/provider/dashscope.js';
 import { getDefaultApiKeyEnvVar } from '../models/modelConfigErrors.js';
 import {
   ALL_PROVIDERS,
@@ -174,10 +177,12 @@ export type WebSearchGateResult =
  * DashScope-compatible endpoint check for the search side channel. Accepts
  * the official DashScope regional hosts (the Standard preset regions,
  * including `dashscope-us`), Bailian Token Plan / workspace MaaS endpoints,
- * and internal Alibaba gateways. This overlaps, but is neither a subset nor a
- * superset of, the content provider's DashScope detection: it rejects generic
- * Alibaba Cloud API Gateway and proxy endpoints, but accepts all concrete
- * `*.maas.aliyuncs.com` endpoints for the Responses search side channel.
+ * QwenCloud MaaS hosts (QWENCLOUD_MAAS_HOSTS), and internal Alibaba
+ * gateways. This overlaps, but is neither a subset nor a superset of, the
+ * content provider's DashScope detection: it rejects generic Alibaba Cloud
+ * API Gateway and proxy endpoints, but accepts all concrete
+ * `*.maas.aliyuncs.com` and QwenCloud MaaS endpoints for the Responses
+ * search side channel.
  * This only catches obvious misconfiguration; a host that does not serve the
  * Responses API fails loudly on first use.
  */
@@ -203,6 +208,7 @@ function classifyDashScopeBaseUrl(
   const hostname = url.hostname.toLowerCase();
   const suffixes = [
     ...DASHSCOPE_REGIONAL_HOSTS,
+    ...QWENCLOUD_MAAS_HOSTS,
     'maas.aliyuncs.com',
     'alibaba-inc.com',
     'aliyun-inc.com',
