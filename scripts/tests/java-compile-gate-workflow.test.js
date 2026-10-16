@@ -34,9 +34,11 @@ describe('Java compile gate workflow', () => {
   ];
 
   it('runs on the pull request and on the push to main', () => {
-    // The pull-request arm stops the merge; the push arm is what makes a
-    // broken `main` attributable to the commit that caused it. Dropping
-    // either one reopens the gap #14381 describes.
+    // Neither arm blocks a merge on its own — the `main` ruleset carries no
+    // required status check — so the pull-request arm is the pre-merge
+    // signal a reviewer reads, and the push arm is what makes a broken
+    // `main` attributable to the commit that caused it. Dropping either one
+    // reopens the gap #14381 describes.
     expect(Object.keys(yml.on).sort()).toEqual([
       'pull_request',
       'push',
@@ -87,17 +89,30 @@ describe('Java compile gate workflow', () => {
     expect(jobs.compile['runs-on']).toBe('ubuntu-latest');
   });
 
+  it('checks out the tree without persisting credentials', () => {
+    // The pull-request arm executes the contributed pom's build plugins, so
+    // the token must not land in .git/config for them to read. The actions
+    // stay pinned to full SHAs — a repointed mutable tag would run under the
+    // same trust as this workflow's own code.
+    const checkout = step('Checkout');
+    expect(checkout.uses).toMatch(/^actions\/checkout@[0-9a-f]{40}$/);
+    expect(checkout.with['persist-credentials']).toBe(false);
+  });
+
   it('uses the JDK 21 toolchain the server module builds for', () => {
     // managed-agent-server targets release 21; the Maven cache is what keeps
     // this gate at minutes rather than a cold resolve on every Java pull
     // request.
     const setup = step('Set up Java 21');
-    expect(setup.uses).toContain('actions/setup-java@');
+    expect(setup.uses).toMatch(/^actions\/setup-java@[0-9a-f]{40}$/);
     expect(setup.with.distribution).toBe('temurin');
     expect(setup.with['java-version']).toBe('21');
     expect(setup.with.cache).toBe('maven');
-    expect(setup.with['cache-dependency-path']).toContain(
-      'packages/managed-agent-server/pom.xml',
+    // The whole path list is the cache key: dropping a pom line rotates no
+    // key when that pom's dependencies change, so their downloads are
+    // re-fetched on every run until an unrelated edit rotates it.
+    expect(setup.with['cache-dependency-path'].trim()).toBe(
+      'packages/sdk-java/qwencode/pom.xml\npackages/managed-agent-server/pom.xml',
     );
   });
 

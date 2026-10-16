@@ -21,6 +21,11 @@ name: 'Java Compile Gate'
 # build consumes it, and the path filter below matches the job's scope so a
 # client-only change does not collect a green verdict over sources no step
 # reads.
+#
+# Neither arm blocks a merge on its own — the `main` ruleset carries no
+# required status check — so the pull-request arm is the pre-merge signal a
+# reviewer reads, and the push arm plus the failure watcher is what makes a
+# broken `main` attributable to the commit that caused it.
 
 on:
   pull_request:

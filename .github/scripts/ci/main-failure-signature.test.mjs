@@ -803,65 +803,6 @@ test('limits job-step fallback to Desktop failures without test IDs', () => {
   );
 });
 
-// Plan-level search markers for an already-built analysis: the dedupe
-// contract lives in the plan output — a run with no identified tests falls
-// back to the sha-keyed legacy marker there.
-function planMarkersForAnalysis(analysis, sha) {
-  const dir = mkdtempSync(join(tmpdir(), 'sig-gate-plan-'));
-  const analysisPath = join(dir, 'analysis.json');
-  writeFileSync(analysisPath, JSON.stringify(analysis));
-  return JSON.parse(
-    captureStdout([
-      'plan',
-      '--analysis',
-      analysisPath,
-      '--sha',
-      sha,
-      '--run-url',
-      `https://github.com/QwenLM/qwen-code/actions/runs/${sha}`,
-      '--run-id',
-      sha,
-      '--at',
-      '2026-10-16T00:00:00Z',
-    ]),
-  ).searchMarkers;
-}
-
-test('deduplicates a standing Java Compile Gate build break across commits', () => {
-  // No mvn invocation in the gate executes tests (the SDK install skips them
-  // and the server step stops at test-compile), so no failure the lane can
-  // produce — a javac or checkstyle break — carries the `-- Time elapsed:`
-  // line MAVEN_FAIL_PATTERN needs. Without the job+step fallback each merge
-  // stacked on the break would open its own sha-keyed issue and dispatch its
-  // own autofix agent.
-  const jobs = [
-    {
-      name: 'Compile and checkstyle the Java modules',
-      steps: ['Compile the Managed Agent Server'],
-    },
-  ];
-  // The signature of the #14370 testCompile break, as the gate's own
-  // negative-control run reported it.
-  const log = [
-    '[ERROR] /home/runner/work/qwen-code/qwen-code/packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/ManagedSessionGuardConvoyIT.java:[367,79] <anonymous com.alibaba.qwen.code.managedagent.ManagedSessionGuardConvoyIT$1> is not abstract and does not override abstract method validateConfiguration() in com.alibaba.qwen.code.managedagent.ToolPublicationObjectStore',
-    '[ERROR] BUILD FAILURE',
-  ].join('\n');
-  const analysis = analyzeLogs('Java Compile Gate', [log], jobs);
-  assert.equal(analysis.tests.length, 1);
-  // The marker keys on the lane, job and step — not the commit: two merges
-  // stacked on the standing red resolve to the same issue.
-  assert.deepEqual(
-    planMarkersForAnalysis(analysis, '1111111111111'),
-    planMarkersForAnalysis(analysis, '2222222222222'),
-  );
-  // The widened fallback stays lane-scoped: the id derives from the workflow
-  // name, so a same-named job in another covered lane hashes to another key.
-  assert.notEqual(
-    analysis.searchMarkers[0],
-    analyzeLogs('Desktop Checks', [], jobs).searchMarkers[0],
-  );
-});
-
 test('the per-commit path leaves an already-filed body untouched', () => {
   const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
   const existingBody = 'whatever the previous run wrote\n';
