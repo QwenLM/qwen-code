@@ -34,7 +34,11 @@ watching remain disabled.
 
 Successful synchronous `SessionStart` and `FileChanged` outputs can return absolute files
 or directories in `hookSpecificOutput.watchPaths`. Directories are watched
-recursively, including future children. The last valid, explicitly supplied
+recursively, including future children. Discovery observes the nearest existing
+parent directory so deeply missing paths and deleted/recreated roots can appear
+later. Only requested files and directory descendants produce notifications;
+unrelated subdirectories are excluded before traversal. Discovery may enumerate
+entries in an existing ancestor directory. The last valid, explicitly supplied
 list in hook execution order replaces the previous dynamic list; an empty list
 clears it, and an omitted or invalid list leaves it unchanged. Static paths
 remain registered. Async hook output does not register paths.
@@ -66,8 +70,8 @@ host filesystem watcher. A remote absolute path must never be interpreted as a
 host path. Supporting hosted runtimes requires a separate design at the actual
 filesystem owner. This feature introduces no daemon route or memory API.
 
-ACP workspace/bootstrap initialization loads the hook registry with file watching
-disabled; actual session configs own their subscriptions. Session hook manager
+ACP workspace/bootstrap and MCP reconnect initialization load the hook registry
+with file watching disabled; actual session configs own their subscriptions. Session hook manager
 mutations, including skill registration and removal, refresh the listening
 session’s static roots without a reload.
 
@@ -76,7 +80,10 @@ filtered through the current trusted registry. Shutdown stops intake, aborts
 running hook commands, discards queued notifications, and releases the watcher.
 Session rotation discards the outgoing dynamic roots and queued events, then
 rebinds static roots to the new listening session before its first turn. A late
-outgoing SessionEnd completion must not stop the replacement watcher.
+outgoing SessionEnd completion must not stop the replacement watcher. Reload
+or skill registration after rotation can establish current-session ownership even
+when no SessionStart hook ran. Ended sessions remain disarmed until a new
+session or an explicit SessionStart; initialization opt-outs remain effective.
 Derived configs do not own a second watcher. Failure to watch or execute a hook
 is logged without changing the originating file operation.
 
@@ -97,11 +104,14 @@ is logged without changing the originating file operation.
 ## Validation and acceptance criteria
 
 Package tests and a real hook-runner probe must verify static filename events,
-dynamic directories outside cwd, future nested files, add/change/unlink,
+dynamic directories outside cwd, deeply missing paths, root deletion/recreation,
+future nested files, add/change/unlink,
 replacement of dynamic roots while retaining static roots, invalid output,
 initial-scan suppression, listener-session ownership, session rotation, failure isolation,
 reload/disable, and shutdown with queued work. Remote and managed configs must
-not start a local watcher. Existing SessionStart additional context must still
+not start a local watcher. MCP reconnect must opt out, and late registration
+after a rotation without SessionStart must rebind only to the current session.
+Existing SessionStart additional context must still
 work when another hook returns watchPaths.
 
 Run build, typecheck, bundle, focused hook/config/schema tests, and the isolated

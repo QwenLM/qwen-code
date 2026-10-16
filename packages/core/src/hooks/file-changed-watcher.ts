@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { watch, type FSWatcher } from 'chokidar';
 import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -20,6 +20,26 @@ function isWithin(root: string, filePath: string): boolean {
     !relative.startsWith(`..${path.sep}`) &&
     !path.isAbsolute(relative)
   );
+}
+
+function discoveryRoot(filePath: string): string | undefined {
+  let directory = path.dirname(filePath);
+  while (true) {
+    try {
+      return statSync(directory).isDirectory() ? directory : undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        debugLogger.warn(
+          `Could not inspect watch directory ${directory}:`,
+          error,
+        );
+        return undefined;
+      }
+      const parent = path.dirname(directory);
+      if (parent === directory) return undefined;
+      directory = parent;
+    }
+  }
 }
 
 export class FileChangedWatcher {
@@ -53,15 +73,6 @@ export class FileChangedWatcher {
       .sort();
     const staticSet = new Set(files);
     const dynamic = next.filter((root) => !staticSet.has(root));
-    // Chokidar misses sibling absent files when each is registered directly.
-    const watchRoots = [
-      ...new Set([
-        ...dynamic.map((root) =>
-          existsSync(root) ? root : path.dirname(root),
-        ),
-        ...files.map((file) => path.dirname(file)),
-      ]),
-    ];
     this.reconfiguration = this.reconfiguration.then(async () => {
       if (
         this.lifetime.signal.aborted ||
@@ -81,13 +92,21 @@ export class FileChangedWatcher {
       this.staticFiles = files;
       if (next.length === 0) return;
       try {
+        // Observe surviving ancestors so missing or replaced roots can reappear.
+        const anchors = next.map(discoveryRoot);
+        if (anchors.some((root) => root === undefined)) this.paths = [];
+        const watchRoots = [
+          ...new Set(anchors.filter((root) => root !== undefined)),
+        ];
+        if (watchRoots.length === 0) return;
         const watcher = watch(watchRoots, {
           ignoreInitial: true,
           ignored: (candidate, stats) => {
             const file = path.resolve(candidate);
             if (dynamic.some((root) => isWithin(root, file))) return false;
             if (staticSet.has(file)) return stats?.isDirectory() ?? false;
-            return !watchRoots.some((root) => isWithin(file, root));
+            // Only ancestors of requested paths may lead discovery downward.
+            return !next.some((root) => isWithin(file, root));
           },
           followSymlinks: false,
           awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
@@ -104,7 +123,13 @@ export class FileChangedWatcher {
               ) {
                 return;
               }
-              this.changes.push({ filePath: path.resolve(filePath), event });
+              const resolved = path.resolve(filePath);
+              if (
+                !staticSet.has(resolved) &&
+                !dynamic.some((root) => isWithin(root, resolved))
+              )
+                return;
+              this.changes.push({ filePath: resolved, event });
               this.drain();
             })
             .on('error', (error) => {

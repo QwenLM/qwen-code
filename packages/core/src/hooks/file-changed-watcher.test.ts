@@ -185,6 +185,81 @@ describe('FileChangedWatcher with real files', () => {
     );
   });
 
+  it('discovers a dynamic root with multiple missing ancestors', async () => {
+    const directory = path.join(root, 'first', 'second', 'third', 'memory');
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([directory]);
+    await fs.mkdir(directory, { recursive: true });
+    const file = path.join(directory, 'topic.md');
+    await fs.writeFile(file, 'new memory');
+    await vi.waitFor(
+      () =>
+        expect(notify).toHaveBeenCalledWith(
+          file,
+          'add',
+          expect.any(AbortSignal),
+        ),
+      waitOptions,
+    );
+  });
+
+  it('retries a path whose discovery parent was not a directory', async () => {
+    const parent = path.join(root, 'blocked');
+    await fs.writeFile(parent, 'not a directory');
+    const directory = path.join(parent, 'memory');
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([directory]);
+    await fs.unlink(parent);
+    await fs.mkdir(directory, { recursive: true });
+    await watcher.setPaths([directory]);
+    const file = path.join(directory, 'topic.md');
+    await fs.writeFile(file, 'retry');
+    await vi.waitFor(
+      () =>
+        expect(notify).toHaveBeenCalledWith(
+          file,
+          'add',
+          expect.any(AbortSignal),
+        ),
+      waitOptions,
+    );
+  });
+
+  it('continues observing a root deleted and recreated after a gap', async () => {
+    const directory = path.join(root, 'memory');
+    await fs.mkdir(directory);
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([directory]);
+    const before = path.join(directory, 'before.md');
+    await fs.writeFile(before, 'before');
+    await vi.waitFor(
+      () =>
+        expect(notify).toHaveBeenCalledWith(
+          before,
+          'add',
+          expect.any(AbortSignal),
+        ),
+      waitOptions,
+    );
+    await fs.rm(directory, { recursive: true });
+    await delay(200);
+    await fs.mkdir(directory);
+    const after = path.join(directory, 'after.md');
+    await fs.writeFile(after, 'after');
+    await vi.waitFor(
+      () =>
+        expect(notify).toHaveBeenCalledWith(
+          after,
+          'add',
+          expect.any(AbortSignal),
+        ),
+      waitOptions,
+    );
+  });
+
   it('continues delivering after a callback failure', async () => {
     const notify = vi
       .fn()

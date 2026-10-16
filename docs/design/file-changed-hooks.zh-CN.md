@@ -26,7 +26,9 @@
 配置仍保持禁用。
 
 执行成功的同步 `SessionStart` 和 `FileChanged` 输出可通过 `hookSpecificOutput.watchPaths`
-提供绝对文件或目录路径。目录递归监听，包括未来新增的子文件。按 hook 执行顺序，
+提供绝对文件或目录路径。目录递归监听，包括未来新增的子文件。发现过程监听最近的
+已存在父目录，使多层缺失路径和删除后重建的根能够在之后出现。只有请求的文件和
+目录后代产生通知，无关子目录在遍历前排除；发现过程可能枚举已有祖先目录的条目。按 hook 执行顺序，
 最后一个显式提供且有效的列表替换之前的动态列表；空列表清空，省略或非法列表
 保持不变。静态路径继续保留。异步 hook 输出不注册路径。
 
@@ -53,14 +55,16 @@ managed execution engine（包含 ACP）及 managed dispatcher 不创建宿主�
 托管 runtime 的支持需要在实际文件系统拥有者处另行设计。本功能不新增 daemon
 route 或 memory API。
 
-ACP workspace/bootstrap 初始化加载 hook registry，但禁用文件监听；实际会话 Config
-拥有各自的订阅。Session hook manager 的变更（含 skill 注册及移除）无需 reload
+ACP workspace/bootstrap 和 MCP reconnect 初始化加载 hook registry，但禁用文件监听；
+实际会话 Config 拥有各自的订阅。Session hook manager 的变更（含 skill 注册及移除）无需 reload
 即可刷新监听会话的静态根路径。
 
 Hook reload 和启用/禁用会更新静态根路径；事件通过当前可信 registry 筛选。
 关闭时停止接收、取消运行中的 hook 命令、丢弃排队通知并释放 watcher。
 会话轮换时丢弃旧会话的动态根路径和排队事件，并在新会话的首轮之前将静态根
-重新绑定到新监听会话。旧 SessionEnd 延迟完成不能停止替换后的 watcher。
+重新绑定到新监听会话。旧 SessionEnd 延迟完成不能停止替换后的 watcher。即使没有
+运行 SessionStart hook，轮换后的 reload 或 skill 注册也可建立当前会话的监听归属。
+已结束会话保持停止监听，直到新会话或显式 SessionStart；初始化时的禁用选项仍有效。
 派生 Config 不拥有第二个 watcher。监听或 hook 执行失败记录日志，
 不改变原始文件操作。
 
@@ -79,9 +83,10 @@ Hook reload 和启用/禁用会更新静态根路径；事件通过当前可信 
 ## 验证与验收标准
 
 包内测试和真实 hook runner 实验需要覆盖静态文件事件、cwd 外动态目录、未来
-新增的嵌套文件、add/change/unlink、替换动态根且保留静态根、非法输出、初始
+新增的嵌套文件、多层缺失路径、根删除后重建、add/change/unlink、替换动态根且保留静态根、非法输出、初始
 扫描抑制、监听会话归属、会话轮换、失败隔离、reload/disable 和存在排队任务时的关闭。
-远程与托管 Config 不得启动本地 watcher。另一个 hook 返回 watchPaths 时，
+远程与托管 Config 不得启动本地 watcher；MCP reconnect 必须禁用监听，未运行
+SessionStart 的轮换后延迟注册只可绑定到当前会话。另一个 hook 返回 watchPaths 时，
 已有 SessionStart additional context 行为仍须正常。
 
 执行 build、typecheck、bundle、针对 hook/config/schema 的测试，以及隔离本地

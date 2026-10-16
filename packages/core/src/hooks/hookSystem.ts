@@ -76,8 +76,9 @@ export class HookSystem {
   private messagesProvider?: MessagesProvider;
   private fileWatcher?: FileChangedWatcher;
   private dynamicWatchPaths: string[] = [];
-  private fileWatchingStarted = false;
+  private fileWatchingAllowed = false;
   private fileWatchingSessionId?: string;
+  private fileWatchingEndedSession?: { sessionId: string };
   private fileWatcherClosing: Promise<void> = Promise.resolve();
   private closed = false;
 
@@ -115,7 +116,7 @@ export class HookSystem {
   async initialize(options?: { skipFileWatching?: boolean }): Promise<void> {
     if (this.managedDispatcher) return;
     await this.hookRegistry.initialize();
-    this.fileWatchingStarted = !options?.skipFileWatching;
+    this.fileWatchingAllowed = !options?.skipFileWatching;
     this.fileWatchingSessionId = this.config.getSessionId();
     await this.refreshFileWatching();
     debugLogger.debug('Hook system initialized successfully');
@@ -172,7 +173,6 @@ export class HookSystem {
   }
 
   private stopFileWatching(): Promise<void> {
-    this.fileWatchingStarted = false;
     this.fileWatchingSessionId = undefined;
     this.dynamicWatchPaths = [];
     const watcher = this.fileWatcher;
@@ -200,10 +200,11 @@ export class HookSystem {
     result?: AggregatedHookResult,
     eventName?: HookEventName,
   ): Promise<void> {
+    const sessionId = this.config.getSessionId();
     if (
-      !this.fileWatchingStarted ||
+      !this.fileWatchingAllowed ||
       this.closed ||
-      this.fileWatchingSessionId !== this.config.getSessionId()
+      this.fileWatchingEndedSession?.sessionId === sessionId
     )
       return;
     if (
@@ -213,6 +214,16 @@ export class HookSystem {
       this.config.getShellExecutionSandbox?.()
     ) {
       return;
+    }
+    if (this.fileWatchingSessionId !== sessionId) {
+      await this.stopFileWatching();
+      if (
+        this.closed ||
+        sessionId !== this.config.getSessionId() ||
+        this.fileWatchingEndedSession?.sessionId === sessionId
+      )
+        return;
+      this.fileWatchingSessionId = sessionId;
     }
     for (const output of result?.allOutputs ?? []) {
       const specific = output.hookSpecificOutput;
@@ -299,12 +310,13 @@ export class HookSystem {
     event: FileChangeEvent,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
+    const sessionId = this.config.getSessionId();
     const result = await this.hookEventHandler.fireFileChangedEvent(
       filePath,
       event,
       signal,
     );
-    if (!signal?.aborted) {
+    if (!signal?.aborted && sessionId === this.config.getSessionId()) {
       await this.refreshFileWatching(result, HookEventName.FileChanged);
     }
     return result;
@@ -431,6 +443,7 @@ export class HookSystem {
     signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const sessionId = this.config.getSessionId();
+    const endedSession = this.fileWatchingEndedSession;
     if (
       this.fileWatchingSessionId !== undefined &&
       this.fileWatchingSessionId !== sessionId
@@ -438,7 +451,11 @@ export class HookSystem {
       await this.stopFileWatching();
     }
     await this.fileWatcherClosing;
-    if (this.closed || sessionId !== this.config.getSessionId())
+    if (
+      this.closed ||
+      sessionId !== this.config.getSessionId() ||
+      this.fileWatchingEndedSession !== endedSession
+    )
       return undefined;
     const result = await this.hookEventHandler.fireSessionStartEvent(
       source,
@@ -450,9 +467,11 @@ export class HookSystem {
     if (
       !signal?.aborted &&
       !this.closed &&
-      sessionId === this.config.getSessionId()
+      sessionId === this.config.getSessionId() &&
+      this.fileWatchingEndedSession === endedSession
     ) {
-      this.fileWatchingStarted = true;
+      this.fileWatchingEndedSession = undefined;
+      this.fileWatchingAllowed = true;
       this.fileWatchingSessionId = sessionId;
       await this.refreshFileWatching(result, HookEventName.SessionStart);
     }
@@ -465,6 +484,7 @@ export class HookSystem {
     reason: SessionEndReason,
     signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
+    this.fileWatchingEndedSession = { sessionId: this.config.getSessionId() };
     const ended = this.hookEventHandler.fireSessionEndEvent(reason, signal);
     const stopped = this.stopFileWatching();
     const result = await ended;
