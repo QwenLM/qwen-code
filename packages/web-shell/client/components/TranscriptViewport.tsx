@@ -24,6 +24,7 @@ import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
 import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
+import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
 
 interface ReadingAnchor {
@@ -79,6 +80,15 @@ export const TranscriptViewport = forwardRef<
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
+  const openTurnCalls = useOpenTurnCalls();
+  const openViewportTurnCalls = useCallback(
+    (turnId: string) => {
+      const recordId = viewport.blocks?.find((block) => block.id === turnId)
+        ?.sourceRecordIds?.[0];
+      openTurnCalls?.(turnId, recordId);
+    },
+    [openTurnCalls, viewport.blocks],
+  );
   const {
     historical,
     loading,
@@ -97,7 +107,10 @@ export const TranscriptViewport = forwardRef<
     viewport.navigation.effectiveTurnCount >=
       SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
   const root = useRef<HTMLDivElement>(null);
-  const navigationVisible = useChatNavigationVisible(root, globalNavigation);
+  const navigationVisible = useChatNavigationVisible(
+    root,
+    !props.hideSessionTimeline,
+  );
   const list = useRef<MessageListHandle>(null);
   const anchor = useRef<ReadingAnchor | undefined>(undefined);
   const entryDirection = useRef<'older' | 'newer'>('older');
@@ -440,10 +453,15 @@ export const TranscriptViewport = forwardRef<
       className={`${styles.root} relative flex min-h-0 flex-1`}
       data-history-viewport={historical ? 'historical' : 'live'}
     >
+      {!props.hideSessionTimeline &&
+        !navigationVisible &&
+        props.timelineAction && (
+          <div className={styles.searchAction}>{props.timelineAction}</div>
+        )}
       {globalNavigation && (
         <div className={styles.navigation} hidden={!navigationVisible}>
           <GlobalTurnNavigation
-            action={props.timelineAction}
+            action={navigationVisible ? props.timelineAction : undefined}
             state={viewport.navigation}
             store={viewport.store}
             follow={navigationVisible ? follow : undefined}
@@ -508,54 +526,63 @@ export const TranscriptViewport = forwardRef<
               )}
             </div>
           )}
-          <MessageList
-            {...props}
-            key={viewport.viewKey}
-            ref={list}
-            messages={viewport.messages}
-            timelineAction={globalNavigation ? undefined : props.timelineAction}
-            hideSessionTimeline={
-              historical || globalNavigation || props.hideSessionTimeline
-            }
-            {...(viewport.historical
-              ? {
-                  frozenViewport: true,
-                  hasOlderHistory: false,
-                  onLoadOlderHistory: undefined,
-                  historyCapacityReached: false,
-                  historyPaginationError: false,
-                  loadingOlderHistory: false,
-                  onCanScrollToBottomChange: undefined,
-                  firstTurnMetrics: undefined,
-                  sessionKey: viewport.viewKey,
-                  pendingApproval: null,
-                  loadingTranscript: false,
-                  catchingUp: false,
-                  isResponding: false,
-                  transcriptActivity: undefined,
-                  onReloadTranscript: undefined,
-                  transcriptReloadPaused: true,
-                  onEditUserMessage: undefined,
-                  onSubmitUserMessageEdit: undefined,
-                  onShowContextDetail: undefined,
-                  onBranchSession: undefined,
-                  onRetryClick: undefined,
-                  onRetryFailedPrompt: undefined,
-                  showRetryHint: false,
-                  failedPromptMessageId: undefined,
-                  tailContent: undefined,
-                  welcomeHeader: undefined,
-                  activeTurnStartedAt: undefined,
-                  turnFileChanges: undefined,
-                  sourceEntries: undefined,
-                  sourceSessionId: undefined,
-                  onSourceOpen: undefined,
-                  turnArtifacts: undefined,
-                  turnScheduledTasks: undefined,
-                  generateContent: undefined,
-                }
-              : {})}
-          />
+          <TurnCallsProvider
+            onOpen={openTurnCalls ? openViewportTurnCalls : undefined}
+          >
+            <MessageList
+              {...props}
+              key={viewport.viewKey}
+              ref={list}
+              messages={viewport.messages}
+              mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
+              timelineAction={
+                globalNavigation || !navigationVisible
+                  ? undefined
+                  : props.timelineAction
+              }
+              hideSessionTimeline={
+                historical || globalNavigation || props.hideSessionTimeline
+              }
+              {...(viewport.historical
+                ? {
+                    frozenViewport: true,
+                    hasOlderHistory: false,
+                    onLoadOlderHistory: undefined,
+                    historyCapacityReached: false,
+                    historyPaginationError: false,
+                    loadingOlderHistory: false,
+                    onCanScrollToBottomChange: undefined,
+                    firstTurnMetrics: undefined,
+                    sessionKey: viewport.viewKey,
+                    pendingApproval: null,
+                    loadingTranscript: false,
+                    catchingUp: false,
+                    isResponding: false,
+                    transcriptActivity: undefined,
+                    onReloadTranscript: undefined,
+                    transcriptReloadPaused: true,
+                    onEditUserMessage: undefined,
+                    onSubmitUserMessageEdit: undefined,
+                    onShowContextDetail: undefined,
+                    onBranchSession: undefined,
+                    onRetryClick: undefined,
+                    onRetryFailedPrompt: undefined,
+                    showRetryHint: false,
+                    failedPromptMessageId: undefined,
+                    tailContent: undefined,
+                    welcomeHeader: undefined,
+                    activeTurnStartedAt: undefined,
+                    turnFileChanges: undefined,
+                    sourceEntries: undefined,
+                    sourceSessionId: undefined,
+                    onSourceOpen: undefined,
+                    turnArtifacts: undefined,
+                    turnScheduledTasks: undefined,
+                    generateContent: undefined,
+                  }
+                : {})}
+            />
+          </TurnCallsProvider>
           {historical && !onCanScrollToBottomChange && (
             <Button
               className="absolute bottom-3 left-1/2 -translate-x-1/2"

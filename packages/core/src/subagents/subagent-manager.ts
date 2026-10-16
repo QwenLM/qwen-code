@@ -58,6 +58,10 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import {
+  SESSION_SKILL_MANAGER,
+  sessionSkillManager,
+} from '../tools/skill-utils.js';
+import {
   buildModelIdContext,
   resolveModelId,
   type ResolvedModelId,
@@ -84,6 +88,8 @@ import {
   hasRebuiltToolRegistry,
   rebuildToolRegistryOnOverride,
 } from '../tools/agent/agent.js';
+import { toolConfigAllowsSkill } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { ToolMode } from '../tools/code-mode.js';
 
 const AGENT_CONFIG_DIR = 'agents';
 
@@ -933,6 +939,7 @@ export class SubagentManager {
       subagentId?: string;
     },
   ): Promise<{ subagent: SubagentExecutor; dispose: () => Promise<void> }> {
+    const hookSessionId = runtimeContext.getSessionId();
     if (
       runtimeContext.getShellExecutionSandbox?.() &&
       (config.executor !== undefined ||
@@ -1168,45 +1175,22 @@ export class SubagentManager {
         modelConfig.reasoningEffort,
       );
 
+      const skillsAvailable = toolConfigAllowsSkill(
+        toolConfig,
+        runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
+      );
       const { context: subagentContext, cleanup } =
-        await this.buildSubagentContextOverride(runtimeContext, config);
+        await this.buildSubagentContextOverride(
+          runtimeContext,
+          config,
+          skillsAvailable,
+        );
       disposeSubagentRegistry = cleanup;
 
-      // Register per-agent frontmatter hooks. The returned unregister callback
-      // is invoked from `dispose` (and from the catch block below on a
-      // constructor failure). v1 limitation: while the entries live in the
-      // registry they fire for every event of their declared type, regardless
-      // of which agent is currently active — proper per-agent scope filtering
-      // is deferred.
-      const hookSystem = runtimeContext.getHookSystem();
-      const hookRegistry = hookSystem?.getRegistry();
-      if (config.hooks && Object.keys(config.hooks).length > 0) {
-        if (config.level === 'project' && !runtimeContext.isTrustedFolder()) {
-          // Project agents load from <repo>/.qwen/agents/ regardless of
-          // trust (read-only use is fine), but their hooks are repo-supplied
-          // code execution — the same gate Config.getProjectHooks() applies
-          // to settings-file hooks.
-          debugLogger.warn(
-            `Subagent "${config.name}" is a project agent in an untrusted folder; ignoring its hooks.`,
-          );
-        } else if (hookRegistry) {
-          const agentScope = `agent:${config.name}:${randomUUID()}`;
-          unregisterAgentHooks = hookRegistry.addAgentHooks(
-            config.hooks as { [K in HookEventName]?: HookDefinition[] },
-            agentScope,
-          );
-        } else {
-          // Single outer guard; nested branch on hookRegistry. The pre-fix
-          // structure repeated the `config.hooks && Object.keys(...).length`
-          // predicate across two `if`/`else if` arms, which made it easy to
-          // drift one side during future edits.
-          debugLogger.warn(
-            `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
-          );
-        }
-      }
-
       try {
+        const subagentId =
+          options?.subagentId ??
+          `${config.name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
         const subagent = await AgentHeadless.create(
           config.name,
           subagentContext,
@@ -1218,8 +1202,36 @@ export class SubagentManager {
           options?.hooks,
           runtimeView,
           options?.taskName,
-          options?.subagentId,
+          subagentId,
         );
+        const hookRegistry = runtimeContext.getHookSystem()?.getRegistry();
+        if (config.hooks && Object.keys(config.hooks).length > 0) {
+          const isSourceTrusted =
+            config.level === 'project'
+              ? () => this.config.isTrustedFolder()
+              : undefined;
+          if (isSourceTrusted && !isSourceTrusted()) {
+            debugLogger.warn(
+              `Subagent "${config.name}" is a project agent in an untrusted folder; ignoring its hooks.`,
+            );
+          } else if (hookRegistry) {
+            unregisterAgentHooks = hookRegistry.addAgentHooks(
+              config.hooks as { [K in HookEventName]?: HookDefinition[] },
+              `agent:${config.name}:${randomUUID()}`,
+              {
+                owner: {
+                  sessionId: hookSessionId,
+                  agentId: subagent.getCore().subagentId,
+                },
+                isSourceTrusted,
+              },
+            );
+          } else {
+            debugLogger.warn(
+              `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
+            );
+          }
+        }
         return { subagent, dispose: runCleanup };
       } catch (innerError) {
         // The caller never received the return value — `dispose` cannot
@@ -1249,12 +1261,13 @@ export class SubagentManager {
 
   /**
    * Build the per-subagent Config override used as the AgentHeadless
-   * runtime context. The override is a thin factory-derived wrapper: no
-   * method changes, but a distinct
-   * instance triggers the lazy own-property init in
+   * runtime context. The override is a thin factory-derived wrapper: a
+   * distinct instance triggers the lazy own-property init in
    * `Config.getFileReadCache()` so the subagent gets its own cache
    * rather than inheriting the parent's recorded reads — which would
    * silently weaken prior-read enforcement on its mutation paths.
+   * Individual getters (`getMcpServers`, `getSkillManager`) are replaced
+   * below where this agent's own policy differs from the session's.
    *
    * The tool registry is also rebuilt on the override so `EditTool` /
    * `WriteFileTool` / `ReadFileTool` resolve `this.config` to the
@@ -1272,14 +1285,18 @@ export class SubagentManager {
   private async buildSubagentContextOverride(
     runtimeContext: Config,
     config: SubagentConfig,
+    /** {@link toolConfigAllowsSkill} on the ToolConfig this agent runs with. */
+    skillsAvailable: boolean,
   ): Promise<{
     context: Config;
     /**
-     * Set only when this call force-rebuilt the registry to land per-agent
-     * MCP server connections. The freshly built registry owns stdio child
-     * processes / sockets that the parent's `Config.shutdown` cannot reach,
-     * so the caller (`createAgentHeadless`) carries this callback through
-     * to its `dispose` closure and runs it when the subagent terminates.
+     * Set whenever this call rebuilt the registry — to land per-agent MCP
+     * server connections, to move lazily built tools above a re-anchored
+     * SkillManager, or because `runtimeContext` was unstamped. The freshly
+     * built registry owns stdio child processes / sockets that the parent's
+     * `Config.shutdown` cannot reach, so the caller (`createAgentHeadless`)
+     * carries this callback through to its `dispose` closure and runs it when
+     * the subagent terminates.
      *
      * Field name matches the `cleanup` field on
      * `ApprovalModeOverrideHandle` (the sibling override-builder return
@@ -1330,6 +1347,29 @@ export class SubagentManager {
       subagentContext.getMcpServers = () => merged;
     }
 
+    // A subagent whose tool policy leaves it no Skill tool must not hold a
+    // SkillManager either (#12424): every skill surface keys on the manager,
+    // including the bundled-reference route that was handing such an agent a
+    // pointer to the `agent-delegation` skill it cannot load. Withheld, the
+    // route resolves to `inline` and the guidance travels in the description.
+    //
+    // The session's manager is recorded rather than dropped: a nested agent
+    // derives its Config from this one through the prototype chain, so without
+    // the record an agent whose own policy allows skills would inherit `null`.
+    //
+    // Re-anchor only on a difference, so an unrestricted agent — the common
+    // case — gets exactly the Config it got before.
+    const sessionManager = sessionSkillManager(runtimeContext);
+    const agentManager = skillsAvailable ? sessionManager : null;
+    const reanchorSkillManager =
+      agentManager !== runtimeContext.getSkillManager();
+    if (reanchorSkillManager) {
+      (subagentContext as unknown as Record<symbol, unknown>)[
+        SESSION_SKILL_MANAGER
+      ] = sessionManager;
+      subagentContext.getSkillManager = () => agentManager;
+    }
+
     // The skip-rebuild optimization (`hasRebuiltToolRegistry`) is bypassed
     // when per-agent `mcpServers` are present: without a fresh rebuild
     // anchored on `subagentContext`, the existing wrapper-owned registry's
@@ -1338,7 +1378,16 @@ export class SubagentManager {
     // discovery loop below would silently no-op. Forcing a rebuild here
     // ties the manager to `subagentContext`, which is the only config in
     // the chain that knows about the per-agent servers.
-    if (hasAgentMcpServers || !hasRebuiltToolRegistry(runtimeContext)) {
+    //
+    // Also bypassed when the SkillManager was re-anchored: the wrapper's
+    // registry was built on `runtimeContext`, so its lazily constructed tools
+    // — the nested Agent tool among them — would read the inherited manager.
+    // Rebuilding is the only re-anchoring that moves tools above the wrapper.
+    const rebuiltToolRegistry =
+      hasAgentMcpServers ||
+      reanchorSkillManager ||
+      !hasRebuiltToolRegistry(runtimeContext);
+    if (rebuiltToolRegistry) {
       await rebuildToolRegistryOnOverride(subagentContext, runtimeContext);
     }
 
@@ -1381,7 +1430,18 @@ export class SubagentManager {
         cleanup: () => subagentRegistry.stop(),
       };
     }
-    return { context: subagentContext };
+    // The cleanup slot follows the rebuild, not the MCP branch: a registry
+    // this call rebuilt is this call's to stop, whichever condition forced
+    // it — its tools are per-subagent instances holding listeners on managers
+    // shared with the session, which nothing else releases. Not rebuilt ⇒ no
+    // cleanup: `getToolRegistry()` would resolve to the parent's registry, and
+    // stopping that would take the session's tools down with this subagent.
+    return {
+      context: subagentContext,
+      cleanup: rebuiltToolRegistry
+        ? () => subagentContext.getToolRegistry().stop()
+        : undefined,
+    };
   }
 
   /**
@@ -1610,7 +1670,15 @@ export class SubagentManager {
       // closed) rather than inheriting shell/write it was not configured
       // for. Deliberate: this supersedes the earlier compatibility fallback
       // for converted Claude agents.
-      const toolNames = config.tools
+      //
+      // An *empty* allow-list is a different case: `tools: []` is the
+      // documented "inherit everything" marker for definition files
+      // (validation.ts warns exactly that), but `[]` is truthy, so testing
+      // only for presence turned a deny-only shape (`tools: []` plus
+      // `disallowedTools`) into a zero-tool agent once AgentCore started
+      // reading an explicit empty list as deny-all. Require a non-empty list
+      // so `tools: []` keeps falling through to the wildcard.
+      const toolNames = config.tools?.length
         ? await this.resolveToolNames(config.tools)
         : ['*'];
       toolConfig = {

@@ -61,7 +61,8 @@ export type RoleId =
   | 'invariant-b'
   | 'invariant-c'
   | 'verify'
-  | 'reverse-audit';
+  | 'reverse-audit'
+  | 'fix-audit';
 
 /**
  * The roles a repository context may require. One list is the single source for
@@ -139,9 +140,13 @@ export interface Brief {
    * and the Exclusion Criteria. `'verdicts'` is the Step 4 verifier: it does not
    * file findings, it rules on the ones it was handed, so it gets the Exclusion
    * Criteria (a finding that matches one is rejected) but not the finding format —
-   * its output shape is the verdict, and its brief defines that.
+   * its output shape is the verdict, and its brief defines that. `'assumptions'`
+   * is the Step 6B fix auditor: it neither files findings nor rules on them, so
+   * it gets none of the finding machinery — no format, no severity ladder, no
+   * Exclusion Criteria, no recall rule, and no project review rules; its brief
+   * defines its two return shapes and that is the whole of its tail.
    */
-  output?: 'findings' | 'verdicts';
+  output?: 'findings' | 'verdicts' | 'assumptions';
   /**
    * May this role be launched `--role <r> --chunk <id>` to own one chunk's
    * territory, the way a Step 3B reverse auditor does?
@@ -173,6 +178,19 @@ export interface Brief {
    * instructs exactly as it counts the brief's.
    */
   acceptsFindings?: boolean;
+  /**
+   * Does this role run more than once per review, so a `--round` label keys
+   * its repeat launches?
+   *
+   * Declarative for the same reason `acceptsFindings` is: `--round` admits
+   * every `acceptsFindings` role today, and the fix auditor takes findings
+   * yet runs exactly once — a round label on it forks its record key away
+   * from the one the roster requires, and lets a round number ride an
+   * audit-input key into the resume-time findings enumeration, where
+   * round-bearing entries outrank the genuine lists. The guard reads which
+   * roles it admits here, not a hardcoded pair.
+   */
+  multiRound?: boolean;
   /**
    * This role's brief never carries the soft tool-call ceiling
    * (`agentToolBudget`).
@@ -736,6 +754,7 @@ Report a **Critical** for each violation, and give **both** locations that toget
     reviewsCode: true,
     output: 'verdicts',
     acceptsFindings: true,
+    multiRound: true,
     label: 'Verification agent',
     publicLabel: 'verification',
     publicLabelZh: '验证',
@@ -854,6 +873,25 @@ Bind ephemeral wherever the service allows it: an OS-assigned port cannot collid
 
 The shared process is FRESH PER ARM by default — with sequential arms, whatever arm a mutates is arm b's starting state, which is a false difference manufactured by the harness, the one thing an A/B exists to rule out. Pass \`--shared-once\` only for the observer shape, where both arms merely watch one upstream and the SAMENESS of that upstream is the point. Rule only on \`observed: true\`: it is false whenever an arm did not complete or the shared process died mid-arm, and then the captures say where the harness needs repair — never anything about the diff. The two captures, quoted to their deciding lines, are the witness.
 
+**When the claim is about what the terminal RENDERS, capture it — do not describe it.** A layout claim — "the panel clips at 80 columns", "the status line overlaps the prompt", "the colors are unreadable on dark themes" — is a claim about pixels, and reading the layout code only reproduces the author's own mental terminal, which is where rendering verdicts go wrong. Run the thing and capture what rendered:
+
+\`\`\`bash
+"\${QWEN_CODE_CLI:-qwen}" review capture-tui \\
+  --command "<the worktree's built entry, or the fixture that drives it>" \\
+  --cols <the width the claim names> --until "<a pane marker that means 'settled'>" \\
+  --out <the plan report's directory>/qwen-review-<target>-capture-<finding-id>-<cols>
+\`\`\`
+
+(\`<target>\` is this review's artifact prefix — the same one the plan and findings files carry — so Step 9's sweep reclaims the captures and identical finding ids across different reviews cannot collide.)
+
+It drives the command in a **private tmux server** (it cannot see, resize or kill the user's own sessions — the isolation is structural, and it reaps its own server and everything left in that session), writes \`<out>.ans\` (the pane bytes, always), renders \`<out>.png\` when \`freeze\` is available, and records which it managed in \`<out>.json\`. The reap stops at the session: a command that DAEMONIZES a helper (setsid, a detached unref'd spawn — browser launchers, updaters) leaves that process running after the review, and no portable kill reaches it. Capture such a command only if you will reap its daemon yourself. To drive the UI first, gate the keystrokes on a rendered marker — \`--ready '<marker>' --keys <tokens>\` — keys fired into a still-mounting UI get partially eaten (measured on this repo's own onboarding dialog). A key token starting with \`-\` must use the \`--keys=<token>\` form (\`--keys=-l Enter\`), or yargs rejects the invocation as an unknown flag. And pick markers unique to the claim: a substring that exists in BOTH arms of a pair (measured: a provider name that also appears in another entry's description) settles the control arm falsely. Three rules make the capture evidence:
+
+- **Capture at the width the claim names, and at a control width.** "Clips at 80 columns" is confirmed by a pair — clipped at 80, intact at 120 — not by one image; a single capture cannot distinguish "clips at 80" from "clips everywhere", and those are different findings.
+- **The evidence rung is part of the verdict.** A \`png\` is rendering evidence: attach it to the finding via \`assetFiles\` (Step 7's \`publish-assets\` embeds it in the posted comment when the run is authorised; unpublished, the local path still reaches the terminal report). An \`ans-only\` capture proves the bytes but not the pixels — quote the relevant lines and say the pixel claim is unverified. A refused capture (no tmux) leaves the claim at its reading-based confidence floor; say what a capture would have measured, so the reader knows what the tooling would have bought.
+- **Attach only what this verification launched.** The command's isolation makes capturing the user's own terminal impossible through it; do not go around it with bare tmux or OS-level screenshots — a capture of anything but the review's own processes is the leak the private server exists to prevent. And judge the pixels, not just their source: a TUI rendering a masked key, an absolute path carrying the user's name, or a \`git remote\` URL with a token in it is an env dump even when the capture is of the review's own process.
+
+A finding a capture settled cites the manifest and carries the image in \`assetFiles\`; like a probe, the observation is the verdict — "the 80-column capture shows the panel's right border at column 83" quotes pixels, not a reading.
+
 **When the observable is an AGGREGATE, change the population rather than instrumenting the reader.** A total, a maximum across children, a count over a fleet — a claim about how one of those combines cannot be settled from a single reading, and the obvious repair (add a per-component dump and read that) costs the verdict its standing, because the numbers then come out of a build you edited. Shrink the contributing population instead: read the aggregate with every contributor live, remove exactly one — kill the process, unregister the workspace, drop the feed — and read it again. Both numbers come from unmodified code, and what they mean depends on the combining rule you are testing for: doubled with the population is a sum, flat is not a sum, and reducing the population to a single contributor makes the reading that contributor's own value outright. Only for a sum is the **difference** a contributor's value; under a maximum, removing a non-holder moves nothing and removing the holder exposes the next-largest. Identify what you removed by something the product did not choose for you — a process's own working directory, its port, its registered id — because removing the one you assumed answers a different question than the one asked.
 
 **When the claim is about GITHUB's behaviour, neither tree can settle it — only GitHub can.** A claim like "this encoding renders identically and can never ping", "GitHub strips this tag", "this markdown shape closes the fold" is about the comment pipeline's parser, sanitizer allowlist and notification path, none of which exist in this environment — a local markdown library is a model of GitHub, and judging a sanitizer claim against a model of the authority is exactly the parser-divergence failure under review. Measured live: an \`@\` → \`&#64;\` defusal read as sound in every local trace, and GitHub's real renderer registered the mention and fired the notification. So:
@@ -892,6 +930,7 @@ The asymmetry cuts both ways: confirming also requires the trace, and a finding 
     reviewsCode: true,
     acceptsChunk: true,
     acceptsFindings: true,
+    multiRound: true,
     label: 'Reverse audit agent',
     publicLabel: 'reverse audit',
     publicLabelZh: '反向审计',
@@ -905,6 +944,51 @@ The asymmetry cuts both ways: confirming also requires the trace, and a finding 
 - A found gap uses the standard finding format (with \`Source: [review]\`), including its failure scenario — your findings go through the same verification as any other, so they must carry the evidence a verifier can trace.
 
 If you find no new gap in your scope, your WHOLE return is the receipt — exactly one line, the no-issues phrase, a dash, and a clause that names what you re-examined, opening with the walk (\`re-walked\` / \`verified\` / \`traced\` — 走查 / 复核 / 核对), as in \`${REVERSE_AUDIT_EXAMPLE_RECEIPT}\`. The clause narrates the walk in the walk's own words and NEVER restates the all-clear — no \`no issues…\` / 未发现问题… inside the clause, not even as the walk's object (\`verified no issues in X\`): a restatement proves no walk, and the tooling reads the return as "not dry". Nothing else may ride in the return but the \`Budget gap:\` and \`Layer walked:\` lines this brief already mandates: any other prose — before the receipt line, after it, or hedged inside its clause — reads as "not dry", because prose has no last hedge and the tooling will not guess which ones are harmless. If any part of your scope went unexamined — a file you could not open, a walk the ceiling cut short — do NOT emit the receipt: say what you did not walk. That keeps the territory under audit, which is the honest outcome; the receipt certifies only a walk that happened. A bare "No issues found." is indistinguishable from an agent that did nothing, and it is treated as one: it ends nothing, and it earns your scope a relaunch.`,
+  },
+
+  'fix-audit': {
+    // Budget-exempt: its load is the hunks `--fix` applied — bounded by what
+    // the fixer edited, not by the reviewed diff the ceiling is derived from —
+    // and its brief bounds it by construction: read the one input file, quote
+    // the pins, write nothing.
+    budgetExempt: true,
+    output: 'assumptions',
+    acceptsFindings: true,
+    label: 'Fix audit agent',
+    publicLabel: 'fix audit',
+    publicLabelZh: '修复审计',
+    // Its input is the applied hunks, never the reviewed diff — an audit that
+    // read the diff could rediscover the review's own findings, which is the
+    // re-review Step 6B forbids.
+    readsDiff: false,
+    brief: `You are a **fix audit agent**. A review has just applied its own findings to this working tree, and you audit what that edit newly assumes. You are not a reviewer and not a verifier: you do not look for defects, you do not rule on whether the findings were right, and you do not judge whether the fix was a good one. Your one question, asked of every applied hunk, is: **what does this edit assume that nothing in the tree pins?**
+
+Your input is one file — the message that launched you points at it. \`read_file\` ALL of it, right after this brief (page with a larger \`offset\` if a read comes back \`isTruncated\`). It holds the hunks \`--fix\` applied and, above them, the findings each hunk claims to close — only findings whose outcome is \`fixed\`; a finding reverted as wrong has no edit to audit. **The reviewed diff is NOT your input.** You are not to rediscover what the review found, and an audit that wanders into the rest of the change is a second review of code nobody asked it to review.
+
+For every hunk:
+
+1. **Name the assumption it introduces.** An edit that fixes something stands on something new: a **bound** (a literal \`16\`, a buffer size, a retry count), a **key** (a map keyed by one field where two objects can now share it), a **lifetime** (an entry released on one path and not another), a **shared resource** (a registry entry that used to hold one thing and now hosts several), an **ordering** (a check that must run before a write), a **default** (an optional now read as \`?? true\`), an **invariant about callers** (every caller passes a non-empty list). Say it in one sentence, in the code's own terms: \`assumes the hop count never legitimately reaches 16\`.
+2. **Look for what pins it** — in the tree as it stands now, the fix included. A pin is something that goes red, or fails to compile, when the assumption is violated: a test that drives the boundary (not one that asserts a string is present); a type that makes the violation unrepresentable; an assertion or refusal at the entry; a **single source** the value is derived from rather than a literal beside the one it must agree with (a bound read from the same constant the configurable limit reads). **Quote the pin** — the file, the line, and the clause that makes it a pin. A pin you cannot quote is not there.
+3. **Report only what is unpinned.** A pinned assumption is a sentence you do not write.
+
+What does NOT pin an assumption: a comment; the finding's own prose; the fixer's stated intent in the outcome note; a test whose assertion would still pass with the assumption violated (a \`toContain\` on a substring the wrong output also contains — measured, four of four such assertions survived the mutation they were written for); a test that exercises the finding's ORIGINAL defect and never reaches the new bound, key or lifetime. Measured on a real fix round (PR #9793): the three intended fix sites were mutation-probed and every mutant was caught, and both Criticals the next round filed were still fix-introduced — a hand-picked \`hops < 16\` beneath a configurable \`MAX_SUBAGENT_DEPTH_LIMIT = 100\` that nothing tied together, and a \`callId\`-only dedup written at the moment one registry entry could newly host several runtimes. Neither sat at a probed site; both were assumptions the edit made and nothing pinned. That class is your whole job.
+
+**You write nothing.** This is the user's working tree with their fix in it — not a review worktree and not a scratch tree: a probe file you add or a line you mutate lands in their files. Reading, searching, and running an EXISTING test command are yours; creating, editing and mutating are not. So you do not prove a pin by mutation — you quote it, and where a quoted test would demonstrably stay green with the assumption violated, say so and count the assumption unpinned.
+
+Then, per listed finding, one check: does any hunk touch a file one of its locations names (the heading lists them all)? When none does, report that entry once, on the \`unattested:\` line form below, and carry on with the hunks that ARE here. It is a disclosure, not an accusation — a fix can land entirely in files the finding does not name (a test file the finding asked for, a caller of the declaration it named) — and not something to go hunting for: the edit it claims is not in front of you, so you name no assumption and no pin for it.
+
+Scope discipline: a hunk that is a generated artifact, a lockfile, or a test the fix added is read for what it pins, not audited for assumptions of its own. Do not report a defect you happen to notice in or beside the hunks — that is a finding, and this audit files none: what you report is a disclosure to the person who will read the outcome, not a finding on the review, and it changes no verdict. If a defect is inseparable from an assumption, say it in one clause under that assumption; otherwise leave it.
+
+Your return is one of two shapes, and nothing else rides in it.
+
+**Disclosures found** — one line per disclosure, ordered by finding id, in one of two forms:
+
+- \`<finding id, or none>\` — \`<file>:<line>\` — assumes: <one sentence> — unpinned; pin with: <one clause naming the test input, the type, or the single source that would>
+- \`<finding id>\` — \`(no hunk)\` — unattested: the ledger marks this finding \`fixed\`, but no hunk in this input touches any of <its locations> — nothing here pins that the fix landed
+
+An assumption in a hunk that closes no listed finding carries \`none\`. The \`pin with:\` clause is the part the reader acts on — name the concrete boundary input or the constant to derive from, never a bare "add a test". The \`unattested:\` form says the whole of what you know about that entry and nothing more — no assumption and no pin, because not one byte of the edit it claims is in front of you and you are not to go hunting for it — and its finding id comes first, because that is the ledger entry the line is filed under. Never fill the other form's \`assumes:\` and \`pin with:\` slots for it: an assumption you had to invent is written into that finding's note and shown to the user as your disclosure.
+
+**Nothing unpinned** — exactly one line: \`No unpinned assumptions — audited <n> hunk(s) in <files>; named <k> assumption(s), each pinned by <the pins, briefly>\`. The clause names what you walked: a return that names nothing you read is indistinguishable from never having read anything. This shape is not yours when an entry owes an \`unattested:\` line — then the return is the first shape.`,
   },
 };
 

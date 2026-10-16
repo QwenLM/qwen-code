@@ -20,6 +20,14 @@ import { diffLines, structuredPatch, type Hunk } from 'diff';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { MAX_DIFF_SIZE_BYTES } from '../utils/gitDiff.js';
+import {
+  digestFileReadSource,
+  readFileHandleBytes,
+  type DescriptorFileReadSource,
+} from '../utils/file-read-source.js';
+import { MAX_SNAPSHOTS } from './file-history-limits.js';
+
+export { MAX_SNAPSHOTS } from './file-history-limits.js';
 
 const debugLogger = createDebugLogger('FILE_HISTORY');
 
@@ -36,6 +44,30 @@ export interface FileHistoryBackup {
   // surface failed paths via filesFailed instead of silently restoring
   // stale content as if it were current.
   failed?: boolean;
+}
+
+export interface RetainedFileHistoryStorage {
+  withWorkingFile<T>(
+    path: string,
+    operation: (source: DescriptorFileReadSource | null) => Promise<T>,
+  ): Promise<T>;
+  withBackupFile<T>(
+    name: string,
+    operation: (source: DescriptorFileReadSource) => Promise<T>,
+  ): Promise<T>;
+  createBackup(path: string, version: number): Promise<FileHistoryBackup>;
+}
+
+async function readRetainedText(
+  source: DescriptorFileReadSource | null,
+): Promise<EndpointRead> {
+  if (!source) return { kind: 'ok', content: '', exists: false };
+  if (source.stats.size > MAX_DIFF_SIZE_BYTES)
+    return { kind: 'oversized', exists: true };
+  const bytes = await readFileHandleBytes(source.fileHandle, source.stats.size);
+  if (bytes.length !== source.stats.size)
+    throw new Error('Retained file changed while reading.');
+  return { kind: 'ok', content: bytes.toString('utf8'), exists: true };
 }
 
 export interface FileHistorySnapshot {
@@ -100,7 +132,6 @@ export interface TurnDiff {
   };
 }
 
-export const MAX_SNAPSHOTS = 100;
 export const FILE_HISTORY_DIR = 'file-history';
 
 // ---------------------------------------------------------------------------
@@ -303,7 +334,20 @@ async function checkOriginFileChanged(
   backupFileName: string,
   sessionId: string,
   originalStatsHint?: Stats,
+  retainedStorage?: RetainedFileHistoryStorage,
 ): Promise<boolean> {
+  if (retainedStorage)
+    return retainedStorage.withBackupFile(backupFileName, async (backup) =>
+      retainedStorage.withWorkingFile(
+        originalFile,
+        async (original) =>
+          !original ||
+          original.stats.mode !== backup.stats.mode ||
+          original.stats.size !== backup.stats.size ||
+          (await digestFileReadSource(original)) !==
+            (await digestFileReadSource(backup)),
+      ),
+    );
   const backupPath = resolveBackupPath(backupFileName, sessionId);
 
   let originalStats: Stats | null = originalStatsHint ?? null;
@@ -338,14 +382,12 @@ async function checkOriginFileChanged(
     return true;
   }
 
-  if (originalStats.mtimeMs < backupStats.mtimeMs) return false;
-
   try {
     const [originalContent, backupContent] = await Promise.all([
-      readFile(originalFile, 'utf-8'),
-      readFile(backupPath, 'utf-8'),
+      readFile(originalFile),
+      readFile(backupPath),
     ]);
-    return originalContent !== backupContent;
+    return !originalContent.equals(backupContent);
   } catch {
     return true;
   }
@@ -355,20 +397,36 @@ async function computeDiffStatsForFile(
   originalFile: string,
   backupFileName: string | undefined,
   sessionId: string,
+  retainedStorage?: RetainedFileHistoryStorage,
 ): Promise<DiffStats> {
   const filesChanged: string[] = [];
   let insertions = 0;
   let deletions = 0;
 
   try {
-    const backupPath = backupFileName
-      ? resolveBackupPath(backupFileName, sessionId)
-      : undefined;
-
-    const [originalContent, backupContent] = await Promise.all([
-      readFileOrNull(originalFile),
-      backupPath ? readFileOrNull(backupPath) : null,
-    ]);
+    let originalContent: string | null;
+    let backupContent: string | null;
+    if (retainedStorage) {
+      const original = await retainedStorage.withWorkingFile(
+        originalFile,
+        readRetainedText,
+      );
+      const backup = backupFileName
+        ? await retainedStorage.withBackupFile(backupFileName, readRetainedText)
+        : { kind: 'ok' as const, content: '', exists: false };
+      if (original.kind !== 'ok' || backup.kind !== 'ok')
+        throw new Error('Retained diff stats exceed the content limit.');
+      originalContent = original.exists ? original.content : null;
+      backupContent = backup.exists ? backup.content : null;
+    } else {
+      const backupPath = backupFileName
+        ? resolveBackupPath(backupFileName, sessionId)
+        : undefined;
+      [originalContent, backupContent] = await Promise.all([
+        readFileOrNull(originalFile),
+        backupPath ? readFileOrNull(backupPath) : null,
+      ]);
+    }
 
     if (originalContent === null && backupContent === null) {
       return { filesChanged, insertions, deletions };
@@ -382,6 +440,7 @@ async function computeDiffStatsForFile(
       if (c.removed) deletions += c.count || 0;
     }
   } catch (error) {
+    if (retainedStorage) throw error;
     debugLogger.error(`FileHistory: Error generating diffStats: ${error}`);
   }
 
@@ -440,7 +499,19 @@ async function readEndpointContent(
   backup: FileHistoryBackup | undefined,
   worktreePath: string | undefined,
   sessionId: string,
+  retainedStorage?: RetainedFileHistoryStorage,
 ): Promise<EndpointRead> {
+  if (retainedStorage) {
+    if (backup?.failed) throw new Error('Retained backup is unavailable.');
+    if (worktreePath !== undefined)
+      return retainedStorage.withWorkingFile(worktreePath, readRetainedText);
+    if (!backup || backup.backupFileName === null)
+      return { kind: 'ok', content: '', exists: false };
+    return retainedStorage.withBackupFile(
+      backup.backupFileName,
+      readRetainedText,
+    );
+  }
   if (worktreePath !== undefined) {
     return readPathWithSizeGuard(worktreePath, 'worktree');
   }
@@ -563,6 +634,7 @@ export class FileHistoryService {
     enabled: boolean,
     cwd: string,
     onSnapshotUpdated?: FileHistorySnapshotRecorder,
+    private readonly retainedStorage?: RetainedFileHistoryStorage,
   ) {
     this.sessionId = sessionId;
     this.enabled = enabled;
@@ -582,15 +654,19 @@ export class FileHistoryService {
     try {
       this.onSnapshotUpdated?.(snapshot);
     } catch (error) {
+      if (this.retainedStorage) throw error;
       debugLogger.error(`FileHistory: recordSnapshotUpdate failed: ${error}`);
     }
   }
 
   restoreFromSnapshots(snapshots: FileHistorySnapshot[]): void {
+    if (this.retainedStorage && snapshots.length > MAX_SNAPSHOTS)
+      throw new Error('Retained history exceeds its snapshot limit.');
     const trackedFiles = new Set<string>();
     const migrated: FileHistorySnapshot[] = [];
     for (const snapshot of snapshots) {
-      const trackedFileBackups: Record<string, FileHistoryBackup> = {};
+      const trackedFileBackups: Record<string, FileHistoryBackup> =
+        Object.create(null);
       for (const [p, backup] of Object.entries(snapshot.trackedFileBackups)) {
         const trackingPath = this.maybeShortenFilePath(p);
         trackedFiles.add(trackingPath);
@@ -610,6 +686,8 @@ export class FileHistoryService {
     const uniqueNames = new Set<string>();
     for (const snapshot of this.state.snapshots) {
       for (const backup of Object.values(snapshot.trackedFileBackups)) {
+        if (this.retainedStorage && backup.failed)
+          throw new Error('Retained backup is unavailable.');
         if (backup.backupFileName !== null && !backup.failed) {
           uniqueNames.add(backup.backupFileName);
         }
@@ -623,8 +701,12 @@ export class FileHistoryService {
     const names = [...uniqueNames];
     for (let i = 0; i < names.length; i += BATCH_SIZE) {
       const batch = names.slice(i, i + BATCH_SIZE);
-      const results = await Promise.all(
+      const results = await this.joinOperations(
         batch.map(async (name) => {
+          if (this.retainedStorage) {
+            await this.retainedStorage.withBackupFile(name, async () => {});
+            return true;
+          }
           let backupPath: string;
           try {
             backupPath = resolveBackupPath(name, this.sessionId);
@@ -634,7 +716,13 @@ export class FileHistoryService {
             );
             return false;
           }
-          return await pathExists(backupPath);
+          try {
+            await stat(backupPath);
+            return true;
+          } catch (error) {
+            if (isENOENT(error)) return false;
+            throw error;
+          }
         }),
       );
       for (let j = 0; j < batch.length; j++) {
@@ -671,6 +759,8 @@ export class FileHistoryService {
     const mostRecent = this.state.snapshots.at(-1);
 
     if (!mostRecent) {
+      if (this.retainedStorage)
+        throw new Error('Retained history requires a current snapshot.');
       debugLogger.error('FileHistory: Missing most recent snapshot');
       return;
     }
@@ -683,7 +773,14 @@ export class FileHistoryService {
     // hopefully-recovered I/O conditions. Without this allowance the
     // failed marker would stay sticky until the file content changes
     // again, permanently poisoning rewind for that file.
+    if (this.retainedStorage && existing?.failed)
+      throw new Error('Retained backup is unavailable.');
     if (existing && !existing.failed) {
+      if (this.retainedStorage && existing.backupFileName !== null)
+        await this.retainedStorage.withBackupFile(
+          existing.backupFileName,
+          async () => {},
+        );
       return;
     }
 
@@ -691,8 +788,11 @@ export class FileHistoryService {
 
     let backup: FileHistoryBackup;
     try {
-      backup = await createBackup(filePath, maxVersion + 1, this.sessionId);
+      backup = this.retainedStorage
+        ? await this.retainedStorage.createBackup(filePath, maxVersion + 1)
+        : await createBackup(filePath, maxVersion + 1, this.sessionId);
     } catch (error) {
+      if (this.retainedStorage) throw error;
       debugLogger.error(`FileHistory: trackEdit failed: ${error}`);
       return;
     }
@@ -723,17 +823,44 @@ export class FileHistoryService {
    */
   async makeSnapshot(promptId: string): Promise<void> {
     if (!this.enabled) return;
+    if (this.retainedStorage && this.state.snapshots.length >= MAX_SNAPSHOTS)
+      throw new Error('Retained history has reached its snapshot limit.');
 
-    const trackedFileBackups: Record<string, FileHistoryBackup> = {};
+    const trackedFileBackups: Record<string, FileHistoryBackup> =
+      Object.create(null);
     const mostRecent = this.state.snapshots.at(-1);
 
     if (mostRecent) {
-      await Promise.all(
+      await this.joinOperations(
         Array.from(this.state.trackedFiles, async (trackingPath) => {
           try {
             const filePath = this.maybeExpandFilePath(trackingPath);
             const latestBackup = mostRecent.trackedFileBackups[trackingPath];
             const nextVersion = this.getMaxVersion(trackingPath) + 1;
+            if (this.retainedStorage) {
+              if (latestBackup?.failed)
+                throw new Error('Retained backup is unavailable.');
+              if (
+                latestBackup &&
+                latestBackup.backupFileName !== null &&
+                !(await checkOriginFileChanged(
+                  filePath,
+                  latestBackup.backupFileName,
+                  this.sessionId,
+                  undefined,
+                  this.retainedStorage,
+                ))
+              ) {
+                trackedFileBackups[trackingPath] = latestBackup;
+              } else {
+                trackedFileBackups[trackingPath] =
+                  await this.retainedStorage.createBackup(
+                    filePath,
+                    nextVersion,
+                  );
+              }
+              return;
+            }
 
             let fileStats: Stats | undefined;
             try {
@@ -780,6 +907,7 @@ export class FileHistoryService {
               this.sessionId,
             );
           } catch (error) {
+            if (this.retainedStorage) throw error;
             debugLogger.error(
               `FileHistory: Failed to backup file ${trackingPath}: ${error}`,
             );
@@ -829,7 +957,20 @@ export class FileHistoryService {
     promptId: string,
     truncateHistory = true,
   ): Promise<RewindResult> {
+    if (this.retainedStorage)
+      throw new Error('Retained history cannot rewind.');
     if (!this.enabled) return { filesChanged: [], filesFailed: [] };
+
+    // Refuse a shared key before truncation can prune the wrong backups.
+    let matches = 0;
+    for (const snapshot of this.state.snapshots) {
+      if (snapshot.promptId === promptId) matches++;
+    }
+    if (matches > 1) {
+      throw new Error(
+        'The selected snapshot shares its checkpoint identity with another turn',
+      );
+    }
 
     const targetSnapshot = this.findSnapshot(promptId);
     if (!targetSnapshot) {
@@ -863,7 +1004,7 @@ export class FileHistoryService {
     const targetSnapshot = this.findSnapshot(promptId);
     if (!targetSnapshot) return undefined;
 
-    const results = await Promise.all(
+    const results = await this.joinOperations(
       Array.from(this.state.trackedFiles, async (trackingPath) => {
         try {
           const filePath = this.maybeExpandFilePath(trackingPath);
@@ -873,7 +1014,11 @@ export class FileHistoryService {
           // produce a meaningful diff against a content we never captured,
           // so omit this file from the preview rather than show a diff
           // versus an older inherited backup.
-          if (targetBackup?.failed) return null;
+          if (targetBackup?.failed) {
+            if (this.retainedStorage)
+              throw new Error('Retained backup is unavailable.');
+            return null;
+          }
 
           const backupFileName: BackupFileName | undefined = targetBackup
             ? targetBackup.backupFileName
@@ -885,15 +1030,25 @@ export class FileHistoryService {
             filePath,
             backupFileName === null ? undefined : backupFileName,
             this.sessionId,
+            this.retainedStorage,
           );
           if (stats?.insertions || stats?.deletions) {
             return { filePath, stats };
           }
-          if (backupFileName === null && (await pathExists(filePath))) {
+          if (
+            backupFileName === null &&
+            (this.retainedStorage
+              ? await this.retainedStorage.withWorkingFile(
+                  filePath,
+                  async (source) => source !== null,
+                )
+              : await pathExists(filePath))
+          ) {
             return { filePath, stats };
           }
           return null;
         } catch (error) {
+          if (this.retainedStorage) throw error;
           debugLogger.error(
             `FileHistory: Error computing diff stats: ${error}`,
           );
@@ -978,7 +1133,7 @@ export class FileHistoryService {
       );
     }
     const cappedPaths = candidatePaths.slice(0, MAX_TURN_DIFF_FILES);
-    const results = await Promise.all(
+    const results = await this.joinOperations(
       cappedPaths.map((trackingPath) =>
         this.computeTurnFileDiff(trackingPath, target, nextSnapshot),
       ),
@@ -1016,6 +1171,7 @@ export class FileHistoryService {
     try {
       return await this.computeTurnFileDiffUnsafe(trackingPath, before, after);
     } catch (e) {
+      if (this.retainedStorage) throw e;
       // Per-file isolation: a structuredPatch crash, a transient read
       // error, anything thrown from a single candidate must not poison
       // the whole turn's Promise.all and silently erase every row.
@@ -1039,13 +1195,21 @@ export class FileHistoryService {
     const absoluteFilePath = this.maybeExpandFilePath(trackingPath);
 
     const beforeBackup = before.trackedFileBackups[trackingPath];
-    if (beforeBackup?.failed) return null;
+    if (beforeBackup?.failed) {
+      if (this.retainedStorage)
+        throw new Error('Retained backup is unavailable.');
+      return null;
+    }
 
     let afterBackup: FileHistoryBackup | undefined;
     let afterFromWorktree = false;
     if (after) {
       afterBackup = after.trackedFileBackups[trackingPath];
-      if (afterBackup?.failed) return null;
+      if (afterBackup?.failed) {
+        if (this.retainedStorage)
+          throw new Error('Retained backup is unavailable.');
+        return null;
+      }
     } else {
       afterFromWorktree = true;
     }
@@ -1067,6 +1231,11 @@ export class FileHistoryService {
       beforeBackup.backupFileName === afterBackup?.backupFileName &&
       beforeBackup.version === afterBackup?.version
     ) {
+      if (this.retainedStorage && beforeBackup.backupFileName !== null)
+        await this.retainedStorage.withBackupFile(
+          beforeBackup.backupFileName,
+          async () => {},
+        );
       return null;
     }
 
@@ -1074,6 +1243,7 @@ export class FileHistoryService {
       beforeBackup,
       undefined,
       this.sessionId,
+      this.retainedStorage,
     );
     // A non-null backup name that fails to read means we cannot produce a
     // trustworthy "before" content — fabricating an empty string would
@@ -1087,8 +1257,18 @@ export class FileHistoryService {
     }
 
     const afterRead = afterFromWorktree
-      ? await readEndpointContent(undefined, absoluteFilePath, this.sessionId)
-      : await readEndpointContent(afterBackup, undefined, this.sessionId);
+      ? await readEndpointContent(
+          undefined,
+          absoluteFilePath,
+          this.sessionId,
+          this.retainedStorage,
+        )
+      : await readEndpointContent(
+          afterBackup,
+          undefined,
+          this.sessionId,
+          this.retainedStorage,
+        );
     if (afterRead.kind === 'unreadable') {
       debugLogger.warn(
         `FileHistory: skipping turn diff for ${trackingPath}: after ${afterFromWorktree ? 'worktree' : 'backup'} unreadable`,
@@ -1225,6 +1405,8 @@ export class FileHistoryService {
   private async applySnapshot(
     targetSnapshot: FileHistorySnapshot,
   ): Promise<RewindResult> {
+    if (this.retainedStorage)
+      throw new Error('Retained history cannot restore.');
     const filesChanged: string[] = [];
     const filesFailed: string[] = [];
     for (const trackingPath of this.state.trackedFiles) {
@@ -1320,6 +1502,8 @@ export class FileHistoryService {
   private async cleanupOrphanedBackups(
     removedSnapshots: FileHistorySnapshot[],
   ): Promise<void> {
+    if (this.retainedStorage)
+      throw new Error('Retained history cannot delete backups.');
     const liveBackups = new Set<string>();
     for (const s of this.state.snapshots) {
       for (const b of Object.values(s.trackedFileBackups)) {
@@ -1347,6 +1531,21 @@ export class FileHistoryService {
         }
       }),
     );
+  }
+
+  private async joinOperations<T>(operations: Array<Promise<T>>): Promise<T[]> {
+    if (!this.retainedStorage) return Promise.all(operations);
+    const results = await Promise.allSettled(operations);
+    const errors = results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [],
+    );
+    if (errors.length)
+      throw new AggregateError(errors, 'Retained history operation failed.');
+    return results.map((result) => {
+      if (result.status !== 'fulfilled')
+        throw new Error('Retained operation did not complete.');
+      return result.value;
+    });
   }
 
   private maybeShortenFilePath(filePath: string): string {

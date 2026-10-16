@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "provider": "local-openai-fixture",
+  "runtimeProvisioningDelayMs": 15000,
+  "samples": [
+    {
+      "scenario": "no-tool",
+      "warmRequestedMs": 41.80949999999996,
+      "runtimeReadyMs": 15419.910042,
+      "firstVisibleTextMs": 518.9289580000001,
+      "turnCompleteMs": 518.9427080000002,
+      "acquireMs": null,
+      "executionStartMs": null,
+      "toolWaitMs": null,
+      "sameContext": null,
+      "storeRequests": 9,
+      "modelRounds": [
+        {
+          "requestMs": 331.11199999999997,
+          "firstTextMs": 334.03316699999993,
+          "finishedMs": 334.0395420000001
+        }
+      ]
+    },
+    {
+      "scenario": "tool",
+      "warmRequestedMs": 29.15754200000083,
+      "runtimeReadyMs": 15448.145334,
+      "firstVisibleTextMs": 15807.866708999998,
+      "turnCompleteMs": 15807.878459,
+      "acquireMs": 15450.950792,
+      "executionStartMs": 15564.442209,
+      "toolWaitMs": 15408.690667000003,
+      "sameContext": true,
+      "storeRequests": 23,
+      "modelRounds": [
+        {
+          "requestMs": 37.738666999997804,
+          "firstTextMs": 39.44683399999849,
+          "finishedMs": 39.45466699999815
+        },
+        {
+          "requestMs": 15672.593709,
+          "firstTextMs": 15674.930667,
+          "finishedMs": 15674.934125
+        }
+      ]
+    }
+  ],
+  "capturedAt": "2026-09-28T13:52:12.244Z",
+  "gitCommit": "bd45b95f826b3873e25ae84d78ae35f1599c141a",
+  "workingTreeDirty": true,
+  "sourceHashes": {
+    "integration-tests/helpers/hosted-latency-driver.ts": "f3aab2694c5d1023adad1f909914ef951666812de2fe82c75cd8772b8ebfc358",
+    "integration-tests/helpers/hosted-latency-baseline.ts": "07faf9eb88726452981ad200ef2d14456c95974ec07f019bd95da8e37717becb",
+    "integration-tests/helpers/hosted-harness-process.ts": "13c3c95de16e83aad1694b8f5f701b973fe0b26f98eeaba5118fd596ec00c5a8",
+    "integration-tests/fake-openai-server.ts": "3d4387fc296d68cb3f73c0e193da3a9783cf418a420053ff7e70a683877e3a21",
+    "packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java": "ef1a9d96d5d8931f70ca0a02b6a654a3a76a948e00aa56649aaf71eedef84e15"
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "release": "25.5.0",
+    "node": "v22.22.2",
+    "database": "MySQL 5.5.5-10.11.19-MariaDB"
+  },
+  "notes": [
+    "Packaged Hosted private protocol + Spring SQL Session Store + real local-process Broker/worker; two fresh Workspaces, one sample each.",
+    "Worker startup sleeps 15000ms before importing the packaged CLI. Timings use one monotonic clock relative to prompt submission; warm response defines readiness.",
+    "Model firstTextMs observes the first nonempty provider delta.content at the proxy. firstVisibleTextMs observes committed session_update text over Harness SSE (250ms polling).",
+    "toolWaitMs is warm response minus first model stream finish; modelRounds separately measure provider stream time, excluding readiness wait.",
+    "Isolated boot-time fixture model configuration; local deterministic OpenAI responses, not real-model latency, published-configuration deployment or public Managed REST latency.",
+    "storeRequests counts HTTP requests between prompt submission and observed completion, including SSE reads; no history-growth or cache claim.",
+    "Checked-in numbers are descriptive; comparison enforces scenario coverage and ordering, never absolute millisecond thresholds."
+  ]
+}

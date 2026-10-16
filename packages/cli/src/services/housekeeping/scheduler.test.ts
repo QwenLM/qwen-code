@@ -644,7 +644,14 @@ describe('_runHousekeepingForTesting (debug-logs cleanup)', () => {
     // Near-miss names: the allowlist is exact-match, so prefix or case
     // widenings must not make these sweepable.
     const prefixed = mkDebugLog('workspace-mcp-discovery-old', old);
-    const recased = mkDebugLog('Transcript-Replay', old);
+    // Case-insensitive filesystems (macOS/Windows defaults) store
+    // 'Transcript-Replay.txt' and 'transcript-replay.txt' as one file, so a
+    // case-widened near-miss only exists apart from the allowlisted name on
+    // case-sensitive filesystems.
+    const recased =
+      process.platform === 'darwin' || process.platform === 'win32'
+        ? undefined
+        : mkDebugLog('Transcript-Replay', old);
 
     await _runHousekeepingForTesting(makeConfig('current'), makeSettings(30));
 
@@ -652,7 +659,9 @@ describe('_runHousekeepingForTesting (debug-logs cleanup)', () => {
     expect(fs.existsSync(discovery)).toBe(false);
     expect(fs.existsSync(stray)).toBe(true);
     expect(fs.existsSync(prefixed)).toBe(true);
-    expect(fs.existsSync(recased)).toBe(true);
+    if (recased) {
+      expect(fs.existsSync(recased)).toBe(true);
+    }
   });
 
   it('throttles cleanup independently for different runtime directories', async () => {

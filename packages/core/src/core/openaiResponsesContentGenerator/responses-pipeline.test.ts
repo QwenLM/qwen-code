@@ -13,7 +13,11 @@ import {
   beforeEach,
   afterEach,
 } from 'vitest';
-import type { Content, GenerateContentParameters } from '@google/genai';
+import type {
+  Content,
+  GenerateContentParameters,
+  GenerateContentResponse,
+} from '@google/genai';
 import { FunctionCallingConfigMode, FinishReason } from '@google/genai';
 import { inspect } from 'node:util';
 import {
@@ -30,6 +34,14 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { ResponsesApiRequest } from './types.js';
 import { preloadRuntimeFetchModule } from '../../utils/runtimeFetchOptions.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import {
+  collect,
+  content,
+  drain,
+  fnCall,
+  fnResponse,
+  userText,
+} from '../../test-utils/model-fixtures.js';
 
 // The pipeline calls the `fetch` buildRuntimeFetchOptions returns (pinned
 // alongside its dispatcher) rather than the global `fetch`, so the mock must
@@ -59,32 +71,13 @@ vi.mock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
   };
 });
 
-function sseStream(lines: string[]): ReadableStream<Uint8Array> {
-  const body = lines.join('\n') + '\n';
-  const encoder = new TextEncoder();
-  return new ReadableStream({
-    start(controller) {
-      controller.enqueue(encoder.encode(body));
-      controller.close();
-    },
-  });
-}
-
-function sseEvent(event: string, data: unknown): string[] {
-  return [`event: ${event}`, `data: ${JSON.stringify(data)}`, ''];
-}
-
-// Splits the SSE body into small byte chunks so a single event/data line —
-// or the JSON payload itself — lands across multiple reader.read() calls,
-// exercising the pipeline's buffer/line-carry logic instead of always
-// handing it one complete frame per read.
-function sseStreamChunked(
-  lines: string[],
-  chunkSize = 5,
-): ReadableStream<Uint8Array> {
-  const body = lines.join('\n') + '\n';
+// Delivers `body` in `chunkSize`-byte reads (default: one read). Small chunks
+// split an event/data line -- or the JSON payload, or a multi-byte character --
+// across reader.read() calls, exercising the pipeline's buffer/line-carry
+// logic instead of handing it one complete frame per read.
+function byteStream(body: string, chunkSize = Infinity) {
   const bytes = new TextEncoder().encode(body);
-  return new ReadableStream({
+  return new ReadableStream<Uint8Array>({
     start(controller) {
       for (let i = 0; i < bytes.length; i += chunkSize) {
         controller.enqueue(bytes.slice(i, i + chunkSize));
@@ -94,16 +87,33 @@ function sseStreamChunked(
   });
 }
 
-// A byte ReadableStream whose reads block until a chunk is pushed (or it is
-// ended), so a test can drip-feed frames on fake-timer boundaries and exercise
-// the idle watchdog / lifetime cap without ever hanging: an unpushed read stays
-// pending, and enqueue/close resolve it. Each pushed line gets its own trailing
-// newline so it parses as a complete data-only SSE frame.
-function gatedByteStream(): {
-  stream: ReadableStream<Uint8Array>;
-  push: (dataLine: string) => void;
-  end: () => void;
-} {
+function sseStream(lines: string[], chunkSize?: number) {
+  return byteStream(lines.join('\n') + '\n', chunkSize);
+}
+
+function sseEvent(event: string, data: unknown): string[] {
+  return [`event: ${event}`, `data: ${JSON.stringify(data)}`, ''];
+}
+
+const deltaEvent = (delta: string) =>
+  sseEvent('response.output_text.delta', { delta });
+const DONE = sseEvent('response.completed', {
+  response: { status: 'completed' },
+});
+const DONE_R1 = sseEvent('response.completed', {
+  response: { id: 'r1', status: 'completed' },
+});
+
+// A data-only SSE line (no `event:` line): the shape the API actually emits.
+function dataLine(type: string, fields: object): string {
+  return `data: ${JSON.stringify({ type, ...fields })}`;
+}
+
+// A byte stream whose reads block until the test pushes a data-only frame (or
+// completes the stream), so a test can drip-feed frames on fake-timer
+// boundaries and exercise the idle watchdog / lifetime cap without ever
+// hanging: an unpushed read stays pending, and enqueue/close resolve it.
+function gatedByteStream() {
   const encoder = new TextEncoder();
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   const stream = new ReadableStream<Uint8Array>({
@@ -111,12 +121,13 @@ function gatedByteStream(): {
       controller = c;
     },
   });
+  const push = (type: string, fields: object) =>
+    controller.enqueue(encoder.encode(dataLine(type, fields) + '\n'));
   return {
     stream,
-    push(dataLine: string) {
-      controller.enqueue(encoder.encode(dataLine + '\n'));
-    },
-    end() {
+    delta: (delta: string) => push('response.output_text.delta', { delta }),
+    complete() {
+      push('response.completed', { response: { status: 'completed' } });
       controller.close();
     },
   };
@@ -124,20 +135,20 @@ function gatedByteStream(): {
 
 function makeCliConfig(
   proxy?: string,
-  sessionId = '',
+  sessionId: string | (() => string) = '',
   allowDynamicHeaderValues = false,
+  freeform = false,
 ): Config {
-  // Config.getSessionId() is typed `string` and never returns undefined, so
-  // the mock must not either -- the reachable "no usable session" state is
-  // the empty string.
+  // getSessionId() is typed `string` and never returns undefined, so neither
+  // may the mock: the reachable "no usable session" state is ''. connect()
+  // stamps its own User-Agent and resolves customHeaders placeholders per
+  // request from Config; the consent gate defaults off, as in production.
   return {
     getProxy: () => proxy,
-    getSessionId: () => sessionId,
-    // connect() stamps its own User-Agent and resolves customHeaders
-    // placeholders per request; both read Config. The consent gate defaults
-    // to off, matching its production default.
+    getSessionId: typeof sessionId === 'function' ? sessionId : () => sessionId,
     getCliVersion: () => '9.9.9-test',
     getOutboundAllowDynamicHeaderValues: () => allowDynamicHeaderValues,
+    getFreeform: () => freeform,
   } as unknown as Config;
 }
 
@@ -153,30 +164,41 @@ function makeGeneratorConfig(
 }
 
 function textRequest(text: string): GenerateContentParameters {
-  return { model: 'gpt-5', contents: [{ role: 'user', parts: [{ text }] }] };
+  return { model: 'gpt-5', contents: [userText(text)] };
 }
+
+/** The OpenAI Responses API's own rejection of an over-long input string. */
+function directBody(param: string, message: string): string {
+  return JSON.stringify({
+    error: {
+      message,
+      type: 'invalid_request_error',
+      param,
+      code: 'string_above_max_length',
+    },
+  });
+}
+
+const MAX_64_MESSAGE =
+  "Invalid 'input[1].id': string too long. Expected a string with " +
+  'maximum length 64, but got a string with length 83 instead.';
+const MAX_64_BODY = directBody('input[1].id', MAX_64_MESSAGE);
 
 describe('normalizeOpenAiWireBaseUrl', () => {
   it('maps the empty default and a /v1-suffixed URL onto the same origin', () => {
     // The Responses wire strips a trailing /v1 before appending /v1/responses,
     // so these spellings are one endpoint — the credential-reuse comparison in
     // ModelsConfig depends on this exact rule.
-    expect(normalizeOpenAiWireBaseUrl('')).toBe('https://api.openai.com');
-    expect(normalizeOpenAiWireBaseUrl(undefined)).toBe(
-      'https://api.openai.com',
-    );
-    expect(normalizeOpenAiWireBaseUrl('https://api.openai.com/v1')).toBe(
-      'https://api.openai.com',
-    );
-    expect(normalizeOpenAiWireBaseUrl('https://api.openai.com/v1/')).toBe(
-      'https://api.openai.com',
-    );
-    expect(normalizeOpenAiWireBaseUrl('https://api.openai.com/')).toBe(
-      'https://api.openai.com',
-    );
-    expect(normalizeOpenAiWireBaseUrl('https://proxy.example/v1/')).toBe(
-      'https://proxy.example',
-    );
+    for (const [baseUrl, origin] of [
+      ['', 'https://api.openai.com'],
+      [undefined, 'https://api.openai.com'],
+      ['https://api.openai.com/v1', 'https://api.openai.com'],
+      ['https://api.openai.com/v1/', 'https://api.openai.com'],
+      ['https://api.openai.com/', 'https://api.openai.com'],
+      ['https://proxy.example/v1/', 'https://proxy.example'],
+    ] as const) {
+      expect(normalizeOpenAiWireBaseUrl(baseUrl)).toBe(origin);
+    }
   });
 });
 
@@ -196,51 +218,153 @@ describe('ResponsesPipeline', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    // Restores what fake-timer and env-stubbing cases change, even on failure.
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
-  function mockResponse(lines: string[], status = 200) {
-    fetchMock.mockResolvedValue({
-      ok: status < 400,
-      status,
-      headers: { get: () => 'text/event-stream' },
-      body: sseStream(lines),
+  // A 200 response; a null contentType models an absent header.
+  function okResponse(
+    body: ReadableStream<Uint8Array> | undefined,
+    contentType: string | null = 'text/event-stream',
+  ) {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => contentType },
+      body,
       text: async () => '',
-    });
+    };
   }
 
-  it('POSTs to <baseUrl>/v1/responses with the converted request body', async () => {
-    mockResponse([
-      ...sseEvent('response.output_text.delta', { delta: 'hi' }),
-      ...sseEvent('response.completed', {
-        response: { id: 'r1', status: 'completed' },
-      }),
-    ]);
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
+  // A non-2xx response without a body stream: its text comes from text().
+  function errorResponse(status: number, body: string) {
+    return {
+      ok: false,
+      status,
+      headers: { get: () => 'application/json' },
+      text: async () => body,
+    };
+  }
+
+  function mockResponse(lines: string[], chunkSize?: number) {
+    fetchMock.mockResolvedValue(okResponse(sseStream(lines, chunkSize)));
+  }
+
+  const pipe = (
+    overrides?: Partial<ContentGeneratorConfig>,
+    cliConfig = makeCliConfig(),
+  ) => new ResponsesPipeline(makeGeneratorConfig(overrides), cliConfig);
+
+  const streamed = (
+    pipeline = pipe(),
+    request = textRequest('hi'),
+    promptId = 'p1',
+  ) => collect(pipeline.executeStream(request, promptId));
+
+  const partsOf = (chunks: GenerateContentResponse[]) =>
+    chunks.map((c) => c.candidates?.[0]?.content?.parts);
+
+  // Drains one stream: resolves to what it threw, or undefined on success.
+  const streamError = (pipeline = pipe(), request = textRequest('hi')) =>
+    drain(pipeline.executeStream(request, 'p1')).then(
+      () => undefined,
+      (e: unknown) => e,
     );
-    const chunks = [];
-    for await (const chunk of pipeline.executeStream(
-      textRequest('hello'),
-      'prompt-1',
-    )) {
-      chunks.push(chunk);
+
+  // The connect phase's rejection, or undefined when it connected.
+  const connectError = (pipeline = pipe(), signal?: AbortSignal) =>
+    pipeline.connectStream(textRequest('hi'), 'p1', signal).then(
+      () => undefined as unknown,
+      (e: unknown) => e,
+    );
+
+  // The connect-phase rejection for a real `Response` carrying this body.
+  function rejectWith(body: string, status: number) {
+    fetchMock.mockResolvedValue(new Response(body, { status }));
+    return connectError();
+  }
+
+  const sentBody = (call = 0) =>
+    JSON.parse(fetchMock.mock.calls[call]![1].body) as ResponsesApiRequest &
+      Record<string, unknown>;
+  const sentHeaders = (call = 0) =>
+    new Headers(fetchMock.mock.calls[call]![1].headers);
+
+  // Answers with a bare completed stream, drains one request and returns the
+  // body it sent.
+  async function sendBody(
+    pipeline = pipe(),
+    request = textRequest('hi'),
+    promptId = 'p1',
+  ) {
+    mockResponse(DONE);
+    await drain(pipeline.executeStream(request, promptId));
+    return sentBody();
+  }
+
+  // Answers with a bare completed stream and runs one execute().
+  function executeDone(pipeline = pipe()) {
+    mockResponse(DONE);
+    return pipeline.execute(textRequest('hi'), 'p1');
+  }
+
+  // Table row runner: sends one request and asserts each expected top-level
+  // body key, one assertion per key.
+  type BodyCase = [
+    title: string,
+    overrides: Partial<ContentGeneratorConfig>,
+    expected: Record<string, unknown>,
+    request?: GenerateContentParameters,
+  ];
+  async function expectBody(...[, overrides, expected, request]: BodyCase) {
+    const body = await sendBody(pipe(overrides), request);
+    for (const [key, value] of Object.entries(expected)) {
+      expect(body[key]).toEqual(value);
     }
+  }
+
+  it.each([
+    { freeform: false, tool: 'function', call: 'function_call' },
+    { freeform: true, tool: 'custom', call: 'custom_tool_call' },
+  ])(
+    'uses $tool tools and matching history when Freeform=$freeform',
+    async ({ freeform, tool, call }) => {
+      const body = await sendBody(
+        pipe(undefined, makeCliConfig(undefined, '', false, freeform)),
+        {
+          model: 'gpt-6-astra',
+          contents: [
+            content('model', fnCall('exec', { source: 'text(1);' }, 'c1')),
+            content('user', fnResponse('exec', { output: '1' }, 'c1')),
+          ],
+          config: { tools: [{ functionDeclarations: [{ name: 'exec' }] }] },
+        },
+      );
+      expect(body.tools?.[0]?.type).toBe(tool);
+      expect(body.input.map((item) => item.type)).toEqual([
+        call,
+        `${call}_output`,
+      ]);
+    },
+  );
+
+  it('POSTs to <baseUrl>/v1/responses with the converted request body', async () => {
+    mockResponse([...deltaEvent('hi'), ...DONE_R1]);
+    const chunks = await streamed(pipe(), textRequest('hello'), 'prompt-1');
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe('https://api.openai.com/v1/responses');
-    expect(new Headers(init.headers).get('Authorization')).toBe(
-      'Bearer test-key',
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      'https://api.openai.com/v1/responses',
     );
-    expect(new Headers(init.headers).get('Accept')).toBe('text/event-stream');
+    const headers = sentHeaders();
+    expect(headers.get('Authorization')).toBe('Bearer test-key');
+    expect(headers.get('Accept')).toBe('text/event-stream');
     // Pin the explicit Content-Type: undici defaults a string body to
     // text/plain;charset=UTF-8 when it is absent, which strict
     // OpenAI-compatible gateways reject with 415/400.
-    expect(new Headers(init.headers).get('Content-Type')).toBe(
-      'application/json',
-    );
-    const body = JSON.parse(init.body) as ResponsesApiRequest;
+    expect(headers.get('Content-Type')).toBe('application/json');
+    const body = sentBody();
     expect(body.model).toBe('gpt-5');
     expect(body.stream).toBe(true);
     // We never reference previous_response_id, so nothing benefits from
@@ -256,59 +380,36 @@ describe('ResponsesPipeline', () => {
       { type: 'message', role: 'user', content: 'hello' },
     ]);
 
-    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([
-      [{ text: 'hi' }],
-      [],
-    ]);
+    expect(partsOf(chunks)).toEqual([[{ text: 'hi' }], []]);
   });
 
   it('logs only request metadata, never raw request-body bytes (issue #11667)', async () => {
-    // Synthetic markers that must never reach the debug log: a user prompt,
-    // a tool name, a replayed reasoning id, and its encrypted content. The
-    // pre-fix code logged `body.substring(0, 500)` — which serializes `model`
-    // first and then `input` — so all four would leak into the per-session
-    // debug file.
+    // Synthetic markers that must never reach the debug log: a user prompt, a
+    // tool name, a replayed reasoning id, and its encrypted content. The
+    // pre-fix code logged `body.substring(0, 500)` -- `model` first, then
+    // `input` -- so all four leaked into the per-session debug file.
     const promptMarker = 'PROMPT_SECRET_MARKER_7f3a';
     const toolMarker = 'TOOL_SECRET_MARKER_9c1b';
     const reasoningIdMarker = 'REASONING_ID_SECRET_2d4e';
     const encryptedMarker = 'ENCRYPTED_CONTENT_SECRET_5b6f';
-
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const request: GenerateContentParameters = {
-      model: 'gpt-5',
-      contents: [
-        { role: 'user', parts: [{ text: `${promptMarker} hello` }] },
-        {
-          role: 'model',
-          parts: [
-            {
-              thought: true,
-              thoughtSignature: JSON.stringify({
-                id: reasoningIdMarker,
-                encrypted_content: encryptedMarker,
-              }),
-            },
-          ],
-        },
-      ],
-      config: {
-        tools: [{ functionDeclarations: [{ name: toolMarker }] }],
+    const thoughtSignature = JSON.stringify({
+      id: reasoningIdMarker,
+      encrypted_content: encryptedMarker,
+    });
+    await sendBody(
+      pipe(),
+      {
+        model: 'gpt-5',
+        contents: [
+          userText(`${promptMarker} hello`),
+          content('model', { thought: true, thoughtSignature }),
+        ],
+        config: { tools: [{ functionDeclarations: [{ name: toolMarker }] }] },
       },
-    };
-    for await (const _ of pipeline.executeStream(request, 'prompt-1')) {
-      // drain
-    }
+      'prompt-1',
+    );
 
-    const logged = debugMock.mock.calls
-      .flat()
-      .map((a) => String(a))
-      .join(' ');
+    const logged = debugMock.mock.calls.flat().map(String).join(' ');
     // No raw content may leak into the debug log.
     expect(logged).not.toContain(promptMarker);
     expect(logged).not.toContain(toolMarker);
@@ -325,28 +426,17 @@ describe('ResponsesPipeline', () => {
 
   it('keys prompt_cache_key on the session so it stays stable across turns', async () => {
     // userPromptId is `${sessionId}########${counter}` and changes on every
-    // send, so keying on it directly gives each turn its own cache namespace
-    // and no request can hit the prefix cache the previous one wrote. Nothing
-    // errors when that happens -- the loss is pure cost and latency, which is
-    // exactly why it needs a test rather than being noticed in use. Matches
-    // the Chat wire's `qwen-code:${sessionId}` key (prefix-caching.ts).
+    // send, so keying on it gives each turn its own cache namespace and no
+    // request can hit the prefix the previous one wrote. Nothing errors when
+    // that happens -- the loss is pure cost and latency, which is why it needs
+    // a test. Matches the Chat wire's `qwen-code:${sessionId}` key
+    // (prefix-caching.ts).
     const keys: Array<string | undefined> = [];
     for (const turn of ['sess-abc########1', 'sess-abc########2']) {
       fetchMock.mockClear();
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(undefined, 'sess-abc'),
-      );
-      for await (const _ of pipeline.executeStream(textRequest('hi'), turn)) {
-        // drain
-      }
-      keys.push(
-        (JSON.parse(fetchMock.mock.calls[0]![1].body) as ResponsesApiRequest)
-          .prompt_cache_key,
-      );
+      const cliConfig = makeCliConfig(undefined, 'sess-abc');
+      const body = await sendBody(pipe(undefined, cliConfig), undefined, turn);
+      keys.push(body.prompt_cache_key);
     }
 
     expect(keys[0]).toBe('qwen-code:sess-abc');
@@ -354,22 +444,7 @@ describe('ResponsesPipeline', () => {
   });
 
   it('falls back to userPromptId as prompt_cache_key when the session id is empty', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(
-      textRequest('hi'),
-      'short-id',
-    )) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
+    const body = await sendBody(pipe(), undefined, 'short-id');
     expect(body.prompt_cache_key).toBe('short-id');
   });
 
@@ -377,52 +452,30 @@ describe('ResponsesPipeline', () => {
     // A mutation removing the truncation branch would silently disable
     // prompt caching (the Responses API rejects/ignores an over-length
     // prompt_cache_key) with no visible error -- pin the hashed shape.
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
     const longId = 'x'.repeat(100);
-    for await (const _ of pipeline.executeStream(textRequest('hi'), longId)) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
-    expect(body.prompt_cache_key).not.toBe(longId);
-    expect(body.prompt_cache_key).toHaveLength(64);
-    expect(body.prompt_cache_key).toMatch(/^[0-9a-f]{64}$/);
+    const { prompt_cache_key } = await sendBody(pipe(), undefined, longId);
+    expect(prompt_cache_key).not.toBe(longId);
+    expect(prompt_cache_key).toHaveLength(64);
+    expect(prompt_cache_key).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('strips a trailing /v1 from baseUrl before appending /v1/responses', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ baseUrl: 'https://api.openai.com/v1' }),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
-    expect(fetchMock.mock.calls[0]![0]).toBe(
-      'https://api.openai.com/v1/responses',
-    );
-  });
-
-  it('defaults to https://api.openai.com when no baseUrl is configured', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ baseUrl: undefined }),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
+  it.each([
+    [
+      'strips a trailing /v1 from baseUrl before appending /v1/responses',
+      'https://api.openai.com/v1',
+    ],
+    [
+      'defaults to https://api.openai.com when no baseUrl is configured',
+      undefined,
+    ],
+    // The round-1 empty-string baseUrl shape: `'' || default` must resolve to
+    // api.openai.com rather than producing `/v1/responses` against no origin.
+    [
+      'treats an empty-string baseUrl as unset and falls back to the default origin',
+      '',
+    ],
+  ])('%s', async (_title, baseUrl) => {
+    await sendBody(pipe({ baseUrl }));
     expect(fetchMock.mock.calls[0]![0]).toBe(
       'https://api.openai.com/v1/responses',
     );
@@ -432,9 +485,6 @@ describe('ResponsesPipeline', () => {
     it.each([undefined, { effort: 'high' }])(
       'applies default below an existing raw override %j',
       async (raw) => {
-        mockResponse(
-          sseEvent('response.completed', { response: { status: 'completed' } }),
-        );
         const config = makeCliConfig();
         config.getResolvedModelConfig = vi.fn().mockReturnValue({
           capabilities: {
@@ -445,195 +495,129 @@ describe('ResponsesPipeline', () => {
             },
           },
         });
-        const pipeline = new ResponsesPipeline(
-          makeGeneratorConfig({
+        const pipeline = pipe(
+          {
             model: 'company-alias',
             authType: 'openai-responses' as ContentGeneratorConfig['authType'],
             ...(raw ? { extra_body: { reasoning: raw } } : {}),
-          }),
+          },
           config,
         );
-        for await (const _ of pipeline.executeStream(
-          { ...textRequest('hi'), model: 'company-alias' },
-          'p1',
-        )) {
-          // drain
-        }
-        const body = JSON.parse(
-          fetchMock.mock.calls[0]![1].body,
-        ) as ResponsesApiRequest;
+        const body = await sendBody(pipeline, {
+          ...textRequest('hi'),
+          model: 'company-alias',
+        });
         expect(body.reasoning).toEqual(
           raw ?? { effort: 'medium', summary: 'auto' },
         );
       },
     );
 
-    it('passes the effort straight through with no clamping, plus include + summary auto', async () => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({ reasoning: { effort: 'max' } }),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-      const body = JSON.parse(
-        fetchMock.mock.calls[0]![1].body,
-      ) as ResponsesApiRequest;
-      expect(body.reasoning).toEqual({ effort: 'max', summary: 'auto' });
-      expect(body.include).toEqual(['reasoning.encrypted_content']);
-    });
-
-    it('omits reasoning and include entirely when reasoning is false', async () => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({ reasoning: false }),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-      const body = JSON.parse(
-        fetchMock.mock.calls[0]![1].body,
-      ) as ResponsesApiRequest;
-      expect(body.reasoning).toBeUndefined();
-      expect(body.include).toBeUndefined();
-    });
-
-    it('translates a legacy extra_body.enable_thinking into reasoning.effort=medium and strips it from the wire body', async () => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
-          extra_body: { enable_thinking: true },
-        }),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-      const body = JSON.parse(fetchMock.mock.calls[0]![1].body) as Record<
-        string,
-        unknown
-      >;
-      expect(body['reasoning']).toEqual({ effort: 'medium', summary: 'auto' });
-      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    it.each<BodyCase>([
+      [
+        'passes the effort straight through with no clamping, plus include + summary auto',
+        { reasoning: { effort: 'max' } },
+        {
+          reasoning: { effort: 'max', summary: 'auto' },
+          include: ['reasoning.encrypted_content'],
+        },
+      ],
+      [
+        'omits reasoning and include entirely when reasoning is false',
+        { reasoning: false },
+        { reasoning: undefined, include: undefined },
+      ],
       // `enable_thinking` has no meaning on this wire; it must never appear
       // top-level on the request, translated or not.
-      expect(body['enable_thinking']).toBeUndefined();
-    });
-
-    it('prefers an explicit reasoning.effort over a legacy extra_body.enable_thinking', async () => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
+      [
+        'translates a legacy extra_body.enable_thinking into reasoning.effort=medium and strips it from the wire body',
+        { extra_body: { enable_thinking: true } },
+        {
+          reasoning: { effort: 'medium', summary: 'auto' },
+          include: ['reasoning.encrypted_content'],
+          enable_thinking: undefined,
+        },
+      ],
+      [
+        'prefers an explicit reasoning.effort over a legacy extra_body.enable_thinking',
+        {
           reasoning: { effort: 'high' },
           extra_body: { enable_thinking: true },
-        }),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-      const body = JSON.parse(
-        fetchMock.mock.calls[0]![1].body,
-      ) as ResponsesApiRequest;
-      expect(body.reasoning).toEqual({ effort: 'high', summary: 'auto' });
-    });
-
-    it('omits reasoning when reasoning is false even with a legacy extra_body.enable_thinking set', async () => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
-          reasoning: false,
-          extra_body: { enable_thinking: true },
-        }),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-      const body = JSON.parse(fetchMock.mock.calls[0]![1].body) as Record<
-        string,
-        unknown
-      >;
-      expect(body['reasoning']).toBeUndefined();
-      expect(body['include']).toBeUndefined();
-      expect(body['enable_thinking']).toBeUndefined();
-    });
+        },
+        { reasoning: { effort: 'high', summary: 'auto' } },
+      ],
+      [
+        'omits reasoning when reasoning is false even with a legacy extra_body.enable_thinking set',
+        { reasoning: false, extra_body: { enable_thinking: true } },
+        {
+          reasoning: undefined,
+          include: undefined,
+          enable_thinking: undefined,
+        },
+      ],
+    ])('%s', expectBody);
   });
 
-  it('maps samplingParams onto temperature/top_p/max_output_tokens', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({
-        samplingParams: { temperature: 0.4, top_p: 0.9, max_tokens: 2048 },
-      }),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
-    expect(body.temperature).toBe(0.4);
-    expect(body.top_p).toBe(0.9);
-    expect(body.max_output_tokens).toBe(2048);
-  });
-
-  it('merges extra_body keys that do not already exist on the request', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({
-        extra_body: { service_tier: 'priority', model: 'ignored' },
-      }),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest & { service_tier?: string };
-    expect(body.service_tier).toBe('priority');
+  it.each<BodyCase>([
+    [
+      'maps samplingParams onto temperature/top_p/max_output_tokens',
+      { samplingParams: { temperature: 0.4, top_p: 0.9, max_tokens: 2048 } },
+      { temperature: 0.4, top_p: 0.9, max_output_tokens: 2048 },
+    ],
     // 'model' already exists on the request, so extra_body must not clobber it.
-    expect(body.model).toBe('gpt-5');
-  });
-
-  it('lets extra_body fill in a field left undefined by the request itself', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
+    [
+      'merges extra_body keys that do not already exist on the request',
+      { extra_body: { service_tier: 'priority', model: 'ignored' } },
+      { service_tier: 'priority', model: 'gpt-5' },
+    ],
     // textRequest() has no config.tools, so apiRequest.tools is present as a
     // key with value undefined — extra_body must still be able to set it.
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({
-        extra_body: { instructions: 'from extra_body' },
-      }),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
-    expect(body.instructions).toBe('from extra_body');
-  });
+    [
+      'lets extra_body fill in a field left undefined by the request itself',
+      { extra_body: { instructions: 'from extra_body' } },
+      { instructions: 'from extra_body' },
+    ],
+    // The production guard checks `requestRecord[key] === undefined`, so an
+    // explicit 0 is preserved; a truthiness guard would let extra_body win.
+    [
+      'does not let extra_body overwrite an explicit samplingParams.temperature of 0',
+      { samplingParams: { temperature: 0 }, extra_body: { temperature: 1 } },
+      { temperature: 0 },
+    ],
+    [
+      'drops function_call items with no matching function_call_output before sending',
+      {},
+      { input: [] },
+      {
+        model: 'gpt-5',
+        contents: [content('model', fnCall('f', {}, 'call_1'))],
+      },
+    ],
+    // --- Critical (a): per-send window-clamped output budget (#5950) ---
+    [
+      'sends request.config.maxOutputTokens as max_output_tokens when no samplingParams cap is set',
+      {},
+      { max_output_tokens: 512 },
+      { ...textRequest('hi'), config: { maxOutputTokens: 512 } },
+    ],
+    [
+      'lets request.config.maxOutputTokens override the static samplingParams.max_tokens',
+      { samplingParams: { max_tokens: 2048 } },
+      { max_output_tokens: 512 },
+      { ...textRequest('hi'), config: { maxOutputTokens: 512 } },
+    ],
+    // C5 regression: the per-send window-clamped value must NOT reopen a
+    // smaller user-configured max_tokens ceiling. reconcileMaxTokens (the
+    // shared "smaller wins" invariant both sibling wires call) picks the
+    // minimum, so config 1000 caps a per-send 8000; a plain `??` precedence
+    // (request first) would leak 8000.
+    [
+      'keeps the configured samplingParams.max_tokens ceiling when the per-send maxOutputTokens is larger (smaller wins)',
+      { samplingParams: { max_tokens: 1000 } },
+      { max_output_tokens: 1000 },
+      { ...textRequest('hi'), config: { maxOutputTokens: 8000 } },
+    ],
+  ])('%s', expectBody);
 
   describe('tool_choice from toolConfig.functionCallingConfig.mode', () => {
     function requestWithTool(
@@ -641,7 +625,7 @@ describe('ResponsesPipeline', () => {
     ): GenerateContentParameters {
       return {
         model: 'gpt-5',
-        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        contents: [userText('hi')],
         config: {
           tools: [{ functionDeclarations: [{ name: 'read_file' }] }],
           ...(mode ? { toolConfig: { functionCallingConfig: { mode } } } : {}),
@@ -649,120 +633,43 @@ describe('ResponsesPipeline', () => {
       };
     }
 
-    it('defaults to auto when no functionCallingConfig is set', async () => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(requestWithTool(), 'p1')) {
-        // drain
-      }
-      const body = JSON.parse(
-        fetchMock.mock.calls[0]![1].body,
-      ) as ResponsesApiRequest;
-      expect(body.tool_choice).toBe('auto');
+    it.each<BodyCase>([
       // parallel_tool_calls is stamped only alongside tools; pin it here so a
       // regression dropping it (degrading fan-out to sequential calls) fails.
-      expect(body.parallel_tool_calls).toBe(true);
-    });
-
-    it('maps ANY to required, forcing a tool call', async () => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(
+      [
+        'defaults to auto when no functionCallingConfig is set',
+        {},
+        { tool_choice: 'auto', parallel_tool_calls: true },
+        requestWithTool(),
+      ],
+      [
+        'maps ANY to required, forcing a tool call',
+        {},
+        { tool_choice: 'required' },
         requestWithTool(FunctionCallingConfigMode.ANY),
-        'p1',
-      )) {
-        // drain
-      }
-      const body = JSON.parse(
-        fetchMock.mock.calls[0]![1].body,
-      ) as ResponsesApiRequest;
-      expect(body.tool_choice).toBe('required');
-    });
-
-    it('maps NONE to none', async () => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(
+      ],
+      [
+        'maps NONE to none',
+        {},
+        { tool_choice: 'none' },
         requestWithTool(FunctionCallingConfigMode.NONE),
-        'p1',
-      )) {
-        // drain
-      }
-      const body = JSON.parse(
-        fetchMock.mock.calls[0]![1].body,
-      ) as ResponsesApiRequest;
-      expect(body.tool_choice).toBe('none');
-    });
-
-    it('omits tool_choice and parallel_tool_calls entirely when there are no tools, even with functionCallingConfig.mode set', async () => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      const request: GenerateContentParameters = {
-        model: 'gpt-5',
-        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        config: {
-          toolConfig: {
-            functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
-          },
-        },
-      };
-      for await (const _ of pipeline.executeStream(request, 'p1')) {
-        // drain
-      }
-      const body = JSON.parse(
-        fetchMock.mock.calls[0]![1].body,
-      ) as ResponsesApiRequest;
+      ],
       // No tools -> neither field is sent (a mode with no tools must not
       // resurrect them); strict endpoints reject tool_choice without `tools`.
-      expect(body.tool_choice).toBeUndefined();
-      expect(body.parallel_tool_calls).toBeUndefined();
-    });
-  });
-
-  it('drops function_call items with no matching function_call_output before sending', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const request: GenerateContentParameters = {
-      model: 'gpt-5',
-      contents: [
+      [
+        'omits tool_choice and parallel_tool_calls entirely when there are no tools, even with functionCallingConfig.mode set',
+        {},
+        { tool_choice: undefined, parallel_tool_calls: undefined },
         {
-          role: 'model',
-          parts: [{ functionCall: { id: 'call_1', name: 'f', args: {} } }],
+          ...textRequest('hi'),
+          config: {
+            toolConfig: {
+              functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+            },
+          },
         },
       ],
-    };
-    for await (const _ of pipeline.executeStream(request, 'p1')) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
-    expect(body.input).toEqual([]);
+    ])('%s', expectBody);
   });
 
   it('throws a descriptive error carrying the body excerpt and stamps .status on a non-ok HTTP response', async () => {
@@ -771,18 +678,7 @@ describe('ResponsesPipeline', () => {
       status: 400,
       text: async () => '{"error":"bad request"}',
     });
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    let caught: unknown;
-    try {
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-    } catch (err) {
-      caught = err;
-    }
+    const caught = await streamError();
     // The body excerpt is the only carrier of the API's reason (invalid schema,
     // quota, model-not-found); a refactor dropping it must fail here.
     expect((caught as Error).message).toMatch(
@@ -795,8 +691,8 @@ describe('ResponsesPipeline', () => {
 
   it('execute() merges all streamed chunks into a single response', async () => {
     mockResponse([
-      ...sseEvent('response.output_text.delta', { delta: 'foo' }),
-      ...sseEvent('response.output_text.delta', { delta: 'bar' }),
+      ...deltaEvent('foo'),
+      ...deltaEvent('bar'),
       ...sseEvent('response.completed', {
         response: {
           status: 'completed',
@@ -804,11 +700,7 @@ describe('ResponsesPipeline', () => {
         },
       }),
     ]);
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const result = await pipeline.execute(textRequest('hi'), 'p1');
+    const result = await pipe().execute(textRequest('hi'), 'p1');
     expect(result.candidates?.[0]?.content?.parts).toEqual([
       { text: 'foo' },
       { text: 'bar' },
@@ -841,34 +733,13 @@ describe('ResponsesPipeline', () => {
               ].join('\n'),
             )
             .join('\n\n') + (trailingNewline ? '\n\n' : '');
-        const bytes = new TextEncoder().encode(body);
-        fetchMock.mockResolvedValue({
-          ok: true,
-          status: 200,
-          headers: { get: () => 'text/event-stream' },
-          body: new ReadableStream({
-            start(controller) {
-              for (let i = 0; i < bytes.length; i += 5) {
-                controller.enqueue(bytes.slice(i, i + 5));
-              }
-              controller.close();
-            },
-          }),
-        });
-        const pipeline = new ResponsesPipeline(
-          makeGeneratorConfig(),
-          makeCliConfig(),
-        );
-        const chunks = [];
-        for await (const chunk of pipeline.executeStream(
+        fetchMock.mockResolvedValue(okResponse(byteStream(body, 5)));
+        const chunks = await streamed(
+          pipe(),
           textRequest('hello'),
           'prompt-framing',
-        )) {
-          chunks.push(chunk);
-        }
-        expect(
-          chunks.map((chunk) => chunk.candidates?.[0]?.content?.parts),
-        ).toEqual([[{ text: 'hello' }], []]);
+        );
+        expect(partsOf(chunks)).toEqual([[{ text: 'hello' }], []]);
         expect(chunks.at(-1)?.candidates?.[0]?.finishReason).toBe(
           FinishReason.STOP,
         );
@@ -877,312 +748,124 @@ describe('ResponsesPipeline', () => {
     );
   });
 
+  const DATA_ONLY = [
+    dataLine('response.output_text.delta', { delta: 'hi' }),
+    dataLine('response.completed', {
+      response: { id: 'r1', status: 'completed' },
+    }),
+  ];
+
   it('parses data-only SSE frames (no event: line) -- the shape the Responses API actually emits', async () => {
-    // Every other test builds frames with sseEvent(), which always prepends
-    // an `event: ` line, so it never exercises the data-only branch that
-    // parses `data['type']` directly and handles `[DONE]`. A regression
-    // there would leave the whole suite green while breaking every real
-    // OpenAI call.
-    const dataOnlyLines = [
-      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'hi' })}`,
-      `data: ${JSON.stringify({
-        type: 'response.completed',
-        response: { id: 'r1', status: 'completed' },
-      })}`,
-      'data: [DONE]',
-    ];
-    mockResponse(dataOnlyLines);
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const chunks = [];
-    for await (const chunk of pipeline.executeStream(
-      textRequest('hello'),
-      'prompt-1',
-    )) {
-      chunks.push(chunk);
-    }
-    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([
-      [{ text: 'hi' }],
-      [],
-    ]);
+    // sseEvent() always prepends an `event: ` line, so tests built on it never
+    // exercise the data-only branch that parses `data['type']` directly and
+    // handles `[DONE]`; a regression there would leave them green while
+    // breaking every real OpenAI call.
+    mockResponse([...DATA_ONLY, 'data: [DONE]']);
+    const chunks = await streamed(pipe(), textRequest('hello'), 'prompt-1');
+    expect(partsOf(chunks)).toEqual([[{ text: 'hi' }], []]);
   });
 
   it('parses data-only SSE frames split across multiple reader.read() chunks', async () => {
-    const dataOnlyLines = [
-      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'hi' })}`,
-      `data: ${JSON.stringify({
-        type: 'response.completed',
-        response: { id: 'r1', status: 'completed' },
-      })}`,
-    ];
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: { get: () => 'text/event-stream' },
-      body: sseStreamChunked(dataOnlyLines, 5),
-      text: async () => '',
-    });
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const chunks = [];
-    for await (const chunk of pipeline.executeStream(
-      textRequest('hello'),
-      'prompt-1',
-    )) {
-      chunks.push(chunk);
-    }
-    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([
-      [{ text: 'hi' }],
-      [],
-    ]);
+    mockResponse(DATA_ONLY, 5);
+    const chunks = await streamed(pipe(), textRequest('hello'), 'prompt-1');
+    expect(partsOf(chunks)).toEqual([[{ text: 'hi' }], []]);
   });
 
   it('recovers the final frame when the stream ends mid-line with no trailing newline', async () => {
-    // Distinct from a stream missing only its trailing blank-line
-    // terminator: here the connection drops before any newline at all
-    // follows the last `data: ` line, so it is never split out of
-    // `buffer` by `buffer.split('\n')` and never reaches the main
-    // per-line loop. Without handling this, `currentEventType` is set
-    // but `dataAccumulator` stays empty, and the post-loop flush (gated
-    // on `currentEventType && dataAccumulator`) silently drops the frame.
-    const body = [
-      'event: response.completed',
-      `data: ${JSON.stringify({ response: { id: 'r1', status: 'completed' } })}`,
-    ].join('\n'); // no trailing newline
-    const encoder = new TextEncoder();
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: { get: () => 'text/event-stream' },
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(encoder.encode(body));
-          controller.close();
-        },
-      }),
-      text: async () => '',
-    });
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const chunks = [];
-    for await (const chunk of pipeline.executeStream(
-      textRequest('hello'),
-      'prompt-1',
-    )) {
-      chunks.push(chunk);
-    }
-    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([[]]);
+    // Unlike a stream missing only its trailing blank line, here the
+    // connection drops before any newline follows the last `data: ` line, so
+    // `buffer.split('\n')` never splits it out for the per-line loop:
+    // `currentEventType` is set but `dataAccumulator` stays empty, and the
+    // post-loop flush (gated on both) would silently drop the frame.
+    const body = DONE_R1.slice(0, 2).join('\n'); // event + data, no newline
+    fetchMock.mockResolvedValue(okResponse(byteStream(body)));
+    const chunks = await streamed(pipe(), textRequest('hello'), 'prompt-1');
+    expect(partsOf(chunks)).toEqual([[]]);
   });
 
   it('parses correctly when frames are split across multiple reader.read() chunks', async () => {
-    const lines = [
-      ...sseEvent('response.output_text.delta', { delta: 'foo' }),
-      ...sseEvent('response.reasoning_summary_text.delta', { delta: 'why' }),
-      ...sseEvent('response.output_item.done', {
-        output_index: 0,
-        item: {
-          type: 'function_call',
-          id: 'fc_1',
-          call_id: 'call_1',
-          name: 'read_file',
-          arguments: '{"path":"a.ts"}',
-        },
-      }),
-      ...sseEvent('response.completed', {
-        response: {
-          status: 'completed',
-          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-        },
-      }),
-    ];
     // 5-byte chunks guarantee every "event: "/"data: " line and the JSON
     // payload itself get split mid-token across reads.
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: { get: () => 'text/event-stream' },
-      body: sseStreamChunked(lines, 5),
-      text: async () => '',
-    });
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
+    mockResponse(
+      [
+        ...deltaEvent('foo'),
+        ...sseEvent('response.reasoning_summary_text.delta', { delta: 'why' }),
+        ...sseEvent('response.output_item.done', {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'read_file',
+            arguments: '{"path":"a.ts"}',
+          },
+        }),
+        ...sseEvent('response.completed', {
+          response: {
+            status: 'completed',
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        }),
+      ],
+      5,
     );
-    const result = await pipeline.execute(textRequest('hi'), 'p1');
+    const result = await pipe().execute(textRequest('hi'), 'p1');
     expect(result.candidates?.[0]?.content?.parts).toEqual([
       { text: 'foo' },
       { text: 'why', thought: true },
-      {
-        functionCall: {
-          id: 'call_1',
-          name: 'read_file',
-          args: { path: 'a.ts' },
-        },
-      },
+      fnCall('read_file', { path: 'a.ts' }, 'call_1'),
     ]);
     expect(result.usageMetadata?.totalTokenCount).toBe(2);
-  });
-
-  // --- Critical (a): per-send window-clamped output budget (#5950) ---
-
-  it('sends request.config.maxOutputTokens as max_output_tokens when no samplingParams cap is set', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const request: GenerateContentParameters = {
-      model: 'gpt-5',
-      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      config: { maxOutputTokens: 512 },
-    };
-    for await (const _ of pipeline.executeStream(request, 'p1')) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
-    expect(body.max_output_tokens).toBe(512);
-  });
-
-  it('lets request.config.maxOutputTokens override the static samplingParams.max_tokens', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ samplingParams: { max_tokens: 2048 } }),
-      makeCliConfig(),
-    );
-    const request: GenerateContentParameters = {
-      model: 'gpt-5',
-      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      config: { maxOutputTokens: 512 },
-    };
-    for await (const _ of pipeline.executeStream(request, 'p1')) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
-    expect(body.max_output_tokens).toBe(512);
-  });
-
-  it('keeps the configured samplingParams.max_tokens ceiling when the per-send maxOutputTokens is larger (smaller wins)', async () => {
-    // C5 regression: the per-send window-clamped value must NOT reopen a
-    // smaller user-configured max_tokens ceiling. reconcileMaxTokens (the
-    // shared "smaller wins" invariant both sibling wires call) picks the
-    // minimum, so config 1000 caps a per-send 8000. A plain `?? ` precedence
-    // (request first) would leak 8000.
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ samplingParams: { max_tokens: 1000 } }),
-      makeCliConfig(),
-    );
-    const request: GenerateContentParameters = {
-      model: 'gpt-5',
-      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      config: { maxOutputTokens: 8000 },
-    };
-    for await (const _ of pipeline.executeStream(request, 'p1')) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
-    expect(body.max_output_tokens).toBe(1000);
   });
 
   // --- Critical (b): mid-stream idle-timeout watchdog ---
 
   it('fails a silent mid-stream stall with a retryable ETIMEDOUT after the idle timeout', async () => {
     vi.useFakeTimers();
-    try {
-      const encoder = new TextEncoder();
-      // Emit one delta frame, then go silent forever: the never-resolving
-      // pull() keeps the second reader.read() pending so only the idle
-      // watchdog can end the stream.
-      const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'response.output_text.delta',
-                delta: 'hi',
-              })}\n`,
-            ),
-          );
-        },
-        pull() {
-          return new Promise<void>(() => {});
-        },
-      });
-      fetchMock.mockResolvedValue({
-        ok: true,
-        status: 200,
-        headers: { get: () => 'text/event-stream' },
-        body,
-        text: async () => '',
-      });
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({ streamIdleTimeoutMs: 1000 }),
-        makeCliConfig(),
-      );
-      const gen = pipeline.executeStream(textRequest('hi'), 'p1');
-      const first = await gen.next();
-      expect(first.value?.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'hi' },
-      ]);
-      const pending = gen.next();
-      // eslint-disable-next-line vitest/valid-expect -- awaited via `assertion` below, after the fake timers advance (handler attached early so the timeout rejection is not unhandled)
-      const assertion = expect(pending).rejects.toBeInstanceOf(
-        StreamInactivityTimeoutError,
-      );
-      // Pin the code field too: getTransportCode reads `.code` off the error
-      // chain to classify the stall as a retryable transport error; a mutant
-      // dropping/renaming it passes the instanceof check but silently makes
-      // the stall non-retryable for every downstream consumer.
-      // eslint-disable-next-line vitest/valid-expect -- same deferred-await pattern as above
-      const codeAssertion = expect(pending).rejects.toMatchObject({
-        code: 'ETIMEDOUT',
-      });
-      await vi.advanceTimersByTimeAsync(1000);
-      await assertion;
-      await codeAssertion;
-    } finally {
-      vi.useRealTimers();
-    }
+    // Emit one delta frame, then go silent forever: the never-resolving pull()
+    // keeps the second reader.read() pending so only the idle watchdog can
+    // end the stream.
+    const line = dataLine('response.output_text.delta', { delta: 'hi' });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`${line}\n`));
+      },
+      pull: () => new Promise<void>(() => {}),
+    });
+    fetchMock.mockResolvedValue(okResponse(body));
+    const gen = pipe({ streamIdleTimeoutMs: 1000 }).executeStream(
+      textRequest('hi'),
+      'p1',
+    );
+    const first = await gen.next();
+    expect(first.value?.candidates?.[0]?.content?.parts).toEqual([
+      { text: 'hi' },
+    ]);
+    const pending = gen.next();
+    // eslint-disable-next-line vitest/valid-expect -- awaited via `assertion` below, after the fake timers advance (handler attached early so the timeout rejection is not unhandled)
+    const assertion = expect(pending).rejects.toBeInstanceOf(
+      StreamInactivityTimeoutError,
+    );
+    // Pin the code field too: getTransportCode reads `.code` off the error
+    // chain to classify the stall as a retryable transport error; a mutant
+    // dropping/renaming it passes the instanceof check but silently makes
+    // the stall non-retryable for every downstream consumer.
+    // eslint-disable-next-line vitest/valid-expect -- same deferred-await pattern as above
+    const codeAssertion = expect(pending).rejects.toMatchObject({
+      code: 'ETIMEDOUT',
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+    await codeAssertion;
   });
 
   it('does not fire the idle watchdog while chunks keep arriving', async () => {
     // A fully delivered, promptly-closing stream must complete cleanly even
     // with a tiny idle timeout configured -- the timer resets per chunk and
     // the terminal `done` resolves before it can fire.
-    mockResponse([
-      ...sseEvent('response.output_text.delta', { delta: 'foo' }),
-      ...sseEvent('response.completed', { response: { status: 'completed' } }),
-    ]);
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ streamIdleTimeoutMs: 1000 }),
-      makeCliConfig(),
-    );
-    const chunks = [];
-    for await (const chunk of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      chunks.push(chunk);
-    }
-    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([
-      [{ text: 'foo' }],
-      [],
-    ]);
+    mockResponse([...deltaEvent('foo'), ...DONE]);
+    const chunks = await streamed(pipe({ streamIdleTimeoutMs: 1000 }));
+    expect(partsOf(chunks)).toEqual([[{ text: 'foo' }], []]);
   });
 
   it('resets the idle timer on each chunk and completes a slow-but-active stream', async () => {
@@ -1191,165 +874,83 @@ describe('ResponsesPipeline', () => {
     // duration far exceeds the idle window. A mutant arming a single timer
     // once at stream start would fail this (it fires at t=1000 mid-stream).
     vi.useFakeTimers();
-    try {
-      const gated = gatedByteStream();
-      fetchMock.mockResolvedValue({
-        ok: true,
-        status: 200,
-        headers: { get: () => 'text/event-stream' },
-        body: gated.stream,
-        text: async () => '',
-      });
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({ streamIdleTimeoutMs: 1000 }),
-        makeCliConfig(),
-      );
-      const chunks: unknown[] = [];
-      let error: unknown;
-      const consume = (async () => {
-        for await (const chunk of pipeline.executeStream(
-          textRequest('hi'),
-          'p1',
-        )) {
-          chunks.push(chunk);
-        }
-      })().catch((e: unknown) => {
-        error = e;
-      });
-      // A chunk every 800ms (< 1000ms idle) across 2400ms total: each drip
-      // resets the idle timer, so it must never fire.
-      await vi.advanceTimersByTimeAsync(800);
-      gated.push(
-        `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'a' })}`,
-      );
-      await vi.advanceTimersByTimeAsync(800);
-      gated.push(
-        `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'b' })}`,
-      );
-      await vi.advanceTimersByTimeAsync(800);
-      gated.push(
-        `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}`,
-      );
-      gated.end();
-      await consume;
-      expect(error).toBeUndefined();
-      expect(chunks.length).toBeGreaterThanOrEqual(2);
-      // A late advance after completion must not produce a delayed throw.
-      await vi.advanceTimersByTimeAsync(5000);
-    } finally {
-      vi.useRealTimers();
-    }
+    const gated = gatedByteStream();
+    fetchMock.mockResolvedValue(okResponse(gated.stream));
+    let chunks: unknown[] = [];
+    let error: unknown;
+    const consume = streamed(pipe({ streamIdleTimeoutMs: 1000 })).then(
+      (c) => (chunks = c),
+      (e: unknown) => (error = e),
+    );
+    // A chunk every 800ms (< 1000ms idle) across 2400ms total: each drip
+    // resets the idle timer, so it must never fire.
+    await vi.advanceTimersByTimeAsync(800);
+    gated.delta('a');
+    await vi.advanceTimersByTimeAsync(800);
+    gated.delta('b');
+    await vi.advanceTimersByTimeAsync(800);
+    gated.complete();
+    await consume;
+    expect(error).toBeUndefined();
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    // A late advance after completion must not produce a delayed throw.
+    await vi.advanceTimersByTimeAsync(5000);
   });
 
   // --- Critical: total-lifetime cap (issue #8597) ---
 
   it('caps the total stream lifetime even when chunks keep resetting the idle watchdog (issue #8597)', async () => {
     vi.useFakeTimers();
-    try {
-      const gated = gatedByteStream(); // drip-fed, never ends
-      fetchMock.mockResolvedValue({
-        ok: true,
-        status: 200,
-        headers: { get: () => 'text/event-stream' },
-        body: gated.stream,
-        text: async () => '',
-      });
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
-          streamIdleTimeoutMs: 1000,
-          streamMaxLifetimeMs: 3000,
-        }),
-        makeCliConfig(),
-      );
-      let error: unknown;
-      const consume = (async () => {
-        for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-          /* drain */
-        }
-      })().catch((e: unknown) => {
-        error = e;
-      });
-      // A chunk every 500ms: every drip resets the 1s idle watchdog, so it can
-      // never fire (the CI-hang shape). The 3s lifetime cap does NOT reset.
-      for (let i = 0; i < 5; i++) {
-        gated.push(
-          `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'x' })}`,
-        );
-        await vi.advanceTimersByTimeAsync(500);
-      }
-      await vi.advanceTimersByTimeAsync(1000); // push past the cap
-      await consume;
-      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
-      expect(error).toMatchObject({ code: 'ETIMEDOUT' });
-      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(3000);
-      expect((error as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
-    } finally {
-      vi.useRealTimers();
+    const gated = gatedByteStream(); // drip-fed, never ends
+    fetchMock.mockResolvedValue(okResponse(gated.stream));
+    const consume = streamError(
+      pipe({ streamIdleTimeoutMs: 1000, streamMaxLifetimeMs: 3000 }),
+    );
+    // A chunk every 500ms: every drip resets the 1s idle watchdog, so it can
+    // never fire (the CI-hang shape). The 3s lifetime cap does NOT reset.
+    for (let i = 0; i < 5; i++) {
+      gated.delta('x');
+      await vi.advanceTimersByTimeAsync(500);
     }
+    await vi.advanceTimersByTimeAsync(1000); // push past the cap
+    const error = await consume;
+    expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+    expect(error).toMatchObject({ code: 'ETIMEDOUT' });
+    expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(3000);
+    expect((error as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
   }, 15000);
 
   it('does not interrupt a drip-fed stream that completes within the lifetime cap', async () => {
     vi.useFakeTimers();
-    try {
-      const gated = gatedByteStream();
-      fetchMock.mockResolvedValue({
-        ok: true,
-        status: 200,
-        headers: { get: () => 'text/event-stream' },
-        body: gated.stream,
-        text: async () => '',
-      });
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
-          streamIdleTimeoutMs: 1000,
-          streamMaxLifetimeMs: 3000,
-        }),
-        makeCliConfig(),
-      );
-      let done = false;
-      let error: unknown;
-      const consume = (async () => {
-        for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-          /* drain */
-        }
-      })().then(
-        () => (done = true),
-        (e: unknown) => (error = e),
-      );
-      gated.push(
-        `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'a' })}`,
-      );
-      await vi.advanceTimersByTimeAsync(500);
-      gated.push(
-        `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}`,
-      );
-      gated.end(); // completes at t=500, well under the 3s cap
-      await consume;
-      expect(error).toBeUndefined();
-      expect(done).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
+    const gated = gatedByteStream();
+    fetchMock.mockResolvedValue(okResponse(gated.stream));
+    const pipeline = pipe({
+      streamIdleTimeoutMs: 1000,
+      streamMaxLifetimeMs: 3000,
+    });
+    let done = false;
+    let error: unknown;
+    const consume = drain(pipeline.executeStream(textRequest('hi'), 'p1')).then(
+      () => (done = true),
+      (e: unknown) => (error = e),
+    );
+    gated.delta('a');
+    await vi.advanceTimersByTimeAsync(500);
+    gated.complete(); // completes at t=500, well under the 3s cap
+    await consume;
+    expect(error).toBeUndefined();
+    expect(done).toBe(true);
   }, 15000);
 
   // --- Critical (c): eager connect so retryWithBackoff sees connect errors ---
 
   it('connectStream performs the fetch eagerly, before the body is iterated', async () => {
-    mockResponse([
-      ...sseEvent('response.output_text.delta', { delta: 'hi' }),
-      ...sseEvent('response.completed', { response: { status: 'completed' } }),
-    ]);
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const gen = await pipeline.connectStream(textRequest('hi'), 'p1');
+    mockResponse([...deltaEvent('hi'), ...DONE]);
+    const gen = await pipe().connectStream(textRequest('hi'), 'p1');
     // Network I/O already happened while awaiting the returned promise -- a
     // lazy `async *` generator would leave this at 0 until the first next().
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    for await (const _ of gen) {
-      // drain
-    }
+    await drain(gen);
   });
 
   it('preserves structured gateway diagnostics past 500 characters and safe response headers', async () => {
@@ -1385,13 +986,7 @@ describe('ResponsesPipeline', () => {
         },
       ),
     );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const error = await pipeline
-      .connectStream(textRequest('hi'), 'p1')
-      .catch((e: unknown) => e);
+    const error = await connectError();
     expect(error).toMatchObject({
       status: 404,
       requestId: 'header-request',
@@ -1425,14 +1020,7 @@ describe('ResponsesPipeline', () => {
       status: 500,
       text: async () => '{"error":"server"}',
     });
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const err = await pipeline
-      .connectStream(textRequest('hi'), 'p1')
-      .then(() => undefined)
-      .catch((e: unknown) => e);
+    const err = await connectError();
     expect((err as Error).message).toMatch(/Responses API error 500: .*server/);
     // .status must be stamped so a connection-time 5xx is retryable on this
     // wire (getErrorStatus reads it); without it retry never triggers.
@@ -1447,57 +1035,35 @@ describe('ResponsesPipeline', () => {
     // which runs after connect resolves). The connect-phase timeout (driven by
     // ContentGeneratorConfig.timeout) must reject instead.
     vi.useFakeTimers();
-    try {
-      let fetchSignal: AbortSignal | undefined;
-      fetchMock.mockImplementation((_url: string, init: RequestInit) => {
-        fetchSignal = init.signal ?? undefined;
-        // Never resolves on its own: only the connect timeout can end this.
-        return new Promise<never>(() => {});
-      });
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({ timeout: 1000 }),
-        makeCliConfig(),
-      );
-      const pending = pipeline
-        .connectStream(textRequest('hi'), 'p1')
-        .then(() => undefined)
-        .catch((e: unknown) => e);
-      await vi.advanceTimersByTimeAsync(1000);
-      const err = await pending;
-      expect(err).toBeInstanceOf(StreamConnectTimeoutError);
-      expect(err).toMatchObject({ code: 'ETIMEDOUT' });
-      expect((err as StreamConnectTimeoutError).connectTimeoutMs).toBe(1000);
-      // The timeout also aborts the in-flight fetch so the socket is freed.
-      expect(fetchSignal?.aborted).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
+    let fetchSignal: AbortSignal | undefined;
+    fetchMock.mockImplementation((_url: string, init: RequestInit) => {
+      fetchSignal = init.signal ?? undefined;
+      // Never resolves on its own: only the connect timeout can end this.
+      return new Promise<never>(() => {});
+    });
+    const pending = connectError(pipe({ timeout: 1000 }));
+    await vi.advanceTimersByTimeAsync(1000);
+    const err = await pending;
+    expect(err).toBeInstanceOf(StreamConnectTimeoutError);
+    expect(err).toMatchObject({ code: 'ETIMEDOUT' });
+    expect((err as StreamConnectTimeoutError).connectTimeoutMs).toBe(1000);
+    // The timeout also aborts the in-flight fetch so the socket is freed.
+    expect(fetchSignal?.aborted).toBe(true);
   }, 15000);
 
   // --- Suggestions: previously untested added behavior ---
 
   it('accumulates a multi-line data: block (joined with \\n) into a single frame', async () => {
-    // Every other test emits exactly one data: line per event, so the
-    // `event: ` + multi-`data:` accumulation path never runs; a last-line-wins
-    // mutant would silently drop a split frame.
-    const lines = [
+    // Every other test emits one data: line per event, so the `event: ` +
+    // multi-`data:` accumulation path never runs; a last-line-wins mutant
+    // would silently drop a split frame.
+    mockResponse([
       'event: response.output_text.delta',
       'data: {"type":"response.output_text.delta",',
       'data: "delta":"multi"}',
       '',
-    ];
-    mockResponse(lines);
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const chunks = [];
-    for await (const chunk of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      chunks.push(chunk);
-    }
-    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([
-      [{ text: 'multi' }],
     ]);
+    expect(partsOf(await streamed())).toEqual([[{ text: 'multi' }]]);
   });
 
   it('decodes multi-byte UTF-8 split across reader.read() chunks', async () => {
@@ -1505,56 +1071,17 @@ describe('ResponsesPipeline', () => {
     // real multi-byte characters across reads -- exercising the decoder's
     // { stream: true } flag. Dropping it corrupts split code points to U+FFFD.
     const text = '你好😀世界';
-    const lines = [
-      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: text })}`,
-      `data: ${JSON.stringify({
-        type: 'response.completed',
-        response: { id: 'r1', status: 'completed' },
-      })}`,
-    ];
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: { get: () => 'text/event-stream' },
-      body: sseStreamChunked(lines, 3),
-      text: async () => '',
-    });
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const chunks = [];
-    for await (const chunk of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      chunks.push(chunk);
-    }
-    expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([{ text }]);
-  });
-
-  it('does not let extra_body overwrite an explicit samplingParams.temperature of 0', async () => {
     mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
+      [dataLine('response.output_text.delta', { delta: text }), DATA_ONLY[1]!],
+      3,
     );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({
-        samplingParams: { temperature: 0 },
-        extra_body: { temperature: 1 },
-      }),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
-    const body = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
-    // The production guard checks `requestRecord[key] === undefined`, so an
-    // explicit 0 is preserved; a truthiness guard would let extra_body win.
-    expect(body.temperature).toBe(0);
+    const chunks = await streamed();
+    expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([{ text }]);
   });
 
   it('propagates responseId and finishReason through execute()/mergeStreamResponses', async () => {
     mockResponse([
-      ...sseEvent('response.output_text.delta', { delta: 'foo' }),
+      ...deltaEvent('foo'),
       ...sseEvent('response.completed', {
         response: {
           id: 'r1',
@@ -1563,39 +1090,21 @@ describe('ResponsesPipeline', () => {
         },
       }),
     ]);
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const result = await pipeline.execute(textRequest('hi'), 'p1');
+    const result = await pipe().execute(textRequest('hi'), 'p1');
     expect(result.responseId).toBe('r1');
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
   });
 
   it('applies customHeaders to the fetch request', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ customHeaders: { 'X-Proxy-Auth': 'token' } }),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
-    expect(
-      new Headers(fetchMock.mock.calls[0]![1].headers).get('X-Proxy-Auth'),
-    ).toBe('token');
+    await sendBody(pipe({ customHeaders: { 'X-Proxy-Auth': 'token' } }));
+    expect(sentHeaders().get('X-Proxy-Auth')).toBe('token');
   });
 
   it.each(['Authorization', 'authorization', 'AuThOrIzAtIoN'])(
     'replaces default headers case-insensitively with custom %s',
     async (authorization) => {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
+      await executeDone(
+        pipe({
           customHeaders: {
             [authorization]: 'Bearer gateway-token',
             accept: 'text/event-stream; charset=utf-8',
@@ -1603,12 +1112,9 @@ describe('ResponsesPipeline', () => {
             'X-Gateway': 'custom',
           },
         }),
-        makeCliConfig(),
       );
 
-      await pipeline.execute(textRequest('hi'), 'p1');
-
-      const headers = new Headers(fetchMock.mock.calls[0]![1].headers);
+      const headers = sentHeaders();
       expect(headers.get('authorization')).toBe('Bearer gateway-token');
       expect(headers.get('accept')).toBe('text/event-stream; charset=utf-8');
       expect(headers.get('content-type')).toBe(
@@ -1618,66 +1124,44 @@ describe('ResponsesPipeline', () => {
     },
   );
 
-  // Issue #11936: this wire builds its request headers by hand in
-  // connect(), so it never entered any of the placeholder machinery the
-  // Chat / Anthropic / Gemini wires go through -- a customHeaders value of
-  // `${session_id}` reached the gateway verbatim (with the consent gate on
-  // AND off), no first-party session_id header was added for the allowlisted
-  // gateways, and no QwenCode User-Agent was stamped.
+  // Issue #11936: this wire builds its request headers by hand in connect(),
+  // so it never entered the placeholder machinery the Chat / Anthropic /
+  // Gemini wires go through -- a customHeaders value of `${session_id}`
+  // reached the gateway verbatim (consent gate on AND off), no first-party
+  // session_id header was added for the allowlisted gateways, and no QwenCode
+  // User-Agent was stamped.
   describe('outbound correlation headers', () => {
     const SESSION_HEADER = 'x-opencode-session';
 
-    function mockCompletedResponse() {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-    }
-
-    function outboundHeaders(call = 0): Headers {
-      return new Headers(fetchMock.mock.calls[call]![1].headers);
-    }
-
     it('stamps a QwenCode User-Agent', async () => {
-      mockCompletedResponse();
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
+      await executeDone();
 
-      await pipeline.execute(textRequest('hi'), 'p1');
-
-      expect(outboundHeaders().get('user-agent')).toBe(
+      expect(sentHeaders().get('user-agent')).toBe(
         `QwenCode/9.9.9-test (${process.platform}; ${process.arch})`,
       );
     });
 
     it('expands ${session_id} per request when the consent gate is on', async () => {
-      mockCompletedResponse();
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
-          customHeaders: { [SESSION_HEADER]: 'sess=${session_id}' },
-        }),
-        makeCliConfig(undefined, 'session-abc', true),
+      await executeDone(
+        pipe(
+          { customHeaders: { [SESSION_HEADER]: 'sess=${session_id}' } },
+          makeCliConfig(undefined, 'session-abc', true),
+        ),
       );
 
-      await pipeline.execute(textRequest('hi'), 'p1');
-
-      expect(outboundHeaders().get(SESSION_HEADER)).toBe('sess=session-abc');
+      expect(sentHeaders().get(SESSION_HEADER)).toBe('sess=session-abc');
     });
 
     it('drops a placeholder-bearing header instead of sending the literal when the gate is off', async () => {
-      mockCompletedResponse();
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
-          customHeaders: { [SESSION_HEADER]: '${session_id}' },
-        }),
-        makeCliConfig(undefined, 'session-abc', false),
+      await executeDone(
+        pipe(
+          { customHeaders: { [SESSION_HEADER]: '${session_id}' } },
+          makeCliConfig(undefined, 'session-abc', false),
+        ),
       );
 
-      await pipeline.execute(textRequest('hi'), 'p1');
-
-      expect(outboundHeaders().get(SESSION_HEADER)).toBeNull();
+      expect(sentHeaders().get(SESSION_HEADER)).toBeNull();
       warn.mockRestore();
     });
 
@@ -1685,62 +1169,37 @@ describe('ResponsesPipeline', () => {
       // A Config whose session id changes under a live pipeline -- what /new
       // and /resume do. Expansion has to happen per request, not be baked in
       // once, or the documented rotation silently stops.
-      fetchMock.mockImplementation(async () => ({
-        ok: true,
-        status: 200,
-        headers: { get: () => 'text/event-stream' },
-        body: sseStream(
-          sseEvent('response.completed', { response: { status: 'completed' } }),
-        ),
-        text: async () => '',
-      }));
+      fetchMock.mockImplementation(async () => okResponse(sseStream(DONE)));
       let sessionId = 'first-session';
-      const cliConfig = {
-        getProxy: () => undefined,
-        getSessionId: () => sessionId,
-        getCliVersion: () => '9.9.9-test',
-        getOutboundAllowDynamicHeaderValues: () => true,
-      } as unknown as Config;
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
-          customHeaders: { [SESSION_HEADER]: '${session_id}' },
-        }),
-        cliConfig,
+      const pipeline = pipe(
+        { customHeaders: { [SESSION_HEADER]: '${session_id}' } },
+        makeCliConfig(undefined, () => sessionId, true),
       );
 
       await pipeline.execute(textRequest('hi'), 'p1');
       sessionId = 'second-session';
       await pipeline.execute(textRequest('hi'), 'p2');
 
-      expect(outboundHeaders(0).get(SESSION_HEADER)).toBe('first-session');
-      expect(outboundHeaders(1).get(SESSION_HEADER)).toBe('second-session');
+      expect(sentHeaders(0).get(SESSION_HEADER)).toBe('first-session');
+      expect(sentHeaders(1).get(SESSION_HEADER)).toBe('second-session');
     });
 
     it('adds the first-party session_id header for an allowlisted gateway host', async () => {
-      mockCompletedResponse();
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({ baseUrl: 'https://routify.alibaba-inc.com' }),
-        makeCliConfig(undefined, 'session-abc'),
+      await executeDone(
+        pipe(
+          { baseUrl: 'https://routify.alibaba-inc.com' },
+          makeCliConfig(undefined, 'session-abc'),
+        ),
       );
 
-      await pipeline.execute(textRequest('hi'), 'p1');
-
-      expect(outboundHeaders().get('session_id')).toBe('session-abc');
+      expect(sentHeaders().get('session_id')).toBe('session-abc');
     });
   });
 
   it('redacts credentials from the logged request URL', async () => {
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
+    await executeDone(
+      pipe({ baseUrl: 'https://review-user:review-secret@gateway.example' }),
     );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({
-        baseUrl: 'https://review-user:review-secret@gateway.example',
-      }),
-      makeCliConfig(),
-    );
-
-    await pipeline.execute(textRequest('hi'), 'p1');
 
     expect(debugMock).toHaveBeenCalledWith(
       'POST https://<redacted>@gateway.example/v1/responses',
@@ -1756,20 +1215,15 @@ describe('ResponsesPipeline', () => {
 
   it('redacts credentials when fetch rejects an invalid custom header value', async () => {
     buildRuntimeFetchOptionsMock.mockReturnValue({ fetch: globalThis.fetch });
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({
+    const error = await connectError(
+      pipe({
         baseUrl: 'http://127.0.0.1:1',
         customHeaders: {
           'X-Gateway':
             'https://review-user:review-secret@gateway.example\ninvalid',
         },
       }),
-      makeCliConfig(),
     );
-
-    const error: unknown = await pipeline
-      .connectStream(textRequest('hi'), 'p1')
-      .catch((error: unknown) => error);
 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(/invalid header value/i);
@@ -1781,20 +1235,10 @@ describe('ResponsesPipeline', () => {
     'does not expose error-body credentials at offset %i on the propagated error',
     async (offset) => {
       const prefix = 'x'.repeat(offset);
-      fetchMock.mockResolvedValue(
-        new Response(
-          `${prefix}https://review-user:review-error-secret@gateway.example/denied`,
-          { status: 502 },
-        ),
+      const error = await rejectWith(
+        `${prefix}https://review-user:review-error-secret@gateway.example/denied`,
+        502,
       );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      const error: unknown = await pipeline
-        .connectStream(textRequest('hi'), 'p1')
-        .catch((error: unknown) => error);
 
       expect(error).toBeInstanceOf(Error);
       expect(error).toMatchObject({ status: 502 });
@@ -1812,20 +1256,10 @@ describe('ResponsesPipeline', () => {
   it.each(['', 'early@'])(
     'does not expose credentials cut off by the error-body read limit (password prefix: %s)',
     async (passwordPrefix) => {
-      fetchMock.mockResolvedValue(
-        new Response(
-          `https://review-user:${passwordPrefix}${'long-secret'.repeat(7_000)}@gateway.example`,
-          { status: 502 },
-        ),
+      const error = await rejectWith(
+        `https://review-user:${passwordPrefix}${'long-secret'.repeat(7_000)}@gateway.example`,
+        502,
       );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      const error: unknown = await pipeline
-        .connectStream(textRequest('hi'), 'p1')
-        .catch((error: unknown) => error);
 
       expect(error).toBeInstanceOf(Error);
       expect(error).toMatchObject({ status: 502 });
@@ -1847,15 +1281,7 @@ describe('ResponsesPipeline', () => {
       const body = quoted
         ? JSON.stringify({ error: { message: upstream } })
         : upstream;
-      fetchMock.mockResolvedValue(new Response(body, { status: 502 }));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      const error: unknown = await pipeline
-        .connectStream(textRequest('hi'), 'p1')
-        .catch((error: unknown) => error);
+      const error = await rejectWith(body, 502);
 
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain('gateway.example/denied');
@@ -1873,15 +1299,7 @@ describe('ResponsesPipeline', () => {
         message: 'Allocated quota exceeded',
       },
     }).padEnd(64_001, ' ');
-    fetchMock.mockResolvedValue(new Response(body, { status: 429 }));
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-
-    const error: unknown = await pipeline
-      .connectStream(textRequest('hi'), 'p1')
-      .catch((error: unknown) => error);
+    const error = await rejectWith(body, 429);
 
     expect(error).toMatchObject({ status: 429 });
     expect(classifyRetryError(error)).toMatchObject({ diagnosis: 'fail-fast' });
@@ -1889,18 +1307,8 @@ describe('ResponsesPipeline', () => {
   });
 
   it('handles long backslash runs without blocking error diagnostics', async () => {
-    fetchMock.mockResolvedValue(
-      new Response('\\'.repeat(64_001), { status: 502 }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-
     const start = performance.now();
-    const error: unknown = await pipeline
-      .connectStream(textRequest('hi'), 'p1')
-      .catch((error: unknown) => error);
+    const error = await rejectWith('\\'.repeat(64_001), 502);
     const elapsed = performance.now() - start;
 
     expect(error).toMatchObject({ status: 502 });
@@ -1912,24 +1320,14 @@ describe('ResponsesPipeline', () => {
 
   it('forwards user aborts to fetch via a composed connect signal', async () => {
     // The connect phase composes the caller's signal with a connect-timeout
-    // controller (so a timeout can also abort the fetch), so fetch no longer
-    // receives the exact user signal object -- it receives one that aborts when
-    // the user signal aborts. Pin the propagation, not the identity.
+    // controller (so a timeout can also abort the fetch), so fetch receives
+    // not the user's signal object but one that aborts when it does. Pin the
+    // propagation, not the identity.
     const controller = new AbortController();
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
+    mockResponse(DONE);
+    await drain(
+      pipe().executeStream(textRequest('hi'), 'p1', controller.signal),
     );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(
-      textRequest('hi'),
-      'p1',
-      controller.signal,
-    )) {
-      // drain
-    }
     const passed = fetchMock.mock.calls[0]![1].signal as AbortSignal;
     expect(passed).toBeInstanceOf(AbortSignal);
     expect(passed.aborted).toBe(false);
@@ -1946,19 +1344,9 @@ describe('ResponsesPipeline', () => {
         );
       },
     });
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: { get: () => 'text/event-stream' },
-      body,
-      text: async () => '',
-    });
+    fetchMock.mockResolvedValue(okResponse(body));
     // Idle watchdog off so the abort, not the timer, is what ends the stream.
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ streamIdleTimeoutMs: 0 }),
-      makeCliConfig(),
-    );
-    const gen = pipeline.executeStream(
+    const gen = pipe({ streamIdleTimeoutMs: 0 }).executeStream(
       textRequest('hi'),
       'p1',
       controller.signal,
@@ -1975,16 +1363,7 @@ describe('ResponsesPipeline', () => {
       fetch: fetchMock,
       fetchOptions: { dispatcher },
     });
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
+    await sendBody();
     expect(fetchMock.mock.calls[0]![1].dispatcher).toBe(dispatcher);
   });
 
@@ -1992,61 +1371,26 @@ describe('ResponsesPipeline', () => {
     fetchMock.mockRejectedValue(
       new Error('fetch failed http://user:secret@proxy.example:8080'),
     );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    let caught: unknown;
-    try {
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-    } catch (err) {
-      caught = err;
-    }
-    const message = (caught as Error).message;
+    const message = ((await streamError()) as Error).message;
     expect(message).toMatch(/<redacted>@proxy\.example/);
     expect(message).not.toContain('secret');
   });
 
   it('rejects a 200 response whose content-type is not SSE', async () => {
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: { get: () => 'application/json' },
-      body: sseStream(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      ),
-      text: async () => '',
-    });
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
+    fetchMock.mockResolvedValue(
+      okResponse(sseStream(DONE), 'application/json'),
     );
-    await expect(async () => {
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-    }).rejects.toThrow(/non-SSE content-type/);
+    await expect(streamed()).rejects.toThrow(/non-SSE content-type/);
   });
 
   it('skips an unparseable data: frame and still yields the surrounding valid events', async () => {
-    const lines = [
-      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'a' })}`,
+    mockResponse([
+      dataLine('response.output_text.delta', { delta: 'a' }),
       'data: {not valid json',
-      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'b' })}`,
+      dataLine('response.output_text.delta', { delta: 'b' }),
       'data: [DONE]',
-    ];
-    mockResponse(lines);
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    const chunks = [];
-    for await (const chunk of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      chunks.push(chunk);
-    }
-    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([
+    ]);
+    expect(partsOf(await streamed())).toEqual([
       [{ text: 'a' }],
       [{ text: 'b' }],
     ]);
@@ -2056,38 +1400,15 @@ describe('ResponsesPipeline', () => {
     // The no-body guard is the one connect-phase validation with no test; a
     // gateway returning 200 + empty body would otherwise crash the turn with a
     // bare TypeError (reading getReader) instead of this classifiable error.
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: { get: () => 'text/event-stream' },
-      body: undefined,
-      text: async () => '',
-    });
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(),
-    );
-    await expect(async () => {
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-    }).rejects.toThrow(/returned no body/);
+    fetchMock.mockResolvedValue(okResponse(undefined));
+    await expect(streamed()).rejects.toThrow(/returned no body/);
   });
 
   it('passes the configured proxy through to buildRuntimeFetchOptions', async () => {
     // The explicit-proxy hand-off is ungated by any assertion; a refactor
     // dropping the getProxy() argument would silently send Responses requests
     // direct in proxy-required environments. Pin the exact call.
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
-    );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig('http://proxy.example:8080'),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
+    await sendBody(pipe(undefined, makeCliConfig('http://proxy.example:8080')));
     expect(buildRuntimeFetchOptionsMock).toHaveBeenCalledWith(
       'openai',
       'http://proxy.example:8080',
@@ -2099,72 +1420,17 @@ describe('ResponsesPipeline', () => {
     // apiKey). Unlike the embed client, this pipeline builds the header by raw
     // fetch, so there is no SDK self-heal: a config with only apiKeyEnvKey must
     // still authenticate.
-    const prev = process.env['RESP_TEST_KEY'];
-    process.env['RESP_TEST_KEY'] = 'env-secret';
-    try {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
-          apiKey: undefined,
-          apiKeyEnvKey: 'RESP_TEST_KEY',
-        }),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-      expect(
-        new Headers(fetchMock.mock.calls[0]![1].headers).get('Authorization'),
-      ).toBe('Bearer env-secret');
-    } finally {
-      if (prev === undefined) delete process.env['RESP_TEST_KEY'];
-      else process.env['RESP_TEST_KEY'] = prev;
-    }
+    vi.stubEnv('RESP_TEST_KEY', 'env-secret');
+    await sendBody(pipe({ apiKey: undefined, apiKeyEnvKey: 'RESP_TEST_KEY' }));
+    expect(sentHeaders().get('Authorization')).toBe('Bearer env-secret');
   });
 
   it('sends no Authorization header when neither apiKey nor apiKeyEnvKey resolves', async () => {
-    const prev = process.env['RESP_TEST_KEY_MISSING'];
-    delete process.env['RESP_TEST_KEY_MISSING'];
-    try {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({
-          apiKey: undefined,
-          apiKeyEnvKey: 'RESP_TEST_KEY_MISSING',
-        }),
-        makeCliConfig(),
-      );
-      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-        // drain
-      }
-      expect(
-        new Headers(fetchMock.mock.calls[0]![1].headers).get('Authorization'),
-      ).toBeNull();
-    } finally {
-      if (prev !== undefined) process.env['RESP_TEST_KEY_MISSING'] = prev;
-    }
-  });
-
-  it('treats an empty-string baseUrl as unset and falls back to the default origin', async () => {
-    // The round-1 empty-string baseUrl shape: `'' || default` must resolve to
-    // api.openai.com rather than producing `/v1/responses` against no origin.
-    mockResponse(
-      sseEvent('response.completed', { response: { status: 'completed' } }),
+    vi.stubEnv('RESP_TEST_KEY_MISSING', undefined);
+    await sendBody(
+      pipe({ apiKey: undefined, apiKeyEnvKey: 'RESP_TEST_KEY_MISSING' }),
     );
-    const pipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ baseUrl: '' }),
-      makeCliConfig(),
-    );
-    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
-      // drain
-    }
-    expect(fetchMock.mock.calls[0]![0]).toBe(
-      'https://api.openai.com/v1/responses',
-    );
+    expect(sentHeaders().get('Authorization')).toBeNull();
   });
 
   it('mergeStreamResponses([]) returns an empty candidates array, not undefined', () => {
@@ -2195,107 +1461,62 @@ describe('ResponsesPipeline', () => {
       return {
         model: 'gpt-5',
         contents: [
-          { role: 'user', parts: [{ text: 'hello' }] },
-          {
-            role: 'model',
-            parts: [
-              {
-                thought: true,
-                text: 'first thought',
-                thoughtSignature: sig(LONG_ID_A),
-              },
-              {
-                thought: true,
-                text: 'second thought',
-                thoughtSignature: sig(SHORT_ID),
-              },
-              { thought: true, thoughtSignature: sig(LONG_ID_B) },
-            ],
-          },
-          { role: 'user', parts: [{ text: 'continue' }] },
+          userText('hello'),
+          content(
+            'model',
+            {
+              thought: true,
+              text: 'first thought',
+              thoughtSignature: sig(LONG_ID_A),
+            },
+            {
+              thought: true,
+              text: 'second thought',
+              thoughtSignature: sig(SHORT_ID),
+            },
+            { thought: true, thoughtSignature: sig(LONG_ID_B) },
+          ),
+          userText('continue'),
         ],
       };
     }
 
+    const message = (role: string, text: string) => ({
+      type: 'message',
+      role,
+      content: text,
+    });
+    const reasoning = (id: string, ...summary: string[]) => ({
+      type: 'reasoning',
+      id,
+      encrypted_content: `enc-${id}`,
+      summary: summary.map((text) => ({ type: 'summary_text', text })),
+    });
+
     const ORIGINAL_INPUT = [
-      { type: 'message', role: 'user', content: 'hello' },
-      {
-        type: 'reasoning',
-        id: LONG_ID_A,
-        encrypted_content: `enc-${LONG_ID_A}`,
-        summary: [{ type: 'summary_text', text: 'first thought' }],
-      },
-      {
-        type: 'reasoning',
-        id: SHORT_ID,
-        encrypted_content: `enc-${SHORT_ID}`,
-        summary: [{ type: 'summary_text', text: 'second thought' }],
-      },
-      {
-        type: 'reasoning',
-        id: LONG_ID_B,
-        encrypted_content: `enc-${LONG_ID_B}`,
-        summary: [],
-      },
-      { type: 'message', role: 'user', content: 'continue' },
+      message('user', 'hello'),
+      reasoning(LONG_ID_A, 'first thought'),
+      reasoning(SHORT_ID, 'second thought'),
+      reasoning(LONG_ID_B),
+      message('user', 'continue'),
     ];
 
     // Only the two over-long ids are downgraded; the short reasoning item is
     // replayed untouched. The signature-only item has no summary to preserve
     // and is dropped rather than becoming an empty assistant message.
     const OVER_LONG_ONLY_INPUT = [
-      { type: 'message', role: 'user', content: 'hello' },
-      { type: 'message', role: 'assistant', content: 'first thought' },
-      {
-        type: 'reasoning',
-        id: SHORT_ID,
-        encrypted_content: `enc-${SHORT_ID}`,
-        summary: [{ type: 'summary_text', text: 'second thought' }],
-      },
-      { type: 'message', role: 'user', content: 'continue' },
+      message('user', 'hello'),
+      message('assistant', 'first thought'),
+      reasoning(SHORT_ID, 'second thought'),
+      message('user', 'continue'),
     ];
 
     const ALL_REASONING_INPUT = [
-      { type: 'message', role: 'user', content: 'hello' },
-      { type: 'message', role: 'assistant', content: 'first thought' },
-      { type: 'message', role: 'assistant', content: 'second thought' },
-      { type: 'message', role: 'user', content: 'continue' },
+      message('user', 'hello'),
+      message('assistant', 'first thought'),
+      message('assistant', 'second thought'),
+      message('user', 'continue'),
     ];
-
-    function errorResponse(status: number, body: string) {
-      return {
-        ok: false,
-        status,
-        headers: { get: () => 'application/json' },
-        text: async () => body,
-      };
-    }
-
-    function okResponse(lines: string[]) {
-      return {
-        ok: true,
-        status: 200,
-        headers: { get: () => 'text/event-stream' },
-        body: sseStream(lines),
-        text: async () => '',
-      };
-    }
-
-    const COMPLETED = sseEvent('response.completed', {
-      response: { id: 'r1', status: 'completed' },
-    });
-
-    /** The shape the OpenAI Responses API returns directly. */
-    function directBody(param: string, message: string): string {
-      return JSON.stringify({
-        error: {
-          message,
-          type: 'invalid_request_error',
-          param,
-          code: 'string_above_max_length',
-        },
-      });
-    }
 
     /**
      * The shape a gateway returns: the upstream error JSON is embedded, quoted
@@ -2307,41 +1528,20 @@ describe('ResponsesPipeline', () => {
       message: string,
       rawControlChar: string,
     ): string {
-      const inner = JSON.stringify({
-        error: {
-          message,
-          type: 'invalid_request_error',
-          param,
-          code: 'string_above_max_length',
-        },
-      });
-      const escaped = inner.replace(/"/g, '\\"');
+      const escaped = directBody(param, message).replace(/"/g, '\\"');
       return `{"error":{"message":"litellm.BadRequestError: OpenAIException -${rawControlChar}${escaped}","type":null,"param":null,"code":"400"}}`;
     }
 
-    const MAX_64_MESSAGE =
-      "Invalid 'input[1].id': string too long. Expected a string with " +
-      'maximum length 64, but got a string with length 83 instead.';
     const NO_MAX_MESSAGE = "Invalid 'input[1].id': string too long.";
 
-    async function drain(
-      pipeline: ResponsesPipeline,
-      request: GenerateContentParameters,
-    ): Promise<unknown> {
-      try {
-        for await (const _ of pipeline.executeStream(request, 'p1')) {
-          // drain
-        }
-        return undefined;
-      } catch (err) {
-        return err;
+    // Queues a 400 per rejection body, then a success, and replays `request`:
+    // resolves to the surfaced error, or undefined on success.
+    function replayAfter(rejections: string[], request = replayRequest()) {
+      for (const body of rejections) {
+        fetchMock.mockResolvedValueOnce(errorResponse(400, body));
       }
-    }
-
-    function parsedCall(index: number): ResponsesApiRequest {
-      return JSON.parse(
-        fetchMock.mock.calls[index]![1].body,
-      ) as ResponsesApiRequest;
+      fetchMock.mockResolvedValueOnce(okResponse(sseStream(DONE_R1)));
+      return streamError(pipe(), request);
     }
 
     /**
@@ -2350,8 +1550,8 @@ describe('ResponsesPipeline', () => {
      */
     function expectRetryDiffersOnlyByInput(retryInput: unknown) {
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      const first = parsedCall(0);
-      const second = parsedCall(1);
+      const first = sentBody(0);
+      const second = sentBody(1);
       expect(first.input).toEqual(ORIGINAL_INPUT);
       expect(second.input).toEqual(retryInput);
       expect({ ...second, input: null }).toEqual({ ...first, input: null });
@@ -2380,58 +1580,24 @@ describe('ResponsesPipeline', () => {
     it.each(encryptedBodies)(
       'recovers once from rejected encrypted replay: %s',
       async (body) => {
-        fetchMock.mockResolvedValueOnce(errorResponse(400, body));
-        fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
         const request = replayRequest();
         const original = structuredClone(request);
-        const pipeline = new ResponsesPipeline(
-          makeGeneratorConfig(),
-          makeCliConfig(),
-        );
-        expect(await drain(pipeline, request)).toBeUndefined();
+        expect(await replayAfter([body], request)).toBeUndefined();
         expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
         expect(request).toEqual(original);
       },
     );
 
     it('preserves tool call/result pairs when recovering encrypted replay', async () => {
-      fetchMock.mockResolvedValueOnce(errorResponse(400, encryptedBodies[0]!));
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
       const request = replayRequest();
       request.contents = [
         ...(request.contents as Content[]),
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call_1',
-                name: 'lookup',
-                args: { value: 1 },
-              },
-            },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call_1',
-                name: 'lookup',
-                response: { output: 'found' },
-              },
-            },
-          ],
-        },
+        content('model', fnCall('lookup', { value: 1 }, 'call_1')),
+        content('user', fnResponse('lookup', { output: 'found' }, 'call_1')),
       ];
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      expect(await drain(pipeline, request)).toBeUndefined();
-      const first = parsedCall(0);
-      const second = parsedCall(1);
+      expect(await replayAfter([encryptedBodies[0]!], request)).toBeUndefined();
+      const first = sentBody(0);
+      const second = sentBody(1);
       expect(first.input.filter((i) => i.type === 'reasoning')).toHaveLength(3);
       expect(second.input.filter((i) => i.type === 'reasoning')).toHaveLength(
         0,
@@ -2445,11 +1611,7 @@ describe('ResponsesPipeline', () => {
 
     it('surfaces the second encrypted rejection without looping', async () => {
       fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      expect(await drain(pipeline, replayRequest())).toMatchObject({
+      expect(await streamError(pipe(), replayRequest())).toMatchObject({
         status: 400,
       });
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -2457,53 +1619,63 @@ describe('ResponsesPipeline', () => {
 
     it('does not retry encrypted rejection without reasoning in the request', async () => {
       fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      expect(
-        await drain(pipeline, {
-          model: 'gpt-5',
-          contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
-        }),
-      ).toMatchObject({ status: 400 });
+      expect(await streamError(pipe(), textRequest('hello'))).toMatchObject({
+        status: 400,
+      });
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     // ── RED behaviors ────────────────────────────────────────────────────
 
-    it('downgrades every over-long reasoning id and retries when the endpoint reports a maximum', async () => {
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(400, directBody('input[1].id', MAX_64_MESSAGE)),
-      );
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      expect(await drain(pipeline, replayRequest())).toBeUndefined();
-      expectRetryDiffersOnlyByInput(OVER_LONG_ONLY_INPUT);
-    });
-
-    it('preserves replay recovery when the error body also contains credentials', async () => {
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(
-          400,
-          directBody(
-            'input[1].id',
-            `${MAX_64_MESSAGE} https://review-user:review-secret@gateway.example`,
-          ),
+    it.each([
+      [
+        'downgrades every over-long reasoning id and retries when the endpoint reports a maximum',
+        MAX_64_BODY,
+        OVER_LONG_ONLY_INPUT,
+      ],
+      [
+        'preserves replay recovery when the error body also contains credentials',
+        directBody(
+          'input[1].id',
+          `${MAX_64_MESSAGE} https://review-user:review-secret@gateway.example`,
         ),
-      );
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      expect(await drain(pipeline, replayRequest())).toBeUndefined();
-      expectRetryDiffersOnlyByInput(OVER_LONG_ONLY_INPUT);
+        OVER_LONG_ONLY_INPUT,
+      ],
+      [
+        'downgrades every replayed reasoning item and retries when no maximum is reported',
+        directBody('input[1].id', NO_MAX_MESSAGE),
+        ALL_REASONING_INPUT,
+      ],
+      [
+        'recovers when the rejection is nested in a proxied message carrying a raw newline',
+        proxiedBody('input[1].id', MAX_64_MESSAGE, '\n'),
+        OVER_LONG_ONLY_INPUT,
+      ],
+      [
+        'recovers when the rejection is nested in a proxied message carrying a raw tab',
+        proxiedBody('input[1].id', MAX_64_MESSAGE, '\t'),
+        OVER_LONG_ONLY_INPUT,
+      ],
+      // The message names input[7].id but the rejected param is input[1].id --
+      // trusting 64 here would keep replaying whichever ids happen to be
+      // shorter than a limit that was never stated for this parameter.
+      [
+        'treats a maximum reported against a different parameter as absent',
+        directBody('input[1].id', MAX_64_MESSAGE.replace('[1]', '[7]')),
+        ALL_REASONING_INPUT,
+      ],
+      [
+        'treats a maximum reported against ambiguous parameters as absent',
+        directBody(
+          'input[1].id',
+          "Invalid 'input[1].id' and 'input[3].id': strings too long. " +
+            'Expected a string with maximum length 64.',
+        ),
+        ALL_REASONING_INPUT,
+      ],
+    ])('%s', async (_title, rejection, retryInput) => {
+      expect(await replayAfter([rejection])).toBeUndefined();
+      expectRetryDiffersOnlyByInput(retryInput);
     });
 
     it('does not retry an oversized rejection even when redaction would shrink it below the limit', async () => {
@@ -2511,117 +1683,19 @@ describe('ResponsesPipeline', () => {
         'input[1].id',
         `${MAX_64_MESSAGE} https://review-user:${'s'.repeat(1_000)}@gateway.example`,
       );
-      const body = rejection.padEnd(64_001, ' ');
-      fetchMock.mockResolvedValueOnce(errorResponse(400, body));
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
 
-      const error = await drain(pipeline, replayRequest());
+      const error = await replayAfter([rejection.padEnd(64_001, ' ')]);
 
       expect(error).toMatchObject({ status: 400 });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(parsedCall(0).input).toEqual(ORIGINAL_INPUT);
-    });
-
-    it('downgrades every replayed reasoning item and retries when no maximum is reported', async () => {
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(400, directBody('input[1].id', NO_MAX_MESSAGE)),
-      );
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      expect(await drain(pipeline, replayRequest())).toBeUndefined();
-      expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
-    });
-
-    it('recovers when the rejection is nested in a proxied message carrying a raw newline', async () => {
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(400, proxiedBody('input[1].id', MAX_64_MESSAGE, '\n')),
-      );
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      expect(await drain(pipeline, replayRequest())).toBeUndefined();
-      expectRetryDiffersOnlyByInput(OVER_LONG_ONLY_INPUT);
-    });
-
-    it('recovers when the rejection is nested in a proxied message carrying a raw tab', async () => {
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(400, proxiedBody('input[1].id', MAX_64_MESSAGE, '\t')),
-      );
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      expect(await drain(pipeline, replayRequest())).toBeUndefined();
-      expectRetryDiffersOnlyByInput(OVER_LONG_ONLY_INPUT);
-    });
-
-    it('treats a maximum reported against a different parameter as absent', async () => {
-      // The message names input[7].id but the rejected param is input[1].id --
-      // trusting 64 here would keep replaying whichever ids happen to be
-      // shorter than a limit that was never stated for this parameter.
-      const foreign =
-        "Invalid 'input[7].id': string too long. Expected a string with " +
-        'maximum length 64, but got a string with length 83 instead.';
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(400, directBody('input[1].id', foreign)),
-      );
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      expect(await drain(pipeline, replayRequest())).toBeUndefined();
-      expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
-    });
-
-    it('treats a maximum reported against ambiguous parameters as absent', async () => {
-      const ambiguous =
-        "Invalid 'input[1].id' and 'input[3].id': strings too long. " +
-        'Expected a string with maximum length 64.';
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(400, directBody('input[1].id', ambiguous)),
-      );
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      expect(await drain(pipeline, replayRequest())).toBeUndefined();
-      expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
+      expect(sentBody(0).input).toEqual(ORIGINAL_INPUT);
     });
 
     it('retries exactly once and surfaces the second rejection unchanged', async () => {
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(400, directBody('input[1].id', MAX_64_MESSAGE)),
-      );
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(
-          400,
-          directBody('input[1].id', `${MAX_64_MESSAGE} SECOND-ATTEMPT`),
-        ),
-      );
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      const err = await drain(pipeline, replayRequest());
+      const err = await replayAfter([
+        MAX_64_BODY,
+        directBody('input[1].id', `${MAX_64_MESSAGE} SECOND-ATTEMPT`),
+      ]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect((err as Error | undefined)?.message).toContain('SECOND-ATTEMPT');
       expect((err as { status?: number }).status).toBe(400);
@@ -2633,44 +1707,26 @@ describe('ResponsesPipeline', () => {
       // rejection naming IT with a smaller maximum is one this classifier
       // would happily act on. An implementation that recovered from inside
       // its own retry would send a third request here.
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(400, directBody('input[1].id', MAX_64_MESSAGE)),
-      );
-      fetchMock.mockResolvedValueOnce(
-        errorResponse(
-          400,
-          directBody(
-            'input[2].id',
-            "Invalid 'input[2].id': string too long. Expected a string with " +
-              'maximum length 4, but got a string with length 8 instead.',
-          ),
+      const err = await replayAfter([
+        MAX_64_BODY,
+        directBody(
+          'input[2].id',
+          "Invalid 'input[2].id': string too long. Expected a string with " +
+            'maximum length 4, but got a string with length 8 instead.',
         ),
-      );
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      const err = await drain(pipeline, replayRequest());
+      ]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect((err as { status?: number }).status).toBe(400);
       expect((err as Error).message).toContain('input[2].id');
-      expect(parsedCall(1).input).toEqual(OVER_LONG_ONLY_INPUT);
+      expect(sentBody(1).input).toEqual(OVER_LONG_ONLY_INPUT);
     });
 
     // ── Controls: every one of these must NOT retry ──────────────────────
 
     it('control: sends one request when the endpoint accepts the long ids', async () => {
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      expect(await drain(pipeline, replayRequest())).toBeUndefined();
+      expect(await replayAfter([])).toBeUndefined();
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(parsedCall(0).input).toEqual(ORIGINAL_INPUT);
+      expect(sentBody(0).input).toEqual(ORIGINAL_INPUT);
     });
 
     it.each([
@@ -2685,16 +1741,8 @@ describe('ResponsesPipeline', () => {
           },
         }),
       ],
-      [
-        'a matching body under 500',
-        500,
-        directBody('input[1].id', MAX_64_MESSAGE),
-      ],
-      [
-        'a matching body under 429',
-        429,
-        directBody('input[1].id', MAX_64_MESSAGE),
-      ],
+      ['a matching body under 500', 500, MAX_64_BODY],
+      ['a matching body under 429', 429, MAX_64_BODY],
       ['a malformed body', 400, '<html><body>Bad Gateway</body></html>'],
       [
         'a primitive JSON body',
@@ -2753,11 +1801,7 @@ describe('ResponsesPipeline', () => {
       [
         'a named item that is not a reasoning item',
         400,
-        directBody(
-          'input[0].id',
-          "Invalid 'input[0].id': string too long. Expected a string with " +
-            'maximum length 64, but got a string with length 83 instead.',
-        ),
+        directBody('input[0].id', MAX_64_MESSAGE.replace('[1]', '[0]')),
       ],
       [
         'a named reasoning id within the reported maximum',
@@ -2777,13 +1821,13 @@ describe('ResponsesPipeline', () => {
             param: 'model',
             code: 'model_not_found',
           },
-          debug: `example: ${directBody('input[1].id', MAX_64_MESSAGE)}`,
+          debug: `example: ${MAX_64_BODY}`,
         }),
       ],
       [
         'trailing non-whitespace after the top-level object',
         400,
-        `${directBody('input[1].id', MAX_64_MESSAGE)} trailing`,
+        `${MAX_64_BODY} trailing`,
       ],
       [
         'an unterminated string tail after a matching object',
@@ -2814,31 +1858,21 @@ describe('ResponsesPipeline', () => {
       [
         'a vertical tab after the top-level object',
         400,
-        `${directBody('input[1].id', MAX_64_MESSAGE)}\u000b`,
+        `${MAX_64_BODY}\u000b`,
       ],
-      [
-        'a form feed after the top-level object',
-        400,
-        `${directBody('input[1].id', MAX_64_MESSAGE)}\u000c`,
-      ],
+      ['a form feed after the top-level object', 400, `${MAX_64_BODY}\u000c`],
       [
         'a no-break space after the top-level object',
         400,
-        `${directBody('input[1].id', MAX_64_MESSAGE)}\u00a0`,
+        `${MAX_64_BODY}\u00a0`,
       ],
     ])('control: does not retry on %s', async (_label, status, body) => {
       fetchMock.mockResolvedValueOnce(errorResponse(status as number, body));
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-
-      const err = await drain(pipeline, replayRequest());
+      const err = await replayAfter([]);
       expect(err).toBeInstanceOf(Error);
       expect((err as { status?: number }).status).toBe(status);
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(parsedCall(0).input).toEqual(ORIGINAL_INPUT);
+      expect(sentBody(0).input).toEqual(ORIGINAL_INPUT);
     });
   });
 
@@ -2860,25 +1894,29 @@ describe('ResponsesPipeline', () => {
       ]);
     }
 
+    function abortError() {
+      const abortErr = new Error('The operation was aborted');
+      abortErr.name = 'AbortError';
+      return abortErr;
+    }
+
     /**
-     * An error body that flushes one chunk and then never produces another --
-     * a proxy that has committed its status line and stalled. Pending reads
+     * A 503 whose body flushes one chunk and then never produces another -- a
+     * proxy that has committed its status line and stalled. Pending reads
      * reject with AbortError once the request's signal fires, matching what
-     * undici does to an in-flight body when the request is aborted.
+     * undici does to an in-flight body when the request is aborted. `text`
+     * stands in for the response's text().
      */
-    function stalledErrorBody(signal: AbortSignal | undefined, head: string) {
+    function stalled503(init: RequestInit, text: () => Promise<string>) {
       let cancelled = false;
-      const encoder = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(encoder.encode(head));
-          signal?.addEventListener(
+          controller.enqueue(new TextEncoder().encode('{"error":{"message":"'));
+          init.signal?.addEventListener(
             'abort',
             () => {
-              const abortErr = new Error('The operation was aborted');
-              abortErr.name = 'AbortError';
               try {
-                controller.error(abortErr);
+                controller.error(abortError());
               } catch {
                 // Already closed or errored.
               }
@@ -2890,7 +1928,8 @@ describe('ResponsesPipeline', () => {
           cancelled = true;
         },
       });
-      return { stream, wasCancelled: () => cancelled };
+      const response = { ...errorResponse(503, ''), body: stream, text };
+      return { response, wasCancelled: () => cancelled };
     }
 
     it('bounds a stalled non-2xx error body with a retryable ETIMEDOUT', async () => {
@@ -2898,29 +1937,16 @@ describe('ResponsesPipeline', () => {
       // flushes `503` and then stalls its body left the old
       // `await response.text()` waiting with no bound at all.
       let fetchSignal: AbortSignal | undefined;
-      let body!: ReturnType<typeof stalledErrorBody>;
+      let stalled!: ReturnType<typeof stalled503>;
       fetchMock.mockImplementation((_url: string, init: RequestInit) => {
         fetchSignal = init.signal ?? undefined;
-        body = stalledErrorBody(fetchSignal, '{"error":{"message":"');
-        return Promise.resolve({
-          ok: false,
-          status: 503,
-          headers: { get: () => 'application/json' },
-          body: body.stream,
-          // A real stalled body stalls `text()` too.
-          text: () => new Promise<string>(() => {}),
-        });
+        // A real stalled body stalls `text()` too.
+        stalled = stalled503(init, () => new Promise<string>(() => {}));
+        return Promise.resolve(stalled.response);
       });
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig({ timeout: 100 }),
-        makeCliConfig(),
-      );
 
       const outcome = await withRealDeadline(
-        pipeline
-          .connectStream(textRequest('hi'), 'p1')
-          .then(() => undefined as unknown)
-          .catch((e: unknown) => e),
+        connectError(pipe({ timeout: 100 })),
       );
 
       expect(outcome).not.toBe(UNBOUNDED);
@@ -2930,7 +1956,7 @@ describe('ResponsesPipeline', () => {
       expect((outcome as Error).message).toMatch(/error response body/i);
       expect((outcome as Error).message).toContain('503');
       // The abandoned body and the underlying request are both released.
-      expect(body.wasCancelled()).toBe(true);
+      expect(stalled.wasCancelled()).toBe(true);
       expect(fetchSignal?.aborted).toBe(true);
     }, 15000);
 
@@ -2938,40 +1964,27 @@ describe('ResponsesPipeline', () => {
       // `.catch(() => "")` around the body read swallowed the caller's
       // cancellation and reported an ordinary status-503 failure instead.
       const caller = new AbortController();
-      fetchMock.mockImplementation((_url: string, init: RequestInit) => {
-        const body = stalledErrorBody(
-          init.signal ?? undefined,
-          '{"error":{"message":"',
-        );
-        return Promise.resolve({
-          ok: false,
-          status: 503,
-          headers: { get: () => 'application/json' },
-          body: body.stream,
-          text: () =>
-            new Promise<string>((_resolve, reject) => {
-              init.signal?.addEventListener(
-                'abort',
-                () => {
-                  const abortErr = new Error('The operation was aborted');
-                  abortErr.name = 'AbortError';
-                  reject(abortErr);
-                },
-                { once: true },
-              );
-            }),
-        });
-      });
-      const pipeline = new ResponsesPipeline(
-        // Long enough that only the caller's abort can end this.
-        makeGeneratorConfig({ timeout: 30_000 }),
-        makeCliConfig(),
+      fetchMock.mockImplementation((_url: string, init: RequestInit) =>
+        Promise.resolve(
+          stalled503(
+            init,
+            () =>
+              new Promise<string>((_resolve, reject) => {
+                init.signal?.addEventListener(
+                  'abort',
+                  () => reject(abortError()),
+                  { once: true },
+                );
+              }),
+          ).response,
+        ),
       );
 
-      const pending = pipeline
-        .connectStream(textRequest('hi'), 'p1', caller.signal)
-        .then(() => undefined as unknown)
-        .catch((e: unknown) => e);
+      const pending = connectError(
+        // Long enough that only the caller's abort can end this.
+        pipe({ timeout: 30_000 }),
+        caller.signal,
+      );
       const abortTimer = setTimeout(() => caller.abort(), 20);
       abortTimer.unref?.();
 
@@ -2987,71 +2000,28 @@ describe('ResponsesPipeline', () => {
     it('control: a complete streamed error body still classifies for replay recovery', async () => {
       // Bounding the read must not cost the classifier the bytes it needs:
       // the whole body, delivered in chunks, has to arrive intact.
-      const rejection = JSON.stringify({
-        error: {
-          message:
-            "Invalid 'input[1].id': string too long. Expected a string " +
-            'with maximum length 64, but got a string with length 83 instead.',
-          type: 'invalid_request_error',
-          param: 'input[1].id',
-          code: 'string_above_max_length',
-        },
-      });
-      const encoder = new TextEncoder();
-      const bytes = encoder.encode(rejection);
       fetchMock.mockResolvedValueOnce({
-        ok: false,
-        status: 400,
-        headers: { get: () => 'application/json' },
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            for (let i = 0; i < bytes.length; i += 7) {
-              controller.enqueue(bytes.slice(i, i + 7));
-            }
-            controller.close();
-          },
-        }),
-        text: async () => rejection,
+        ...errorResponse(400, MAX_64_BODY),
+        body: byteStream(MAX_64_BODY, 7),
       });
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: { get: () => 'text/event-stream' },
-        body: sseStream(
-          sseEvent('response.completed', {
-            response: { id: 'r1', status: 'completed' },
-          }),
-        ),
-        text: async () => '',
-      });
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
+      fetchMock.mockResolvedValueOnce(okResponse(sseStream(DONE_R1)));
 
-      const request: GenerateContentParameters = {
+      const thoughtSignature = JSON.stringify({
+        id: `rs_${'a'.repeat(80)}`,
+        encrypted_content: 'enc',
+      });
+      await streamed(pipe(), {
         model: 'gpt-5',
         contents: [
-          { role: 'user', parts: [{ text: 'hello' }] },
-          {
-            role: 'model',
-            parts: [
-              {
-                thought: true,
-                text: 'a thought',
-                thoughtSignature: JSON.stringify({
-                  id: `rs_${'a'.repeat(80)}`,
-                  encrypted_content: 'enc',
-                }),
-              },
-            ],
-          },
-          { role: 'user', parts: [{ text: 'continue' }] },
+          userText('hello'),
+          content('model', {
+            thought: true,
+            text: 'a thought',
+            thoughtSignature,
+          }),
+          userText('continue'),
         ],
-      };
-      for await (const _ of pipeline.executeStream(request, 'p1')) {
-        // drain
-      }
+      });
 
       // The rejection was read in full and acted on: one retry went out.
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -3061,45 +2031,14 @@ describe('ResponsesPipeline', () => {
       // A body whose first 64,000 characters happen to be a complete,
       // classifiable object must NOT license a replay recovery -- acting on a
       // truncated body is acting on evidence we do not have.
-      const rejection = JSON.stringify({
-        error: {
-          message:
-            "Invalid 'input[1].id': string too long. Expected a string " +
-            'with maximum length 64, but got a string with length 83 instead.',
-          type: 'invalid_request_error',
-          param: 'input[1].id',
-          code: 'string_above_max_length',
-        },
-      });
-      const oversized = `${rejection}${' '.repeat(70_000)}`;
+      const oversized = `${MAX_64_BODY}${' '.repeat(70_000)}`;
       fetchMock.mockResolvedValueOnce({
-        ok: false,
-        status: 400,
-        headers: { get: () => 'application/json' },
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(oversized));
-            controller.close();
-          },
-        }),
-        text: async () => oversized,
+        ...errorResponse(400, oversized),
+        body: byteStream(oversized),
       });
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: { get: () => 'text/event-stream' },
-        body: sseStream([]),
-        text: async () => '',
-      });
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
+      fetchMock.mockResolvedValueOnce(okResponse(sseStream([])));
 
-      const err = await pipeline
-        .connectStream(textRequest('hi'), 'p1')
-        .then(() => undefined as unknown)
-        .catch((e: unknown) => e);
+      const err = await connectError();
 
       expect((err as { status?: number }).status).toBe(400);
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -3109,31 +2048,6 @@ describe('ResponsesPipeline', () => {
   });
 
   describe('SSE content-type guard', () => {
-    function respondWith(contentType: string | null, lines: string[]) {
-      fetchMock.mockResolvedValue({
-        ok: true,
-        status: 200,
-        headers: { get: () => contentType },
-        body: sseStream(lines),
-        text: async () => '',
-      });
-    }
-
-    async function collect() {
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      const chunks = [];
-      for await (const chunk of pipeline.executeStream(
-        textRequest('hi'),
-        'p1',
-      )) {
-        chunks.push(chunk);
-      }
-      return chunks;
-    }
-
     // Valid NDJSON: bare JSON objects, one per line, with no SSE framing --
     // exactly what these media types promise and what the reader, which only
     // understands `event:`/`data:` lines, silently turns into zero candidates.
@@ -3148,8 +2062,10 @@ describe('ResponsesPipeline', () => {
     it.each(['application/x-ndjson', 'application/stream+json'])(
       'rejects %s, which the SSE reader cannot parse',
       async (contentType) => {
-        respondWith(contentType, NDJSON_LINES);
-        await expect(collect()).rejects.toThrow(/non-SSE content-type/);
+        fetchMock.mockResolvedValue(
+          okResponse(sseStream(NDJSON_LINES), contentType),
+        );
+        await expect(streamed()).rejects.toThrow(/non-SSE content-type/);
       },
     );
 
@@ -3157,18 +2073,18 @@ describe('ResponsesPipeline', () => {
     // the same NDJSON body the labelled cases reject was accepted whenever
     // the header was simply absent, and framed into zero candidates.
     it('rejects a 200 response that declares no content-type at all', async () => {
-      respondWith(null, NDJSON_LINES);
-      await expect(collect()).rejects.toThrow(/non-SSE content-type/);
+      fetchMock.mockResolvedValue(okResponse(sseStream(NDJSON_LINES), null));
+      await expect(streamed()).rejects.toThrow(/non-SSE content-type/);
     });
 
     it('control: accepts text/event-stream case-insensitively and with parameters', async () => {
-      respondWith('Text/Event-Stream; charset=utf-8', [
-        ...sseEvent('response.output_text.delta', { delta: 'hi' }),
-        ...sseEvent('response.completed', {
-          response: { id: 'r1', status: 'completed' },
-        }),
-      ]);
-      const chunks = await collect();
+      fetchMock.mockResolvedValue(
+        okResponse(
+          sseStream([...deltaEvent('hi'), ...DONE_R1]),
+          'Text/Event-Stream; charset=utf-8',
+        ),
+      );
+      const chunks = await streamed();
       expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([
         { text: 'hi' },
       ]);
@@ -3182,176 +2098,102 @@ describe('ResponsesPipeline', () => {
   // the same call produced a different body depending only on which wire it
   // took.
   describe('request-scoped controls', () => {
-    function requestWith(
+    const requestWith = (
       config: NonNullable<GenerateContentParameters['config']>,
-    ): GenerateContentParameters {
-      return { ...textRequest('hi'), config };
-    }
+    ) => ({ ...textRequest('hi'), config });
+    const optOut = () =>
+      requestWith({ thinkingConfig: { includeThoughts: false } });
+    const budget = () =>
+      requestWith({ thinkingConfig: { thinkingBudget: 1024 } });
+    const OFF = { reasoning: undefined, include: undefined };
+    const ENCRYPTED = ['reasoning.encrypted_content'];
 
-    async function sentBody(
-      pipeline: ResponsesPipeline,
-      request: GenerateContentParameters,
-    ): Promise<Record<string, unknown>> {
-      mockResponse(
-        sseEvent('response.completed', { response: { status: 'completed' } }),
-      );
-      for await (const _ of pipeline.executeStream(request, 'p1')) {
-        // drain
-      }
-      return JSON.parse(fetchMock.mock.calls[0]![1].body) as Record<
-        string,
-        unknown
-      >;
-    }
-
-    it('honors request temperature and topP when samplingParams omits those keys', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(
-          makeGeneratorConfig({ samplingParams: { max_tokens: 321 } }),
-          makeCliConfig(),
-        ),
+    it.each<BodyCase>([
+      // 0 is a meaningful temperature, not an absent one; max-token
+      // reconciliation is untouched by this.
+      [
+        'honors request temperature and topP when samplingParams omits those keys',
+        { samplingParams: { max_tokens: 321 } },
+        { temperature: 0, top_p: 0.25, max_output_tokens: 321 },
         requestWith({ temperature: 0, topP: 0.25 }),
-      );
-      // 0 is a meaningful temperature, not an absent one.
-      expect(body['temperature']).toBe(0);
-      expect(body['top_p']).toBe(0.25);
-      // Max-token reconciliation is untouched by this.
-      expect(body['max_output_tokens']).toBe(321);
-    });
-
-    it('control: honors request temperature and topP when there are no samplingParams at all', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(makeGeneratorConfig(), makeCliConfig()),
+      ],
+      [
+        'control: honors request temperature and topP when there are no samplingParams at all',
+        {},
+        { temperature: 0.7, top_p: 0.9 },
         requestWith({ temperature: 0.7, topP: 0.9 }),
-      );
-      expect(body['temperature']).toBe(0.7);
-      expect(body['top_p']).toBe(0.9);
-    });
-
-    it('control: an explicit samplingParams value still wins over the request value', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(
-          makeGeneratorConfig({
-            samplingParams: { temperature: 0.9, top_p: 0.1 },
-          }),
-          makeCliConfig(),
-        ),
+      ],
+      [
+        'control: an explicit samplingParams value still wins over the request value',
+        { samplingParams: { temperature: 0.9, top_p: 0.1 } },
+        { temperature: 0.9, top_p: 0.1 },
         requestWith({ temperature: 0, topP: 0.25 }),
-      );
-      expect(body['temperature']).toBe(0.9);
-      expect(body['top_p']).toBe(0.1);
-    });
-
-    it('suppresses reasoning and include when the request opts out with includeThoughts:false', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(
-          makeGeneratorConfig({ reasoning: { effort: 'high' } }),
-          makeCliConfig(),
-        ),
-        requestWith({ thinkingConfig: { includeThoughts: false } }),
-      );
-      expect(body['reasoning']).toBeUndefined();
+      ],
       // The encrypted-reasoning include exists only to round-trip reasoning;
       // it must go with it.
-      expect(body['include']).toBeUndefined();
-    });
-
-    it('suppresses a legacy extra_body.enable_thinking when the request opts out', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(
-          makeGeneratorConfig({ extra_body: { enable_thinking: true } }),
-          makeCliConfig(),
-        ),
-        requestWith({ thinkingConfig: { includeThoughts: false } }),
-      );
-      expect(body['reasoning']).toBeUndefined();
-      expect(body['include']).toBeUndefined();
-      expect(body['enable_thinking']).toBeUndefined();
-    });
-
-    // The opt-out has to survive the whole build, not just buildReasoning():
-    // leaving `reasoning`/`include` off the request literal is exactly what
-    // makes the fill-only extra_body merge below eligible to put them back,
-    // so a configured extra_body silently re-enabled thinking on the wire.
-    it('does not let extra_body reintroduce reasoning or include when the request opts out', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(
-          makeGeneratorConfig({
-            reasoning: { effort: 'high' },
-            extra_body: {
-              reasoning: { effort: 'low' },
-              include: ['reasoning.encrypted_content'],
-            },
-          }),
-          makeCliConfig(),
-        ),
-        requestWith({ thinkingConfig: { includeThoughts: false } }),
-      );
-      expect(body['reasoning']).toBeUndefined();
-      expect(body['include']).toBeUndefined();
-    });
-
-    it('control: extra_body still fills reasoning and include when the request does not opt out', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(
-          makeGeneratorConfig({
-            extra_body: {
-              reasoning: { effort: 'low' },
-              include: ['reasoning.encrypted_content'],
-            },
-          }),
-          makeCliConfig(),
-        ),
-        requestWith({ thinkingConfig: { thinkingBudget: 1024 } }),
-      );
-      expect(body['reasoning']).toEqual({ effort: 'low' });
-      expect(body['include']).toEqual(['reasoning.encrypted_content']);
-    });
-
-    it('control: a generated reasoning still outranks extra_body when the request does not opt out', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(
-          makeGeneratorConfig({
-            reasoning: { effort: 'high' },
-            extra_body: {
-              reasoning: { effort: 'low' },
-              include: ['ignored'],
-            },
-          }),
-          makeCliConfig(),
-        ),
-        requestWith({ thinkingConfig: { thinkingBudget: 1024 } }),
-      );
-      expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto' });
-      expect(body['include']).toEqual(['reasoning.encrypted_content']);
-    });
-
-    it('control: a request opt-out leaves unrelated extra_body keys alone', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(
-          makeGeneratorConfig({
-            reasoning: { effort: 'high' },
-            extra_body: { service_tier: 'priority' },
-          }),
-          makeCliConfig(),
-        ),
-        requestWith({ thinkingConfig: { includeThoughts: false } }),
-      );
-      expect(body['reasoning']).toBeUndefined();
-      expect(body['include']).toBeUndefined();
-      expect(body['service_tier']).toBe('priority');
-    });
-
-    it('control: a thinkingConfig without includeThoughts leaves configured reasoning intact', async () => {
-      const body = await sentBody(
-        new ResponsesPipeline(
-          makeGeneratorConfig({ reasoning: { effort: 'high' } }),
-          makeCliConfig(),
-        ),
-        requestWith({ thinkingConfig: { thinkingBudget: 1024 } }),
-      );
-      expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto' });
-      expect(body['include']).toEqual(['reasoning.encrypted_content']);
-    });
+      [
+        'suppresses reasoning and include when the request opts out with includeThoughts:false',
+        { reasoning: { effort: 'high' } },
+        OFF,
+        optOut(),
+      ],
+      [
+        'suppresses a legacy extra_body.enable_thinking when the request opts out',
+        { extra_body: { enable_thinking: true } },
+        { ...OFF, enable_thinking: undefined },
+        optOut(),
+      ],
+      // The opt-out has to survive the whole build, not just buildReasoning():
+      // leaving `reasoning`/`include` off the request literal is exactly what
+      // makes the fill-only extra_body merge eligible to put them back, so a
+      // configured extra_body silently re-enabled thinking on the wire.
+      [
+        'does not let extra_body reintroduce reasoning or include when the request opts out',
+        {
+          reasoning: { effort: 'high' },
+          extra_body: {
+            reasoning: { effort: 'low' },
+            include: ['reasoning.encrypted_content'],
+          },
+        },
+        OFF,
+        optOut(),
+      ],
+      [
+        'control: extra_body still fills reasoning and include when the request does not opt out',
+        {
+          extra_body: {
+            reasoning: { effort: 'low' },
+            include: ['reasoning.encrypted_content'],
+          },
+        },
+        { reasoning: { effort: 'low' }, include: ENCRYPTED },
+        budget(),
+      ],
+      [
+        'control: a generated reasoning still outranks extra_body when the request does not opt out',
+        {
+          reasoning: { effort: 'high' },
+          extra_body: { reasoning: { effort: 'low' }, include: ['ignored'] },
+        },
+        { reasoning: { effort: 'high', summary: 'auto' }, include: ENCRYPTED },
+        budget(),
+      ],
+      [
+        'control: a request opt-out leaves unrelated extra_body keys alone',
+        {
+          reasoning: { effort: 'high' },
+          extra_body: { service_tier: 'priority' },
+        },
+        { ...OFF, service_tier: 'priority' },
+        optOut(),
+      ],
+      [
+        'control: a thinkingConfig without includeThoughts leaves configured reasoning intact',
+        { reasoning: { effort: 'high' } },
+        { reasoning: { effort: 'high', summary: 'auto' }, include: ENCRYPTED },
+        budget(),
+      ],
+    ])('%s', expectBody);
   });
 });

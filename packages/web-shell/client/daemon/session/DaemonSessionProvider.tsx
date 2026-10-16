@@ -73,6 +73,9 @@ import {
   isRecord,
   isAcpChildCapacityError,
 } from './httpErrors.js';
+import { McpAppToolsContext } from '../../mcpAppHostContext.js';
+import { createTrajectoryLiveStore } from '../../trajectory/trajectory-live-store.js';
+import { TrajectoryLiveContext } from '../../trajectory/trajectory-live-context.js';
 import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
@@ -382,7 +385,7 @@ function materializeTranscriptHistory(
     const text = (block as { text?: string }).text ?? '';
     const images = (block as { images?: unknown[] }).images?.length ?? 0;
     const files = (block as { files?: unknown[] }).files?.length ?? 0;
-    return `${text} img:${images} file:${files}`;
+    return `${text}\u0000img:${images}\u0000file:${files}`;
   };
   const oldestRetainedBlock = current.blocks[0];
   const boundaryEchoKey =
@@ -988,6 +991,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   // load-older fetch captures it before the await and drops the page if it
   // moved mid-fetch, so a stale page can never advance the anchor below the
   // evicted band.
+  const trajectoryLiveStore = useMemo(() => createTrajectoryLiveStore(), []);
   const paginationGenerationRef = useRef(0);
   const store = useMemo(
     () =>
@@ -2623,8 +2627,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // The deferred store.reset() runs here — in the same synchronous
           // block as store.dispatch() — so the queueMicrotask notification
           // only fires once with the fully-populated state.
-          const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
+          const {
+            compactedReplay,
+            liveJournal,
+            lifecycleReplay,
+            lifecycleReplayIncomplete,
+          } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
+          trajectoryLiveStore.begin(activeSession, {
+            sessionId: activeSession.sessionId,
+            scope: sessionContextKey(activeProductSessionContext),
+            epoch: activeSession.eventEpoch,
+            lastEventId: activeSession.lastEventId,
+            events: lifecycleReplay
+              ? [...replayEvents, ...lifecycleReplay]
+              : replayEvents,
+            incomplete:
+              lifecycleReplayIncomplete === true ||
+              (historyPageSizeRef.current !== undefined &&
+                lifecycleReplay === undefined) ||
+              activeSession.replayDegraded === true ||
+              activeSession.replayPartial === true ||
+              activeSession.historyHasMore === true ||
+              !activeSession.replaySnapshotComplete,
+          });
           const markerStillVisible =
             repairingEpisode?.markerBlockId !== undefined &&
             store
@@ -3526,6 +3552,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const sseConnectReason = nextSseConnectReason;
           nextSseConnectReason = undefined;
           const recoveryEventCursor = activeSession.lastEventId ?? 0;
+          trajectoryLiveStore.reconnect(
+            activeSession,
+            activeSession.lastEventId === undefined,
+          );
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
@@ -3534,6 +3564,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (sessionRef.current !== activeSession) {
               break;
             }
+            trajectoryLiveStore.ingest(
+              activeSession,
+              event,
+              activeSession.eventEpoch,
+            );
             if (!sawEvent) {
               sawEvent = true;
               reconnectAttempt = 0;
@@ -3645,6 +3680,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 if (
                   event.type === 'turn_complete' ||
                   event.type === 'turn_error' ||
+                  // A rewind can drop the interrupted turn itself.
+                  event.type === 'session_rewound' ||
                   uiEvents.some((item) => item.type === 'prompt.cancelled')
                 ) {
                   const generation = advanceSessionRecoveryGeneration(
@@ -3925,15 +3962,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 );
               }
               if (sessionRef.current === activeSession) {
-                turnNotifications.observe(activeSession, event, false, () =>
-                  getTurnNotificationContent(
+                turnNotifications.observe(activeSession, event, false, () => {
+                  if (event.type === 'permission_request')
+                    flushTranscriptSync();
+                  return getTurnNotificationContent(
                     event,
                     store.getSnapshot().blocks,
                     connectionRef.current.sessionId === activeSession.sessionId
                       ? connectionRef.current.displayName
                       : getSessionDisplayName(activeSession.state),
-                  ),
-                );
+                  );
+                });
               }
               if (
                 event.type === 'turn_complete' ||
@@ -4054,6 +4093,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
           }
+          trajectoryLiveStore.invalidate(activeSession, 'stream_closed');
           if (
             sessionRef.current !== activeSession &&
             !resyncRequested &&
@@ -4172,6 +4212,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }));
           }
         } catch (error) {
+          if (runnerSession)
+            trajectoryLiveStore.invalidate(runnerSession, 'stream_error');
           const restartRequested = eventStream?.restartRequested === true;
           clearEventStream();
           if (session && sessionRef.current !== session) {
@@ -4556,6 +4598,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     void run();
     return () => {
       const session = runnerSession;
+      if (session) trajectoryLiveStore.invalidate(session, 'stream_closed');
       disposed = true;
       abort.abort();
       const ownsCurrentSession =
@@ -4579,6 +4622,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       const isUnmounting = !mountedRef.current;
       if (ownsCurrentSession || ownsEmptyState) {
+        if (!keepSessionForNextEffect || isUnmounting || !session) {
+          trajectoryLiveStore.clear();
+        }
         // A same-attachment effect restart must flush events already yielded by
         // the SSE client, because its resume cursor has advanced past them.
         flushTranscriptSync();
@@ -4642,6 +4688,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     maxRetainedBytes,
     store,
     turnNavigationStore,
+    trajectoryLiveStore,
     restoreSessionId,
     restoreSessionContext,
     restoreMode,
@@ -4743,6 +4790,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             AUTH_FAILURE_HTTP_STATUSES.has(errorStatus);
           const missingSession = isMissingSessionHttpStatus(errorStatus);
           if (authFailure || missingSession) {
+            trajectoryLiveStore.invalidate(
+              session,
+              authFailure ? 'auth_failure' : 'session_missing',
+            );
             const deadSessionId = session.sessionId;
             if (missingSession) {
               console.warn(
@@ -4811,6 +4862,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     connection.status,
     heartbeatFailureThreshold,
     heartbeatIntervalMs,
+    trajectoryLiveStore,
   ]);
 
   const settleAdmittedPrompt = useCallback(
@@ -5386,36 +5438,70 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [],
   );
 
+  const appSession = sessionRef.current;
+  const mcpAppTools = useMemo(() => {
+    const session = appSession;
+    if (
+      !session ||
+      !session.clientId ||
+      session.sessionId !== connection.sessionId
+    )
+      return undefined;
+    return {
+      sessionId: session.sessionId,
+      callTool: (
+        request: import('../../mcpAppHostContext.js').McpAppToolCallRequest,
+        signal: AbortSignal,
+      ) => {
+        if (sessionRef.current !== session)
+          return Promise.reject(new Error('MCP App session changed'));
+        const clientId = session.clientId;
+        if (!clientId)
+          return Promise.reject(new Error('MCP App client is not attached'));
+        return session.client.callMcpAppTool(
+          session.sessionId,
+          request,
+          clientId,
+          signal,
+        );
+      },
+    };
+  }, [appSession, connection.sessionId]);
+
   return (
-    <DaemonStoreContext.Provider value={store}>
-      <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
-        <DaemonConnectionContext.Provider value={connection}>
-          <DaemonPromptStatusContext.Provider value={promptStatus}>
-            <DaemonSessionNoticesContext.Provider value={noticesValue}>
-              <DaemonWorkspaceEventSignalsContext.Provider
-                value={workspaceEventSignals}
-              >
-                <DaemonActionsContext.Provider value={actions}>
-                  <DaemonSessionOwnerGuardContext.Provider
-                    value={ownerGuardValue}
+    <TrajectoryLiveContext.Provider value={trajectoryLiveStore}>
+      <McpAppToolsContext.Provider value={mcpAppTools}>
+        <DaemonStoreContext.Provider value={store}>
+          <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
+            <DaemonConnectionContext.Provider value={connection}>
+              <DaemonPromptStatusContext.Provider value={promptStatus}>
+                <DaemonSessionNoticesContext.Provider value={noticesValue}>
+                  <DaemonWorkspaceEventSignalsContext.Provider
+                    value={workspaceEventSignals}
                   >
-                    <DaemonTranscriptHistoryContext.Provider
-                      value={transcriptHistoryValue}
-                    >
-                      <DaemonPromptSettlementContext.Provider
-                        value={subscribeToPromptSettlement}
+                    <DaemonActionsContext.Provider value={actions}>
+                      <DaemonSessionOwnerGuardContext.Provider
+                        value={ownerGuardValue}
                       >
-                        {children}
-                      </DaemonPromptSettlementContext.Provider>
-                    </DaemonTranscriptHistoryContext.Provider>
-                  </DaemonSessionOwnerGuardContext.Provider>
-                </DaemonActionsContext.Provider>
-              </DaemonWorkspaceEventSignalsContext.Provider>
-            </DaemonSessionNoticesContext.Provider>
-          </DaemonPromptStatusContext.Provider>
-        </DaemonConnectionContext.Provider>
-      </DaemonTurnNavigationContext.Provider>
-    </DaemonStoreContext.Provider>
+                        <DaemonTranscriptHistoryContext.Provider
+                          value={transcriptHistoryValue}
+                        >
+                          <DaemonPromptSettlementContext.Provider
+                            value={subscribeToPromptSettlement}
+                          >
+                            {children}
+                          </DaemonPromptSettlementContext.Provider>
+                        </DaemonTranscriptHistoryContext.Provider>
+                      </DaemonSessionOwnerGuardContext.Provider>
+                    </DaemonActionsContext.Provider>
+                  </DaemonWorkspaceEventSignalsContext.Provider>
+                </DaemonSessionNoticesContext.Provider>
+              </DaemonPromptStatusContext.Provider>
+            </DaemonConnectionContext.Provider>
+          </DaemonTurnNavigationContext.Provider>
+        </DaemonStoreContext.Provider>
+      </McpAppToolsContext.Provider>
+    </TrajectoryLiveContext.Provider>
   );
 }
 
@@ -5428,11 +5514,15 @@ function promptSettledFromTurnEvent(
   }
   const promptId = eventPromptId(event);
   if (!promptId) return undefined;
+  const originator = event.originatorClientId
+    ? { originatorClientId: event.originatorClientId }
+    : {};
   if (event.type === 'turn_error') {
     const data = isRecord(event.data) ? event.data : {};
     return {
       sessionId,
       promptId,
+      ...originator,
       outcome: 'failed',
       error: {
         // Same defaults `matchTurnEvent` applies when it turns this frame into
@@ -5451,6 +5541,7 @@ function promptSettledFromTurnEvent(
   return {
     sessionId,
     promptId,
+    ...originator,
     outcome:
       stopReason === 'cancelled'
         ? 'cancelled'
@@ -5926,13 +6017,14 @@ export function useDaemonSessionNotices(): {
 }
 
 function hasActiveGenerationSignal(
-  events: ReadonlyArray<{ type: string }>,
+  events: ReadonlyArray<DaemonUiEvent>,
 ): boolean {
   return events.some(
     (event) =>
       event.type === 'assistant.text.delta' ||
       event.type === 'thought.text.delta' ||
-      event.type === 'tool.update',
+      (event.type === 'tool.update' &&
+        !event.toolCallId.startsWith('mcp-app-')),
   );
 }
 

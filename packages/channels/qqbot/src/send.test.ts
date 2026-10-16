@@ -309,7 +309,7 @@ describe('session persistence paths', () => {
 //   newlines, Unicode line separators, and BiDi overrides. The tests below
 //   validate each threat class individually.
 describe('group sender-name sanitization', () => {
-  function makeChannel() {
+  function makeChannel(messageRoutes?: Record<string, string>) {
     return new QQChannel(
       'qq-bot',
       {
@@ -324,10 +324,64 @@ describe('group sender-name sanitization', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
+        messageRoutes,
       },
       {} as unknown as ChannelAgentBridge,
     );
   }
+
+  it.each(['handleC2C', 'handleGroup', 'handleGroupAll'] as const)(
+    '%s leaves routed message text available for prefix matching',
+    (handler) => {
+      vi.useFakeTimers();
+      const ch = makeChannel({ review: 'Review code.' });
+      const inbound = vi.fn().mockResolvedValue(undefined);
+      (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+        inbound;
+      (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+      (ch as unknown as Record<typeof handler, (event: unknown) => void>)[
+        handler
+      ]({
+        id: 'routed-message',
+        group_openid: 'grp-1',
+        content: 'review this change',
+        mentions: [{ is_you: true, id: 'bot-id' }],
+        author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+      });
+      expect(inbound).toHaveBeenCalledTimes(1);
+      expect(inbound.mock.calls[0][0].text).toBe('review this change');
+      expect(inbound.mock.calls[0][0].alreadyPrefixed).toBeUndefined();
+    },
+  );
+
+  it.each(['handleGroup', 'handleGroupAll'] as const)(
+    '%s preserves an embedded mention in routed text',
+    (handler) => {
+      vi.useFakeTimers();
+      const ch = makeChannel({ '/QA': 'Answer questions.' });
+      const inbound = vi.fn().mockResolvedValue(undefined);
+      (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+        inbound;
+      (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+      (ch as unknown as Record<typeof handler, (event: unknown) => void>)[
+        handler
+      ]({
+        id: 'routed-mention',
+        group_openid: 'grp-1',
+        content: '<@bot> /QA ask <@person> about this',
+        mentions: [
+          { is_you: true, id: 'bot' },
+          { is_you: false, id: 'person' },
+        ],
+        author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+      });
+      expect(inbound).toHaveBeenCalledTimes(1);
+      expect(inbound.mock.calls[0][0].text).toBe(
+        '/QA ask <@person> about this',
+      );
+      expect(inbound.mock.calls[0][0].alreadyPrefixed).toBeUndefined();
+    },
+  );
 
   it('neutralizes a crafted nickname (brackets, newline, >64 chars) before self-prefixing', () => {
     vi.useFakeTimers();

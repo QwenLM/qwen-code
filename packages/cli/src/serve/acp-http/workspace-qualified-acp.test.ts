@@ -96,13 +96,15 @@ function makeRuntime(input: {
   primary: boolean;
   trusted: boolean;
   bridge: HttpAcpBridge;
+  sessionRuntimeBaseDir?: string;
   env?: WorkspaceRuntimeEnvMetadata;
   provenance?: WorkspaceRuntime['provenance'];
 }): WorkspaceRuntime {
   return {
     workspaceId: input.id,
     workspaceCwd: input.cwd,
-    sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+    sessionRuntimeBaseDir:
+      input.sessionRuntimeBaseDir ?? Storage.getRuntimeBaseDir(),
     primary: input.primary,
     trusted: input.trusted,
     env: input.env ?? PARENT_ENV,
@@ -797,6 +799,70 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       requireZeroAttaches: true,
     });
   });
+
+  it.each(['load', 'resume'] as const)(
+    'restores session/%s in the selected runtime storage',
+    async (action) => {
+      const sessionId =
+        action === 'load'
+          ? '550e8400-e29b-41d4-a716-446655440191'
+          : '550e8400-e29b-41d4-a716-446655440192';
+      const replacementRuntimeBaseDir = path.join(
+        runtimeDir,
+        'replacement-runtime',
+      );
+      await Storage.runWithResolvedRuntimeBaseDir(
+        replacementRuntimeBaseDir,
+        () => writeStoredSession(sessionId, '/ws'),
+      );
+
+      const replacementBridge = makeBridge();
+      const restoreSession = vi.fn(
+        async (request: { workspaceCwd: string; clientId?: string }) => {
+          expect(Storage.getRuntimeBaseDir()).toBe(replacementRuntimeBaseDir);
+          return {
+            sessionId,
+            workspaceCwd: request.workspaceCwd,
+            attached: false,
+            clientId: request.clientId ?? 'replacement-client',
+            state: {},
+            hasActivePrompt: false,
+          };
+        },
+      );
+      Object.assign(replacementBridge, {
+        loadSession: action === 'load' ? restoreSession : vi.fn(),
+        resumeSession: action === 'resume' ? restoreSession : vi.fn(),
+        getSessionContextStatus: vi.fn(async () => ({ state: {} })),
+      });
+
+      const entry = workspaceRegistry.primaryEntry;
+      expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+      workspaceRegistry.activateReplacement(
+        entry,
+        makeRuntime({
+          id: 'primary-id',
+          cwd: '/ws',
+          primary: true,
+          trusted: true,
+          bridge: replacementBridge,
+          sessionRuntimeBaseDir: replacementRuntimeBaseDir,
+        }),
+        'policy-2',
+      );
+
+      const response = await sendWsRequest('/acp', {
+        jsonrpc: '2.0',
+        id: 2,
+        method: `session/${action}`,
+        params: { sessionId, workspaceCwd: '/ws' },
+      });
+
+      expect(response['error']).toBeUndefined();
+      expect(response['result']).toEqual({});
+      expect(restoreSession).toHaveBeenCalledOnce();
+    },
+  );
 
   it('rolls back session/new when its generation changes while building the response', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440183';

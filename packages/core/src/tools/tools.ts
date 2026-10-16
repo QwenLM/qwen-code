@@ -31,6 +31,14 @@ export interface ToolInvocation<
   readonly permissionAliases?: readonly string[];
 
   /**
+   * Producer-carried MCP identity (server name + tool name on that server),
+   * set by MCP tool invocations. Permission matchers read the server
+   * boundary from here instead of re-deriving it from a flattened
+   * `mcp__<server>__<tool>` spelling, which cannot tell `foo` from `foo_`.
+   */
+  readonly mcpIdentity?: { serverName: string; serverToolName: string };
+
+  /**
    * Gets a pre-execution description of the tool operation.
    *
    * @returns A markdown string describing what the tool will do.
@@ -622,6 +630,14 @@ export interface ToolResult {
   resultFilePaths?: string[];
 
   /**
+   * The full collected set a result's count is computed over, before any
+   * display slice: glob's header certifies the collected count, so a
+   * containment check that reads only `resultFilePaths` would certify hits
+   * it never inspected.
+   */
+  collectedFilePaths?: string[];
+
+  /**
    * Structured artifacts produced by this tool call. Daemon/session surfaces
    * consume this as metadata only; the producer remains responsible for the
    * underlying file, URL, or managed resource lifecycle.
@@ -896,6 +912,8 @@ export interface AskUserQuestionResultDisplay {
 export type ToolResultDisplay =
   | ShellResultDisplay
   | string
+  | AdvisorReviewDisplay
+  | AdvisorAdviceDisplay
   | AskUserQuestionResultDisplay
   | FileDiff
   | TodoResultDisplay
@@ -910,6 +928,73 @@ export type ToolResultDisplay =
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;
+
+export interface AdvisorAdviceDisplay {
+  type: 'advisor_advice';
+  model?: string;
+  text: string;
+}
+
+export type AdvisorDisplay = AdvisorReviewDisplay | AdvisorAdviceDisplay;
+
+export function isAdvisorDisplay(display: unknown): display is AdvisorDisplay {
+  return (
+    isAdvisorReviewDisplay(display) ||
+    (typeof display === 'object' &&
+      display !== null &&
+      'type' in display &&
+      display.type === 'advisor_advice' &&
+      'text' in display &&
+      typeof display.text === 'string')
+  );
+}
+
+export function formatAdvisorDisplay(display: AdvisorDisplay): string {
+  return display.type === 'advisor_advice'
+    ? display.text
+    : formatAdvisorReview(display);
+}
+
+export interface AdvisorReviewDisplay {
+  type: 'advisor_review';
+  model?: string;
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
+}
+
+export function formatAdvisorReview(review: AdvisorReviewDisplay): string {
+  return [
+    '## Verdict',
+    review.verdict.trim(),
+    '## Risks',
+    review.risks.trim(),
+    '## Missing evidence',
+    review.missingEvidence.trim(),
+    '## Recommendation',
+    review.recommendation.trim(),
+  ].join('\n\n');
+}
+
+export function isAdvisorReviewDisplay(
+  display: unknown,
+): display is AdvisorReviewDisplay {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    display.type === 'advisor_review' &&
+    'verdict' in display &&
+    typeof display.verdict === 'string' &&
+    'risks' in display &&
+    typeof display.risks === 'string' &&
+    'missingEvidence' in display &&
+    typeof display.missingEvidence === 'string' &&
+    'recommendation' in display &&
+    typeof display.recommendation === 'string'
+  );
+}
 
 export interface TeamResultDisplay {
   type: 'team_result';
@@ -1145,7 +1230,8 @@ export interface AutoModeFallbackConfirmation {
     | 'consecutive_block'
     | 'consecutive_unavailable'
     | 'total_denial'
-    | 'external_write';
+    | 'external_write'
+    | 'external_directory';
   message: string;
 }
 

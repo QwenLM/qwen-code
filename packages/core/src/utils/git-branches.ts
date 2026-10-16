@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -68,32 +68,36 @@ export interface GitBranchesResult {
   detached: boolean;
 }
 
-// Repository-shifting variables that a daemon process may inherit from its
-// launch environment.  Clearing them prevents a trusted workspace request
-// from operating on a completely different repository despite the resolved
-// `cwd`.
 const GIT_ENV_VARS_TO_CLEAR = [
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_COMMON_DIR',
-  'GIT_INDEX_FILE',
-  'GIT_CONFIG_GLOBAL',
-  'GIT_CONFIG_SYSTEM',
-  'GIT_CONFIG_NOSYSTEM',
-  // Repository selectors that an inherited daemon environment could use to
-  // redirect a trusted-workspace git/gh invocation to a different repository
-  // or object database despite the resolved cwd.
   'GH_REPO',
-  'GIT_CONFIG_COUNT',
-  'GIT_CONFIG_PARAMETERS',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'SSH_ASKPASS',
+  'XDG_CONFIG_HOME',
+  'PREFIX',
+  'EDITOR',
+  'VISUAL',
+  'PAGER',
 ];
 
-// Command-scope config injection uses numbered GIT_CONFIG_KEY_<n> /
-// GIT_CONFIG_VALUE_<n> pairs (an inherited `url.<base>.insteadOf` can retarget
-// a clone/push). The index count is unbounded, so strip them by prefix.
-const GIT_ENV_PREFIXES_TO_CLEAR = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
+const NORMALIZED_GIT_ENV_VARS_TO_CLEAR = new Set(
+  GIT_ENV_VARS_TO_CLEAR.map((key) => key.toLowerCase()),
+);
+const REMOTE_GIT_TRANSPORT_KEYS = new Set(
+  ['GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'SSH_ASKPASS'].map((key) =>
+    key.toLowerCase(),
+  ),
+);
+const GIT_METADATA_KEYS = new Set(
+  [
+    'GIT_AUTHOR_NAME',
+    'GIT_AUTHOR_EMAIL',
+    'GIT_AUTHOR_DATE',
+    'GIT_COMMITTER_NAME',
+    'GIT_COMMITTER_EMAIL',
+    'GIT_COMMITTER_DATE',
+    'GIT_SSL_CAINFO',
+    'GIT_SSL_CAPATH',
+  ].map((key) => key.toLowerCase()),
+);
 
 // Transport names git ships helpers for: `ext` is deny-by-default but
 // re-enableable from config files, `fd` is allowed by default and needs no
@@ -105,14 +109,21 @@ const HELPER_PROTOCOLS = new Set(['ext', 'fd']);
 export function gitEnv(
   base?: Readonly<Record<string, string | undefined>>,
 ): Record<string, string | undefined> {
-  const env = { ...(base ?? process.env) };
-  for (const key of GIT_ENV_VARS_TO_CLEAR) {
-    delete env[key];
-  }
+  const source = base ?? process.env;
+  const env = { ...source };
   for (const key of Object.keys(env)) {
-    if (GIT_ENV_PREFIXES_TO_CLEAR.some((prefix) => key.startsWith(prefix))) {
+    const normalizedKey = key.toLowerCase();
+    if (
+      // Survives the scrub so the normalization below can see it.
+      normalizedKey !== 'git_allow_protocol' &&
+      (NORMALIZED_GIT_ENV_VARS_TO_CLEAR.has(normalizedKey) ||
+        normalizedKey.startsWith('git_'))
+    ) {
       delete env[key];
     }
+  }
+  for (const [key, value] of Object.entries(source)) {
+    if (GIT_METADATA_KEYS.has(key.toLowerCase())) env[key] = value;
   }
   // GIT_ALLOW_PROTOCOL is git's only protocol control that OVERRIDES
   // config-file policy, so deleting it outright would hand a
@@ -134,17 +145,141 @@ export function gitEnv(
   return env;
 }
 
+export function gitRemoteEnv(
+  base?: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  const source = base ?? process.env;
+  const env = gitEnv(source);
+  for (const [key, value] of Object.entries(source)) {
+    if (REMOTE_GIT_TRANSPORT_KEYS.has(key.toLowerCase())) env[key] = value;
+  }
+  return env;
+}
+
+/**
+ * Run git and hand each NUL-separated record to `onRecord` as it arrives.
+ *
+ * For output whose size follows the repository rather than the question —
+ * the index is the one that matters here. `execFile` buffers the whole of it
+ * and fails past `maxBuffer`, which on a safety check reads as "nothing
+ * found"; this holds only the record being read, and stops the moment
+ * `onRecord` says it has seen enough.
+ *
+ * Records are bytes. git writes a path as the bytes it is, and `-z` output
+ * does not quote it, so decoding the stream before splitting it replaces a
+ * byte that is not UTF-8 and hands the reader a path that names some other
+ * file. A reader decodes what it needs, and can tell when that failed.
+ *
+ * Settles exactly once: `true` when the reader stopped early, `false` when
+ * git finished without it, a rejection when git failed, timed out, or the
+ * reader threw — including on the last record, which has no separator after
+ * it and so is only seen once git has closed.
+ */
+export function streamGitRecords(
+  cwd: string,
+  args: string[],
+  onRecord: (record: Buffer) => boolean,
+  env?: Readonly<Record<string, string | undefined>>,
+  options: { timeoutMs?: number } = {},
+): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, {
+      cwd,
+      env: gitEnv(env),
+      windowsHide: true,
+    });
+    let settled = false;
+    const settle = (outcome: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      outcome();
+    };
+    // The subcommand, for messages: the arguments begin with `-c` pairs.
+    const subcommand =
+      args.find((arg, i) => !arg.startsWith('-') && args[i - 1] !== '-c') ??
+      'git';
+    const timer = setTimeout(
+      () => settle(() => reject(new Error(`git ${subcommand} timed out`))),
+      options.timeoutMs ?? GIT_TIMEOUT_MS,
+    );
+    // Whether the reader has seen enough — or, when it threw, the throw.
+    const deliver = (record: Buffer): boolean => {
+      try {
+        if (!onRecord(record)) return false;
+        settle(() => resolve(true));
+      } catch (err) {
+        settle(() => reject(err));
+      }
+      return true;
+    };
+    let pending = Buffer.alloc(0);
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      let at = pending.indexOf(0);
+      while (at !== -1) {
+        const record = pending.subarray(0, at);
+        pending = pending.subarray(at + 1);
+        if (deliver(record)) return;
+        at = pending.indexOf(0);
+      }
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      // Bounded: a failure's first words are what a caller reports.
+      if (stderr.length < 8192) stderr += chunk;
+    });
+    child.on('error', (err) => settle(() => reject(err)));
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      if (code !== 0) {
+        settle(() =>
+          reject(
+            new Error(
+              stderr.trim() ||
+                `git ${subcommand} exited with ${code ?? signal}`,
+            ),
+          ),
+        );
+        return;
+      }
+      // A final record with no separator after it still counts.
+      if (pending.length > 0 && deliver(pending)) return;
+      settle(() => resolve(false));
+    });
+  });
+}
+
+/**
+ * Both streams, for the handful of subcommands that report on stderr.
+ *
+ * `git worktree prune -v` is one: everything it says it would remove goes to
+ * stderr, so a caller reading only stdout is told nothing at all.
+ */
+export function runGitCapture(
+  cwd: string,
+  args: string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<{ stdout: string; stderr: string }> {
+  return execFileAsync('git', args, {
+    cwd,
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: 10 * 1024 * 1024,
+    env: ['push', 'pull', 'fetch'].includes(args[0] ?? '')
+      ? gitRemoteEnv(env)
+      : gitEnv(env),
+  }).then(({ stdout, stderr }) => ({ stdout, stderr }));
+}
+
 export function runGit(
   cwd: string,
   args: string[],
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string> {
-  return execFileAsync('git', args, {
-    cwd,
-    timeout: GIT_TIMEOUT_MS,
-    maxBuffer: 10 * 1024 * 1024,
-    env: gitEnv(env),
-  }).then(({ stdout }) => stdout);
+  return runGitCapture(cwd, args, env).then(({ stdout }) => stdout);
 }
 
 const SEPARATOR = '\x00';
