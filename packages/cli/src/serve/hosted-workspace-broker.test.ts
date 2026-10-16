@@ -10,6 +10,7 @@ import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
+import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 
 let server: Server;
@@ -847,6 +848,9 @@ it('distinguishes unknown outcomes from definitive not-found records', async () 
   }));
   await expect(missing.status('execution')).resolves.toBeUndefined();
 
+  // A terminally abandoned record carries the terminal marker and reaches
+  // the caller as its own state — never folded into the not-found sentinel
+  // the stop path reads as "already stopped".
   const abandoned = await fixture(() => ({
     code: 409,
     body: {
@@ -855,9 +859,11 @@ it('distinguishes unknown outcomes from definitive not-found records', async () 
     },
   }));
   await expect(abandoned.status('execution')).resolves.toEqual({
-    state: 'unknown',
+    state: 'abandoned',
   });
 
+  // A still-reconcilable UNKNOWN carries no marker, so it reaches the caller
+  // as a state instead of reading as stopped.
   const unknown = await fixture(() => ({
     code: 409,
     body: { code: 'runtime_broker_execution_unknown' },
@@ -909,6 +915,94 @@ it('refuses a status answer for a different execution', async () => {
   );
 });
 
+it('lists the held Runtime Sessions the read-only route answers (#13930 R1-2)', async () => {
+  let seenBody: Record<string, unknown> | undefined;
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/tool-sessions:active-holds');
+    seenBody = body;
+    return {
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        // The Harness-scoped answer carries no Runtime Session identity.
+        heldRuntimeSessionIds: ['turn-a', `wake-${'b'.repeat(64)}`],
+      },
+    };
+  });
+  await expect(broker.activeHoldRuntimeSessionIds()).resolves.toEqual([
+    'turn-a',
+    `wake-${'b'.repeat(64)}`,
+  ]);
+  expect(seenBody?.['harnessSessionId']).toBe('session');
+
+  const empty = await fixture(() => ({
+    body: {
+      protocolVersion: 1,
+      harnessSessionId: 'session',
+      heldRuntimeSessionIds: [],
+    },
+  }));
+  await expect(empty.activeHoldRuntimeSessionIds()).resolves.toEqual([]);
+});
+
+it.each([
+  { heldRuntimeSessionIds: 'not-an-array' },
+  { heldRuntimeSessionIds: [7] },
+  { heldRuntimeSessionIds: ['.'] },
+  { heldRuntimeSessionIds: ['..'] },
+  { heldRuntimeSessionIds: ['a/b'] },
+  { heldRuntimeSessionIds: [''] },
+])('refuses the malformed active-holds answer %j', async (answer) => {
+  const broker = await fixture(() => ({
+    body: { protocolVersion: 1, harnessSessionId: 'session', ...answer },
+  }));
+  await expect(broker.activeHoldRuntimeSessionIds()).rejects.toThrow(
+    'Runtime Broker active-holds answer is invalid.',
+  );
+});
+
+it('accepts exactly the id shape the close drain maps idempotently (#13930 R1-4)', async () => {
+  // The validator and hostedRuntimeSessionId's pass-through are one
+  // invariant kept in two places: a drift between them makes a legitimate
+  // Broker answer fail validation, and the load then restores nothing.
+  const accepted = [
+    'turn',
+    `wake-${'b'.repeat(64)}`,
+    'a.b-c_d',
+    'x'.repeat(512),
+  ];
+  const broker = await fixture(() => ({
+    body: {
+      protocolVersion: 1,
+      harnessSessionId: 'session',
+      heldRuntimeSessionIds: accepted,
+    },
+  }));
+  await expect(broker.activeHoldRuntimeSessionIds()).resolves.toEqual(accepted);
+  for (const id of accepted) expect(hostedRuntimeSessionId(id)).toBe(id);
+
+  for (const rejected of [
+    '.',
+    '..',
+    'a..b',
+    'a/b',
+    'a b',
+    '',
+    'x'.repeat(513),
+  ]) {
+    expect(hostedRuntimeSessionId(rejected)).not.toBe(rejected);
+    const refusing = await fixture(() => ({
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        heldRuntimeSessionIds: [rejected],
+      },
+    }));
+    await expect(refusing.activeHoldRuntimeSessionIds()).rejects.toThrow(
+      'Runtime Broker active-holds answer is invalid.',
+    );
+  }
+});
 it('owns the :process ledger key behind a plain execution id', async () => {
   const paths: string[] = [];
   const found = await fixture((path) => {
