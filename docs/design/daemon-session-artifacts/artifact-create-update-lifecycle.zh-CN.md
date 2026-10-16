@@ -127,7 +127,7 @@
 - 匹配内置扩展名：返回普通候选。
 - 不匹配，或 `record_as_artifact=false`：返回 `updateOnly: true` 的候选。
 
-内置扩展名集合在现有基础上追加 `.sql`、`.py`、`.md`、`.json`，kind 均为 `file`。它们是数据与分析场景最常见的交付物；不做成配置项，是为了不引入新的 settings 面。现有的跳过规则（点目录、`node_modules`、`dist` 等）与 `record_as_artifact=false` 继续生效。artifact 登记出错不得让一次成功的文件写入变成失败的工具调用。只有新建产物时在 `llmContent` 追加提示，`updateOnly` 候选不追加。
+内置扩展名集合在现有基础上追加 `.sql`、`.py`、`.md`、`.json`，kind 均为 `file`。它们是数据与分析场景最常见的交付物；不做成配置项，是为了不引入新的 settings 面。现有的跳过规则（点目录、`node_modules`、`dist` 等）与 `record_as_artifact=false` 继续生效。artifact 登记出错不得让一次成功的文件写入变成失败的工具调用：构造候选只做路径解析（realpath 失败时退回字面路径），store 在工具结果返回之后才登记。只有内置扩展名的候选在 `llmContent` 追加提示，`updateOnly` 候选不追加。
 
 ### 4.3 入站字段：`updateOnly`
 
@@ -222,6 +222,7 @@ interface ToolArtifact {
 
 - **把每次写入都当成新产物**：由"内置策略之外一律 `updateOnly`"约束，并有测试覆盖。
 - **编码场景噪音与驱逐**：新增的 `.md`、`.json`、`.py` 在普通编码会话里很常见（README、`package.json`、源码），被 agent 修改后都会成为 artifact。200 条上限不是缓解而是风险本身：超限后最老的非 `clientRetained` 条目被淘汰，会话早期的重要报告可能被挤掉。缓解：跳过目录规则不变；`record_as_artifact=false` 可逐次关闭；删除后不复活。这是放宽默认值而非新增配置的代价，评审时需确认可接受。
+- **含凭据的文件**：新增扩展名也会命中 `certs/service-account.json`、`config/credentials.json` 这类文件（包括被 gitignore 的），现有跳过规则都不排除它们。登记只在会话内列出路径、标题、大小和指纹；这条路径不复制也不上传内容，预览与下载走会话本来就能读取的工作区文件路由。不增加按文件名的跳过规则；`record_as_artifact=false` 可逐次关闭。
 - **权限边界**：跨归属内容同步绕过了 `denyCrossClientMutation`。范围限定为生产者集合的 tool 输入和内容字段，并有测试固定不改标题、retention、归属。
 - **写入到登记的窗口**：agent 写入与 store 读取之间的改动会被吸收为基线，与今天一致（见 4.3）。
 - **性能**：未登记文件的 `updateOnly` 候选在 stat 之前短路；已登记文件每次修改 stat + hash（超过 100MB 的文件保持今天按大小建立基线的行为）。无快照回放时，每条写入记录都会 hash 一次。

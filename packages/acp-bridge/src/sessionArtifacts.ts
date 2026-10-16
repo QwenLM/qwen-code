@@ -124,7 +124,10 @@ export interface SessionArtifactInput extends ToolArtifactLike {
   toolName?: string;
   hookEventName?: string;
   clientId?: string;
-  /** Refresh an existing artifact with this identity; never create one. */
+  /**
+   * Refresh an existing workspace artifact at `workspacePath`; never create
+   * one. Dropped when `workspacePath` is absent.
+   */
   updateOnly?: boolean;
 }
 
@@ -2338,7 +2341,10 @@ function mergeBatchArtifact(
     toolName: refreshDisplay ? next.toolName : existing.toolName,
     source: refreshDisplay ? next.source : existing.source,
     hookEventName: refreshDisplay ? next.hookEventName : existing.hookEventName,
-    toolCallId: refreshDisplay ? next.toolCallId : existing.toolCallId,
+    toolCallId:
+      refreshDisplay || isLatestWorkspaceWrite(existing, next)
+        ? next.toolCallId
+        : existing.toolCallId,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
     metadata: stripDerivedFromTitleMarker(
@@ -2455,13 +2461,7 @@ function mergeArtifact(
       stripExpandedFromDirectoryMarker(next.metadata),
     );
   }
-  // The latest file write owns the turn attribution even when it may not
-  // refresh the display fields of an artifact another producer created.
-  if (
-    existing.storage === 'workspace' &&
-    isWorkspaceAutoRecordInput(incoming) &&
-    incoming.toolCallId
-  ) {
+  if (isLatestWorkspaceWrite(existing, incoming)) {
     next.toolCallId = incoming.toolCallId;
   }
 
@@ -2690,6 +2690,21 @@ function isWorkspaceAutoRecordInput(
   return (
     (artifact.source ?? 'tool') === 'tool' &&
     isWorkspaceAutoRecordToolName(artifact.toolName)
+  );
+}
+
+/**
+ * The latest file write owns the turn attribution even when it may not
+ * refresh the display fields of an artifact another producer created.
+ */
+function isLatestWorkspaceWrite(
+  existing: Pick<NormalizedArtifact, 'storage'>,
+  incoming: NormalizedArtifact,
+): boolean {
+  return (
+    existing.storage === 'workspace' &&
+    isWorkspaceAutoRecordInput(incoming) &&
+    Boolean(incoming.toolCallId)
   );
 }
 

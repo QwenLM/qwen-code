@@ -95,7 +95,8 @@ export interface WriteFileToolParams {
 
   /**
    * When false, skip the automatic session-artifact registration that
-   * write_file otherwise does for artifact-like files (html, pdf, images).
+   * write_file otherwise does for artifact-like files (html, pdf, images,
+   * csv, markdown, json, python, and sql).
    * Use this for intermediate files that will be deleted, such as HTML
    * written only to print a PDF. An artifact the session already has for
    * this path is still refreshed.

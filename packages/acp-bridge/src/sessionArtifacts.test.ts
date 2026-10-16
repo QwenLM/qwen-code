@@ -9304,6 +9304,27 @@ describe('SessionArtifactStore workspace auto-record lifecycle', () => {
     ).resolves.toMatchObject({ changes: [] });
   });
 
+  it('attributes a batched create and edit of one file to the edit', async () => {
+    const store = createStore('auto-record-batched-write-then-edit');
+    await writeWorkspaceFile('report.html', '<p>v2</p>');
+
+    const result = await store.upsertMany([
+      fileWrite('report.html', 'write_file', 'write-1'),
+      fileWrite('report.html', 'edit', 'edit-1', { title: 'ignored.html' }),
+    ]);
+
+    expect(result.changes).toEqual([
+      expect.objectContaining({
+        action: 'created',
+        artifact: expect.objectContaining({
+          title: 'report.html',
+          toolName: 'write_file',
+          toolCallId: 'edit-1',
+        }),
+      }),
+    ]);
+  });
+
   it('serializes concurrent writes to one file into a single artifact', async () => {
     const store = createStore('auto-record-concurrent');
     await writeWorkspaceFile('orders.csv', 'id\n1\n');
