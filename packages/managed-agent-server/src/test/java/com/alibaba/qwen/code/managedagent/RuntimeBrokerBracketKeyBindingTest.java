@@ -22,7 +22,7 @@ import org.springframework.core.io.ByteArrayResource;
 // shape from the YAML loader through property binding to the protector.
 class RuntimeBrokerBracketKeyBindingTest {
     @Test
-    void bindsBracketWrappedPreviousKeysByTheirExactId() {
+    void bindsBracketWrappedPreviousKeysByTheirExactId() throws Exception {
         String yaml = """
                 qwen:
                   managed-agent:
