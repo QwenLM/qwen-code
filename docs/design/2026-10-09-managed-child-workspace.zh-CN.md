@@ -2,7 +2,7 @@
 
 [English](2026-10-09-managed-child-workspace.md) | [简体中文](2026-10-09-managed-child-workspace.zh-CN.md)
 
-状态：I1 已在本变更中实现。已落地：child Workspace（父 storage 内的一个 Git linked worktree）、它带 fencing 与恢复的持久命令、合并与丢弃两种收尾、storage lease 的维护 hold，以及把 child Session 绑定到已准备好的 child Workspace。I2（`worktree` 准入、relay 与级联接线）已由其单独的[设计](2026-10-10-managed-child-worktree-admission.zh-CN.md)实现。仍是设计：I3（`snapshot`，以及串行化的裁定），有其后续切片（见后续工作）。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)（Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的阶段 H）的隔离切片，由 [#13753](https://github.com/QwenLM/qwen-code/issues/13753) 跟踪。它拆分自 H4c（[#13743](https://github.com/QwenLM/qwen-code/issues/13743)，PR #13754），其[设计](2026-10-09-managed-workflow-child-kind.zh-CN.md)在决策 11 中确定了词汇。它承接 H4a（[记录契约](2026-10-06-managed-child-agent-runtime.zh-CN.md)）与 H4b（[child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md)）。
+状态：I1 已在本变更中实现。已落地：child Workspace（父 storage 内的一个 Git linked worktree）、它带 fencing 与恢复的持久命令、合并与丢弃两种收尾、storage lease 的维护 hold，以及把 child Session 绑定到已准备好的 child Workspace。I2（`worktree` 准入、relay 与级联接线）已由其单独的[设计](2026-10-10-managed-child-worktree-admission.zh-CN.md)实现。I3（`snapshot`，以及串行化的裁定）由其自己的[设计](2026-10-11-managed-child-snapshot.zh-CN.md)实现。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)（Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的阶段 H）的隔离切片，由 [#13753](https://github.com/QwenLM/qwen-code/issues/13753) 跟踪。它拆分自 H4c（[#13743](https://github.com/QwenLM/qwen-code/issues/13743)，PR #13754），其[设计](2026-10-09-managed-workflow-child-kind.zh-CN.md)在决策 11 中确定了词汇。它承接 H4a（[记录契约](2026-10-06-managed-child-agent-runtime.zh-CN.md)）与 H4b（[child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md)）。
 
 ## 问题与范围
 
@@ -79,6 +79,7 @@ Issue #13753 要求三项：
 15. **I3 的方向。**
     - 串行共享不需要单独的取值。storage lease 一次只接纳一个 holder，而 storage 的每个写入方（父、`shared` child、`worktree` child 或 child Workspace 维护）都在写入前获取它。因此它们中任何两个都不能同时持有 storage，lease 本身就是 2026-10-04 问题框架所要求的 generation barrier。
     - `snapshot` 可以复用本能力：一个总是被丢弃的 child Workspace，绑定到一个工具 profile 拒绝所有写入的 child。由 I3 决定 profile 级别的拒绝是否足以作为「不能写」的证据。
+    - I3 已裁定这两点：串行化的裁定为最终结论；拒绝方式是在结束时丢弃的 child Workspace 之上使用只读 profile（`read_file`、`glob`），行记录自己的模式（I3 决策 4、5、9）。
 
 ## 记录与表
 

@@ -414,6 +414,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspaces/create": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Create an independent empty Workspace under the operator-controlled creation root and grant its authenticated creator OWNER access. Disabled deployments reject creation. The actor-scoped idempotency key freezes the normalized name and storage registration; retry the same request after an uncertain response. Completed replay checks current access and does not restore removed Workspaces or revoked grants. No host path is accepted or returned. */
+        post: operations["webShellCreateWorkspace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-options/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read effective approval policy options for an Agent in the authenticated tenant. Requires an actor. Does not create a Session or change an existing policy. */
+        post: operations["queryWebShellSessionOptions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-models/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read the allowed model catalog and current model selection of a readable Session. No credentials or provider routes are returned. */
+        post: operations["queryWebShellSessionModels"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-models/change": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Change the model of an idle Workspace Session for later Turns. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection. */
+        post: operations["changeWebShellSessionModel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -482,6 +550,11 @@ export interface components {
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             workspace?: components["schemas"]["WebShellWorkspaceSelection"];
+            /**
+             * @description Optional policy for Workspace-bound creation only. Omission preserves the existing default and idempotency digest. Explicit selection is validated against the resolved Agent and tool profile and frozen in the Session; Shell refuses yolo and definitions retain their compiled policy.
+             * @enum {string}
+             */
+            approvalMode?: "default" | "auto-edit" | "yolo";
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -542,6 +615,13 @@ export interface components {
             lastSequence: number;
             workspace?: components["schemas"]["WebShellWorkspaceContext"];
             capabilities: components["schemas"]["WebShellSessionCapabilities"];
+            /**
+             * @description Persisted Session approval policy; older servers may omit it. Existing Sessions cannot change policy through this API.
+             * @enum {string}
+             */
+            approvalMode?: "default" | "auto-edit" | "yolo";
+            modelContext?: components["schemas"]["WebShellModelContext"];
+            modelSelection?: components["schemas"]["WebShellModelSelection"];
         };
         WebShellSessionCapabilities: {
             /**
@@ -580,6 +660,8 @@ export interface components {
             sessionDelete?: boolean;
             /** @description Present only for persisted Shell Sessions, with no schema default; files and unbound Sessions omit it. True when Workspace files, Shell deployment admission and persisted default/auto-edit approval are valid. False prevents fresh sending. Disabling only the Shell flag preserves accepted cancellation and approval while Workspace files remain enabled and persisted approval remains valid; files-off or invalid approval can refuse attachment. This capability does not override authorization or recovery refusals. */
             foregroundShell?: boolean;
+            /** @description The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply. */
+            modelChange?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -717,6 +799,10 @@ export interface components {
                 workspaceContext: boolean;
                 /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Turn at creation: Read/Write/Edit under hosted-workspace-files/1, or file tools plus mandatory-approval foreground Shell under hosted-workspace-shell/1 when the Shell opt-in is enabled. The public Shell tool list does not include the child agent tool. Callers holding the OPERATOR role may submit later Turns or rename under the same opt-in while the registry row stays ACTIVE and still backs the Session's binding and the actor recorded by the Workspace create command keeps OPERATOR or above, and may cancel a running Turn (its delivery re-checks no grants). Shell fresh sending also requires foregroundShell=true. Public Shell close, archive, unarchive and delete stay unavailable, including protocol-0, while close of other profiles follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close. */
                 workspaceBinding: boolean;
+                /** @description Supports creating empty Workspaces under the operator-controlled root. Missing or false means unsupported; current actor and server admission checks still apply. */
+                workspaceCreation?: boolean;
+                /** @description Supports effective Session policy options and explicit Workspace-bound creation policy. Missing or false means unsupported. */
+                approvalModeSelection?: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
             defaultWorkspace: (components["schemas"]["WebShellWorkspace"] & {
@@ -1098,6 +1184,61 @@ export interface components {
              * @description Byte length of the complete payloadJson in UTF-8, before truncation.
              */
             byteLength: number;
+        };
+        WebShellWorkspaceCreateRequest: {
+            /** @description Trimmed display name, without control characters. The server validates the normalized name. */
+            displayName: string;
+            idempotencyKey: string;
+        };
+        WebShellSessionOptionsRequest: {
+            agentId: string;
+        };
+        WebShellSessionOptions: {
+            /** @enum {string} */
+            approvalMode: "default" | "auto-edit" | "yolo";
+            /** @description Effective modes for this Agent/profile. Stored definitions offer only their pinned mode; auto and plan are unsupported. */
+            availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
+        };
+        /** @description Safe allowlisted observation for a Workspace-bound Session. Unknown counts are omitted, never estimated. */
+        WebShellModelContext: {
+            /** @description Actual model identity from the committed main-model usage resource. */
+            modelId: string;
+            /** @description Provider prompt token count for the latest successfully committed main-model request; not cumulative billing usage. */
+            inputTokens?: number;
+            /** @description Context capacity from the same resolved model configuration. Missing means unknown. */
+            contextWindowSize?: number;
+            /** @description Timestamp of the committed source observation, in Unix epoch milliseconds. */
+            observedAt: number;
+        };
+        WebShellModelSelection: {
+            modelId?: string;
+            /** Format: int64 */
+            revision: number;
+        };
+        WebShellModelOption: {
+            modelId: string;
+            label: string;
+        };
+        WebShellSessionModelsRequest: {
+            sessionId: string;
+        };
+        WebShellSessionModels: {
+            models: components["schemas"]["WebShellModelOption"][];
+            modelSelection: components["schemas"]["WebShellModelSelection"];
+            supported: boolean;
+        };
+        WebShellChangeModelRequest: {
+            sessionId: string;
+            modelId: string;
+            /** Format: int64 */
+            expectedRevision: number;
+            idempotencyKey: string;
+            requestId?: string;
+        };
+        WebShellModelChangeResult: {
+            sessionId: string;
+            modelSelection: components["schemas"]["WebShellModelSelection"];
+            replayed: boolean;
         };
     };
     responses: {
@@ -2027,6 +2168,125 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WebShellSession"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellCreateWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Created Workspace or authorized same-key replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspace"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellSessionOptions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionOptionsRequest"];
+            };
+        };
+        responses: {
+            /** @description Effective default and supported policies. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionOptions"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellSessionModels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionModelsRequest"];
+            };
+        };
+        responses: {
+            /** @description Session model options. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionModels"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    changeWebShellSessionModel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellChangeModelRequest"];
+            };
+        };
+        responses: {
+            /** @description The admitted model selection, or the same original result on replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellModelChangeResult"];
                 };
             };
             400: components["responses"]["BadRequest"];
