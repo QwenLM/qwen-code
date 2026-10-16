@@ -1834,6 +1834,76 @@ describe('EmbeddedApp message edit rewind', () => {
     expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
   });
 
+  it('leaves edit mode after a refused edit so the next send is not stuck', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [userBlock('u0', 'first')]);
+    sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [] });
+    const prepareSubmit = await startEditing(props, 0);
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('The original message can no longer be edited.');
+    });
+
+    // `prepareSubmit` is gated on `editingMessage`: a refusal that left it set
+    // would make every later unrelated send re-enter the same failing branch.
+    sdkMocks.getRewindSnapshots.mockClear();
+    const nextSubmit = callback<(s: PrepareSubmission) => Promise<unknown>>(
+      mocks.embeddedProps.current as CapturedProps,
+      'prepareSubmit',
+    );
+    await act(async () => {
+      await nextSubmit({
+        sessionId: 'session-1',
+        prompt: 'unrelated',
+        inputAnnotations: [],
+      });
+    });
+    expect(sdkMocks.getRewindSnapshots).not.toHaveBeenCalled();
+  });
+
+  it('edits the turn the web shell numbered, skipping an injected row', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      {
+        id: 'n1',
+        kind: 'user',
+        text: 'injected note',
+        promptId: 'daemon-n1',
+        meta: { source: 'mid_turn_message_injected' },
+      },
+      userBlock('u1', 'original text'),
+    ]);
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(1)],
+    });
+    sdkMocks.rewindSession.mockImplementation(async () => {
+      await deliverTranscript(props, [userBlock('u0', 'first')]);
+    });
+    // The web shell numbers only `role === 'user'` rows and the injected row
+    // renders as `role: 'system'`, so ordinal 1 is u1, not n1.
+    const prepareSubmit = await startEditing(props, 1);
+
+    await act(async () => {
+      await prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      });
+    });
+
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-1',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+  });
+
   it('rewinds the session captured before the snapshot fetch, not the one navigated to', async () => {
     const props = await renderApp();
     await deliverTranscript(props, [userBlock('u3', 'original text')]);

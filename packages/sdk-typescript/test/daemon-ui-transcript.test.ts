@@ -66,6 +66,27 @@ describe('daemon transcript rewind', () => {
     expect(rebound.blocks.at(-1)?.promptId).toBe('daemon-B');
   });
 
+  it('binds a prompt admitted across a resync latch', () => {
+    let state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'user.text.delta', text: 'B' },
+    ]);
+    const blockId = state.blocks.at(-1)!.id;
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'session.state_resync_required',
+        reason: 'ring-evicted',
+        lastDeliveredId: 1,
+        earliestAvailableId: 2,
+      },
+      { type: 'user.prompt.bound', blockId, promptId: 'daemon-B' },
+    ]);
+    // The bind is synthesized once and never replayed, so the latch must not
+    // swallow it or the block stays unrewindable for the rest of the session.
+    expect(state.blocks.find((block) => block.id === blockId)?.promptId).toBe(
+      'daemon-B',
+    );
+  });
+
   it.each(['missing', 'duplicate'])(
     'does not truncate another user for a %s daemon association',
     (kind) => {

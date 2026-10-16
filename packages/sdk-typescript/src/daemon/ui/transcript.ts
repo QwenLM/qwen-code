@@ -144,6 +144,9 @@ const RESYNC_PASSTHROUGH_TYPES: ReadonlySet<string> = new Set([
   'status',
   'debug',
   'error',
+  // Synthesized once at admission and never replayed, so a dropped bind would
+  // leave that block without the promptId rewind resolution keys on.
+  'user.prompt.bound',
 ]);
 
 export function appendLocalUserTranscriptMessage(

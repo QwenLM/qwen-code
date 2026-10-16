@@ -45,20 +45,26 @@ const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
 /** Longest an edit submit waits for the rewind to land in the transcript. */
 const REWIND_APPLIED_TIMEOUT_MS = 2_000;
 
-/** Conversational user turns — the blocks a rewind indexes against. */
+/**
+ * Conversational user turns — the blocks a rewind indexes against.
+ * `mid_turn_message_injected` renders as `role: 'system'`, so the web shell's
+ * ordinal never numbers it; counting it here shifts every later index.
+ */
+function isEditableUserBlock(
+  block: DaemonTranscriptBlock | undefined,
+): boolean {
+  const source = block?.meta?.['source'];
+  return (
+    block?.kind === 'user' &&
+    source !== 'background_notification' &&
+    source !== 'mid_turn_message_injected'
+  );
+}
+
 function countEditableUserTurns(
   blocks: readonly DaemonTranscriptBlock[],
 ): number {
-  let count = 0;
-  for (const block of blocks) {
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
-      count += 1;
-    }
-  }
-  return count;
+  return blocks.filter(isEditableUserBlock).length;
 }
 
 function waitForRewindApplied(
@@ -1577,11 +1583,10 @@ export function EmbeddedApp() {
             const editContent = queuedPromptForEdit
               ? queuedPromptForEdit.prompt
               : content;
-            const target = transcriptBlocksRef.current.filter(
-              (block) =>
-                block.kind === 'user' &&
-                block.meta?.['source'] !== 'background_notification',
-            )[turnIndex];
+            const target =
+              transcriptBlocksRef.current.filter(isEditableUserBlock)[
+                turnIndex
+              ];
             if (!editsQueuedPrompt && !target) return false;
             composerRef.current?.clear({ text: true, tags: true });
             composerRef.current?.setText(editContent);
@@ -1621,22 +1626,21 @@ export function EmbeddedApp() {
           prepareSubmit={async (submission) => {
             if (submission.source === 'mcp-app') return undefined;
             if (editingMessage) {
+              // Leaving edit mode is unconditional: every refusal path below
+              // throws, and this branch is gated on `editingMessage`, so a
+              // stale value would make the next send re-enter and fail again.
+              const { blockId } = editingMessage;
+              setEditingMessage(undefined);
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
               const blocks = transcriptBlocksRef.current;
-              const userBlocks = blocks.filter(
-                (block) =>
-                  block.kind === 'user' &&
-                  block.meta?.['source'] !== 'background_notification',
-              );
+              const userBlocks = blocks.filter(isEditableUserBlock);
               const target =
-                editingMessage.blockId === undefined
+                blockId === undefined
                   ? userBlocks.at(-1)
-                  : userBlocks.find(
-                      (block) => block.id === editingMessage.blockId,
-                    );
+                  : userBlocks.find((block) => block.id === blockId);
               let snapshots: Awaited<
                 ReturnType<typeof daemonClient.getRewindSnapshots>
               >['snapshots'];
@@ -1672,7 +1676,6 @@ export function EmbeddedApp() {
               } catch (err) {
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
-              setEditingMessage(undefined);
               clearInsight();
               // The daemon delivers `session.rewound` on the session stream,
               // which lands in the transcript store after the rewind HTTP

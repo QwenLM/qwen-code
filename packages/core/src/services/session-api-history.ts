@@ -34,13 +34,15 @@ export function getApiHistoryPromptId(content: Content): string | undefined {
   return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
 }
 
+const LEGACY_RECORD_REWIND_PREFIX = 'legacy-record:';
+
 /** Record-derived rewind keys are not file-checkpoint prompt IDs. */
 export function getRecordRewindId(record: ChatRecord): string | undefined {
   if (typeof record.promptId === 'string' && record.promptId.length > 0) {
     return record.promptId;
   }
   return typeof record.uuid === 'string' && record.uuid.length > 0
-    ? `legacy-record:${record.uuid}`
+    ? `${LEGACY_RECORD_REWIND_PREFIX}${record.uuid}`
     : undefined;
 }
 
@@ -65,7 +67,13 @@ export function getLastApiHistoryPromptId(
 ): string | undefined {
   const prompt = history
     .slice(0, history.length - (trailingSystemNotifications ?? 0))
-    .findLast((content) => getApiHistoryPromptId(content) !== undefined);
+    .findLast((content) => {
+      const id = getApiHistoryPromptId(content);
+      // Callers use this as a transport turn id (Session retry/continue), so
+      // it must stay a real prompt id: a record-derived key would also be
+      // stamped on the continuation entry, and a duplicate resolves to -1.
+      return id !== undefined && !id.startsWith(LEGACY_RECORD_REWIND_PREFIX);
+    });
   return prompt && getApiHistoryPromptId(prompt);
 }
 

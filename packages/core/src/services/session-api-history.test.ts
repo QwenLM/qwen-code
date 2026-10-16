@@ -802,6 +802,19 @@ describe('cancelled prompt identity with automatic tails', () => {
       promptId: 'daemon-1',
     });
   });
+  it('never hands a record-derived rewind key back as a transport prompt id', () => {
+    const original = structuredClone(input.message!);
+    markApiHistoryPrompt(original, input.promptId);
+    const legacyEntry: Content = {
+      role: 'user',
+      parts: [{ text: 'resumed legacy turn' }],
+    };
+    markApiHistoryPrompt(legacyEntry, 'legacy-record:uuid-9');
+    // Session binds this to responseCapture.turnId on a continue, so a
+    // synthesized key would collide with the legacy entry it came from.
+    expect(getLastApiHistoryPromptId([original, legacyEntry])).toBe('client-1');
+    expect(getLastApiHistoryPromptId([legacyEntry])).toBeUndefined();
+  });
   it('keeps cancellation through compression with several entries for the same turn', () => {
     const compression: ChatRecord = {
       ...base,
