@@ -2,7 +2,7 @@
 
 [English](2026-09-26-runtime-broker-fault-gates.md) | [简体中文](2026-09-26-runtime-broker-fault-gates.zh-CN.md)
 
-Status: implemented as tests in `packages/sdk-java/runtime-broker`; no
+Status: implemented as tests in `packages/managed-agent-server`; no
 production code changes
 
 Related: #12748 (FG1–FG4), Stage F of #12380, and the designs the gates
@@ -222,7 +222,7 @@ that assertion changes from `EXECUTING` to the committed result.
 8.4 / Java 21` job of `sdk-java.yml` (#12733), the Java 21 lane that
    already installs, builds and bundles the CLI for the Hosted process gates.
    A step after those gates runs `mvn -Pfault-gates test` in
-   `packages/sdk-java/runtime-broker` with
+   `packages/managed-agent-server` with
    `-Dqwen.cli.entry=$GITHUB_WORKSPACE/dist/cli.js`, bounded at 10 minutes.
 2. **Database.** H2 in file mode behind its TCP server, shared by every
    Broker process. The gates do not run on MySQL or MariaDB yet; the lane
@@ -236,7 +236,7 @@ that assertion changes from `EXECUTING` to the committed result.
 ## 4. Validation
 
 With the bundle built at the repository root (`npm run build && npm run
-bundle`), run in `packages/sdk-java/runtime-broker`:
+bundle`), run in `packages/managed-agent-server`:
 
 ```bash
 mvn -Pfault-gates test   # every fault gate (44 today), about 4 minutes
