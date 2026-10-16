@@ -4,8 +4,12 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.alibaba.qwen.code.managedagent.config.InternalSurfaceConfiguration.RoutingFilter;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStorageException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.MethodParameter;
@@ -14,6 +18,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.mock.http.MockHttpInputMessage;
+import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.validation.BeanPropertyBindingResult;
@@ -22,9 +27,12 @@ import org.springframework.validation.ObjectError;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -147,7 +155,8 @@ class ApiExceptionHandlerTest {
         rejected.addError(fieldError("resources[3].resourceId", "NotBlank"));
         rejected.addError(fieldError("resources[7].resourceId", "NotBlank"));
         rejected.addError(fieldError("attachments[" + SECRET + "].name", "Size"));
-        rejected.addError(new ObjectError("request", new String[] {"ValidRange"}, null,
+        rejected.addError(new ObjectError("request",
+                new String[] {"ValidRange.request", "ValidRange"}, null,
                 "range must be valid: " + SECRET));
 
         List<ILoggingEvent> events = logged(handler -> {
@@ -172,12 +181,14 @@ class ApiExceptionHandlerTest {
         assertThat(events.get(1).getFormattedMessage()).isEqualTo(
                 "Managed Agent refused an internal request: POST " + acquire
                         + " (HttpMessageNotReadableException)");
-        // Indices and map keys are dropped, repeats collapse, the order is
-        // stable, and the count keeps what collapsed.
+        // Indices and map keys are dropped, repeats collapse into one entry
+        // with its count, the most frequent first and ties in name order,
+        // and the total keeps what collapsed.
         assertThat(events.get(2).getFormattedMessage()).isEqualTo(
                 "Managed Agent refused an internal request: POST " + acquire
-                        + " (MethodArgumentNotValidException fields attachments[].name:Size,"
-                        + " request:ValidRange, resources[].resourceId:NotBlank (4 errors))");
+                        + " (MethodArgumentNotValidException fields"
+                        + " resources[].resourceId:NotBlank x2, attachments[].name:Size x1,"
+                        + " request:ValidRange x1 (4 errors))");
     }
 
     @Test
@@ -200,14 +211,123 @@ class ApiExceptionHandlerTest {
                     new MockHttpServletResponse());
         });
 
+        // The entry behind most of the errors is kept although its name
+        // sorts after the single failures.
         assertThat(events).hasSize(2);
         assertThat(events.get(0).getFormattedMessage()).endsWith(
-                " (MethodArgumentNotValidException fields f1:NotNull, f2:NotNull, f3:NotNull,"
-                        + " f4:NotNull, f5:NotNull, … (1007 errors))");
+                " (MethodArgumentNotValidException fields items[].name:NotBlank x1000,"
+                        + " f1:NotNull x1, f2:NotNull x1, f3:NotNull x1, f4:NotNull x1,"
+                        + " … (1007 errors))");
         assertThat(events.get(1).getFormattedMessage())
                 .contains("POST " + longSession.substring(0, 256) + "… (" + longSession.length()
                         + " chars) (")
                 .hasSizeLessThan(1000);
+    }
+
+    @Test
+    void marksATruncationOnlyPastItsBound() throws Exception {
+        MethodParameter parameter = sampleParameter();
+        var five = new BeanPropertyBindingResult(new Object(), "request");
+        var six = new BeanPropertyBindingResult(new Object(), "request");
+        for (int field = 1; field <= 6; field++) {
+            if (field <= 5) {
+                five.addError(fieldError("f" + field, "NotNull"));
+            }
+            six.addError(fieldError("f" + field, "NotNull"));
+        }
+        String atBound = "/internal/" + "s".repeat(256 - "/internal/".length());
+
+        List<ILoggingEvent> events = logged(handler -> {
+            handler.invalid(new MethodArgumentNotValidException(parameter, five),
+                    new MockHttpServletRequest("POST", "/internal/x"), new MockHttpServletResponse());
+            handler.invalid(new MethodArgumentNotValidException(parameter, six),
+                    new MockHttpServletRequest("POST", "/internal/x"), new MockHttpServletResponse());
+            handler.invalidArgument(refuse(), new MockHttpServletRequest("POST", atBound),
+                    new MockHttpServletResponse());
+            handler.invalidArgument(refuse(), new MockHttpServletRequest("POST", atBound + "s"),
+                    new MockHttpServletResponse());
+        });
+
+        assertThat(events).extracting(ILoggingEvent::getFormattedMessage).satisfiesExactly(
+                first -> assertThat(first).endsWith(" f5:NotNull x1 (5 errors))"),
+                second -> assertThat(second).endsWith(" f5:NotNull x1, … (6 errors))"),
+                third -> assertThat(third).contains("POST " + atBound + " (")
+                        .doesNotContain("…"),
+                fourth -> assertThat(fourth).contains("POST " + atBound + "… (257 chars) ("));
+    }
+
+    @Test
+    void logsAnInternalBindingFailureByItsParameterNotItsValue() throws Exception {
+        String acquire = "/internal/managed-session-store/v1/sessions/s/writers:acquire";
+        MethodParameter parameter = sampleParameter();
+
+        List<ILoggingEvent> events = logged(handler -> {
+            handler.invalidParameter(new MissingRequestHeaderException(
+                    ManagedSessionStoreModels.WRITER_TOKEN_HEADER, parameter),
+                    new MockHttpServletRequest("POST", acquire), new MockHttpServletResponse());
+            // Declared under a name other than the Java parameter's.
+            handler.invalidParameter(new MethodArgumentTypeMismatchException(SECRET, int.class,
+                    "afterRevision", parameter,
+                    new NumberFormatException("For input string: " + SECRET)),
+                    new MockHttpServletRequest("GET", acquire), new MockHttpServletResponse());
+            handler.invalidParameter(new MissingServletRequestParameterException("workspaceId",
+                    "String"), new MockHttpServletRequest("GET", acquire),
+                    new MockHttpServletResponse());
+            handler.invalidParameter(new ServletRequestBindingException(
+                    "Unsatisfied parameter conditions: " + SECRET),
+                    new MockHttpServletRequest("GET", acquire), new MockHttpServletResponse());
+            handler.invalidParameter(new MissingRequestHeaderException(
+                    ManagedSessionStoreModels.WRITER_TOKEN_HEADER, parameter),
+                    new MockHttpServletRequest("POST", "/v1/agents/sessions"),
+                    new MockHttpServletResponse());
+        });
+
+        // The controller declares the parameter's name; the value, and the
+        // message that would quote it, stay out.
+        assertThat(events).allSatisfy(event ->
+                assertThat(event.getThrowableProxy()).isNull());
+        assertThat(events).extracting(ILoggingEvent::getFormattedMessage).containsExactly(
+                "Managed Agent refused an internal request: POST " + acquire
+                        + " (MissingRequestHeaderException for "
+                        + ManagedSessionStoreModels.WRITER_TOKEN_HEADER + ")",
+                "Managed Agent refused an internal request: GET " + acquire
+                        + " (MethodArgumentTypeMismatchException for afterRevision)",
+                "Managed Agent refused an internal request: GET " + acquire
+                        + " (MissingServletRequestParameterException for workspaceId)",
+                "Managed Agent refused an internal request: GET " + acquire
+                        + " (ServletRequestBindingException)");
+    }
+
+    @Test
+    void logsExactlyTheRoutesTheRouterKeepsInternal() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getInternalServer().setPort(4183);
+        RoutingFilter router = new RoutingFilter(properties, new ObjectMapper());
+        List<String> spellings = List.of(
+                "/internal/managed-session-store/v1/sessions/s/writers:acquire",
+                "/%69nternal/managed-session-store/v1/sessions/s/writers:acquire",
+                "/internal;x=1/managed-tool-publications/v1/sessions/s/grants",
+                "/internal", "/internals/x", "/api/internal/x", "/v1/agents/sessions/internal/x");
+
+        List<String> served = new ArrayList<>();
+        List<String> logged = new ArrayList<>();
+        for (String spelling : spellings) {
+            MockHttpServletRequest onInternalListener = new MockHttpServletRequest("POST", spelling);
+            onInternalListener.setLocalPort(4183);
+            MockFilterChain chain = new MockFilterChain();
+            router.doFilter(onInternalListener, new MockHttpServletResponse(), chain);
+            if (chain.getRequest() != null) {
+                served.add(spelling);
+            }
+            if (!logged(handler -> handler.invalidArgument(refuse(),
+                    new MockHttpServletRequest("POST", spelling),
+                    new MockHttpServletResponse())).isEmpty()) {
+                logged.add(spelling);
+            }
+        }
+
+        // What the internal listener serves and what gets a line are one set.
+        assertThat(logged).isEqualTo(served).containsExactlyElementsOf(spellings.subList(0, 3));
     }
 
     @Test
@@ -280,9 +400,14 @@ class ApiExceptionHandlerTest {
         return new IllegalArgumentException("Committed publication evidence is missing: " + SECRET);
     }
 
+    // The codes a real validation run resolves, most specific first: the
+    // first carries the field path with its client-chosen keys, and only the
+    // last is the bare constraint.
     private static FieldError fieldError(String field, String code) {
-        return new FieldError("request", field, SECRET, false, new String[] {code}, null,
-                "rejected: " + SECRET);
+        return new FieldError("request", field, SECRET, false,
+                new String[] {code + ".request." + field, code + "." + field,
+                        code + ".java.lang.String", code},
+                null, "rejected: " + SECRET);
     }
 
     private static StackTraceElement frame(String type, String method, int line) {

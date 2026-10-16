@@ -16,6 +16,7 @@ import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -26,7 +27,6 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.Arrays;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -127,6 +127,7 @@ public class ApiExceptionHandler {
     public ResponseEntity<Map<String, Object>> invalidParameter(
             Exception error, HttpServletRequest request,
             HttpServletResponse response) {
+        logInternalRefusal(request, error);
         String message;
         if (error instanceof MethodArgumentTypeMismatchException mismatch) {
             message = "Request parameter '" + mismatch.getName()
@@ -157,15 +158,16 @@ public class ApiExceptionHandler {
     // line. The line names the check without quoting the request: exception
     // messages here can carry body content (Jackson's parse errors, rejected
     // values, a forwarded channel message), so only the exception type, the
-    // failing fields' names and constraints, and the application frames
-    // that threw are kept. The path is classified as the router saw it, as
-    // RoutingFilter does, but logged raw: the routed path is decoded, and a
-    // %0A in a segment would start a forged log line. Body checks run before
-    // the writer credential is checked, so the line's size is bounded
-    // whatever the request holds.
+    // failing fields' names, constraints and counts, the name of a parameter
+    // that did not bind, and the application frames that threw are kept.
+    // The route is classified by the predicate the router uses, but the path
+    // is logged raw: the routed path is decoded, and a %0A in a segment
+    // would start a forged log line. Body checks run before the writer
+    // credential is checked, so the line's size is bounded whatever the
+    // request holds.
     private static void logInternalRefusal(HttpServletRequest request,
             Exception error) {
-        if (!PublicSurface.pathWithinApplication(request).startsWith("/internal/")) {
+        if (!PublicSurface.internal(request)) {
             return;
         }
         String detail;
@@ -176,9 +178,13 @@ public class ApiExceptionHandler {
             // require) up through the check that called it.
             detail = " at " + applicationFrames(error);
         } else {
-            // A body that did not parse fails inside Spring; any application
-            // frames on its stack are filters, not a check.
-            detail = "";
+            // A body that did not parse, or a header or parameter that did
+            // not bind, fails inside Spring: the type says which, and any
+            // application frames on its stack are filters, not a check. A
+            // binding failure names the parameter the controller declares,
+            // never the value the client sent.
+            String parameter = boundParameter(error);
+            detail = parameter == null ? "" : " for " + parameter;
         }
         LOG.warn("Managed Agent refused an internal request: {} {} ({}{})",
                 request.getMethod(), bounded(request.getRequestURI()),
@@ -186,21 +192,37 @@ public class ApiExceptionHandler {
     }
 
     // Field paths keep their shape but drop list indices and map keys, which
-    // the client chooses. Repeats then collapse, so a list of thousands of
-    // bad elements logs as one entry, and the error count says how many.
+    // the client chooses. Repeats then collapse into one entry with its
+    // count, the most frequent first, so a list of thousands of bad elements
+    // logs as one entry that single failures elsewhere cannot crowd out.
     private static String constraints(BindingResult result) {
-        List<String> distinct = result.getAllErrors().stream()
-                .map(error -> error instanceof FieldError field
+        Map<String, Long> counts = result.getAllErrors().stream()
+                .collect(Collectors.groupingBy(error -> error instanceof FieldError field
                         ? field.getField().replaceAll("\\[[^\\]]*\\]", "[]")
                                 + ":" + field.getCode()
-                        : error.getObjectName() + ":" + error.getCode())
-                .distinct()
-                .sorted()
-                .toList();
-        return distinct.stream().limit(LOGGED_CONSTRAINTS)
+                        : error.getObjectName() + ":" + error.getCode(),
+                        Collectors.counting()));
+        return counts.entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue().reversed()
+                        .thenComparing(Map.Entry.comparingByKey()))
+                .limit(LOGGED_CONSTRAINTS)
+                .map(entry -> entry.getKey() + " x" + entry.getValue())
                 .collect(Collectors.joining(", ", "fields ",
-                        distinct.size() > LOGGED_CONSTRAINTS ? ", …" : ""))
+                        counts.size() > LOGGED_CONSTRAINTS ? ", …" : ""))
                 + " (" + result.getErrorCount() + " errors)";
+    }
+
+    private static String boundParameter(Exception error) {
+        if (error instanceof MissingRequestHeaderException missing) {
+            return missing.getHeaderName();
+        }
+        if (error instanceof MissingServletRequestParameterException missing) {
+            return missing.getParameterName();
+        }
+        if (error instanceof MethodArgumentTypeMismatchException mismatch) {
+            return mismatch.getName();
+        }
+        return null;
     }
 
     private static String applicationFrames(Throwable error) {
