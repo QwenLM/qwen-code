@@ -14,6 +14,9 @@ import {
   readDaemonHttpErrorCode,
   readSupersededReplacementId,
   SessionRouter,
+  singleScopeRoutingKey,
+  unwrapMessageRoutingKey,
+  wrapMessageRoutingKey,
 } from './SessionRouter.js';
 import {
   DaemonChannelBridge,
@@ -4036,5 +4039,27 @@ describe('session rotation', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('routing-key shape helpers', () => {
+  it('pins the persisted key shapes and every unwrap fallback', () => {
+    expect(singleScopeRoutingKey('ch')).toBe('ch:__single__');
+    const k = wrapMessageRoutingKey('ch:__single__', '/review');
+    expect(k).toBe('["ch:__single__","/review"]');
+    expect(unwrapMessageRoutingKey(k)).toBe('ch:__single__');
+    for (const bad of [
+      'ch:alice:c1',
+      '[oops',
+      '["a"]',
+      '["a","b","c"]',
+      '[1,"b"]',
+      '[null,null]',
+    ]) {
+      expect(unwrapMessageRoutingKey(bad)).toBe(bad);
+    }
+    expect(
+      unwrapMessageRoutingKey(wrapMessageRoutingKey('[weird:chat', '/r')),
+    ).toBe('[weird:chat');
   });
 });
