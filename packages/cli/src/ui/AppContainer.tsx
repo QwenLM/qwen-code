@@ -4020,25 +4020,27 @@ export const AppContainer = (props: AppContainerProps) => {
     history: historyManager.history,
     sessionStats,
   });
+  const permissionDialogVisible =
+    isMcpApprovalDialogOpen ||
+    isFolderTrustDialogOpen ||
+    isTrustDialogOpen ||
+    !!shellConfirmationRequest ||
+    !!confirmationRequest ||
+    !!loopDetectionConfirmationRequest;
   const dialogsVisible =
+    permissionDialogVisible ||
     showWelcomeBackDialog ||
     shouldShowIdePrompt ||
     shouldShowCommandMigrationNudge ||
-    isFolderTrustDialogOpen ||
-    isMcpApprovalDialogOpen ||
-    !!shellConfirmationRequest ||
-    !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
     !!providerUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
-    !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
     isStatusLineDialogOpen ||
     isMemoryDialogOpen ||
     isModelDialogOpen ||
-    isTrustDialogOpen ||
     activeArenaDialog !== null ||
     isPermissionsDialogOpen ||
     isAuthDialogOpen ||
@@ -4073,12 +4075,7 @@ export const AppContainer = (props: AppContainerProps) => {
     ),
     permission:
       streamingState === StreamingState.WaitingForConfirmation ||
-      isMcpApprovalDialogOpen ||
-      isFolderTrustDialogOpen ||
-      isTrustDialogOpen ||
-      !!shellConfirmationRequest ||
-      !!confirmationRequest ||
-      !!loopDetectionConfirmationRequest,
+      permissionDialogVisible,
     dialog: dialogsVisible || isFeedbackDialogOpen,
   });
   useProgramStatus(

@@ -5,13 +5,27 @@
  */
 
 import { basename, win32 } from 'node:path';
+import {
+  editorCommands,
+  isTerminalEditor,
+} from '@qwen-code/qwen-code-core/utils/editor.js';
+import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 
 export function isTerminalEditorCommand(command: string): boolean {
-  if (!command.trim()) return false;
-  if (/[/\\]Zed\.app[/\\]Contents[/\\]MacOS[/\\]cli$/i.test(command))
-    return false;
-  const executable = win32.basename(basename(command));
-  return !/^(code|codium|windsurf|cursor|trae|zed|zeditor|notepad|open)(\.(exe|cmd|bat))?$/i.test(
+  const executable = win32
+    .basename(basename(command))
+    .toLowerCase()
+    .replace(/\.(exe|cmd|bat)$/, '');
+  for (const [editor, commands] of Object.entries(editorCommands)) {
+    if (
+      [...commands.default, ...commands.win32].some(
+        (name) => name.replace(/\.(exe|cmd|bat)$/, '') === executable,
+      )
+    ) {
+      return isTerminalEditor(editor as EditorType);
+    }
+  }
+  return /^(vi|nano|pico|micro|hx|helix|kak|joe|zile|jed|mle|ne|vim\.tiny)$/.test(
     executable,
   );
 }

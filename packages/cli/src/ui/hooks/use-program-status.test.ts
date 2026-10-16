@@ -312,6 +312,40 @@ describe('useProgramStatus', () => {
     }
   });
 
+  it.each(['auth', 'permission', 'question'] as const)(
+    'keeps %s blocking visible through cancellation wind-down',
+    (kind) => {
+      const { rerender } = mount();
+      rerender({
+        state: StreamingState.Responding,
+        kind: undefined,
+        error: false,
+        cancellation: 0,
+      });
+      rerender({
+        state: StreamingState.Responding,
+        kind: undefined,
+        error: false,
+        cancellation: 1,
+      });
+      expect(write).toHaveBeenLastCalledWith(report('idle'));
+      rerender({
+        state: StreamingState.Idle,
+        kind,
+        error: true,
+        cancellation: 1,
+      });
+      expect(write).toHaveBeenLastCalledWith(report('blocked', kind));
+      rerender({
+        state: StreamingState.Idle,
+        kind: undefined,
+        error: true,
+        cancellation: 1,
+      });
+      expect(write).toHaveBeenLastCalledWith(report('idle'));
+    },
+  );
+
   it('wraps reports and handoff clears for tmux passthrough', () => {
     vi.stubEnv('TMUX', '/tmp/tmux-1000/default,12345,0');
     mount();

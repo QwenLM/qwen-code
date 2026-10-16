@@ -2295,7 +2295,6 @@ export const useLlmStream = (
       userMessageTimestamp: number,
       submitType: SendMessageType,
     ) => {
-      setTurnHasError(true);
       if (submitType !== SendMessageType.Goal) {
         lastPromptErroredRef.current = true;
       } else {
@@ -2502,7 +2501,6 @@ export const useLlmStream = (
 
   const handleSessionTokenLimitExceededEvent = useCallback(
     (value: { currentTokens: number; limit: number; message: string }) => {
-      setTurnHasError(true);
       addItem(
         {
           type: 'error',
@@ -2605,6 +2603,7 @@ export const useLlmStream = (
       userMessageTimestamp: number,
       signal: AbortSignal,
       submitType: SendMessageType,
+      ownsTurnStatus: () => boolean,
       turnAdmission?: GoalTurnAdmission,
       promptId?: string,
       trackInteractionOwner = true,
@@ -2867,6 +2866,7 @@ export const useLlmStream = (
               };
             case ServerLlmEventType.Error:
               flushBufferedStreamEvents();
+              if (ownsTurnStatus()) setTurnHasError(true);
               handleErrorEvent(event.value, userMessageTimestamp, submitType);
               break;
             case ServerLlmEventType.ChatCompressed:
@@ -2901,6 +2901,7 @@ export const useLlmStream = (
                 );
                 setPendingHistoryItem(null);
               }
+              if (ownsTurnStatus()) setTurnHasError(true);
               handleSessionTokenLimitExceededEvent(event.value);
               llmMessageBuffer = '';
               assistantOutputStarted = false;
@@ -3789,6 +3790,9 @@ export const useLlmStream = (
         allowConcurrentBtwDuringResponse || isDetachedToolContinuation
           ? undefined
           : abortController;
+      const ownsTurnStatus = () =>
+        foregroundAbortController !== undefined &&
+        abortControllerRef.current === foregroundAbortController;
       let keepToolContinuationAbortController = false;
       if (detachedAbortController) {
         detachedToolContinuationAbortControllersRef.current.add(
@@ -4123,6 +4127,7 @@ export const useLlmStream = (
             userMessageTimestamp,
             processingSignal,
             submitType,
+            ownsTurnStatus,
             turnAdmission,
             prompt_id,
             !allowConcurrentBtwDuringResponse,
@@ -4296,10 +4301,10 @@ export const useLlmStream = (
           cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
-            setTurnHasError(true);
+            if (ownsTurnStatus()) setTurnHasError(true);
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
-            setTurnHasError(true);
+            if (ownsTurnStatus()) setTurnHasError(true);
             if (submitType !== SendMessageType.Goal) {
               lastPromptErroredRef.current = true;
             }
@@ -5072,9 +5077,9 @@ export const useLlmStream = (
         completedAndReadyToSubmitTools.find(
           (toolCall) => !toolCall.request.isClientInitiated,
         );
-      const recordedInteractionOwner = ownerToolCall
-        ? ownerForToolCall(ownerToolCall)
-        : undefined;
+      const hadRecordedInteractionOwner = ownerToolCall
+        ? ownerForToolCall(ownerToolCall) !== undefined
+        : false;
       const interactionOwner = ownerToolCall
         ? liveOwnerForToolCall(ownerToolCall)
         : undefined;
@@ -5156,6 +5161,16 @@ export const useLlmStream = (
         errorMessage?: string,
         errorType?: string,
       ) => {
+        const ownsInteraction =
+          !!promptId &&
+          !!interactionOwner &&
+          getActiveInteractionSpan(promptId) === interactionOwner;
+        const ownsTurnStatus = continuationOwner?.foregroundAbortController
+          ? abortControllerRef.current ===
+            continuationOwner.foregroundAbortController
+          : !continuationOwner?.survivesGenerationChange &&
+            (!activeInteractionPromptIdRef.current ||
+              promptId === activeInteractionPromptIdRef.current);
         if (continuationOwner?.detachedAbortController) {
           detachedToolContinuationAbortControllersRef.current.delete(
             continuationOwner.detachedAbortController,
@@ -5170,21 +5185,12 @@ export const useLlmStream = (
         }
         if (
           status === 'error' &&
-          (!activeInteractionPromptIdRef.current ||
-            promptId === activeInteractionPromptIdRef.current) &&
-          (!recordedInteractionOwner ||
-            (promptId &&
-              getActiveInteractionSpan(promptId) === recordedInteractionOwner))
+          ownsTurnStatus &&
+          (!hadRecordedInteractionOwner || ownsInteraction)
         ) {
           setTurnHasError(true);
         }
-        if (
-          !promptId ||
-          !interactionOwner ||
-          getActiveInteractionSpan(promptId) !== interactionOwner
-        ) {
-          return;
-        }
+        if (!ownsInteraction) return;
         endInteractionSpan(status, {
           promptId,
           ...(errorMessage ? { errorMessage } : {}),

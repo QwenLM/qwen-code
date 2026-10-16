@@ -48,7 +48,7 @@ export function useProgramStatus(
     }
     let state: string;
     if (cancelled.current) {
-      state = 'idle';
+      state = blockedKind ? 'blocked' : 'idle';
       if (streamingState === StreamingState.Idle) {
         turnActive.current = false;
         cancelled.current = false;

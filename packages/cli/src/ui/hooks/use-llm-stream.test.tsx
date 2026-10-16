@@ -8587,6 +8587,139 @@ describe('useLlmStream', () => {
       expect(result.current.streamingState).toBe(StreamingState.Idle);
     });
 
+    it.each([
+      'yielded',
+      'thrown',
+      'unauthorized',
+      'token limit',
+      'tool yielded',
+      'tool thrown',
+    ] as const)(
+      'isolates %s side-query failures from foreground status',
+      async (failure) => {
+        let completeTools!: (tools: TrackedToolCall[]) => Promise<void>;
+        mockUseReactToolScheduler.mockImplementation((onComplete) => {
+          completeTools = onComplete;
+          return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+        });
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        mockSendMessageStream.mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerLlmEventType.Content,
+              value: 'foreground started',
+            };
+            await held;
+            yield {
+              type: ServerLlmEventType.Content,
+              value: 'foreground completed',
+            };
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+        const { result } = renderStatusStream();
+        let foreground!: Promise<void>;
+        act(() => {
+          foreground = result.current.submitQuery(
+            'foreground',
+            SendMessageType.UserQuery,
+          );
+        });
+        await waitFor(() =>
+          expect(result.current.streamingState).toBe(StreamingState.Responding),
+        );
+        const sideFailure = async function* () {
+          if (failure.includes('thrown')) throw new Error('side query failed');
+          if (failure === 'unauthorized')
+            throw new UnauthorizedError('side auth failed');
+          if (failure === 'token limit')
+            yield {
+              type: ServerLlmEventType.SessionTokenLimitExceeded,
+              value: {
+                currentTokens: 200,
+                limit: 100,
+                message: 'limit reached',
+              },
+            };
+          else
+            yield {
+              type: ServerLlmEventType.Error,
+              value: { error: { message: 'side query failed', status: 429 } },
+            };
+        };
+        mockSendMessageStream.mockReturnValueOnce(
+          failure.startsWith('tool')
+            ? (async function* () {
+                yield {
+                  type: ServerLlmEventType.ToolCallRequest,
+                  value: {
+                    callId: 'side-tool',
+                    name: 'testTool',
+                    args: {},
+                    isClientInitiated: false,
+                    prompt_id: 'side-status',
+                  },
+                };
+              })()
+            : sideFailure(),
+        );
+        try {
+          await act(async () => {
+            await result.current.submitQuery(
+              '/btw status check',
+              SendMessageType.UserQuery,
+              'side-status',
+            );
+          });
+          expect(mockSendMessageStream.mock.calls[1]?.[3]).toEqual(
+            expect.objectContaining({ isConcurrentSideQuery: true }),
+          );
+          if (failure.startsWith('tool')) {
+            mockSendMessageStream.mockReturnValueOnce(sideFailure());
+            await act(async () => {
+              await completeTools([
+                {
+                  request: {
+                    callId: 'side-tool',
+                    name: 'testTool',
+                    args: {},
+                    isClientInitiated: false,
+                    prompt_id: 'side-status',
+                  },
+                  status: 'success',
+                  responseSubmittedToLlm: false,
+                  response: {
+                    callId: 'side-tool',
+                    responseParts: [{ text: 'side result' }],
+                    errorType: undefined,
+                  },
+                  tool: { displayName: 'TestTool' },
+                  invocation: {
+                    getDescription: () => 'side tool',
+                  } as unknown as AnyToolInvocation,
+                } as TrackedCompletedToolCall,
+              ]);
+            });
+          }
+        } finally {
+          await act(async () => {
+            release();
+            await foreground;
+          });
+        }
+        if (failure.startsWith('tool'))
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+        expect(result.current.turnHasError).toBe(false);
+      },
+    );
+
     it('resets a terminal API error for the next successful model turn', async () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
@@ -11832,6 +11965,7 @@ describe('useLlmStream', () => {
         await result.current.submitQuery('show a chart');
       });
 
+      expect(result.current.turnHasError).toBe(true);
       expect(result.current.pendingHistoryItems).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ type: 'gemini', text: 'before' }),

@@ -124,6 +124,61 @@ describe('openInExternalEditor', () => {
     },
   );
 
+  it.each(['preferred GUI', 'opts GUI', 'opts terminal'] as const)(
+    'keeps handoff classification before Windows quoting for %s',
+    async (scenario) => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+      });
+      const events: string[] = [];
+      const release = () => events.push('release');
+      const acquire = () => events.push('acquire');
+      appEvents.on(AppEvent.TerminalReleased, release);
+      appEvents.on(AppEvent.TerminalAcquired, acquire);
+      const command = scenario === 'opts terminal' ? 'nvim.cmd' : 'code.cmd';
+      mockGetExternalEditorCommand.mockReturnValue({
+        command,
+        args: [expectedTmpFile],
+        needsShell: true,
+      });
+      mockSpawnSync.mockImplementation(() => {
+        events.push('spawn');
+        return { status: 0, error: null };
+      });
+      try {
+        const { result } = renderHook(() =>
+          useTextBuffer({
+            initialText: 'hello',
+            viewport,
+            isValidPath: () => false,
+            preferredEditor:
+              scenario === 'preferred GUI' ? 'vscode' : undefined,
+          }),
+        );
+        await act(async () => {
+          await result.current.openInExternalEditor(
+            scenario === 'preferred GUI' ? {} : { editor: command },
+          );
+        });
+        expect(mockSpawnSync.mock.calls[0]?.[0]).toBe(`"${command}"`);
+        expect(mockSpawnSync.mock.calls[0]?.[2]).toEqual(
+          expect.objectContaining({ shell: true }),
+        );
+        expect(events).toEqual(
+          scenario === 'opts terminal'
+            ? ['release', 'spawn', 'acquire']
+            : ['spawn'],
+        );
+      } finally {
+        appEvents.removeListener(AppEvent.TerminalReleased, release);
+        appEvents.removeListener(AppEvent.TerminalAcquired, acquire);
+        Object.defineProperty(process, 'platform', platform);
+      }
+    },
+  );
+
   it.each(['write failure', 'GUI editor'])(
     'does not publish a terminal handoff for %s',
     async (scenario) => {

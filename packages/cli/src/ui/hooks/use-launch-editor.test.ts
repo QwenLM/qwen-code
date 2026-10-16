@@ -26,9 +26,17 @@ vi.mock('ink', () => ({
 vi.mock('../contexts/SettingsContext.js', () => ({
   useSettings: () => settings,
 }));
-vi.mock('@qwen-code/qwen-code-core/utils/editor.js', () => ({
-  getEditorExecutable: (editor: string) => (editor === 'vim' ? 'vim' : 'code'),
-}));
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/editor.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/editor.js')
+    >()),
+    getEditorExecutable: (editor: string) =>
+      editor === 'vim' ? 'custom-terminal-wrapper' : 'custom-gui-wrapper',
+    isTerminalEditor: (editor: string) => editor === 'vim',
+  }),
+);
 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 beforeEach(() => {

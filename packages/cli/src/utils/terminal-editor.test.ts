@@ -32,7 +32,6 @@ describe('isTerminalEditorCommand', () => {
     'jed',
     'mle',
     'ne',
-    'emacsclient',
     'vim.tiny',
     '/usr/local/bin/hx',
     'vim.cmd',
@@ -43,6 +42,12 @@ describe('isTerminalEditorCommand', () => {
     expect(isTerminalEditorCommand(command)).toBe(true),
   );
   it.each([
+    'gvim',
+    'subl',
+    'neovide',
+    'emacsclient',
+    'unknown-editor',
+    '/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl',
     '',
     ' ',
     'code',

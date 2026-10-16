@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isTerminalEditor } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { isTerminalEditorCommand } from '../../../utils/terminal-editor.js';
 import { appEvents, AppEvent } from '../../../utils/events.js';
 import { spawnSync } from 'node:child_process';
@@ -2582,7 +2583,10 @@ export function useTextBuffer({
         }
       }
 
-      const terminalEditor = isTerminalEditorCommand(editorCmd);
+      const terminalEditor =
+        editorSource === 'preferred' && preferredEditor
+          ? isTerminalEditor(preferredEditor)
+          : isTerminalEditorCommand(editorCmd);
       let terminalReleased = false;
       if (useShell) {
         // .cmd/.bat launch through cmd.exe on Windows. Quote both the
