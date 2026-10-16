@@ -77,6 +77,8 @@ import {
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 
 const broker = vi.hoisted(() => ({
+  capabilityDigest:
+    'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91',
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
@@ -105,6 +107,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    readonly capabilityDigest = broker.capabilityDigest;
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
@@ -678,6 +681,7 @@ async function shellReceiptScenario(
     | 'sentinel'
     | 'lost-admission'
     | 'lost-reserve',
+  approval?: { mode: HostedApprovalMode },
 ) {
   const shellCall = {
     ...calls[0],
@@ -847,6 +851,10 @@ async function shellReceiptScenario(
       mode !== 'large' ||
       Buffer.byteLength(JSON.stringify(messageParts)) <= 64 * 1024,
     { owner, captureBytes: 1024 * 1024 },
+    undefined,
+    approval
+      ? { settings: { mode: approval.mode, timeoutMs: 1000 }, waiters }
+      : undefined,
   );
   const execution = shellTurn.execute(
     [shellCall],
@@ -947,6 +955,11 @@ async function shellReceiptScenario(
   ).toHaveLength(1);
 }
 
+it('runs Full Access Shell without ordinary Actions through durable result and replay acceptance', async () => {
+  await shellReceiptScenario('normal', { mode: 'yolo' });
+  expect(actionIds()).toEqual([]);
+});
+
 it.each([
   'normal',
   'abandoned',
@@ -958,7 +971,7 @@ it.each([
   'lost-reserve',
 ] as const)(
   'uses only the original Shell publication after Broker %s',
-  shellReceiptScenario,
+  (mode) => shellReceiptScenario(mode),
 );
 
 it('records a durable receipt for a proven unstarted Shell', async () => {
@@ -1304,7 +1317,7 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob only under the /2 Workspace profiles', async () => {
+it('offers glob only under the /2 and the read Workspace profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (
@@ -1338,6 +1351,91 @@ it('offers glob only under the /2 Workspace profiles', async () => {
     ...shellTools,
     'glob',
   ]);
+  // #13753 I3: the read profile declares its two read tools, whatever
+  // lane the Session has.
+  await expect(advertised('hosted-workspace-read/1')).resolves.toEqual([
+    'read_file',
+    'glob',
+  ]);
+  await expect(advertised('hosted-workspace-read/1', true)).resolves.toEqual([
+    'read_file',
+    'glob',
+  ]);
+});
+
+// #13753 I3: the read profile's two tools dispatch like any profile's.
+it('dispatches read_file and glob on the read profile', async () => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-read/1' },
+  );
+  const reads = [
+    { ...calls[0], name: 'read_file', args: { file_path: 'a.txt' } },
+    {
+      ...calls[0],
+      callId: 'call-glob',
+      name: 'glob',
+      args: { pattern: '**/*.ts' },
+    },
+  ];
+  await turn.execute(
+    reads,
+    reads.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(
+    broker.execute.mock.calls.map(
+      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+    ),
+  ).toEqual(['read_file', 'glob']);
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+// #13753 I3: every tool that writes, and every other tool, is refused on
+// the read profile before the Broker is acquired.
+it.each([
+  ['write_file', { file_path: 'a.txt', content: 'x' }],
+  ['edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b' }],
+  ['run_shell_command', { command: 'touch a.txt' }],
+  ['monitor', { command: 'tail -f a.txt' }],
+  ['agent', { description: 'd', prompt: 'p' }],
+  ['send_message', { to: 'parent', message: 'm' }],
+])('refuses %s on the read profile before the Broker', async (name, args) => {
+  const reader = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    { resources: session.resources, assertWritable: async () => {} },
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-read/1' },
+  );
+  await reader.declarations(new AbortController().signal);
+  const call = { ...calls[0], name, args };
+  await expect(
+    reader.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
 });
 
 function createSearchTurn() {

@@ -607,6 +607,14 @@ packaged-stack E2E, which have no ingress,
 then trusted as the actor for the request's tenant. It is disabled by default;
 never enable it where untrusted clients can reach the server.
 
+### Create empty Workspaces from WebShell
+
+Set `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` to an existing canonical, server-owned directory to enable **New workspace → Start from scratch** in the Managed composer. The default is disabled. The root must be separate from static Workspace mounts, the default Workspace cwd, and private Runtime state. Enable Workspace files, the Session Store, the durable Session-isolated local-process Broker and verified Linux Workspace recovery first. Enabling this setting authorizes authenticated tenant actors to allocate independent empty roots and receive OWNER access; only enable it for tenants allowed to consume this host's storage.
+
+`POST /api/agent/web-shell/v1/workspaces/create` accepts `displayName` (trimmed, 1–128 characters without controls) and `idempotencyKey`. It returns the regular Workspace summary without host paths. Creation freezes an actor-scoped `WORKSPACE_CREATE` receipt, derives a tenant-separated directory below the configured root, registers its native identity and marker, and atomically publishes the ACTIVE Workspace with its creator grant. The Workspace query advertises `workspaceCreation` when enabled. Existing static mount configuration continues to work.
+
+An uncertain response must be retried with the same key and name. The page preserves that pending operation across refresh and selects the result without clearing the prompt or model. Completed replay never restores revoked access, recreates missing registry rows, or registers held storage again. Pending registration resumes in place after a process restart; failed attempts retain their owned directory for retry. There is no automatic storage deletion or arbitrary host-path import. Workspace persistence does not imply recovery of a resident Harness Session whose writer lease expired during control-plane downtime; that existing Session recovery boundary is separate from creating or reusing a Workspace. Keep the configured root and SQL database durable together. Schema V4 extends the receipt namespace after the published V3 Session-list migration while retaining all published migration resources and existing data.
+
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
 `auto-edit`, any caller with a read grant on the bound Workspace can list and
 inspect pending permission Actions through the public API or WebShell;
@@ -615,12 +623,27 @@ or above, and that read grant as well. A Shell Session is the exception:
 only its recorded owner may answer, because that answer runs a command. Responses are durable, idempotent
 operations; their final result follows the committed Harness decision.
 `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
-The approval mode is pinned at Session creation and must be confirmed by the
-Harness on creation and load.
+The initial approval mode is pinned at Session creation and must be confirmed by the
+Harness on creation and load. Built-in Workspace Sessions can select a different
+policy for later Turns while retaining the original definition.
+
+For new Workspace-bound WebShell Sessions, the shared composer queries `POST /api/agent/web-shell/v1/session-options/query` with `agentId` using the authenticated tenant actor. The response contains the effective `approvalMode` and `availableApprovalModes`; Workspace discovery advertises `approvalModeSelection` for this contract. Built-in Sessions allow `default`, `auto-edit`, and `yolo` (Full Access). Shell Full Access additionally requires the Harness feature `approval-selection/1`; without it Shell offers only `default` and `auto-edit`. The Shell deployment opt-in and its deployment default remain unchanged. Hosted execution does not support classifier `auto` or `plan`. An AgentDefinition exposes only its compiled policy, which a creation request cannot override.
+
+The WebShell create request may include `approvalMode` only with a Workspace binding. Omission preserves the existing default and request digest; explicit selection is persisted in the Session and joins its idempotency digest. Retrying the same key reads the original pin even if deployment defaults, the AgentDefinition, or a later Session selection changed. Workspace-bound and definition-pinned Session summaries expose the current `approvalMode`, immutable `initialApprovalMode`, and `approvalRevision`. Legacy unbound built-in Sessions omit this metadata because their execution policy is supplied by the deployment. The public REST create contract is unchanged.
+
+Built-in Workspace Sessions can change their next Turn's approval policy when the Harness advertises `approval-selection/1`. `POST /api/agent/web-shell/v1/session-approval/query` returns the current mode, revision, available modes, and support. `POST /api/agent/web-shell/v1/session-approval/change` accepts `sessionId`, `approvalMode`, `expectedRevision`, `idempotencyKey`, and `requestId`. Only the recorded Session owner with current Workspace OPERATOR or OWNER access may change it or replay a receipt. The Session must be idle, with no pending approval, context/lifecycle operation, retained Runtime, or recovery work. Identical retries return the original result without another revision; different content under the same key and stale revisions conflict. Stored AgentDefinitions remain fixed. There is no public REST mutation endpoint.
+
+Schema V6 preserves the original policy and adds a current override plus per-Turn approval snapshots. Turn admission and policy changes share the Session row lock, so retries and recovery execute the admitted snapshot. Revision zero and legacy Turns consistently omit the private `approvalSelection` field and execute the confirmed immutable definition, preserving prompt retry identity across Harness capability upgrades; positive revisions always send the saved Turn snapshot. `yolo` skips ordinary file and Shell approvals, while explicit Hook ask/deny decisions retain their existing behavior. The configured approval timeout persists for new selectable Full Access Sessions and survives a later switch back to asking. Legacy Full Access definitions without a timeout keep the existing 10-minute fallback. WebShell retains an uncertain change with its original request and key across refresh, blocks send/model/cwd changes until receipt readback, and ignores older policy revisions. A Session with an override cannot execute through an older Harness. Deploy the updated Harness first, upgrade schema and all Java/Broker readers and writers during a maintenance window, then release WebShell; rollback binaries must understand the saved override and snapshots. See the [approval selection design](../../docs/design/managed-approval-selection.md).
+
+Workspace-bound WebShell Session summaries can include `modelContext` with the actual observed `modelId`, optional latest-request `inputTokens` and resolved `contextWindowSize`, and `observedAt`. The Hosted CLI records capacity beside successful provider usage; the Java Session Store projects only committed main-model attempts into one private latest-resource pointer. Lists read these observations in one batch without scanning journal history. Older or invalid usage advances the pointer but leaves missing values unknown; cumulative billing totals and inferred capacities never substitute for them. The shared usage popover does not offer manual compression. New tasks continue to select published AgentDefinition presets. This observation projection uses existing SQL tables and resource-reference cleanup without changing the recovery format.
+
+To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; the browser supplies neither provider settings nor credentials. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER and the Session must be idle, without pending approval, context/lifecycle work or recovery. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
+
+Schema V5 adds the current selection to the Session and copies it into each newly admitted Turn. Retries and recovery send that Turn's fixed model, never a later Session choice. No explicit selection preserves the original AgentDefinition/deployment behavior. Selection does not change the AgentDefinition identity, instructions, tools or approval policy. Each newly committed selection clears the latest context observation, including A→B→A without a Turn, until a new successful model request supplies usage. `modelSelection` in the summary describes the next-Turn setting; `modelContext` describes an actual successful request. An unavailable selected model fails closed rather than falling back to the deployment model.
 
 Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
 through `POST /v1/agents/sessions`. The server persists
-`hosted-workspace-shell/1` with mandatory `default`/`auto-edit` approval when the
+`hosted-workspace-shell/1` with the deployment default `default`/`auto-edit` policy when the
 Shell deployment opt-in is enabled, otherwise `hosted-workspace-files/1` with the
 configured file approval mode. This also applies to empty bound creation. The
 Session Store uses the persisted Workspace ID; public callers cannot choose the
@@ -1182,6 +1205,23 @@ mvn -Pmysql-integration \
 
 Use a disposable database: the integration test creates and deletes fixture
 rows within the selected schema.
+
+## Linux extension process acceptance
+
+`HostedExtensionsIT` is collected by the existing `hosted-harness-mysql` profile. It uses the public AgentDefinition and Session APIs, real MySQL, the packaged Harness and durable native worker, a stdio MCP process, and command Hooks in a delegated cgroup v2 subtree. It verifies static Skill bytes, extension revision pinning across Harness replacement, Hook allow/deny, cancellation of a Hook and its descendant, safe continuation, and physical close. A separate MCP fault case writes and fsyncs an effect before disconnecting, then verifies that a replacement Harness refuses recovery without replaying the effect or reporting successful close.
+
+After building the root packages and bundle and installing the current Java SDK, run this focused slice from `packages/managed-agent-server` on Linux with JDK 21, Node 22+, disposable MySQL 8.4, and Maven already inside the delegated cgroup ancestor:
+
+```bash
+QWEN_MANAGED_HOOK_CGROUP_ROOT=/sys/fs/cgroup/your-delegated-root \
+  mvn -Phosted-harness-mysql -Dit.test=HostedExtensionsIT \
+  -Dnode.executable=/absolute/path/to/node \
+  -Dqwen.cli.entry="$PWD/../../dist/cli.js" \
+  -Dmysql.url='jdbc:mysql://127.0.0.1:3306/managed_agent_test' \
+  -Dmysql.user=root -Dmysql.password= verify
+```
+
+Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING`, its ordinary execution `UNKNOWN`, and rejects new input and close with `409 turn_active`; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
 
 ## Real-model end-to-end check
 

@@ -22,6 +22,7 @@ import {
 import type { LoadedSettings } from '../../config/settings.js';
 import type { WaitingCallInfo } from './live-session.js';
 import type { LiveHistoryItem } from './live-session-model.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 
 export interface FollowupGenerationParams {
   config: Config;
@@ -78,14 +79,36 @@ export function useFollowupSuggestionGeneration({
     ) {
       const ac = new AbortController();
       abortRef.current = ac;
-      // Only clone the tail — a full structuredClone of a large resumed
-      // session causes transient heap peaks that trigger OOM (#4624).
-      const conversationHistory = config
-        .getLlmClient()
-        .getHistoryTail(40, true);
-      generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        enableCacheSharing: cacheSharingEnabled,
-      })
+      const generate = async () => {
+        const mods = getInteractiveModSession(config);
+        if (mods) {
+          let onAbort: (() => void) | undefined;
+          try {
+            await Promise.race([
+              mods.ready,
+              new Promise<never>((_, reject) => {
+                onAbort = () => reject(ac.signal.reason);
+                ac.signal.addEventListener('abort', onAbort, { once: true });
+              }),
+            ]);
+          } finally {
+            if (onAbort) ac.signal.removeEventListener('abort', onAbort);
+          }
+        }
+        ac.signal.throwIfAborted();
+        // Only clone the tail — a full structuredClone of a large resumed
+        // session causes transient heap peaks that trigger OOM (#4624).
+        const conversationHistory = config
+          .getLlmClient()
+          .getHistoryTail(40, true);
+        return generatePromptSuggestion(
+          config,
+          conversationHistory,
+          ac.signal,
+          { enableCacheSharing: cacheSharingEnabled },
+        );
+      };
+      void generate()
         .then((result) => {
           if (ac.signal.aborted) return;
           if (result.suggestion) {

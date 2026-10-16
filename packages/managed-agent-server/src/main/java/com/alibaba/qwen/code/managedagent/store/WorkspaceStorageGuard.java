@@ -41,6 +41,7 @@ public class WorkspaceStorageGuard {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final Map<Storage, Path> roots;
+    private final WorkspaceCreationRoots createdRoots;
     private final boolean enabled;
     private final IdentityReader identities;
     private final ObjectMapper json = new ObjectMapper();
@@ -60,6 +61,7 @@ public class WorkspaceStorageGuard {
         this.transaction = new TransactionTemplate(manager);
         this.enabled = properties.getRuntimeBroker().isVerifiedWorkspaceRecoveryEnabled();
         this.identities = identities;
+        this.createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         this.roots = enabled ? properties.getRuntimeBroker().getWorkspaceMounts().stream()
                 .collect(Collectors.toMap(mount -> new Storage(mount.tenantId(), mount.storageId()),
                         mount -> Path.of(mount.root()), (left, right) -> {
@@ -76,7 +78,7 @@ public class WorkspaceStorageGuard {
             return "disabled";
         }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
-        Path root = roots.get(new Storage(tenantId, storageId));
+        Path root = configuredRoot(tenantId, storageId);
         if (root == null) {
             return "unconfigured";
         }
@@ -201,12 +203,27 @@ public class WorkspaceStorageGuard {
         verify(binding.getTenantId(), binding.getStorageId(), binding.getCwdRelative(), true);
     }
 
+    public Path createdStorageRoot(String tenantId, String storageId) {
+        return createdRoots.resolve(tenantId, storageId, false);
+    }
+
+    void registerCreated(String tenantId, String storageId, String operationId) {
+        Path path = createdRoots.resolve(tenantId, storageId, true);
+        if (path == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        register(tenantId, storageId, operationId, path);
+    }
+
     public void register(String tenantId, String storageId, String operationId) {
+        register(tenantId, storageId, operationId, root(tenantId, storageId));
+    }
+
+    private void register(String tenantId, String storageId, String operationId, Path root) {
         if (!enabled || !validId(operationId)) {
             throw WorkspaceExecutionStore.unavailable();
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        Path root = root(tenantId, storageId);
         Identity identity = identity(root);
         String key = LocalStorageOwners.physicalKey(identity);
         Registration prepared = transaction.execute(status -> {
@@ -713,8 +730,13 @@ public class WorkspaceStorageGuard {
         }
     }
 
-    private Path root(String tenantId, String storageId) {
+    private Path configuredRoot(String tenantId, String storageId) {
         Path root = roots.get(new Storage(tenantId, storageId));
+        return root == null ? createdStorageRoot(tenantId, storageId) : root;
+    }
+
+    private Path root(String tenantId, String storageId) {
+        Path root = configuredRoot(tenantId, storageId);
         if (root == null) {
             throw WorkspaceExecutionStore.unavailable();
         }

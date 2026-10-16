@@ -234,8 +234,16 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         ensureOpen();
         HarnessSessionRef session = requireSessionRef(request.getSession());
+        if (request.getModelSelection() != null
+                && !capabilities().getFeatures().contains("model-selection/1")) {
+            throw new DaemonException("Hosted model selection is unavailable");
+        }
+        if (request.getApprovalSelection() != null
+                && !capabilities().getFeatures().contains("approval-selection/1")) {
+            throw new DaemonException("Hosted approval selection is unavailable");
+        }
         ActivePrompt candidate = new ActivePrompt(request.getPromptId(),
-                request.getPayloadDigest());
+                request.getPayloadDigest(), request.getModelSelection(), request.getApprovalSelection());
         ActivePrompt existing = activePrompts.putIfAbsent(
                 session.getHarnessSessionId(), candidate);
         if (existing != null && !existing.matches(candidate)) {
@@ -1571,15 +1579,22 @@ public final class HostedHarnessClient implements AutoCloseable {
     private static final class ActivePrompt {
         private final String promptId;
         private final String payloadDigest;
+        private final Map<String, Object> modelSelection;
+        private final Map<String, Object> approvalSelection;
 
-        ActivePrompt(String promptId, String payloadDigest) {
+        ActivePrompt(String promptId, String payloadDigest, Map<String, Object> modelSelection,
+                Map<String, Object> approvalSelection) {
             this.promptId = promptId;
             this.payloadDigest = payloadDigest;
+            this.modelSelection = modelSelection;
+            this.approvalSelection = approvalSelection;
         }
 
         boolean matches(ActivePrompt other) {
             return promptId.equals(other.promptId)
-                    && payloadDigest.equals(other.payloadDigest);
+                    && payloadDigest.equals(other.payloadDigest)
+                    && java.util.Objects.equals(modelSelection, other.modelSelection)
+                    && java.util.Objects.equals(approvalSelection, other.approvalSelection);
         }
     }
 
