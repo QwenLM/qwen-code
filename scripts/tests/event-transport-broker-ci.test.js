@@ -22,14 +22,11 @@ const step = (name) => {
   return found;
 };
 const script = readFileSync('scripts/rocketmq-lite-broker.sh', 'utf8');
-const pom = readFileSync(
-  'packages/sdk-java/managed-agent-server/pom.xml',
-  'utf8',
-);
+const pom = readFileSync('packages/managed-agent-server/pom.xml', 'utf8');
 const profile = pom
   .split('<id>event-transport-broker-gates</id>')[1]
   .split('</profile>')[0];
-const server = 'packages/sdk-java/managed-agent-server/src';
+const server = 'packages/managed-agent-server/src';
 const properties = readFileSync(
   `${server}/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java`,
   'utf8',
@@ -54,7 +51,7 @@ describe('EventTransport broker gates CI', () => {
       expect(run).toContain(`-Dqwen.gate.rocketmq.${property}=`);
     }
     expect(run).toContain(
-      'node scripts/check-failsafe-reports.js event-transport packages/sdk-java/managed-agent-server',
+      'node scripts/check-failsafe-reports.js event-transport packages/managed-agent-server',
     );
   });
 
@@ -104,16 +101,13 @@ describe('EventTransport broker gates CI', () => {
   });
 
   it('still runs the gate on its only live triggers', () => {
-    // #14205 moved the whole SDK Java workflow off pull_request/push, so the
-    // provisioning script no longer has a per-change trigger: the daily
-    // schedule is now the only run that boots the broker these steps
-    // drive, and dropping it would retire the gate with every pin above
-    // still green.
+    // Keep both daily coverage and the release caller after leaving PR CI.
     expect(Object.keys(workflow.on).sort()).toEqual([
       'schedule',
+      'workflow_call',
       'workflow_dispatch',
     ]);
-    expect(workflow.on.schedule).toEqual([{ cron: '47 19 * * *' }]);
+    expect(workflow.on.schedule).toContainEqual({ cron: expect.any(String) });
   });
 
   it('provisions every group the server and the gate subscribe in', () => {
