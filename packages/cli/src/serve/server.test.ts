@@ -707,6 +707,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_file_write',
   // Binary file upload (never overwrites; auto-numbers occupied names).
   'workspace_file_upload',
+  'workspace_file_delete',
   'workspace_directory_create',
   'workspace_directory_delete',
   // Mutation control routes (approval mode, workspace tool/skill toggles,
@@ -12416,6 +12417,7 @@ describe('createServeApp', () => {
       expect(bridge.continueSessionContexts).toHaveLength(1);
       expect(bridge.continueSessionContexts[0]).toMatchObject({
         clientId: 'client-xyz',
+        confirmCancellation: 'legacy-daemon',
       });
       const promptId = bridge.continueSessionContexts[0]?.promptId;
       expect(typeof promptId).toBe('string');
@@ -42441,6 +42443,65 @@ describe('auth device-flow routes', () => {
         'This install would replace a model configured for another purpose.',
     });
     expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider reports invalid API key as a client error', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const invokeWorkspaceCommand = vi.spyOn(bridge, 'invokeWorkspaceCommand');
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'qwencloud-standard',
+        apiKey: 'sk-sp-not-a-real-key',
+        baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      });
+
+    expect(installAuthProvider).not.toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: 'invalid_api_key',
+    });
+    expect(res.body.error).toContain('Token Plan');
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider passes padded valid keys through to installAuthProvider', async () => {
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'qwencloud-standard',
+      providerLabel: 'Standard API Key',
+      authType: 'openai',
+      message: 'ok',
+    });
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'qwencloud-standard',
+        apiKey: '  sk-valid-pay-as-you-go-key  ',
+        baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      });
+
+    expect(res.status).toBe(200);
+    expect(installAuthProvider).toHaveBeenCalledOnce();
+    expect(installAuthProvider.mock.calls[0][0]).toMatchObject({
+      apiKey: 'sk-valid-pay-as-you-go-key',
+    });
   });
 
   it('POST /workspace/auth/provider returns a warning state when runtime sync fails after persistence', async () => {

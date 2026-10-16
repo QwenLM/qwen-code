@@ -30,9 +30,12 @@ import {
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceGlobProfile,
+  isHostedWorkspaceReadProfile,
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
@@ -86,7 +89,6 @@ import {
   InvalidWorkspaceRelativePathError,
   normalizeWorkspaceRelativePath,
 } from './managed-workspace-binding.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
   hostedRuntimeSessionId,
@@ -203,13 +205,38 @@ export {
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceGlobProfile,
+  isHostedWorkspaceReadProfile,
   type HostedWorkspaceToolProfile,
 };
 
 const ACQUIRE_BUSY_POLL_MS = 250;
+// The owed handback's cadence: a quick backoff for the common late settle,
+// then a steady one-minute tail — the chain stays owed until the handback
+// lands, every timer unref'd so a blocked Session never holds the daemon's
+// event loop open, and every attempt re-reads the Broker's gate, never
+// bypasses it.
+const BLOCK_MOUNT_RETRY_GAPS_MS = [1000, 3000, 5000, 10000, 30000, 60000];
+// The block verdict never waits out a slow Broker round-trip: it proceeds
+// once the first handback attempt settles or this bound passes, whichever
+// is first — the attempt itself keeps running inside the retry chain.
+const RELEASE_MOUNT_VERDICT_BOUND_MS = 2000;
+// A reply that decided nothing earns a re-send — the holder-conditioned
+// clear is idempotent — and so do the busy refusal, whose executions settle
+// on their own clock, and the Broker's internal error. Every other refusal
+// is final: a superseded claim, a lifecycle drain, a writer that never
+// proved it stopped, a Session the Broker no longer holds.
+function retryableMountHandback(cause: unknown): boolean {
+  if (!(cause instanceof HostedWorkspaceBrokerRejection)) return true;
+  return (
+    (cause.status === 409 && cause.code === 'runtime_session_busy') ||
+    (cause.status === 500 && cause.code === 'runtime_broker_internal_error')
+  );
+}
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -569,6 +596,23 @@ export const HOSTED_WORKSPACE_FILE_TOOLS_V2: FunctionDeclaration[] = [
 ];
 export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
+// #13753 I3: the read profile of a snapshot child, which reads a frozen copy
+// of its parent's Workspace. Nothing here writes, and the turn refuses any
+// call it does not declare. A missing read_file stops the module loading:
+// spreading a failed lookup would silently declare a tool with no name.
+const HOSTED_READ_FILE_TOOL = HOSTED_WORKSPACE_FILE_TOOLS.find(
+  (tool) => tool.name === 'read_file',
+);
+if (HOSTED_READ_FILE_TOOL === undefined)
+  throw new Error('Hosted Workspace file tools no longer declare read_file.');
+export const HOSTED_WORKSPACE_READ_TOOLS: FunctionDeclaration[] = [
+  {
+    ...HOSTED_READ_FILE_TOOL,
+    description:
+      "Read a file in this read-only snapshot of the parent's Workspace, taken when this child started. Files cannot be changed and commands cannot run here.",
+  },
   HOSTED_GLOB_TOOL,
 ];
 
@@ -1254,9 +1298,12 @@ export const HOSTED_TEAM_AGENT_TOOL: FunctionDeclaration = {
  * #13753 I2: an Agent tool declaration with `isolation`, the legacy Agent
  * tool's name and value, for a host that serves child Workspaces. Only
  * there does the model see it; elsewhere each declaration stays exactly
- * as it was.
+ * as it was. I3 adds `snapshot` where the host also serves snapshots.
  */
-function withWorktreeIsolation(tool: FunctionDeclaration): FunctionDeclaration {
+function withIsolation(
+  tool: FunctionDeclaration,
+  snapshot: boolean,
+): FunctionDeclaration {
   const schema = tool.parametersJsonSchema as {
     properties: Record<string, unknown>;
   };
@@ -1267,26 +1314,44 @@ function withWorktreeIsolation(tool: FunctionDeclaration): FunctionDeclaration {
         'Nesting, custom subagent types and isolated workspaces are unavailable in this profile.',
         'Nesting and custom subagent types are unavailable in this profile.',
       ) +
-      ' With isolation "worktree" the child works in its own Git worktree of this Workspace\'s repository: its changes merge back into this Workspace as uncommitted changes when it completes, before its result arrives, and the result reports the merge (merged, conflicted with its paths, or blocked); a failed or cancelled child\'s worktree is discarded.',
+      ' With isolation "worktree" the child works in its own Git worktree of this Workspace\'s repository: its changes merge back into this Workspace as uncommitted changes when it completes, before its result arrives, and the result reports the merge (merged, conflicted with its paths, or blocked); a failed or cancelled child\'s worktree is discarded.' +
+      (snapshot
+        ? ' With isolation "snapshot" the child only reads, in a Git repository: it gets a frozen copy of this Workspace\'s files (ignored files excluded), taken when it starts. A background child may start before or after this turn\'s later changes, so make any change it must see before launching it. It can read files and find them by name pattern, but cannot change files, run commands or receive messages while it runs, and nothing it does reaches this Workspace.' +
+          ('name' in schema.properties
+            ? ' A team member (name) cannot run as a snapshot.'
+            : '')
+        : ''),
     parametersJsonSchema: {
       ...schema,
       properties: {
         ...schema.properties,
         isolation: {
           type: 'string',
-          enum: ['worktree'],
-          description:
-            'Run the child in its own Git worktree that merges back when it completes. Omit to share this Workspace directly.',
+          enum: snapshot ? ['worktree', 'snapshot'] : ['worktree'],
+          description: snapshot
+            ? 'Run the child in its own Git worktree that merges back when it completes ("worktree"), or as a read-only reader of a frozen copy of this Workspace ("snapshot"). Omit to share this Workspace directly.'
+            : 'Run the child in its own Git worktree that merges back when it completes. Omit to share this Workspace directly.',
         },
       },
     },
   };
 }
 
-export const HOSTED_AGENT_WORKTREE_TOOL =
-  withWorktreeIsolation(HOSTED_AGENT_TOOL);
-export const HOSTED_TEAM_AGENT_WORKTREE_TOOL = withWorktreeIsolation(
+export const HOSTED_AGENT_WORKTREE_TOOL = withIsolation(
+  HOSTED_AGENT_TOOL,
+  false,
+);
+export const HOSTED_TEAM_AGENT_WORKTREE_TOOL = withIsolation(
   HOSTED_TEAM_AGENT_TOOL,
+  false,
+);
+export const HOSTED_AGENT_SNAPSHOT_TOOL = withIsolation(
+  HOSTED_AGENT_TOOL,
+  true,
+);
+export const HOSTED_TEAM_AGENT_SNAPSHOT_TOOL = withIsolation(
+  HOSTED_TEAM_AGENT_TOOL,
+  true,
 );
 
 function physicalToolStatus(
@@ -1498,6 +1563,7 @@ export class HostedWorkspaceToolTurn {
   private readonly warmed: Promise<void>;
   private acquired = false;
   private cleanupOwed = false;
+  private cleanedUp = false;
   private retiredOwnerResults = false;
   private uncertain = false;
   // Agent calls never write a `tool.intent` (the Broker pipeline they
@@ -1527,6 +1593,7 @@ export class HostedWorkspaceToolTurn {
   private readonly childAgents?: HostedChildAgentSession;
   private readonly childDepth: number;
   private readonly childWorkspaces: boolean;
+  private readonly childSnapshots: boolean;
   private readonly childConsumption: (childRunId: string) => void;
   private readonly messages?: HostedSessionMessageSession;
   private readonly teams?: HostedTeamSession;
@@ -1585,6 +1652,8 @@ export class HostedWorkspaceToolTurn {
         readonly depth: number;
         /** #13753 I2: the host serves child Workspaces. */
         readonly childWorkspaces?: boolean;
+        /** #13753 I3: the host serves read-only snapshots too. */
+        readonly childSnapshots?: boolean;
         readonly queueConsumption: (childRunId: string) => void;
       };
       messages?: HostedSessionMessageSession;
@@ -1608,6 +1677,8 @@ export class HostedWorkspaceToolTurn {
     this.childAgents = extras?.childAgents?.funnel;
     this.childDepth = extras?.childAgents?.depth ?? 0;
     this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
+    this.childSnapshots =
+      this.childWorkspaces && extras?.childAgents?.childSnapshots === true;
     this.childConsumption =
       extras?.childAgents?.queueConsumption ?? (() => undefined);
     this.messages = extras?.messages;
@@ -1636,9 +1707,9 @@ export class HostedWorkspaceToolTurn {
     void this.warmed.catch(() => undefined);
   }
 
-  /** Whether this Session runs one of the `/2` search profiles. */
-  private get searchProfile(): boolean {
-    return isHostedWorkspaceSearchProfile(this.profile);
+  /** Whether this Session's profile declares `glob`, which then asks no approval. */
+  private get globProfile(): boolean {
+    return isHostedWorkspaceGlobProfile(this.profile);
   }
 
   /**
@@ -1666,6 +1737,13 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    // #13753 I3: a snapshot child's read profile declares its two read
+    // tools and nothing else, whatever lanes, orchestration or MCP the
+    // Session has; the refusal of every other call rests on this alone.
+    if (isHostedWorkspaceReadProfile(this.profile)) {
+      this.advertised = [...HOSTED_WORKSPACE_READ_TOOLS];
+      return this.advertised;
+    }
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
     const search = isHostedWorkspaceSearchProfile(this.profile);
     // b3c: a member's widened send_message rides the same gate as its
@@ -1699,20 +1777,25 @@ export class HostedWorkspaceToolTurn {
       // a child's), behind the kind gate — files profiles and the public
       // files/1 flow keep their exact current vocabulary, mirrored by the
       // admission check in prepareRequests. H4e-b1's team tools follow it.
-      // #13753 I2: only a host that serves child Workspaces sees isolation.
+      // #13753 I2: only a host that serves child Workspaces sees isolation,
+      // and only one that serves snapshots too sees `snapshot` (I3).
       ...(this.teamsAdmitted()
         ? [
-            this.childWorkspaces
-              ? HOSTED_TEAM_AGENT_WORKTREE_TOOL
-              : HOSTED_TEAM_AGENT_TOOL,
+            this.childSnapshots
+              ? HOSTED_TEAM_AGENT_SNAPSHOT_TOOL
+              : this.childWorkspaces
+                ? HOSTED_TEAM_AGENT_WORKTREE_TOOL
+                : HOSTED_TEAM_AGENT_TOOL,
             ...HOSTED_TEAM_TOOLS,
             ...(teamPlanAdmissionsEnabled() ? [HOSTED_TEAM_PLAN_TOOL] : []),
           ]
         : this.agentsAdmitted()
           ? [
-              this.childWorkspaces
-                ? HOSTED_AGENT_WORKTREE_TOOL
-                : HOSTED_AGENT_TOOL,
+              this.childSnapshots
+                ? HOSTED_AGENT_SNAPSHOT_TOOL
+                : this.childWorkspaces
+                  ? HOSTED_AGENT_WORKTREE_TOOL
+                  : HOSTED_AGENT_TOOL,
             ]
           : []),
       // H4d-b: the same Sessions message along their lineage — a parent
@@ -2020,6 +2103,11 @@ export class HostedWorkspaceToolTurn {
           await oweHostedTurnCleanup(this.session, this.promptId, original);
           this.cleanupOwed = original.runtime !== undefined;
         }
+        // The claim commits under the ORIGINAL turn's identity: remember
+        // the broker that actually acquires before the attempt, so the
+        // recovery-block handback can target it — this.broker's identity
+        // never held that mount.
+        this.mountOwner = original;
         await original.acquire();
         const state = await original.fileHistory({
           kind: 'raw-file-history',
@@ -2047,12 +2135,15 @@ export class HostedWorkspaceToolTurn {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
+    // #13753 I3: a snapshot child's read profile declares only `read_file`
+    // and `glob`, the batch this path resumes without file history.
     if (
       !saved?.pendingTurn &&
       !saved?.pendingUndo &&
       !this.hooks &&
       !this.mcp &&
-      this.profile === HOSTED_WORKSPACE_FILE_PROFILE
+      (this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+        isHostedWorkspaceReadProfile(this.profile))
     ) {
       this.uncertain = true;
       try {
@@ -2792,7 +2883,7 @@ export class HostedWorkspaceToolTurn {
           const asks = hostedApprovalAsks(
             this.approval!.settings,
             call.name,
-            this.searchProfile,
+            this.globProfile,
           );
           if (!asks || (call.name === 'skill' && this.skills)) return call;
           const output = await this.hooks!.fire(
@@ -3109,10 +3200,20 @@ export class HostedWorkspaceToolTurn {
             validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, ${teamsOn ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
           } else if (
             args['isolation'] !== undefined &&
-            args['isolation'] !== 'worktree'
+            args['isolation'] !== 'worktree' &&
+            args['isolation'] !== 'snapshot'
           ) {
-            validationError =
-              'Hosted child agent isolation must be "worktree" or omitted.';
+            // `snapshot` passes here on every host, as `worktree` does, so a
+            // launch committed while the host served it still replays; a
+            // host that does not serve it refuses a new one at admission.
+            validationError = this.childSnapshots
+              ? 'Hosted child agent isolation must be "worktree", "snapshot" or omitted.'
+              : 'Hosted child agent isolation must be "worktree" or omitted.';
+          } else if (named && args['isolation'] === 'snapshot') {
+            // #13753 I3: a member trades messages with its leader, which a
+            // snapshot, with no message lane, can neither send nor take.
+            // The remedies name only the isolation this host serves.
+            validationError = `Hosted team member cannot run as a snapshot: a member exchanges messages with the team leader, which a read-only snapshot cannot. Launch the member ${this.childWorkspaces ? 'with isolation "worktree" or ' : ''}without isolation${this.childSnapshots ? ', or launch the snapshot without name' : ''}.`;
           } else if (
             args['plan_mode_required'] !== undefined &&
             typeof args['plan_mode_required'] !== 'boolean'
@@ -3711,7 +3812,7 @@ export class HostedWorkspaceToolTurn {
               hostedApprovalAsks(
                 this.approval.settings,
                 request.call.name,
-                this.searchProfile,
+                this.globProfile,
               )
             )
               askAgain.add(index);
@@ -4050,7 +4151,7 @@ export class HostedWorkspaceToolTurn {
           invocationBindingId: request.isShell
             ? request.runtimeCallId
             : executionCallId,
-          capabilityVersion: WORKSPACE_CAPABILITY_DIGEST,
+          capabilityVersion: this.broker.capabilityDigest,
           policyVersion: 'preapproved-workspace-tools/1',
           mediaVersion: null,
           modelMessageId: messageId,
@@ -5020,6 +5121,7 @@ export class HostedWorkspaceToolTurn {
         executionCallId: callKey,
         closing: authority.currentActivation?.phase !== 'active',
         childWorkspaces: this.childWorkspaces,
+        childSnapshots: this.childSnapshots,
       });
     } catch (cause) {
       if (!isMessageRefusal(cause)) throw cause;
@@ -5067,6 +5169,7 @@ export class HostedWorkspaceToolTurn {
           executionCallId: callKey,
           closing,
           childWorkspaces: this.childWorkspaces,
+          childSnapshots: this.childSnapshots,
         });
       } catch (cause) {
         if (!isMessageRefusal(cause)) throw cause;
@@ -5338,13 +5441,17 @@ export class HostedWorkspaceToolTurn {
     // budget would refuse the launch it is already running. Both counts
     // read committed records only, so a refusal re-derives on replay.
     // #13753 I2: the launch's isolation, fixed on its record for every
-    // later revision and replay.
+    // later revision and replay; I3 adds the read-only snapshot.
+    const isolation = request.call.args['isolation'];
     const workspaceMode =
-      request.call.args['isolation'] === 'worktree' ? 'worktree' : 'shared';
+      isolation === 'worktree' || isolation === 'snapshot'
+        ? isolation
+        : 'shared';
     if (children.record(childRunId) === undefined) {
       const admission = childLaunchAdmission({
         workspaceMode,
         childWorkspaces: this.childWorkspaces,
+        childSnapshots: this.childSnapshots,
         sameDefinition: true,
         closing: authority.currentActivation?.phase !== 'active',
         activeInScope: children.activeChildRunsOf(key.sessionId).length,
@@ -5356,9 +5463,13 @@ export class HostedWorkspaceToolTurn {
           request.call.name,
           request.call.callId,
           [],
-          admission.reason === 'workspace_mode'
-            ? 'Hosted child agent refused this launch (workspace_mode): this host does not serve isolated child Workspaces; launch without isolation to share this Workspace.'
-            : `Hosted child agent refused this launch (${admission.reason}).`,
+          admission.reason !== 'workspace_mode'
+            ? `Hosted child agent refused this launch (${admission.reason}).`
+            : workspaceMode !== 'snapshot'
+              ? 'Hosted child agent refused this launch (workspace_mode): this host does not serve isolated child Workspaces; launch without isolation to share this Workspace.'
+              : this.childWorkspaces
+                ? 'Hosted child agent refused this launch (workspace_mode): this host does not serve read-only snapshot children. A child launched without isolation shares this Workspace, and one with isolation "worktree" merges its changes back: neither is read-only.'
+                : 'Hosted child agent refused this launch (workspace_mode): this host does not serve isolated child Workspaces, so it cannot run a read-only snapshot child. A child launched without isolation shares this Workspace and is not read-only.',
         );
         await this.commit('tool_result', refused, model);
         return refused;
@@ -5506,6 +5617,7 @@ export class HostedWorkspaceToolTurn {
       const admission = childLaunchAdmission({
         workspaceMode: 'shared',
         childWorkspaces: false,
+        childSnapshots: false,
         sameDefinition: true,
         closing: authority.currentActivation?.phase !== 'active',
         activeInScope: children.activeChildRunsOf(key.sessionId).length,
@@ -6899,7 +7011,7 @@ export class HostedWorkspaceToolTurn {
     if (this.nativeBatch) this.nativeBatch.refusals = refusals;
     const approval = this.approval;
     if (!approval) return refusals;
-    const searchProfile = this.searchProfile;
+    const globProfile = this.globProfile;
     let asked = false;
     for (const [index, request] of requests.entries()) {
       if (index < nextOrdinal) continue;
@@ -6907,7 +7019,7 @@ export class HostedWorkspaceToolTurn {
         refusals[index] ||
         (request.call.name === 'skill' && this.skills !== undefined) ||
         this.hookPermission.get(request.call.callId) === 'allow' ||
-        !hostedApprovalAsks(approval.settings, request.call.name, searchProfile)
+        !hostedApprovalAsks(approval.settings, request.call.name, globProfile)
       )
         continue;
       asked = true;
@@ -7067,6 +7179,97 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
+  // The recovery-blocked exit ends the turn's Workspace exclusion the way
+  // finish() does on the settled path (#13800: one leaked mount wedged
+  // every unrelated tool turn on the same storage). Only the mount goes
+  // back — releaseMount(), never the RELEASED-forever release() — so the
+  // Runtime Session keeps its READY identity for the recovery fleet, and
+  // the handback names the claim of the acquire that owes it: a re-drive
+  // that acquires again supersedes that claim, so the old handback can
+  // never free the live mount. The plain lane hands back its own broker's
+  // claim (or the takeover branch's original identity); the Hook and MCP
+  // lanes own a Session-scoped mount and answer through their own
+  // discipline. A failed attempt is logged, never thrown — the block
+  // verdict must still reach the Session, and it waits for the first
+  // attempt only up to RELEASE_MOUNT_VERDICT_BOUND_MS. The chain retries
+  // on the BLOCK_MOUNT_RETRY_GAPS_MS cadence until the handback lands or a
+  // final refusal ends it, and the daemon stops it at shutdown.
+  blockMountRetry?: Promise<void>;
+  private mountOwner?: HostedWorkspaceBroker;
+
+  async releaseForRecoveryBlock(): Promise<void> {
+    if (this.blockMountRetry) return;
+    const attempt = this.mountHandbackAttempt();
+    if (!attempt) return;
+    let stopped = false;
+    let wake: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = () => {
+      stopped = true;
+      clearTimeout(timer);
+      wake?.();
+    };
+    let reported: string | undefined;
+    const once = async (): Promise<boolean> => {
+      try {
+        await attempt();
+        return false;
+      } catch (cause) {
+        const retry = retryableMountHandback(cause);
+        const line = String(cause);
+        // One line per distinct failure, not one per retry.
+        if (line !== reported) {
+          reported = line;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness turn ${this.promptId} could not release the Workspace mount after its recovery block${retry ? ' (retrying)' : ''}: ${line}`,
+          );
+        }
+        return retry;
+      }
+    };
+    const first = once();
+    const handbacks = this.options.mountHandbacks;
+    handbacks?.add(stop);
+    this.blockMountRetry = (async () => {
+      let again = await first;
+      for (let attempts = 0; again && !stopped; attempts++) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          timer = setTimeout(
+            resolve,
+            BLOCK_MOUNT_RETRY_GAPS_MS[
+              Math.min(attempts, BLOCK_MOUNT_RETRY_GAPS_MS.length - 1)
+            ],
+          );
+          timer.unref();
+        });
+        if (!stopped) again = await once();
+      }
+    })().finally(() => handbacks?.delete(stop));
+    await Promise.race([
+      first,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, RELEASE_MOUNT_VERDICT_BOUND_MS).unref();
+      }),
+    ]);
+  }
+
+  private mountHandbackAttempt(): (() => Promise<void>) | undefined {
+    if (this.mcp)
+      return this.mcp.mountHandback(
+        () => this.hooks?.mountWorkUnproven() ?? false,
+      );
+    if (this.hooks) return this.hooks.mountHandback();
+    const owner = this.mountOwner ?? this.broker;
+    const claim = owner.mountClaim();
+    // A turn that never sent an acquire holds nothing to hand back.
+    if (claim === undefined) return undefined;
+    return async () => {
+      await owner.releaseMount(claim);
+      this.acquired = false;
+    };
+  }
+
   // The publisher lives on the Session across turns, so a turn's close
   // deliberately does not touch it: the Session's ordered close (H3's
   // fifth slice) drains the stores, and background traffic keeps its
@@ -7081,6 +7284,16 @@ export class HostedWorkspaceToolTurn {
       );
     else if (this.acquired) await this.broker.release();
     this.acquired = false;
+    this.cleanedUp = true;
+  }
+
+  /**
+   * finish() leaves a turn owing the cleanup debt holding its mount for
+   * cleanup(), which runs only after the terminal record lands; a turn that
+   * exits before then still holds it (#13800).
+   */
+  get cleanupPending(): boolean {
+    return this.cleanupOwed && !this.cleanedUp;
   }
 
   async close(): Promise<void> {}

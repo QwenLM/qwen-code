@@ -350,6 +350,11 @@ class TakeoverReconciliationTest {
                             lookups.add((String) reference.get("callId"));
                             return status.apply(reference);
                         }
+                        if (method.getName().equals("reclaimMount")) {
+                            // A held mount stays as it is; only one a
+                            // recovery-block handback freed is claimed again.
+                            return CompletableFuture.completedFuture(null);
+                        }
                         unexpectedTransportCalls.add(method.getName());
                         throw new AssertionError("Takeover must not invoke transport " + method.getName());
                     });
