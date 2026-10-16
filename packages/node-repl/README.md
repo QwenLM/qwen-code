@@ -1,7 +1,7 @@
 # @qwen-code/node-repl-mcp
 
 A standalone [Model Context Protocol](https://modelcontextprotocol.io) server that
-exposes a **session-persistent Node.js REPL** as five MCP tools. It runs a real
+exposes a **session-persistent Node.js REPL** as two MCP tools. It runs a real
 Node.js kernel in a dedicated child process; top-level bindings, closures, and
 module state persist across calls within a session.
 
@@ -10,13 +10,17 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
 
 ## Tools
 
-| Tool                            | Description                                                                                                        |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `node_repl`                     | Start one JavaScript cell. `{ code, timeout_ms?, yield_time_ms?, title? }`; yields a cell ID if it remains active. |
-| `node_repl_wait`                | Wait for the active cell by ID without cancelling it.                                                              |
-| `node_repl_cancel`              | Cancel the active cell by ID; terminate an unresponsive kernel after five seconds.                                 |
-| `node_repl_reset`               | Terminate the kernel process and discard all bindings/module state.                                                |
-| `node_repl_add_node_module_dir` | Register an extra `node_modules` directory for bare-package resolution.                                            |
+| Tool       | Description                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------------- |
+| `js`       | Execute JavaScript to completion. `{ code, timeout_ms?, title? }`, default timeout 30 seconds. |
+| `js_reset` | Discard bindings and restart the kernel on the next call.                                      |
+
+The first call preloads global `cua` and emits the current platform's runtime
+documentation. Start with `var app = await cua.getApp("Application")`; it displays
+AX state automatically. Use `app.getAXState()`, `app.getScreenshot()`, or
+`app.getAXStateAndScreenshot()` for observations, with `emit:false` to suppress
+automatic display. Actions return void; observe to confirm the result.
+Call `cua.rewriteDocumentation()` after context compaction.
 
 ### Cell semantics
 
@@ -31,7 +35,7 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
   helpers that captured its binding read the replacement. Helper assignments
   and direct assignments share the same binding, including within one cell.
 - Bare packages resolve from the session `cwd` `node_modules` plus any directory
-  registered via `node_repl_add_node_module_dir`; package entrypoints use Node
+  configured by the host with `QWEN_NODE_REPL_MODULE_DIRS`; package entrypoints use Node
   singleton caching. Local `.js`/`.mjs` reload on each execution.
 - Node builtins are importable except `process`/`node:process`. Use
   `(await import('node:module')).createRequire(import.meta.url)` for CommonJS or
@@ -41,7 +45,7 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
   not committed. If the kernel does not return a terminal result within five
   seconds of cancellation, the host terminates it and reports that all bindings
   were lost. A subsequent cell starts a fresh kernel. External actions may have
-  completed, so verify external state before retrying. `node_repl_reset` or a
+  completed, so verify external state before retrying. `js_reset` or a
   real process crash also discards all bindings.
 - When the kernel is retained, runtime errors keep completed statement/declarator
   checkpoints; cancellation and timeout restore binding values from cell entry.
@@ -90,6 +94,7 @@ resolution (`<cwd>/node_modules`).
 Environment:
 
 - `QWEN_NODE_REPL_ROOTS` — extra readable roots (path-list, OS delimiter).
+- `QWEN_NODE_REPL_MODULE_DIRS` — host-configured `node_modules` directories (path-list, OS delimiter); retained across reset.
 - `QWEN_NODE_REPL_DEBUG` — set truthy for stderr debug logging.
 
 ### Linux desktop sessions
@@ -133,7 +138,7 @@ until something connects, and each connection gets its own short-lived process.
 - **Web Shell.** In a session served by a remote `qwen serve` (started with
   `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`), choose **Use this computer** in the sidebar
   footer. A native dialog on this computer asks for approval; once allowed, the
-  relay starts `node_repl` here and registers it for that one session over the
+  relay starts the JavaScript MCP server here and registers it for that one session over the
   daemon's reverse tool channel. Disconnect from the same entry.
 
 An approved session can run code on this computer with your permissions and see
@@ -177,3 +182,7 @@ transform, protocol, security policy, kernel manager). The qwen-coupled result
 converter was replaced by `output-adapter.ts`, which emits MCP content blocks.
 The empty-in-production trusted-package / sha256-pinning layer was removed
 entirely: this runtime has no trusted-package or capability mechanism.
+
+Relayed `js` calls have a 20-second execution limit so cancellation and the
+terminal response fit the daemon's 30-second reverse-channel deadline. Local
+stdio calls retain the default 30-second limit.

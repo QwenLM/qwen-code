@@ -1,3 +1,4 @@
+import type { CuaRuntime } from "../runtime.js";
 import type {
   ActAndVerifyResult,
   ComputerUse,
@@ -131,4 +132,14 @@ export async function exerciseComputerUseTypes(
   (await computer.sessionInfo()).expiresInSeconds;
   computer.connectionGeneration;
   return result;
+}
+
+export async function exerciseRuntimeTypes(cua: CuaRuntime): Promise<void> {
+  const app = await cua.getApp("Fixture");
+  const text: string = await app.getAXState({ emit: false });
+  const result: void = await app.click(1);
+  await app.getScreenshot();
+  await app.getAXStateAndScreenshot({ forceFull: true });
+  void text;
+  void result;
 }

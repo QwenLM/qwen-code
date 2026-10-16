@@ -26,6 +26,10 @@
     "./computer-use": {
       "types": "./computer-use/index.d.ts",
       "import": "./computer-use/index.js"
+    },
+    "./runtime": {
+      "types": "./computer-use/runtime.d.ts",
+      "import": "./computer-use/runtime.js"
     }
   },
   "files": [
@@ -46,7 +50,10 @@
     "scripts/install-native.mjs",
     "LICENSE.md",
     "NOTICE.md",
-    "README.md"
+    "README.md",
+    "computer-use/runtime.js",
+    "computer-use/runtime.d.ts",
+    "computer-use/documentation.js"
   ],
   "engines": {
     "node": ">=22"

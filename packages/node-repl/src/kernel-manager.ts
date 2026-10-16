@@ -96,6 +96,7 @@ export interface NodeReplExecRequest {
 }
 
 export interface KernelManagerOptions {
+  preloadCua?: boolean;
   cwd: string;
   homeDir: string;
   tmpRootDir: string;
@@ -631,6 +632,7 @@ export class NodeReplKernelManager {
       handle.toKernel.write(
         encodeFrame({
           type: 'init',
+          preloadCua: this.options.preloadCua ?? false,
           generation: handle.generation,
           cwd: this.options.cwd,
           homeDir: this.options.homeDir,

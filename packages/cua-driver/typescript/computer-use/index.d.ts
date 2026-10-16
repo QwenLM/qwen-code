@@ -27,7 +27,7 @@ export interface AppObservationOptions extends CallOptions {
   disableDiff?: boolean;
   /** Returned text budget. Default 12,000; minimum 512. */
   maxTextChars?: number;
-  /** Expose the screenshot captured with this App observation. */
+  /** Capture and expose a screenshot; false by default. */
   includeScreenshot?: boolean;
 }
 

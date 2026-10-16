@@ -197,7 +197,7 @@ try {
     if (
       instructions.length === 0 ||
       instructions.length >= 256 ||
-      !instructions.includes('One persistent JavaScript kernel') ||
+      !instructions.includes('runtime documentation') ||
       instructions.includes('Computer Use')
     ) {
       throw new Error(
@@ -206,28 +206,25 @@ try {
     }
     const tools = await client.listTools();
     const names = tools.tools.map((tool) => tool.name).sort();
-    if (
-      names.join(',') !==
-      'node_repl,node_repl_add_node_module_dir,node_repl_cancel,node_repl_reset,node_repl_wait'
-    ) {
+    if (names.join(',') !== 'js,js_reset') {
       throw new Error(`unexpected MCP tools: ${names.join(',')}`);
     }
 
     await client.callTool({
-      name: 'node_repl',
+      name: 'js',
       arguments: { code: 'const releaseValue = 40;' },
     });
     const persisted = await client.callTool({
-      name: 'node_repl',
+      name: 'js',
       arguments: { code: 'nodeRepl.write(String(releaseValue + 2));' },
     });
     if (!textOf(persisted).includes('42')) {
       throw new Error('packed MCP server did not preserve cell bindings');
     }
 
-    await client.callTool({ name: 'node_repl_reset', arguments: {} });
+    await client.callTool({ name: 'js_reset', arguments: {} });
     const reset = await client.callTool({
-      name: 'node_repl',
+      name: 'js',
       arguments: { code: 'nodeRepl.write(typeof releaseValue);' },
     });
     if (!textOf(reset).includes('undefined')) {

@@ -6,7 +6,7 @@
 
 import {
   MAX_RELAYED_REPLY_BYTES,
-  MAX_RELAYED_YIELD_TIME_MS,
+  MAX_RELAYED_TIMEOUT_MS,
 } from './constants.js';
 
 export type JsonRpcId = string | number;
@@ -53,26 +53,23 @@ interface Pending {
   resolve: (reply: JsonRpcMessage | undefined) => void;
 }
 
-/**
- * A relayed `tools/call` reply must fit the daemon's per-message round-trip
- * budget, so a `yield_time_ms` above it is rewritten down; the caller can
- * keep waiting with `node_repl_wait`.
- */
-function clampYieldTime(message: JsonRpcMessage): JsonRpcMessage {
+function clampExecutionTime(message: JsonRpcMessage): JsonRpcMessage {
   if (message.method !== 'tools/call') return message;
-  const params = message.params as { arguments?: unknown } | undefined;
-  const args = params?.arguments;
+  const params = message.params as
+    | { name?: string; arguments?: unknown }
+    | undefined;
+  if (params?.name !== 'js') return message;
+  const args = params.arguments;
   if (args === null || typeof args !== 'object') return message;
   const record = args as Record<string, unknown>;
-  const yieldTime = record['yield_time_ms'];
-  if (typeof yieldTime !== 'number' || yieldTime <= MAX_RELAYED_YIELD_TIME_MS) {
+  const timeout = record['timeout_ms'];
+  if (typeof timeout === 'number' && timeout <= MAX_RELAYED_TIMEOUT_MS)
     return message;
-  }
   return {
     ...message,
     params: {
       ...params,
-      arguments: { ...record, yield_time_ms: MAX_RELAYED_YIELD_TIME_MS },
+      arguments: { ...record, timeout_ms: MAX_RELAYED_TIMEOUT_MS },
     },
   };
 }
@@ -204,7 +201,7 @@ export class McpChildRelay {
     return new Promise((resolve) => {
       this.pending.set(relayId, { originalId, resolve });
       try {
-        this.child.send({ ...clampYieldTime(message), id: relayId });
+        this.child.send({ ...clampExecutionTime(message), id: relayId });
       } catch (error) {
         this.settle(
           relayId,

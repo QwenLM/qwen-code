@@ -154,7 +154,7 @@ export class ComputerUseApp {
     try {
       state = await this.#computer.observeWindow({
         ...options,
-        includeScreenshot: true,
+        includeScreenshot: exposeScreenshot,
         pid: target.pid,
         windowId: target.windowId,
         appContext: true,

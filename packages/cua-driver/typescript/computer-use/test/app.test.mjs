@@ -59,7 +59,7 @@ test("app aliases bind the same handle and hide OS addressing from state", async
   assert.equal(calls.find((call) => call.method === "listWindows").input.appContext, true);
   const observation = calls.find((call) => call.method === "getWindowState").input;
   assert.equal(observation.appContext, true);
-  assert.equal(observation.includeScreenshot, true);
+  assert.equal(observation.includeScreenshot, false);
   assert.equal(observation.observationRevision.projectionVersion, "app-tree-v1");
   await app.click(37);
   assert.equal(calls.at(-1).input.elementToken, "rv1:window_7:25");
@@ -120,7 +120,7 @@ test("application identity preserves POSIX syntax and case on every Node host", 
 test("App scroll carries its context without changing exact-window foreground scroll", async () => {
   const { computer, calls } = fixture({ platform: "linux" });
   const app = await computer.getApp("Fixture");
-  await app.getState();
+  await app.getState({ includeScreenshot: true });
   await app.scroll({ x: 2, y: 3 }, { direction: "down", amount: 1 });
   assert.equal(calls.at(-1).input.appContext, true);
   await computer.scroll({ pid: 42, windowId: 7, x: 2, y: 3, direction: "down", amount: 1, deliveryMode: "foreground" });
@@ -193,7 +193,7 @@ test("app input activates the exact target once without exposing a mode choice",
   assert.equal(calls.filter((call) => call.method === "getWindowState").length, 2);
 });
 
-test("app observations retain a current screenshot without exposing it by default", async () => {
+test("app observations capture screenshots only when requested and require one for coordinates", async () => {
   const { computer, calls } = fixture({ observe: (_input, state, count) => ({
     ...state,
     tree_markdown: count === 1 ? state.tree_markdown : "No accessibility changes.",
@@ -205,17 +205,18 @@ test("app observations retain a current screenshot without exposing it by defaul
   const hidden = await app.getState({ includeScreenshot: false });
   assert.equal(hidden.screenshot, undefined);
   await app.click(37);
-  await app.click({ x: 1, y: 2 });
+  await assert.rejects(app.click({ x: 1, y: 2 }), { code: "app_screenshot_required" });
   const unchanged = await app.getState();
   assert.equal(unchanged.mode, "no_change");
   assert.equal(unchanged.screenshot, undefined);
-  await app.click({ x: 2, y: 3 });
+  await assert.rejects(app.click({ x: 2, y: 3 }), { code: "app_screenshot_required" });
   const visible = await app.getState({ includeScreenshot: true });
   assert.equal(visible.screenshot.images[0].dataBase64, "fixture");
+  await app.click({ x: 2, y: 3 });
   assert.deepEqual(
     calls.filter((call) => call.method === "getWindowState")
       .map((call) => call.input.includeScreenshot),
-    [true, true, true, true],
+    [false, false, false, true],
   );
 });
 
