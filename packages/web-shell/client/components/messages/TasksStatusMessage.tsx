@@ -26,6 +26,7 @@ import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { PlanExecutionView } from './PlanExecutionView';
+import type { OpenSubagentDetails } from '../../subagentDetailsContext';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
 import {
   localizeAgentTypeName,
@@ -376,7 +377,7 @@ export function TasksStatusMessage({
   onClose?: () => void;
   planTodos?: readonly TodoItem[];
   agentTools?: readonly ACPToolCall[];
-  onOpenSubagent?: (tool: ACPToolCall) => void;
+  onOpenSubagent?: OpenSubagentDetails;
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
   const { t } = useI18n();
@@ -1053,6 +1054,7 @@ export function TasksStatusMessage({
                   <div className={styles.inlineDetail} data-kind={task.kind}>
                     <TaskDetail
                       task={task}
+                      onOpenSubagent={onOpenSubagent}
                       t={t}
                       hideHeader
                       busy={busy}
@@ -1107,6 +1109,7 @@ export function TasksStatusMessage({
           {actionError && <div className={styles.error}>{actionError}</div>}
           <TaskDetail
             task={selectedTask}
+            onOpenSubagent={onOpenSubagent}
             t={t}
             busy={busy}
             showCancelConfirm={pendingCancelId === selectedTask.id}
@@ -1464,6 +1467,7 @@ function MonitorMetric({ label, value }: { label: string; value: string }) {
 
 function TaskDetail({
   task,
+  onOpenSubagent,
   t,
   hideHeader = false,
   busy = false,
@@ -1476,6 +1480,7 @@ function TaskDetail({
   onCancelConfirmDismiss,
 }: {
   task: DaemonSessionTaskStatus;
+  onOpenSubagent?: OpenSubagentDetails;
   t: ReturnType<typeof useI18n>['t'];
   hideHeader?: boolean;
   busy?: boolean;
@@ -1847,6 +1852,7 @@ function TaskDetail({
       {task.kind === 'workflow' && (
         <WorkflowExecutionView
           task={task}
+          onOpenSubagent={onOpenSubagent}
           sourceTask={sourceWorkflowTask}
           historyTasks={workflowHistoryTasks}
           historyActionBusy={busy}
