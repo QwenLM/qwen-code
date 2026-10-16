@@ -373,6 +373,26 @@ class SessionMessageRelayTest {
                 "accepted");
     }
 
+    // An older body that cannot be read (not yet, or not JSON) cannot prove
+    // its run: the younger message holds as behind one to its own run, and
+    // the fault in the other message's read costs it no attempt.
+    @Test
+    void holdsBehindAnOlderMessageWhoseBodyCannotBeRead() {
+        when(store.olderOwedMessages(TENANT, PARENT, MESSAGE))
+                .thenReturn(List.of("resource-older"));
+        for (String unreadable : new String[] {null, "not json {"}) {
+            when(records.readResource(TENANT, PARENT, "resource-older"))
+                    .thenReturn(unreadable);
+            relay.scan();
+        }
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        verify(store, Mockito.times(2)).scheduleRetry(any(MessageRow.class),
+                anyString(), Mockito.eq(6_000L), anyLong(), anyLong());
+        verify(store, never()).defer(any(MessageRow.class), anyString(),
+                anyLong(), any(), anyLong(), anyLong());
+    }
+
     // The store reads per sender, across runs: the match can sit behind
     // older messages to other runs.
     @Test
