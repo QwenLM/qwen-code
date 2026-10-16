@@ -537,13 +537,12 @@ public final class ToolPublicationAdmissionStore {
     }
 
     private void lockTenant(JsonNode key) {
-        String tenant = text(key, "tenantId");
-        String tenantKey = ManagedSchemaKeys.key(tenant);
-        jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
-                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
-        String saved = jdbc.queryForObject("SELECT tenant_id FROM ma_tenant_guard"
-                + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE", String.class, tenantKey);
-        require(tenant.equals(saved), "Receipt tenant conflicts");
+        // This lane's publication-guard acquisition, bounded with the shared
+        // named-failure mapping (#13800). For a CSI-pinned Session,
+        // lockCsiOriginal above already took the same row with the same
+        // bound, and this re-lock returns at once.
+        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
+                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private static String scope(JsonNode key) {

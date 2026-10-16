@@ -4,6 +4,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isBuiltin } from 'node:module';
 import pkg from '../package.json' with { type: 'json' };
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -141,19 +142,32 @@ for (const [key, entry] of entryPoints) {
   }
 }
 
-// Declarations ship verbatim, so they must not import through the alias that
-// only this repository resolves.
+// Published declarations must resolve without this repository's dev dependencies.
+const typeDependencies = new Set([
+  pkg.name,
+  ...Object.keys(pkg.dependencies ?? {}),
+  ...Object.keys(pkg.peerDependencies ?? {}),
+]);
 const typesDir = join(root, 'dist/types');
 if (existsSync(typesDir)) {
   for (const name of readdirSync(typesDir, { recursive: true })) {
     if (!name.endsWith('.d.ts')) continue;
+    if (packed && !packed.has(packPath(join(typesDir, name)))) continue;
     const source = readFileSync(join(typesDir, name), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/\/\/.*$/gm, '');
     for (const [, specifier] of source.matchAll(
       /(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g,
     )) {
-      if (specifier.startsWith('@/')) {
+      if (specifier.startsWith('.') || isBuiltin(specifier)) continue;
+      const dependency = specifier.startsWith('@')
+        ? specifier.split('/').slice(0, 2).join('/')
+        : specifier.split('/')[0];
+      const typesPackage = `@types/${dependency.replace(/^@/, '').replace('/', '__')}`;
+      if (
+        !typeDependencies.has(dependency) &&
+        !typeDependencies.has(typesPackage)
+      ) {
         problems.push(`dist/types/${name} imports the repo-only ${specifier}`);
       }
     }

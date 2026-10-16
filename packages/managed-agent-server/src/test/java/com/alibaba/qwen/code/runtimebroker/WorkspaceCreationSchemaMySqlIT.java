@@ -14,16 +14,47 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.UUID;
 
-/** Uses only an explicitly supplied disposable empty application catalog. */
+import javax.sql.DataSource;
+
+/**
+ * Creates and drops its own disposable empty application catalog beside the supplied one. The
+ * failsafe lane shares {@code mysql.url} with ITs such as ManagedSchemaMySqlIT that initialize the
+ * schema there, so the supplied catalog is empty only in some run orders.
+ */
 class WorkspaceCreationSchemaMySqlIT {
     @Test
     void upgradesPublishedCatalogsWithoutChangingExistingRows() throws Exception {
-        var source =
-                new DriverManagerDataSource(
-                        System.getProperty("mysql.url"),
-                        System.getProperty("mysql.user"),
-                        System.getProperty("mysql.password", ""));
+        String url = System.getProperty("mysql.url");
+        String user = System.getProperty("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        int query = url.indexOf('?');
+        String location = query < 0 ? url : url.substring(0, query);
+        String catalog = "workspace_creation_" + UUID.randomUUID().toString().replace("-", "");
+        var admin = new DriverManagerDataSource(url, user, password);
+        try (var connection = admin.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute(
+                    "CREATE DATABASE `" + catalog + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin");
+        }
+        try {
+            upgradesPublishedCatalogs(
+                    new DriverManagerDataSource(
+                            location.substring(0, location.lastIndexOf('/') + 1)
+                                    + catalog
+                                    + (query < 0 ? "" : url.substring(query)),
+                            user,
+                            password));
+        } finally {
+            try (var connection = admin.getConnection();
+                    var statement = connection.createStatement()) {
+                statement.execute("DROP DATABASE `" + catalog + "`");
+            }
+        }
+    }
+
+    private static void upgradesPublishedCatalogs(DataSource source) throws Exception {
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
             ManagedSchema.requireApplicationCatalog(connection);
@@ -44,7 +75,7 @@ class WorkspaceCreationSchemaMySqlIT {
         }
         assertEquals(1, ManagedSchema.schemaVersion(source));
         ManagedSchema.initialize(source);
-        assertEquals(5, ManagedSchema.schemaVersion(source));
+        assertEquals(6, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection();
                 var statement = connection.createStatement();
                 var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
@@ -62,6 +93,12 @@ class WorkspaceCreationSchemaMySqlIT {
             statement.execute(
                     "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
             statement.execute("ALTER TABLE ma_request_receipt ADD " + oldCheck);
+            statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_approval_selection");
+            statement.execute("ALTER TABLE ma_turn DROP CONSTRAINT ck_ma_turn_approval_selection");
+            statement.execute("ALTER TABLE ma_session DROP COLUMN selected_approval_mode");
+            statement.execute("ALTER TABLE ma_session DROP COLUMN approval_revision");
+            statement.execute("ALTER TABLE ma_turn DROP COLUMN approval_mode");
+            statement.execute("ALTER TABLE ma_turn DROP COLUMN approval_revision");
             statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_model_selection");
             statement.execute("ALTER TABLE ma_turn DROP CONSTRAINT ck_ma_turn_model_selection");
             statement.execute("ALTER TABLE ma_session DROP COLUMN model_id");
@@ -84,7 +121,7 @@ class WorkspaceCreationSchemaMySqlIT {
         assertEquals(4, ManagedSchema.schemaVersion(source));
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
-        assertEquals(5, ManagedSchema.schemaVersion(source));
+        assertEquals(6, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
             receipt(
