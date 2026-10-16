@@ -12225,6 +12225,22 @@ Other open files:
           expect(mockTurnRunFn).not.toHaveBeenCalled();
         });
 
+        it('rejects an admission after the session changes', async () => {
+          promptSubmitBus({ output: undefined });
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-session',
+          );
+          vi.mocked(mockConfig.getSessionId).mockReturnValue('next-session');
+
+          await expect(
+            admittedSend(admission, 'prompt-session'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
         it('binds the admission to the hook owner fields, not the owner object', async () => {
           promptSubmitBus({ output: undefined });
           vi.mocked(mockConfig.getHookSystem).mockReturnValue({
