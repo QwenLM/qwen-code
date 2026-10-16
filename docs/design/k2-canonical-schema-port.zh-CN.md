@@ -13,9 +13,9 @@
 
 ## 数据库结构与行身份
 
-保留当前主干 V1–V5 的原始字节。V1 为 32 表 707 列，包含新增重试预算字段；V2 增加四个私有 CSI 权限字段，V3 调整列表索引，V4 扩展 Workspace 创建 receipt namespace，V5 增加四个模型选择字段。K2 退役增量顺延为 V6，增加十一个应用进度字段、`ma_csi_source`（19 列）和 `ma_csi_physical`（6 列）。有效结构为 34 表 751 列，应用清单为 33 表 745 列，物理伴随表单独检查。`ma_session.csi_guard` 由私有工具 profile 或持久 runtime request pin 生成。
+保留当前主干 V1–V6 的原始字节。V1 为 32 表 707 列，包含新增重试预算字段；V2 增加四个私有 CSI 权限字段，V3 调整列表索引，V4 扩展 Workspace 创建 receipt namespace，V5 增加四个模型选择字段，V6 增加四个审批选择字段。K2 退役增量顺延为 V7，增加十一个应用进度字段、`ma_csi_source`（19 列）和 `ma_csi_physical`（6 列）。有效结构为 34 表 755 列，应用清单为 33 表 749 列，物理伴随表单独检查。`ma_session.csi_guard` 由私有工具 profile 或持久 runtime request pin 生成。
 
-七个主干新增字段均进入原始 typed whole-row 比较，包括 Session 模型 `(NULL,0)`、Turn 模型双 NULL 及三项重试预算字段。`model_id` 使用严格 UTF-8 identity 解码，但不成为新的强引用根。私有首条路径保持固定 native 模型策略，只支持实际 Session 默认 `(NULL,0)`；非默认选择完整进入清单并阻塞退役，普通公开模型选择保持不变。旧 inventory/2 baseline 缺列时仍被拒绝，不补默认值、不改 header/hash 或已存 bytes。旧未发布 K2 V4 不伪装为主干 V4，也不修改 Flyway 历史。
+十一个主干新增字段均进入原始 typed whole-row 比较，包括 Session 模型 `(NULL,0)`、Turn 模型双 NULL、三项重试预算字段与四项审批选择字段。私有 Session 仅支持审批覆盖 `(NULL,0)`；非默认覆盖阻塞，普通审批选择保留主干行为，Turn 审批字段保留实际 nullable 快照。`model_id` 使用严格 UTF-8 identity 解码，但不成为新的强引用根。私有首条路径保持固定 native 模型策略，只支持实际 Session 默认 `(NULL,0)`；非默认选择完整进入清单并阻塞退役，普通公开模型选择保持不变。旧 inventory/2 baseline 缺列时仍被拒绝，不补默认值、不改 header/hash 或已存 bytes。旧未发布 K2 V4/V6 不伪装为主干 V4/V6，也不修改 Flyway 历史。
 
 原生资源读取证据使用现有 `ma_request_receipt`，namespace 为 `SESSION_COMMAND`，
 operation 为 `CSI_RESOURCE_READ`，真实主键为 `key("csi-read", readId)`。

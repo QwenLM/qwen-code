@@ -146,4 +146,32 @@ class ManagedPrivateMutationIsolationTest {
         }
         assertThat(jdbc.queryForMap("SELECT * FROM ma_session")).usingRecursiveComparison().isEqualTo(owner);
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"profile", "retained-pin"})
+    void approvalChangesRespectThePrivateFenceBeforeReplayOrPolicyWrites(String shape) {
+        session(shape);
+        var owner = jdbc.queryForMap("SELECT * FROM ma_session");
+        var store = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        for (boolean saved : new boolean[] {false, true}) {
+            if (saved) {
+                String scope = ManagedSchemaKeys.key("SET_APPROVAL", "session", "actor");
+                transaction.executeWithoutResult(status -> ManagedReceipts.insert(jdbc,
+                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND,
+                        "tenant", com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope.ACTOR,
+                        scope, "approval", "digest", "SET_APPROVAL", "actor".getBytes(StandardCharsets.UTF_8),
+                        "session", null, "COMPLETED", "ACTIVE", true, 1));
+                jdbc.update("UPDATE ma_request_receipt SET result_json = '{\"mode\":\"auto-edit\",\"revision\":1}'");
+            }
+            var receipts = jdbc.queryForList("SELECT * FROM ma_request_receipt");
+            assertThatThrownBy(() -> transaction.execute(status -> store.changeSessionApproval("tenant", "actor",
+                    "session", "approval", "digest", "auto-edit", 0, true)))
+                    .isInstanceOfSatisfying(ApiException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_session")).usingRecursiveComparison().isEqualTo(owner);
+            assertThat(jdbc.queryForList("SELECT * FROM ma_request_receipt")).usingRecursiveComparison().isEqualTo(receipts);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event", Integer.class)).isZero();
+        }
+    }
 }

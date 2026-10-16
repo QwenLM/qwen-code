@@ -121,7 +121,8 @@ public enum ManagedSchemaProjection {
                     + "root_session_id, parent_child_run_id, child_depth, agent_definition_digest, "
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, recovery_protected, "
-                    + "resource_gc_completed, runtime_request_key, csi_guard, model_id, model_revision"),
+                    + "resource_gc_completed, runtime_request_key, csi_guard, model_id, model_revision, "
+                    + "selected_approval_mode, approval_revision"),
     SESSION_HEAD(
             "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
@@ -176,7 +177,8 @@ public enum ManagedSchemaProjection {
                     + "submission_attempted, harness_event_epoch, harness_last_event_id, dispatch_owner, "
                     + "dispatch_lease_until, error_code, error_message, gmt_create, gmt_modified, "
                     + "completed_at, version, retry_count, consecutive_failures, "
-                    + "budget_exempt_failures, retry_after, model_id, model_revision");
+                    + "budget_exempt_failures, retry_after, model_id, model_revision, "
+                    + "approval_mode, approval_revision");
 
     private final String columns;
 

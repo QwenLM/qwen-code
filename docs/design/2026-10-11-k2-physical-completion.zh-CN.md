@@ -33,7 +33,7 @@ Plan 还固定 `historicalReleaseInventorySha256`，它从该 ownership 投影�
 
 读取时除核对已保存 hash，还要求 saved plan bytes 等于已验证 expected plan 的精确编码。JSON 值相同但 whitespace、字段顺序或 escaping 改变，也必须拒绝，不能在重试时据此建立新 plan hash 或 stop-intent 依赖。
 
-Physical 表具有独立显式 typed catalog 和 validator，在同 Connection 的 application closure 之后读取。当前 application catalog 为 inventory/2 的 33 表 745 列，见[标准结构适配](k2-canonical-schema-port.zh-CN.md)。DRAINED 前，companion 必须具有精确六列 schema，并且不存在匹配 retirement、binding 或 physical-key 的行。完整 DRAINED image 验证后，任何 companion row 必须匹配原 plan 与 exact stored bytes/hash/version；foreign/duplicate row 或 schema drift 均拒绝进度。当前 expected image 只允许声明的 insert、append 或一次 pending-outcome replacement，不向已部署 DB 回填 positive state。原 worker-ACK 表在本 lane 中不支持，不提供物理资格；qualified release 需要另外实现的 format 与 validator。
+Physical 表具有独立显式 typed catalog 和 validator，在同 Connection 的 application closure 之后读取。当前 application catalog 为 inventory/2 的 33 表 749 列，见[标准结构适配](k2-canonical-schema-port.zh-CN.md)。DRAINED 前，companion 必须具有精确六列 schema，并且不存在匹配 retirement、binding 或 physical-key 的行。完整 DRAINED image 验证后，任何 companion row 必须匹配原 plan 与 exact stored bytes/hash/version；foreign/duplicate row 或 schema drift 均拒绝进度。当前 expected image 只允许声明的 insert、append 或一次 pending-outcome replacement，不向已部署 DB 回填 positive state。原 worker-ACK 表在本 lane 中不支持，不提供物理资格；qualified release 需要另外实现的 format 与 validator。
 
 ## Stop intent 与精确正常 DELETE
 

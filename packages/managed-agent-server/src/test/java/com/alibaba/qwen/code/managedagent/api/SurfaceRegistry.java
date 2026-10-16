@@ -293,6 +293,14 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/session-models/change",
             Surface.WEBSHELL, RuleClass.OPERATOR,
             EnumSet.of(Capability.SESSION_MODEL_CHANGE)),
+    WEBSHELL_SESSION_APPROVAL(Method.POST,
+            "/api/agent/web-shell/v1/session-approval/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR,
+            EnumSet.of(Capability.SESSION_APPROVAL)),
+    WEBSHELL_SESSION_APPROVAL_CHANGE(Method.POST,
+            "/api/agent/web-shell/v1/session-approval/change",
+            Surface.WEBSHELL, RuleClass.OWNER,
+            EnumSet.of(Capability.SESSION_APPROVAL_CHANGE)),
     // ManagedSessionStoreController: internal writer routes.
     INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
@@ -535,6 +543,8 @@ public enum SurfaceRegistry {
         ARTIFACT_CONTENT,
         WORKSPACE_CREATE,
         SESSION_OPTIONS,
+        SESSION_APPROVAL,
+        SESSION_APPROVAL_CHANGE,
         SESSION_MODELS,
         SESSION_MODEL_CHANGE,
         WORKSPACE_LIST,

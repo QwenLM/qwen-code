@@ -149,6 +149,20 @@ export class JavaManagedAgentClient {
     return this.post('/workspaces/create', request, signal);
   }
 
+  getSessionApproval(
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionApproval']> {
+    return this.post('/session-approval/query', { sessionId }, signal);
+  }
+
+  changeApproval(
+    request: Schemas['WebShellChangeApprovalRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellApprovalChangeResult']> {
+    return this.post('/session-approval/change', request, signal);
+  }
+
   getSessionOptions(
     agentId: string,
     signal?: AbortSignal,
