@@ -705,6 +705,13 @@ export async function parseChannelConfig(
     'multiSession',
     rawConfig['multiSession'],
   );
+  // QQ's opt-in purge of legacy session routes. Validated like multiSession so
+  // a stringified "true" cannot silently leave the purge off.
+  const purgeLegacySessions = optionalBooleanField(
+    name,
+    'purgeLegacySessions',
+    rawConfig['purgeLegacySessions'],
+  );
   const sessionRotation = parseSessionRotationConfig(
     name,
     rawConfig['sessionRotation'],
@@ -735,6 +742,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope: configuredSessionScope,
     multiSession,
+    purgeLegacySessions,
     sessionRotation,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
