@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -116,14 +117,19 @@ class AesGcmSecretProtectorTest {
 
     @Test
     void rejectsInvalidPreviousKeyMaterial() {
-        assertThrows(IllegalArgumentException.class,
+        IllegalArgumentException malformed = assertThrows(
+                IllegalArgumentException.class,
                 () -> AesGcmSecretProtector.fromBase64("key-2",
                         encodedKey(2), Map.of("key-1", "not-base64")));
-        assertThrows(IllegalArgumentException.class,
+        IllegalArgumentException shortKey = assertThrows(
+                IllegalArgumentException.class,
                 () -> AesGcmSecretProtector.fromBase64("key-2",
                         encodedKey(2), Map.of("key-1",
                                 Base64.getEncoder().encodeToString(
                                         new byte[31]))));
+
+        assertTrue(malformed.getMessage().contains("key-1"));
+        assertTrue(shortKey.getMessage().contains("key-1"));
     }
 
     private static boolean containsSubsequence(byte[] envelope,

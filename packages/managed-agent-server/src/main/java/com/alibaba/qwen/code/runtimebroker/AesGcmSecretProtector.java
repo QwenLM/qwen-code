@@ -43,8 +43,8 @@ public final class AesGcmSecretProtector implements SecretProtector {
         keyBytes.forEach((id, bytes) -> {
             String configuredId = BrokerValues.requireId(id, "keyId");
             if (bytes == null || bytes.length != 32) {
-                throw new IllegalArgumentException(
-                        "AES-GCM key must contain 32 bytes");
+                throw new IllegalArgumentException("AES-GCM key "
+                        + configuredId + " must contain 32 bytes");
             }
             configured.put(configuredId,
                     new SecretKeySpec(bytes.clone(), "AES"));
@@ -61,7 +61,7 @@ public final class AesGcmSecretProtector implements SecretProtector {
     public static AesGcmSecretProtector fromBase64(String keyId,
             String encodedKey, Map<String, String> previousKeys) {
         Map<String, byte[]> decoded = new LinkedHashMap<>();
-        decoded.put(keyId, decodeKey(encodedKey));
+        decoded.put(keyId, decodeKey(keyId, encodedKey));
         if (previousKeys != null) {
             previousKeys.forEach((previousKeyId, previousKey) -> {
                 String configuredId = BrokerValues.requireId(previousKeyId,
@@ -70,22 +70,23 @@ public final class AesGcmSecretProtector implements SecretProtector {
                     throw new IllegalArgumentException(
                             "AES-GCM key IDs must be unique");
                 }
-                decoded.put(configuredId, decodeKey(previousKey));
+                decoded.put(configuredId, decodeKey(configuredId, previousKey));
             });
         }
         return new AesGcmSecretProtector(keyId, decoded,
                 new SecureRandom());
     }
 
-    private static byte[] decodeKey(String encodedKey) {
+    private static byte[] decodeKey(String keyId, String encodedKey) {
         if (encodedKey == null || encodedKey.isBlank()) {
-            throw new IllegalArgumentException("encodedKey is required");
+            throw new IllegalArgumentException(
+                    "encodedKey for key " + keyId + " is required");
         }
         try {
             return Base64.getDecoder().decode(encodedKey);
         } catch (IllegalArgumentException exception) {
-            throw new IllegalArgumentException(
-                    "encodedKey must be valid base64", exception);
+            throw new IllegalArgumentException("encodedKey for key " + keyId
+                    + " must be valid base64", exception);
         }
     }
 
