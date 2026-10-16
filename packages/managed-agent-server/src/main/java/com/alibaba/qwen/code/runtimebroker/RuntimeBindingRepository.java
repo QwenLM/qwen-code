@@ -107,20 +107,20 @@ public interface RuntimeBindingRepository {
         requireHarnessAdmission(scope, harnessSessionId, authority);
     }
 
-    /** As the scope-only check, for a Runtime Session on {@code binding}; see {@link HarnessOwnership}. */
-    default void requireHarnessAdmission(RuntimeProvisionRequest binding, RuntimeScope scope,
+    /** As the scope-only check, for a Runtime Session on {@code bindingRequest}; see {@link HarnessOwnership}. */
+    default void requireHarnessAdmission(RuntimeProvisionRequest bindingRequest, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireHarnessAdmission(scope, harnessSessionId, authority);
     }
 
-    /** As the scope-only check, for a Runtime Session on {@code binding}; see {@link HarnessOwnership}. */
-    default boolean requireHarnessRecovery(RuntimeProvisionRequest binding, RuntimeScope scope,
+    /** As the scope-only check, for a Runtime Session on {@code bindingRequest}; see {@link HarnessOwnership}. */
+    default boolean requireHarnessRecovery(RuntimeProvisionRequest bindingRequest, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
         return requireHarnessRecovery(scope, harnessSessionId, authority);
     }
 
-    /** As the scope-only check, for a Runtime Session on {@code binding}; see {@link HarnessOwnership}. */
-    default void requireHookAdmission(RuntimeProvisionRequest binding, RuntimeScope scope,
+    /** As the scope-only check, for a Runtime Session on {@code bindingRequest}; see {@link HarnessOwnership}. */
+    default void requireHookAdmission(RuntimeProvisionRequest bindingRequest, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireHookAdmission(scope, harnessSessionId, authority);
     }

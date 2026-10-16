@@ -2307,9 +2307,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         });
     }
 
-    private void requireLifecycleRelease(RuntimeProvisionRequest binding, RuntimeSession session,
+    private void requireLifecycleRelease(RuntimeProvisionRequest bindingRequest, RuntimeSession session,
             RuntimeLifecycleAuthority authority) {
-        if (bindingRepository.requireHarnessRecovery(binding, session.getScope(), session.getHarnessSessionId(), authority)
+        if (bindingRepository.requireHarnessRecovery(bindingRequest, session.getScope(), session.getHarnessSessionId(), authority)
                 && !bindingRepository.isHarnessDraining(session.getScope().getTenantId(), session.getHarnessSessionId())) {
             throw conflict("runtime_admission_closed", "Lifecycle release requires resource drain");
         }
