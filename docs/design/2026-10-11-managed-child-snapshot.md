@@ -127,7 +127,7 @@ The facts below are from `main` at `415925cbda`, after the schema consolidation 
   - `hosted-harness-session.ts`: the `childSnapshots` flag on create and load;
   - `hosted-child-agent-session.ts`: refusing messages to a running snapshot child, and the continuation's admission.
 - **`packages/sdk-java/qwencode`:** `CreateHarnessSession` and `LoadHarnessSession` carry `childSnapshots`.
-- **`packages/sdk-java/managed-agent-server`:**
+- **`packages/managed-agent-server`:**
   - `ManagedAgentProperties`: the switch;
   - `QwenHostedHarnessConnector`: the flag;
   - `ChildResultRelay`: prepare for both modes, discard a snapshot, and give it no receipt member;

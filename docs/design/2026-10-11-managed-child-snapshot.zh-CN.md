@@ -127,7 +127,7 @@ Issue #13753 对 I3 提出两点：
   - `hosted-harness-session.ts`：创建与加载时的 `childSnapshots` 标志；
   - `hosted-child-agent-session.ts`：拒绝给运行中的 snapshot child 发消息，以及续跑的准入。
 - **`packages/sdk-java/qwencode`：** `CreateHarnessSession` 与 `LoadHarnessSession` 携带 `childSnapshots`。
-- **`packages/sdk-java/managed-agent-server`：**
+- **`packages/managed-agent-server`：**
   - `ManagedAgentProperties`：开关；
   - `QwenHostedHarnessConnector`：标志；
   - `ChildResultRelay`：为两种模式准备、丢弃快照、不给它回执成员；
