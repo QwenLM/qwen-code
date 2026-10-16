@@ -230,4 +230,6 @@ test('publishes verified draft assets behind an exact tag', async () => {
   assert.match(workflow, /remote_digest.*!=.*local_digest/);
   assert.match(workflow, /scripts\/contract-version-utils\.js/);
   assert.match(workflow, /scripts\/flyway-migration-utils\.js/);
+  assert.match(workflow, /grep -x 'managed-agent-reference-v\.\*'/);
+  assert.match(workflow, /previous_tag_name:\$previous/);
 });
