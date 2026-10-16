@@ -146,11 +146,23 @@ export async function writeSshPrivateJson(
   file: string,
   value: unknown,
 ): Promise<void> {
+  if (
+    !(await createSshPrivateJson(file, value)) &&
+    !isDeepStrictEqual(await readSshPrivateJson(file), value)
+  )
+    refuse('Runtime state conflicts with an earlier operation.');
+}
+
+async function createSshPrivateJson(
+  file: string,
+  value: unknown,
+): Promise<boolean> {
   const temporary = path.join(
     path.dirname(file),
     `.${path.basename(file)}.${randomUUID()}.tmp`,
   );
   const handle = await fs.open(temporary, 'wx', 0o600);
+  let created = true;
   try {
     try {
       await handle.writeFile(JSON.stringify(value), 'utf8');
@@ -162,13 +174,13 @@ export async function writeSshPrivateJson(
       await fs.link(temporary, file);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (!isDeepStrictEqual(await readSshPrivateJson(file), value))
-        refuse('Runtime state conflicts with an earlier operation.');
+      created = false;
     }
   } finally {
     await fs.unlink(temporary);
   }
   await syncParentDirectory(file);
+  return created;
 }
 
 async function privateDirectory(directory: string): Promise<void> {
@@ -407,6 +419,7 @@ async function observe(
       'clean.json',
       'stdout.log',
       'stderr.log',
+      'launch-failed.json',
     ]) {
       try {
         await fs.lstat(path.join(directory, file));
@@ -433,6 +446,18 @@ async function observe(
     )
   )
     refuse('Runtime launch claim conflicts.');
+  if (neverStarted && pid !== null)
+    refuse('A retired launch claim cannot own a worker process.');
+  const failed = await optionalJson(path.join(directory, 'launch-failed.json'));
+  if (
+    failed !== undefined &&
+    (!isDeepStrictEqual(failed, {
+      provisionRequestId: record.boot.provisionRequestId,
+    }) ||
+      pid !== null ||
+      (await optionalJson(path.join(directory, 'ready.json'))) !== undefined)
+  )
+    refuse('Runtime failed-launch evidence conflicts.');
   const clean = await optionalJson(path.join(directory, 'clean.json'));
   if (clean !== undefined) {
     const proof = object(clean);
@@ -449,14 +474,16 @@ async function observe(
     )
       refuse('Runtime clean proof conflicts.');
     if (
-      (neverStarted &&
+      ((neverStarted || failed !== undefined) &&
         pid === null &&
-        claimedRetirement === stop['retirementId']) ||
+        (failed !== undefined || claimedRetirement === stop['retirementId'])) ||
       (pid !== null && !alive(Number(pid)))
     )
       return { ...result, state: 'RETIRED', cleanProof: clean };
     return { ...result, state: 'BLOCKED' };
   }
+  if (failed !== undefined) return { ...result, state: 'FAILED' };
+  if (neverStarted && pid === null) return result;
   if (pid === null || !alive(Number(pid)))
     return { ...result, state: 'BLOCKED' };
   const ready = await optionalJson(path.join(directory, 'ready.json'));
@@ -550,65 +577,83 @@ async function ensure(
     return observe(saved);
   const original = await observe(saved);
   if (original['state'] !== 'INTENT') return original;
-  let claim;
-  try {
-    claim = await fs.open(path.join(directory, 'launch.claim'), 'wx', 0o600);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  if (
+    !(await createSshPrivateJson(path.join(directory, 'launch.claim'), {
+      provisionRequestId: saved.boot.provisionRequestId,
+    }))
+  )
     return observe(saved);
-  }
+  let spawned = false;
   try {
-    await claim.writeFile(
-      JSON.stringify({ provisionRequestId: saved.boot.provisionRequestId }),
+    const output = await fs.open(
+      path.join(directory, 'stdout.log'),
+      'ax',
+      0o600,
     );
-    await claim.sync();
-  } finally {
-    await claim.close();
-  }
-  await syncParentDirectory(path.join(directory, 'launch.claim'));
-  const output = await fs.open(path.join(directory, 'stdout.log'), 'ax', 0o600);
-  const errors = await fs.open(path.join(directory, 'stderr.log'), 'ax', 0o600);
-  try {
-    const env: NodeJS.ProcessEnv = {};
-    for (const key of [
-      'PATH',
-      'HOME',
-      'USER',
-      'LOGNAME',
-      'SHELL',
-      'LANG',
-      'LC_ALL',
-      'TMPDIR',
-      'TMP',
-      'TEMP',
-      'TZ',
-    ]) {
-      if (process.env[key] !== undefined) env[key] = process.env[key];
+    try {
+      const errors = await fs.open(
+        path.join(directory, 'stderr.log'),
+        'ax',
+        0o600,
+      );
+      try {
+        const env: NodeJS.ProcessEnv = {};
+        for (const key of [
+          'PATH',
+          'HOME',
+          'USER',
+          'LOGNAME',
+          'SHELL',
+          'LANG',
+          'LC_ALL',
+          'TMPDIR',
+          'TMP',
+          'TEMP',
+          'TZ',
+        ]) {
+          if (process.env[key] !== undefined) env[key] = process.env[key];
+        }
+        const child = spawn(
+          process.execPath,
+          [saved.workerEntry, 'managed-runtime-bootstrap-worker', directory],
+          {
+            cwd: path.dirname(saved.workerEntry),
+            detached: true,
+            stdio: ['ignore', output.fd, errors.fd],
+            env,
+          },
+        );
+        await new Promise<void>((resolve, reject) => {
+          child.once('spawn', resolve);
+          child.once('error', reject);
+        });
+        spawned = true;
+        child.unref();
+        await writeSshPrivateJson(path.join(directory, 'pid.json'), {
+          pid: child.pid,
+        });
+      } finally {
+        await errors.close();
+      }
+    } finally {
+      await output.close();
     }
-    const child = spawn(
-      process.execPath,
-      [saved.workerEntry, 'managed-runtime-bootstrap-worker', directory],
-      {
-        cwd: path.dirname(saved.workerEntry),
-        detached: true,
-        stdio: ['ignore', output.fd, errors.fd],
-        env,
-      },
-    );
-    await new Promise<void>((resolve, reject) => {
-      child.once('spawn', resolve);
-      child.once('error', reject);
-    });
-    await writeSshPrivateJson(path.join(directory, 'pid.json'), {
-      pid: child.pid,
-    });
-    child.unref();
-  } finally {
-    await Promise.all([output.close(), errors.close()]);
+  } catch {
+    if (!spawned) {
+      await writeSshPrivateJson(path.join(directory, 'launch-failed.json'), {
+        provisionRequestId: saved.boot.provisionRequestId,
+      });
+      return observe(saved);
+    }
+    // The original worker also publishes its PID; never launch a replacement.
   }
   for (let attempt = 0; attempt < 100; attempt++) {
     const observed = await observe(saved);
-    if (observed['state'] !== 'STARTING') return observed;
+    if (
+      observed['state'] !== 'STARTING' &&
+      !(observed['state'] === 'BLOCKED' && observed['pid'] === null)
+    )
+      return observed;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return observe(saved);
@@ -685,49 +730,65 @@ export async function executeSshBootstrap(
   const record = await readSshRuntimeRecord(directory);
   if (record.nodeId !== nodeId || record.stateDirectory !== stateDirectory)
     refuse('Runtime node identity conflicts.');
-  const observed = await observe(record);
+  let observed = await observe(record);
   if (operation === 'observe') return observed;
   if (operation !== 'stop')
     refuse('Runtime bootstrap operation is unsupported.');
   const retirementId = text(request['retirementId']);
   if (!UUID.test(retirementId))
     refuse('Runtime retirement identity is invalid.');
-  await writeSshPrivateJson(path.join(directory, 'stop.json'), {
-    retirementId,
-  });
-  try {
-    const claim = await fs.open(
-      path.join(directory, 'launch.claim'),
-      'wx',
-      0o600,
-    );
-    try {
-      await claim.writeFile(
-        JSON.stringify({
-          provisionRequestId: record.boot.provisionRequestId,
-          retirementId,
-        }),
-      );
-      await claim.sync();
-    } finally {
-      await claim.close();
-    }
-    await syncParentDirectory(path.join(directory, 'launch.claim'));
+  if (observed['state'] === 'INTENT') {
+    await createSshPrivateJson(path.join(directory, 'launch.claim'), {
+      provisionRequestId: record.boot.provisionRequestId,
+      retirementId,
+    });
+    observed = await observe(record);
+  }
+  const claim = object(
+    await readSshPrivateJson(path.join(directory, 'launch.claim')),
+  );
+  if (
+    claim['retirementId'] !== undefined &&
+    claim['retirementId'] !== retirementId
+  )
+    refuse('Runtime retirement identity conflicts.');
+  if (observed['state'] === 'RETIRED') {
+    await writeSshPrivateJson(path.join(directory, 'stop.json'), {
+      retirementId,
+    });
+    return observed;
+  }
+  if (
+    observed['state'] === 'FAILED' ||
+    claim['retirementId'] === retirementId
+  ) {
+    await writeSshPrivateJson(path.join(directory, 'stop.json'), {
+      retirementId,
+    });
     await verifySshStorage(record.identity, record.marker);
     await writeSshPrivateJson(
       path.join(directory, 'clean.json'),
       sshCleanProof(record, retirementId, new Date().toISOString()),
     );
     return observe(record);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   }
-  if (observed['state'] === 'RETIRED') return observed;
+  if (
+    observed['state'] === 'STARTING' ||
+    (observed['state'] === 'BLOCKED' && observed['pid'] === null)
+  )
+    throw new SshBootstrapError(
+      'ssh_runtime_retirement_pending',
+      'Original Runtime startup has not completed.',
+      true,
+    );
   if (observed['state'] !== 'READY')
     throw new SshBootstrapError(
       'ssh_runtime_stop_unverified',
       'Original Runtime is not reachable for clean retirement.',
     );
+  await writeSshPrivateJson(path.join(directory, 'stop.json'), {
+    retirementId,
+  });
   const ready = observed['ready'] as ManagedContextReady;
   try {
     await attest(record, ready);

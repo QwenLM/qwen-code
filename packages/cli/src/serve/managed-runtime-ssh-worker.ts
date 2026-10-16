@@ -128,6 +128,9 @@ export async function runManagedRuntimeBootstrapWorker(
   if (record.expectedQwenVersion !== (await getCliVersion()))
     throw new Error('Pinned Qwen version changed before Runtime startup.');
   await verifySshStorage(record.identity, record.marker);
+  await writeSshPrivateJson(path.join(directory, 'pid.json'), {
+    pid: process.pid,
+  });
   const closing = async () => {
     try {
       await access(path.join(directory, 'stop.json'));

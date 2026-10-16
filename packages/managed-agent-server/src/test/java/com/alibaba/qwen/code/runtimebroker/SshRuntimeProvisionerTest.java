@@ -259,6 +259,25 @@ class SshRuntimeProvisionerTest {
     }
 
     @Test
+    void aProvenFailedLaunchCannotBeReplacedButCanBeRetiredWithoutALease() throws Exception {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var request = provisioner.createRequest(SCOPE, "session");
+        var original = bindings.findOrCreate(request);
+        var claim = bindings.claimOperation(original.getBindingId(), "owner", Duration.ofMinutes(1));
+        var seed = claim.getProvisionSeed();
+        var handle = await(provisioner.ensureResource(request, seed, null));
+        state = "FAILED";
+        var error = assertThrows(ExecutionException.class,
+                () -> await(provisioner.reconcile(request, seed, handle, null)));
+        assertEquals("ssh_runtime_launch_failed", ((RuntimeBrokerException) error.getCause()).getCode());
+        assertFalse(((RuntimeBrokerException) error.getCause()).isRetryable());
+        var draining = claim.withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, null, Instant.now());
+        assertTrue(await(provisioner.stopDrained(draining)).matches(draining));
+        assertFalse(commands.stream().anyMatch(command -> Boolean.TRUE.equals(command.get("launch"))));
+    }
+
+    @Test
     void interruptedOrKilledWorkerDoesNotProduceStopEvidenceOrAnotherLaunch() throws Exception {
         var request = provisioner.createRequest(SCOPE, "session");
         var seed = RuntimeProvisionSeed.create("binding", 1);

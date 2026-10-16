@@ -6,6 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
 import {
   chmod,
   mkdtemp,
@@ -18,7 +19,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CONTEXT_CONFIG_REF,
@@ -106,6 +107,7 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
     });
 
     afterEach(async () => {
+      vi.restoreAllMocks();
       for (const pid of pids) {
         try {
           process.kill(pid, 'SIGKILL');
@@ -656,6 +658,162 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
         result: { state: 'RETIRED', pid: null },
       });
     });
+
+    it.each(['stdout.log', 'stderr.log'])(
+      'retires a proven failed %s open without retrying the launch',
+      async (log) => {
+        const request = ensureRequest();
+        const open = fs.open;
+        const failure = vi
+          .spyOn(fs, 'open')
+          .mockImplementation(async (...args) => {
+            if (String(args[0]).endsWith(`/${log}`))
+              throw Object.assign(new Error('Descriptor limit'), {
+                code: 'EMFILE',
+              });
+            return open(...args);
+          });
+        try {
+          expect(await executeSshBootstrap(request)).toMatchObject({
+            state: 'FAILED',
+            pid: null,
+          });
+        } finally {
+          failure.mockRestore();
+        }
+        expect(await bootstrap(request)).toMatchObject({
+          ok: true,
+          result: { state: 'FAILED', pid: null },
+        });
+        expect(
+          await bootstrap({
+            ...request,
+            operation: 'stop',
+            retirementId: randomUUID(),
+          }),
+        ).toMatchObject({ ok: true, result: { state: 'RETIRED', pid: null } });
+        expect(await bootstrap(request)).toMatchObject({
+          ok: true,
+          result: { state: 'RETIRED', pid: null },
+        });
+      },
+    );
+
+    it('retires a failed spawn without deleting its unique launch claim', async () => {
+      const request = {
+        ...ensureRequest(),
+        workerEntry: path.join(root, 'missing', 'entry.mjs'),
+      };
+      expect(await bootstrap(request)).toMatchObject({
+        ok: true,
+        result: { state: 'FAILED', pid: null },
+      });
+      const claim = path.join(
+        stateDirectory,
+        'resources',
+        request.resourceId,
+        'launch.claim',
+      );
+      const original = await readFile(claim, 'utf8');
+      expect(await bootstrap(request)).toMatchObject({
+        ok: true,
+        result: { state: 'FAILED', pid: null },
+      });
+      expect(
+        await bootstrap({
+          ...request,
+          operation: 'stop',
+          retirementId: randomUUID(),
+        }),
+      ).toMatchObject({ ok: true, result: { state: 'RETIRED', pid: null } });
+      expect(await readFile(claim, 'utf8')).toBe(original);
+      expect(await bootstrap(request)).toMatchObject({
+        ok: true,
+        result: { state: 'RETIRED', pid: null },
+      });
+    });
+
+    it('recovers the same worker when the launcher cannot publish its PID', async () => {
+      const request = ensureRequest();
+      const link = fs.link;
+      const failure = vi
+        .spyOn(fs, 'link')
+        .mockImplementation(async (...args) => {
+          if (String(args[1]).endsWith('/pid.json'))
+            throw Object.assign(new Error('PID write failed'), { code: 'EIO' });
+          return link(...args);
+        });
+      try {
+        const observed = await executeSshBootstrap(request);
+        if (typeof observed['pid'] === 'number') pids.add(observed['pid']);
+      } finally {
+        failure.mockRestore();
+      }
+      const original = await ready(request);
+      expect((await ready(request))['pid']).toBe(original['pid']);
+      expect(
+        await bootstrap({
+          ...request,
+          operation: 'stop',
+          retirementId: randomUUID(),
+        }),
+      ).toMatchObject({
+        ok: true,
+        result: { state: 'RETIRED', pid: original['pid'] },
+      });
+      expect(() => process.kill(Number(original['pid']), 0)).toThrow();
+    }, 60_000);
+
+    it('waits for the original starting worker before writing its retirement fence', async () => {
+      const request = ensureRequest();
+      const entered = path.join(root, 'entered');
+      const gate = path.join(root, 'continue');
+      await writeFile(
+        entry,
+        `import {register} from ${JSON.stringify(api)};\nimport {access,writeFile} from 'node:fs/promises';\nregister({tsconfig:${JSON.stringify(tsconfig)}});\nif(process.argv[2]==='managed-runtime-bootstrap-worker'){await writeFile(${JSON.stringify(entered)},String(process.pid));while(!(await access(${JSON.stringify(gate)}).then(()=>true,()=>false))){await new Promise(r=>setTimeout(r,10));}await (await import(${JSON.stringify(workerSource)})).runManagedRuntimeBootstrapWorker(process.argv[3]);}else{await (await import(${JSON.stringify(source)})).runManagedRuntimeBootstrap();}\n`,
+      );
+      const launching = bootstrap(request);
+      const retirementId = randomUUID();
+      try {
+        await expect
+          .poll(async () => readFile(entered, 'utf8'), { timeout: 10_000 })
+          .toMatch(/^\d+$/);
+        const pid = Number(await readFile(entered, 'utf8'));
+        pids.add(pid);
+        expect(
+          await bootstrap({ ...request, operation: 'stop', retirementId }),
+        ).toMatchObject({
+          ok: false,
+          error: { code: 'ssh_runtime_retirement_pending', retryable: true },
+        });
+        await expect(
+          readFile(
+            path.join(
+              stateDirectory,
+              'resources',
+              request.resourceId,
+              'stop.json',
+            ),
+          ),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await writeFile(gate, 'continue');
+        await launching;
+      }
+      const original = await ready(request);
+      expect(original['pid']).toBe(Number(await readFile(entered, 'utf8')));
+      expect(
+        await bootstrap({ ...request, operation: 'stop', retirementId }),
+      ).toMatchObject({
+        ok: true,
+        result: {
+          state: 'RETIRED',
+          pid: original['pid'],
+          cleanProof: { retirementId },
+        },
+      });
+      expect(() => process.kill(Number(original['pid']), 0)).toThrow();
+    }, 60_000);
 
     it('refuses a changed pinned Qwen version before claiming a launch', async () => {
       const request = ensureRequest();

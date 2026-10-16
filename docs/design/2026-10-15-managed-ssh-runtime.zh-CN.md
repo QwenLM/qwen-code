@@ -59,6 +59,8 @@ WebShell 在现有 Workspace 选择器中增加可选登记对话框。检查目
 
 启动时先持久化 seed 和确定性 handle，再调用 bootstrap ensure。bootstrap 原子取得该 generation 的唯一启动资格，使用独立进程生命周期、私有文件日志且无 IPC 启动 worker，保存 PID/ready。Broker 在原资源启动时最多观察 60 秒，建立转发并 attest 原 incarnation 后提交 READY；等待不会再次启动进程。私有 JSON 记录写完并同步后才以原子、不覆盖的方式发布；启动 claim 及父目录条目同步后才 spawn。重复 ensure 返回原资源，启动结果不明确的 claim 不再 spawn，退役标记永久拒绝迟到启动。
 
+启动 claim 与从未启动的退役 claim 共用原子、不覆盖的 JSON 发布原语。若 launcher 确定日志打开或 spawn 在创建任何子进程前失败，则保存匹配的启动失败证据并报告 `FAILED`；该 generation 只能退役，永不再次启动。证据无法持久化时，claim 继续阻塞。子进程一旦创建，launcher 元数据失败不能产生“从未启动”证明：原 worker 也会在开放 HTTP 准入和发布 ready 前写入相同的不可变 PID。关闭与启动竞态时返回可重试 pending，不提前写启动屏障。未启动的关闭必须先赢得 launch claim；否则重新观察获胜方，等待原 worker 就绪后请求认证退役。中断的从未启动退役可凭匹配 claim 继续完成。
+
 释放工具 Turn 的 Runtime Session 不停止 worker。SSH 故障可以重建转发并重新 attest 原 worker；Broker 退出只关闭本地连接，不停止远端 worker。Broker 启动观察已保存登记，记录缺失、worker 消失、主机重启或身份不符均保持阻塞，不换机器、不重建原 generation、不重放未知执行。
 
 即使 Broker 重启前所有 Runtime Session 均已释放，关闭流程仍先 reconcile 并 attest 原 handle 和 lease，恢复转发后仅重试 ACK。如果原 worker 已退出且远端保存完整匹配的 clean proof，严格停止会核实该证明并补建缺失的 SQL 停止回执，不访问已退出的 HTTP endpoint。身份冲突不允许通过停止操作回退。

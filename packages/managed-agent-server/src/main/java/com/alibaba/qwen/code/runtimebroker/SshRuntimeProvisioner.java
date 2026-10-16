@@ -270,6 +270,10 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
         if ("RETIRED".equals(result.get("state"))) {
             throw new RuntimeBrokerException(409, "ssh_runtime_recovery_blocked", "Original SSH worker has already retired.", false);
         }
+        if ("FAILED".equals(result.get("state"))) {
+            throw new RuntimeBrokerException(409, "ssh_runtime_launch_failed",
+                    "Original SSH launch failed before creating a worker and can only be retired.", false);
+        }
         return result;
     }
 
@@ -324,7 +328,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
     private static void verifyResource(Map<String, Object> result, RuntimeResourceHandle handle) {
         if (!text(handle, "resourceId").equals(result.get("resourceId"))
                 || !(result.get("state") instanceof String state)
-                || !Set.of("INTENT", "STARTING", "READY", "BLOCKED", "RETIRED").contains(state)) {
+                || !Set.of("INTENT", "STARTING", "READY", "BLOCKED", "FAILED", "RETIRED").contains(state)) {
             throw conflict();
         }
         if ("BLOCKED".equals(state)) {
