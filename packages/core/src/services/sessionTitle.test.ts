@@ -17,6 +17,7 @@ import {
   sanitizeTitle,
   tryGenerateSessionTitle,
 } from './sessionTitle.js';
+import { content, modelText, userText } from '../test-utils/model-fixtures.js';
 
 interface MockOptions {
   fastModel?: string | undefined;
@@ -53,10 +54,7 @@ function makeConfig(opts: MockOptions): {
 
 const DIALOG_HISTORY: Content[] = [
   { role: 'user', parts: [{ text: 'my login button is broken on mobile' }] },
-  {
-    role: 'model',
-    parts: [{ text: "Let's look at the button handler and the viewport CSS." }],
-  },
+  modelText("Let's look at the button handler and the viewport CSS."),
 ];
 
 const reminder = (body: string) =>
@@ -431,22 +429,14 @@ describe('tryGenerateSessionTitle', () => {
           { functionCall: { name: 'grep', args: { q: 'auth' } } } as any,
         ],
       },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'grep',
-              response: { output: 'TEN_THOUSAND_TOKENS_OF_FILE_DUMP' },
-            },
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          } as any,
-        ],
-      },
-      {
-        role: 'model',
-        parts: [{ text: 'The middleware stores tokens unsafely.' }],
-      },
+      content('user', {
+        functionResponse: {
+          name: 'grep',
+          response: { output: 'TEN_THOUSAND_TOKENS_OF_FILE_DUMP' },
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any),
+      modelText('The middleware stores tokens unsafely.'),
     ];
 
     let capturedContents: Content[] | null = null;
@@ -507,13 +497,11 @@ describe('tryGenerateSessionTitle', () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'start with titles' }] },
       { role: 'model', parts: [{ text: 'Ready.' }] },
-      {
-        role: 'user',
-        parts: [
-          { text: reminder('MID_SESSION_TOOL_METADATA') },
-          { text: 'please add a regression test' },
-        ],
-      },
+      content(
+        'user',
+        { text: reminder('MID_SESSION_TOOL_METADATA') },
+        { text: 'please add a regression test' },
+      ),
       { role: 'model', parts: [{ text: 'I will add the test.' }] },
     ];
 
@@ -535,21 +523,16 @@ describe('tryGenerateSessionTitle', () => {
 
   it('excludes UserPromptSubmit hook context from the title prompt', async () => {
     const history: Content[] = [
-      {
-        role: 'user',
-        parts: [
-          { text: 'Diagnose the parser CI failure.' },
-          {
-            text: wrapUserPromptSubmitContext(
-              'UNRELATED_MEMORY_TOPIC '.repeat(80),
-            ),
-          },
-        ],
-      },
-      {
-        role: 'model',
-        parts: [{ text: 'I will inspect the parser workflow.' }],
-      },
+      content(
+        'user',
+        { text: 'Diagnose the parser CI failure.' },
+        {
+          text: wrapUserPromptSubmitContext(
+            'UNRELATED_MEMORY_TOPIC '.repeat(80),
+          ),
+        },
+      ),
+      modelText('I will inspect the parser workflow.'),
     ];
 
     let captured = '';
@@ -595,14 +578,7 @@ describe('tryGenerateSessionTitle', () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'inspect the selected file' }] },
       { role: 'model', parts: [{ text: 'I will inspect it.' }] },
-      {
-        role: 'user',
-        parts: [
-          {
-            text: `what does this function do?\n${reminder('IDE_SKILL_CONTEXT')}`,
-          },
-        ],
-      },
+      userText(`what does this function do?\n${reminder('IDE_SKILL_CONTEXT')}`),
     ];
 
     let captured = '';

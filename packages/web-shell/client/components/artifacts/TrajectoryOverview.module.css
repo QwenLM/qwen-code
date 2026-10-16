@@ -13,10 +13,10 @@
   position: relative;
   flex: none;
   box-sizing: border-box;
-  height: 64px;
+  height: 128px;
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
-  grid-template-rows: 48px 16px;
+  grid-template-columns: 78px minmax(0, 1fr);
+  grid-template-rows: 60px 18px 28px 20px;
   border-bottom: 1px solid var(--border);
   user-select: none;
 }
@@ -30,29 +30,30 @@
 .labels {
   position: relative;
   border-right: 1px solid var(--border);
-  font-size: 9px;
-  line-height: 1;
+  font-size: 10px;
+  line-height: 1.05;
   color: var(--muted-foreground);
 }
 
 .labels span {
   position: absolute;
-  right: 4px;
-  height: 8px;
+  left: 5px;
+  right: 2px;
+  height: 18px;
   display: flex;
   align-items: center;
 }
 
 .labels span:nth-child(1) {
-  top: 6px;
+  top: 3px;
 }
 
 .labels span:nth-child(2) {
-  top: 20px;
+  top: 21px;
 }
 
 .labels span:nth-child(3) {
-  top: 34px;
+  top: 39px;
 }
 
 .plot {
@@ -138,12 +139,12 @@
 }
 
 .span[data-lane='1'] {
-  --lane-offset: 14px;
+  --lane-offset: 18px;
   background: var(--traj-tool);
 }
 
 .span[data-lane='2'] {
-  --lane-offset: 28px;
+  --lane-offset: 36px;
   background: var(--traj-subagent);
 }
 
@@ -177,7 +178,7 @@
   justify-content: space-between;
   align-items: center;
   padding: 0 6px;
-  font-size: 9px;
+  font-size: 10px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
@@ -185,13 +186,87 @@
 .axisEnd {
   display: flex;
   align-items: center;
-  /* With each button's hit area 5px past its box, 10px apart makes the three
-     areas meet without overlapping, so a near miss lands on nothing rather
-     than on the neighbour. */
-  gap: 10px;
 }
 
-/* Sized to fit the 16px axis row, so the strip's height does not move. */
+.controls {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 0 6px;
+}
+
+.modeGroup,
+.zoomGroup {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.modeButton {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.modeButton[aria-pressed='true'],
+.modeButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.legend {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  padding: 0 6px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.legend span {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.legend i {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  flex: none;
+  font-style: normal;
+}
+
+.legend .ttftKey,
+.legend .afterKey {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.ttftKey {
+  background: var(--traj-ttft);
+}
+.afterKey {
+  background: var(--traj-request);
+}
+.errorKey {
+  color: var(--destructive);
+  font-weight: bold;
+}
+
+/* Buttons stay inside the fixed controls row. */
 .zoomButton {
   position: relative;
   display: inline-flex;
@@ -207,7 +282,7 @@
   cursor: pointer;
 }
 
-/* A 24px target around the 14px box: the axis row cannot grow past 16px. */
+/* A 24px target around the 14px box. */
 .zoomButton::after {
   content: '';
   position: absolute;
@@ -215,7 +290,7 @@
 }
 
 .zoomButton:last-of-type {
-  margin-right: 6px;
+  margin-right: 0;
 }
 
 .srOnly {

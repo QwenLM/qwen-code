@@ -331,7 +331,15 @@ async function fetchPolicyAttempt(
       (error instanceof Error
         ? getErrorCode((error as Error & { cause?: unknown }).cause)
         : undefined);
-    throw new FetchError(getErrorMessage(error), code);
+    throw new FetchError(
+      getErrorMessage(error),
+      // A multi-address connect failure arrives as an AggregateError whose
+      // top-level code is only the FIRST attempt's, so a whitelisted attempt
+      // masked by a non-whitelisted one (e.g. ETIMEDOUT) must still classify
+      // as connection-level — otherwise the https→http fallback depends on
+      // address-attempt order (issue #12720).
+      findConnectionLevelCode(error) ?? code,
+    );
   };
 
   let currentUrl = url;
@@ -458,6 +466,57 @@ function getErrorCode(error: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+/**
+ * Any-attempt-match classification for multi-address connect failures
+ * (issue #12720): Node surfaces an exhausted dual-stack connect as an
+ * AggregateError whose top-level `code` reflects only the FIRST attempted
+ * address (lib/internal/errors.js NodeAggregateError), so reading a single
+ * code makes the https→http fallback attempt-order dependent. If ANY
+ * attempt's code is connection-level, the failure is connection-level;
+ * per-attempt exemptions (e.g. ETIMEDOUT) hold simply by staying out of
+ * CONNECTION_LEVEL_ERROR_CODES.
+ *
+ * Traversal mirrors describeCodedCause (utils/errors.ts): unwrap
+ * AggregateError.errors[] and nested `.cause` chains — undici wraps each
+ * attempt in its own `TypeError: fetch failed` — with a depth cap and a
+ * visited set. A plain single-error chain resolves to the same code as
+ * before (its own code when whitelisted, otherwise undefined here and the
+ * caller keeps the first-derived code).
+ */
+function findConnectionLevelCode(
+  error: unknown,
+  depth = 0,
+  visited = new Set<object>(),
+): string | undefined {
+  if (
+    error == null ||
+    depth >= 8 ||
+    typeof error !== 'object' ||
+    visited.has(error)
+  ) {
+    return undefined;
+  }
+  visited.add(error);
+
+  const code = getErrorCode(error);
+  if (code !== undefined && CONNECTION_LEVEL_ERROR_CODES.has(code)) {
+    return code;
+  }
+
+  if (error instanceof AggregateError && Array.isArray(error.errors)) {
+    for (const attempt of error.errors) {
+      const found = findConnectionLevelCode(attempt, depth + 1, visited);
+      if (found !== undefined) return found;
+    }
+  }
+
+  return findConnectionLevelCode(
+    (error as { cause?: unknown }).cause,
+    depth + 1,
+    visited,
+  );
 }
 
 function formatUnknownErrorMessage(error: unknown): string | undefined {

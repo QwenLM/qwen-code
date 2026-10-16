@@ -29,7 +29,7 @@ const MAX_DEFERRED_TOOL_DESC_LEN = 160;
 // snapshot. The snapshot lives in the stable messages prefix; simplifying a
 // large skill set limits cached-prefix growth. Typical small skill sets render
 // in full with no truncation (and thus no behavior change).
-const MAX_SKILL_LISTING_CHARS = 8000;
+export const MAX_SKILL_LISTING_CHARS = 8000;
 
 /**
  * Shared date formatter for system-prompt date injection.
@@ -155,6 +155,12 @@ export function isSkillListingReminder(text: string): boolean {
   return openers.some((opener) => text.startsWith(`${open}${opener}`));
 }
 
+/**
+ * The only text a deferred tool shows the model before `tool_search` reveals
+ * it: the description's first line, capped. A deferred tool's selection rule
+ * ("pick me over X when…") therefore has to live in that line, or the resident
+ * guidance that recommends X is all the model sees (#12702).
+ */
 function truncateDeferredToolDescription(description: string): string {
   const firstLine = (description || '').split('\n')[0].trim();
   return firstLine.length > MAX_DEFERRED_TOOL_DESC_LEN
@@ -551,6 +557,10 @@ export interface InitialChatHistoryOptions {
   // that excludes the Skill tool, so announcing skills they can't invoke wastes
   // turns — mirrors includeDeferredToolsReminder).
   includeAvailableSkillsReminder?: boolean;
+  // Main-session git snapshot. It lives in the prelude instead of the system
+  // prompt so a repository change between sessions does not invalidate the
+  // provider-cached system prompt. Subagents leave it unset.
+  gitStatus?: string | null;
 }
 
 /**
@@ -569,8 +579,20 @@ export async function getInitialChatHistory(
 
   const includeDeferredToolsReminder =
     options.includeDeferredToolsReminder ?? true;
+  // Gate on registry presence, not just the caller's option: when the Skill
+  // tool is excluded (`--exclude-tools skill` / a coreTools allowlist) its
+  // factory never registers, and announcing skills the model cannot invoke
+  // wastes tokens. The per-turn skills drain already gates on registry
+  // presence (`drainSkillAndCommandReminders`, `client.ts`). The subagent and
+  // fork-resume paths gate on their own declared tool list instead
+  // (`willHaveSkillTool` / `subagentWillHaveSkillTool`), which reads agent
+  // config and so cannot see a parent's `--exclude-tools`; this adds the
+  // registry check those two cannot make. `getAllToolNames()` counts
+  // deferred-but-registered factories, so a Skill tool demoted behind
+  // `tool_search` keeps its listing; `getFunctionDeclarations()` would not.
   const includeAvailableSkillsReminder =
-    options.includeAvailableSkillsReminder ?? true;
+    (options.includeAvailableSkillsReminder ?? true) &&
+    toolRegistry.getAllToolNames().includes(ToolNames.SKILL);
   const startupReminder = config.getSkipStartupContext()
     ? null
     : await buildStartupContextReminder(config);
@@ -578,13 +600,16 @@ export async function getInitialChatHistory(
     ? await buildAvailableSkillsReminder(config)
     : null;
 
-  // Stable parts first (MCP, skills, startup) so prefix-caching servers
-  // retain the KV-cache for the shared prefix. Deferred-tools is last because
-  // progressive MCP discovery can change it — only the tail recomputes.
+  // Stable parts first (MCP, skills, startup, git snapshot) so prefix-caching
+  // servers retain the KV-cache for the shared prefix. The git snapshot is
+  // computed once per session, so it sits with the other session-constant
+  // parts. Deferred-tools is last because progressive MCP discovery can
+  // change it — only the tail recomputes.
   const reminderParts = [
     buildMcpServerInstructionsReminder(toolRegistry),
     skillsResult?.reminder ?? null,
     startupReminder,
+    options.gitStatus ? wrapSystemReminder(options.gitStatus) : null,
     includeDeferredToolsReminder
       ? buildDeferredToolsReminder(toolRegistry)
       : null,

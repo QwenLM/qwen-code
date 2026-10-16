@@ -35,6 +35,10 @@ describe('SSH ACP HTTP dispatch', () => {
           '_qwen/file/read',
           '_qwen/file/glob',
           '_qwen/workspace/voice',
+          // The grant is the only in-app trust recovery an SSH-backed
+          // workspace has. The sweep below cannot pin its admission because
+          // it iterates this already-filtered list, so assert membership.
+          '_qwen/workspace/trust/grant',
         ]),
       );
       expect(methods).not.toContain('_qwen/session/shell');

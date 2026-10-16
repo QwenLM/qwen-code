@@ -25,6 +25,12 @@ import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import {
+  result as managedResult,
+  notStartedResult,
+  blockedResult,
+  previewOnlyResult,
+} from '../managed/managed-tool-result.test-fixtures';
 
 vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -210,6 +216,63 @@ const zhT = (key: string, values?: Record<string, string | number>): string => {
 };
 
 describe('tool group summary logic', () => {
+  it.each([
+    [notStartedResult, 'Command not executed'],
+    [blockedResult, 'Output delivery blocked'],
+    [previewOnlyResult, 'Command succeeded'],
+  ])(
+    'renders the shared result facts in tool summaries: %s',
+    (result, expected) => {
+      const container = renderToolLine(
+        makeTool({ toolResult: result }),
+        { onToolResultOpen: vi.fn() },
+        {},
+      );
+      expect(container.textContent).toContain(expected);
+    },
+  );
+  it('rerenders a result-only revision change and opens its canonical Item', () => {
+    const onOpen = vi.fn();
+    const customization = {};
+    const tool = makeTool({
+      rawOutput: 'unchanged preview',
+      toolResult: managedResult,
+    });
+    const container = renderToolLine(
+      tool,
+      { onToolResultOpen: onOpen },
+      customization,
+    );
+    expect(container.textContent).toContain('Capture complete');
+    const { root } = mounted.at(-1)!;
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <WebShellCustomizationProvider value={customization}>
+            <ToolLine
+              tool={{
+                ...tool,
+                toolResult: {
+                  ...managedResult,
+                  projection_revision: 2,
+                  capture_status: 'partial',
+                  delivery_status: 'blocked',
+                },
+              }}
+              onToolResultOpen={onOpen}
+            />
+          </WebShellCustomizationProvider>
+        </I18nProvider>,
+      ),
+    );
+    expect(container.textContent).toContain('Capture incomplete');
+    expect(container.textContent).toContain('Output delivery blocked');
+    const button = [...container.querySelectorAll('button')].find(
+      (node) => node.textContent === 'View output',
+    );
+    act(() => button!.click());
+    expect(onOpen).toHaveBeenCalledWith('item-1');
+  });
   it('counts agents separately only for compact summaries', () => {
     const tools = [
       makeTool({ callId: 'agent-1', toolName: 'Agent' }),

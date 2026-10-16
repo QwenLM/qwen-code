@@ -14,10 +14,11 @@ import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import { HOSTED_STORE_PREFIX } from '../scratch-dir.js';
 
 // An HTTP transport fixture, not a substitute for the Spring/MySQL slice.
 export async function startHostedSessionStore(sessionId: string) {
-  const root = await mkdtemp(path.join(tmpdir(), 'hosted-store-'));
+  const root = await mkdtemp(path.join(tmpdir(), HOSTED_STORE_PREFIX));
   const sessionKey = {
     tenantId: 'tenant',
     workspaceId: 'workspace',
@@ -39,6 +40,7 @@ export async function startHostedSessionStore(sessionId: string) {
   const pending = new Set<Promise<void>>();
   let handle: ManagedSessionJournalHandle | undefined;
   let writerToken: string | undefined;
+  let writerId: string | undefined;
   let writerGeneration = 0;
   let seals = 0;
   const scan = () =>
@@ -48,7 +50,10 @@ export async function startHostedSessionStore(sessionId: string) {
     const request = (async () => {
       const url = new URL(req.url!, 'http://127.0.0.1');
       const prefix = `/internal/managed-session-store/v1/sessions/${sessionId}`;
-      assert(url.pathname.startsWith(prefix));
+      assert(
+        url.pathname.startsWith(`${prefix}/`),
+        `expected a path under ${prefix}/`,
+      );
       assert.equal(req.headers['x-qwen-tenant-id'], sessionKey.tenantId);
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -73,10 +78,17 @@ export async function startHostedSessionStore(sessionId: string) {
           return;
         }
         writerToken = String(req.headers['x-qwen-managed-writer-token']);
+        writerId = String(body.writerId);
         handle = await journal.open({ sessionKey });
         writerGeneration++;
       } else {
-        assert.equal(req.headers['x-qwen-managed-writer-token'], writerToken);
+        // Compare without echoing either token into the failure.
+        assert(
+          req.headers['x-qwen-managed-writer-token'] === writerToken,
+          handle
+            ? 'the writer token does not match the attached writer'
+            : 'no writer is attached',
+        );
       }
       const current = await scan();
       const head = {
@@ -87,7 +99,19 @@ export async function startHostedSessionStore(sessionId: string) {
         activationEpoch: current.activation?.epoch ?? 0,
       };
       if (route === '/writers:acquire' || route === '/writers:renew') {
-        json({ ...head, leaseUntil: Date.now() + Number(body.leaseMillis) });
+        json({
+          ...head,
+          leaseUntil: Date.now() + Number(body.leaseMillis),
+          // Matches ManagedSessionReaderVersion.SUPPORTED on the Java store:
+          // the Harness writes Hosted recovery records at storage version 2.
+          supportedStorageVersion: 2,
+        });
+      } else if (route === '/execution:authorize') {
+        assert.equal(req.method, 'POST');
+        assert(handle);
+        assert.equal(body.writerId, writerId);
+        assert.equal(body.writerGeneration, writerGeneration);
+        json({ authorized: true });
       } else if (route === '/restore') {
         json({
           ...head,
@@ -98,7 +122,10 @@ export async function startHostedSessionStore(sessionId: string) {
           recoveryStatus: 'READY',
           recoveryDetailCode: null,
         });
-      } else if (route === '/transactions:commit') {
+      } else if (
+        route === '/transactions:commit' ||
+        route === '/transactions:commit-v2'
+      ) {
         assert(handle);
         assert.equal(body.writerGeneration, writerGeneration);
         assert.equal(body.expectedJournalRevision, transactions.length);
@@ -170,7 +197,8 @@ export async function startHostedSessionStore(sessionId: string) {
         throw new Error(`Unexpected Store route: ${route}`);
       }
     })().catch((error: unknown) => {
-      failures.push(String(error));
+      // Name the request, so that a failure shows which call went wrong.
+      failures.push(`${req.method} ${req.url}: ${String(error)}`);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({

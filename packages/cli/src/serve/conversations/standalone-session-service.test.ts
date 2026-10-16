@@ -4108,30 +4108,45 @@ describe('StandaloneSessionService', () => {
     expect(harness.reservation.release).toHaveBeenCalledOnce();
   });
 
-  it('classifies an ID a paired Bridge already hosts as a conflict', async () => {
-    vi.spyOn(
-      SessionService.prototype,
-      'findSessionIdIgnoringCase',
-    ).mockResolvedValue(undefined);
-    const harness = createHarness();
-    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
-      new StandaloneSessionSpawnError(
-        false,
-        new RequestedSessionIdRejectedError('session_id_conflict', sessionId),
-      ),
-    );
+  it.each([
+    ['has not persisted anything', false],
+    ['already wrote its transcript', true],
+  ])(
+    'classifies an ID a paired Bridge already hosts as a conflict when its owner %s',
+    async (_state, ownerPersisted) => {
+      let spawnAttempted = false;
+      vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      ).mockImplementation(async () =>
+        ownerPersisted && spawnAttempted ? sessionId : undefined,
+      );
+      const harness = createHarness();
+      harness.bridge.spawnStandaloneSession.mockImplementationOnce(async () => {
+        spawnAttempted = true;
+        throw new StandaloneSessionSpawnError(
+          false,
+          new RequestedSessionIdRejectedError('session_id_conflict', sessionId),
+        );
+      });
 
-    await expect(
-      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
-    ).rejects.toMatchObject({
-      code: 'standalone_session_conflict',
-      retryable: false,
-    });
+      await expect(
+        harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+      ).rejects.toMatchObject({
+        code: 'standalone_session_conflict',
+        retryable: false,
+        creationDiagnostic: {
+          dispatchState: 'not_dispatched',
+          cleanupOutcome: 'not_needed',
+        },
+      });
 
-    expect(harness.bridge.killSession).not.toHaveBeenCalled();
-    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
-    expect(harness.reservation.release).toHaveBeenCalledOnce();
-  });
+      expect(spawnAttempted).toBe(true);
+      expect(harness.bridge.killSession).not.toHaveBeenCalled();
+      expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+      expect(harness.reservation.release).toHaveBeenCalledOnce();
+    },
+  );
 
   it('freezes the UUID and quarantines after dispatched spawn ambiguity', async () => {
     vi.spyOn(
@@ -4231,6 +4246,59 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
     expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
     expect(harness.reservation.release).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a liftable Managed engine quarantine refusal without freezing the runtime', async () => {
+    mockDurableStandalone();
+    const harness = createHarness();
+    const refusal = Object.assign(
+      new Error(
+        "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      ),
+      { code: -32024, data: { errorKind: 'managed_engine_quarantined' } },
+    );
+    harness.bridge.commitManagedConversationBinding.mockRejectedValue(refusal);
+
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({
+      code: 'managed_engine_quarantined',
+      retryable: true,
+      cause: refusal,
+    });
+
+    expect(
+      harness.bridge.commitManagedConversationBinding,
+    ).toHaveBeenCalledTimes(2);
+    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+    expect(harness.reservation.release).toHaveBeenCalled();
+  });
+
+  it('reports a liftable quarantine on the restore path as retryable, never directory-compromised', async () => {
+    // The commit-arm refusal arrives inside a session load/resume: the
+    // translation happens once at bindAndRelease, so restore's own catch
+    // must see the StandaloneSessionServiceError shape — classifiable as
+    // retryable, not the compromised-directory fallback.
+    mockActiveStandalone();
+    const harness = createHarness();
+    const refusal = Object.assign(
+      new Error(
+        "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      ),
+      { code: -32024, data: { errorKind: 'managed_engine_quarantined' } },
+    );
+    harness.bridge.commitManagedConversationBinding.mockRejectedValue(refusal);
+
+    await expect(harness.service.load(sessionId)).rejects.toMatchObject({
+      code: 'managed_engine_quarantined',
+      retryable: true,
+      cause: refusal,
+    });
+
+    expect(
+      harness.bridge.commitManagedConversationBinding,
+    ).toHaveBeenCalledTimes(2);
+    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
   });
 
   it('closes only a wrong fresh returned session before quarantining', async () => {

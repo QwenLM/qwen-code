@@ -119,7 +119,7 @@ import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { parsePlanCommand } from '../utils/planMode';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
-import { serializeContextUsageMessage } from './messages/ContextUsageMessage';
+import { createContextUsageMessageData } from './messages/ContextUsageMessage';
 import type {
   TurnOutputKind,
   TurnOutputOpenRequest,
@@ -257,6 +257,7 @@ export interface ChatPaneProps {
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
   /** Enable the app-scoped experimental Session Workflow presentation. */
   sessionWorkflowEnabled?: boolean;
+  showResponseTokensPerSecond?: boolean;
   planControlVisible?: boolean;
 }
 
@@ -297,6 +298,7 @@ export function ChatPane({
   voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
   voiceWorkspaces,
   sessionWorkflowEnabled = false,
+  showResponseTokensPerSecond = false,
   planControlVisible = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
@@ -390,9 +392,9 @@ export function ChatPane({
   ]);
   const { artifacts } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
-    (tool: ACPToolCall) => {
+    (tool: ACPToolCall, parentSessionId = connection.sessionId) => {
       if (
-        !connection.sessionId ||
+        !parentSessionId ||
         !onRightPanelOpen ||
         getSubagentDetailsUnavailableReason(tool)
       )
@@ -409,12 +411,12 @@ export function ChatPane({
           ? rawOutput['subagentName']
           : undefined);
       onRightPanelOpen({
-        id: `subagent:${connection.sessionId}:${tool.callId}`,
+        id: `subagent:${parentSessionId}:${tool.callId}`,
         kind: 'subagent',
         title: tool.title || subagentType || t('agent.label'),
         turnId: tool.callId,
         tool,
-        sessionId: connection.sessionId,
+        sessionId: parentSessionId,
         workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
       });
     },
@@ -681,6 +683,9 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canSendMidTurnNow =
+    connection.capabilities?.features.includes('session_mid_turn_send_now') ===
+    true;
   const canInjectMidTurnMedia =
     connection.capabilities?.features.includes('session_attachments') === true;
   const {
@@ -689,6 +694,7 @@ export function ChatPane({
     enqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    sendQueuedPromptNow,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -1445,7 +1451,8 @@ export function ChatPane({
         store.dispatch([
           {
             type: 'status',
-            text: serializeContextUsageMessage(result),
+            text: t('contextUsage.title'),
+            data: createContextUsageMessageData(result),
             clearActiveText: false,
           },
         ]);
@@ -1454,7 +1461,14 @@ export function ChatPane({
         if (!owner.isCurrent()) return;
         reportError(error, 'Failed to load context usage');
       });
-  }, [actions, contextUsageAvailable, reportError, sessionOwnerGuard, store]);
+  }, [
+    actions,
+    contextUsageAvailable,
+    reportError,
+    sessionOwnerGuard,
+    store,
+    t,
+  ]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
@@ -1719,6 +1733,7 @@ export function ChatPane({
               <TranscriptViewport
                 ref={transcriptViewportRef}
                 messages={messages}
+                sourceSessionId={connection.sessionId}
                 pendingApproval={pendingToolApproval}
                 loadingTranscript={connection.loadingTranscript}
                 catchingUp={connection.catchingUp}
@@ -1740,7 +1755,6 @@ export function ChatPane({
                     ? fileChangesByTurn
                     : undefined
                 }
-                sourceSessionId={connection.sessionId}
                 turnArtifacts={
                   visibleTurnOutputKinds.has('artifact')
                     ? artifactsByTurn
@@ -1772,6 +1786,7 @@ export function ChatPane({
         {pendingToolApproval && (
           <div className={styles.approval} data-testid="pane-approval">
             <ToolApproval
+              showBrowserNotifications
               disabled={isExitPlanApproval && modeControlsBusy}
               planExecutionMode={connection.planExecutionMode}
               request={pendingToolApproval}
@@ -1839,6 +1854,9 @@ export function ChatPane({
               token count + cancel hint, but no rotating "witty" loading
               phrase. */}
           <StreamingStatus
+            showResponseTokensPerSecond={
+              showResponseTokensPerSecond && !approvalActive
+            }
             startedAt={activeTurnStartedAt}
             showPhrase={false}
             hasActivePrompt={sessionHasActivePrompt}
@@ -1860,7 +1878,9 @@ export function ChatPane({
                   streamingState !== 'idle' || sessionHasActivePrompt
                 }
                 onDelete={removeQueuedPrompt}
+                canSendMidTurnNow={canSendMidTurnNow}
                 onInsert={insertQueuedPrompt}
+                onSendNow={sendQueuedPromptNow}
                 onEdit={editQueuedPrompt}
                 onImagePreview={handleImagePreview}
                 onAttachmentPreview={handleAttachmentPreview}

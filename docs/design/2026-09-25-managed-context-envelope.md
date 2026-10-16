@@ -110,6 +110,8 @@ One request installs one Session's context on a Runtime and returns a receipt. W
 | `binding`         | an object closed to the seven `ContextBinding` fields, each with its W0a rule, as W0a's wire strings       |
 | `contextDigest`   | a string matching `sha256:[0-9a-f]{64}`                                                                    |
 
+The Broker acquires only the narrower Runtime Session IDs that [Broker Provider Control](2026-09-27-broker-provider-control.md) admits.
+
 The worker checks the request in this order and stops at the first failure:
 
 1. A request that breaks the shape is 400 `managed_runtime_attestation_invalid`.
@@ -183,7 +185,7 @@ An implementation independent of both languages computed the expected values and
 
 - `packages/cli/src/serve/contracts/managed-context-v1.schema.json` and `.fixtures.json` (new).
 - `packages/cli/src/serve/managed-context-envelope.ts` and its test (new).
-- A conformance test in `packages/sdk-java/runtime-broker/src/test/java/com/alibaba/qwen/code/runtimebroker/managedworkspace/` (new).
+- A conformance test in `packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/runtimebroker/managedworkspace/` (new).
 - `packages/cli/src/serve/managed-workspace-binding.ts` exports three of its W0a checks for reuse; their behavior does not change.
 - This design document in both languages (new), and the "Boot envelope" section and follow-up table of the W0a document, which now point here.
 - The runtime-broker `README.md` and `QWEN.md`, whose maintenance rule for the digest now names these fixtures too.

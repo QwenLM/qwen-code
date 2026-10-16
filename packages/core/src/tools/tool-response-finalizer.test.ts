@@ -16,6 +16,7 @@ import {
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
 import { persistAndTruncateToolResult } from './truncation.js';
+import { fnResponse } from '../test-utils/model-fixtures.js';
 
 const debugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -81,15 +82,7 @@ describe('tool response finalization', () => {
       {
         ...entry(
           'exec-inline',
-          [
-            {
-              functionResponse: {
-                id: 'exec-inline',
-                name: 'exec',
-                response: { output: 'x'.repeat(32_000) },
-              },
-            },
-          ],
+          [fnResponse('exec', { output: 'x'.repeat(32_000) }, 'exec-inline')],
           [],
         ),
         toolName: 'exec',
@@ -106,13 +99,7 @@ describe('tool response finalization', () => {
   it('leaves a batch within budget unchanged', async () => {
     const entries = [
       entry('small', [
-        {
-          functionResponse: {
-            id: 'small',
-            name: 'shell',
-            response: { output: 'small output' },
-          },
-        },
+        fnResponse('shell', { output: 'small output' }, 'small'),
       ]),
     ];
 
@@ -146,23 +133,9 @@ describe('tool response finalization', () => {
   it('marks only persisted over-budget entries as mutated', async () => {
     const entries = [
       entry('large', [
-        {
-          functionResponse: {
-            id: 'large',
-            name: 'shell',
-            response: { output: 'x'.repeat(1000) },
-          },
-        },
+        fnResponse('shell', { output: 'x'.repeat(1000) }, 'large'),
       ]),
-      entry('small', [
-        {
-          functionResponse: {
-            id: 'small',
-            name: 'shell',
-            response: { output: 'ok' },
-          },
-        },
-      ]),
+      entry('small', [fnResponse('shell', { output: 'ok' }, 'small')]),
     ];
 
     await finalizeToolResponses(config(100), entries);
@@ -185,13 +158,7 @@ describe('tool response finalization', () => {
   it('can suppress intermediate boundary observations', async () => {
     const entries = [
       entry('small', [
-        {
-          functionResponse: {
-            id: 'small',
-            name: 'shell',
-            response: { output: 'small output' },
-          },
-        },
+        fnResponse('shell', { output: 'small output' }, 'small'),
       ]),
     ];
 
@@ -203,13 +170,7 @@ describe('tool response finalization', () => {
   it('deduplicates an unchanged scheduler-owned entry in an outer batch', async () => {
     boundaryObserveMock.mockReturnValue(true);
     const owned = entry('owned', [
-      {
-        functionResponse: {
-          id: 'owned',
-          name: 'shell',
-          response: { output: 'a'.repeat(70_000) },
-        },
-      },
+      fnResponse('shell', { output: 'a'.repeat(70_000) }, 'owned'),
     ]);
     const promptIds = new Map([
       ['owned', 'prompt-owned'],
@@ -229,13 +190,7 @@ describe('tool response finalization', () => {
       [
         ...schedulerFinalized,
         entry('synthetic', [
-          {
-            functionResponse: {
-              id: 'synthetic',
-              name: 'shell',
-              response: { output: 'synthetic error' },
-            },
-          },
+          fnResponse('shell', { output: 'synthetic error' }, 'synthetic'),
         ]),
       ],
       promptIds,
@@ -259,13 +214,7 @@ describe('tool response finalization', () => {
       config(200_000),
       [
         entry('owned', [
-          {
-            functionResponse: {
-              id: 'owned',
-              name: 'shell',
-              response: { output: 'a'.repeat(70_000) },
-            },
-          },
+          fnResponse('shell', { output: 'a'.repeat(70_000) }, 'owned'),
         ]),
       ],
       promptIds,
@@ -296,13 +245,11 @@ describe('tool response finalization', () => {
           callId: 'enter-plan',
           toolName: ToolNames.ENTER_PLAN_MODE,
           responseParts: [
-            {
-              functionResponse: {
-                id: 'enter-plan',
-                name: ToolNames.ENTER_PLAN_MODE,
-                response: { output: reminder },
-              },
-            },
+            fnResponse(
+              ToolNames.ENTER_PLAN_MODE,
+              { output: reminder },
+              'enter-plan',
+            ),
           ],
         },
       ];
@@ -322,13 +269,11 @@ describe('tool response finalization', () => {
         callId: 'enter-plan',
         toolName: ToolNames.ENTER_PLAN_MODE,
         responseParts: [
-          {
-            functionResponse: {
-              id: 'enter-plan',
-              name: ToolNames.ENTER_PLAN_MODE,
-              response: { output: `${reminder}${hookContext}` },
-            },
-          },
+          fnResponse(
+            ToolNames.ENTER_PLAN_MODE,
+            { output: `${reminder}${hookContext}` },
+            'enter-plan',
+          ),
         ],
       },
     ];
@@ -356,13 +301,11 @@ describe('tool response finalization', () => {
         callId: 'enter-plan',
         toolName: ToolNames.ENTER_PLAN_MODE,
         responseParts: [
-          {
-            functionResponse: {
-              id: 'enter-plan',
-              name: ToolNames.ENTER_PLAN_MODE,
-              response: { output: `${reminder}\n\n${'first'.repeat(1000)}` },
-            },
-          },
+          fnResponse(
+            ToolNames.ENTER_PLAN_MODE,
+            { output: `${reminder}\n\n${'first'.repeat(1000)}` },
+            'enter-plan',
+          ),
         ],
       },
     ];
@@ -374,15 +317,13 @@ describe('tool response finalization', () => {
       {
         ...firstPass[0],
         responseParts: [
-          {
-            functionResponse: {
-              id: 'enter-plan',
-              name: ToolNames.ENTER_PLAN_MODE,
-              response: {
-                output: `${firstOutput}\n\n${'second'.repeat(1000)}`,
-              },
+          fnResponse(
+            ToolNames.ENTER_PLAN_MODE,
+            {
+              output: `${firstOutput}\n\n${'second'.repeat(1000)}`,
             },
-          },
+            'enter-plan',
+          ),
         ],
       },
     ];
@@ -406,13 +347,11 @@ describe('tool response finalization', () => {
         callId: 'enter-plan',
         toolName: ToolNames.ENTER_PLAN_MODE,
         responseParts: [
-          {
-            functionResponse: {
-              id: 'enter-plan',
-              name: ToolNames.ENTER_PLAN_MODE,
-              response: { error: 'x'.repeat(1000) },
-            },
-          },
+          fnResponse(
+            ToolNames.ENTER_PLAN_MODE,
+            { error: 'x'.repeat(1000) },
+            'enter-plan',
+          ),
         ],
       },
     ];
@@ -431,13 +370,11 @@ describe('tool response finalization', () => {
         callId: 'enter-plan',
         toolName: ToolNames.ENTER_PLAN_MODE,
         responseParts: [
-          {
-            functionResponse: {
-              id: 'enter-plan',
-              name: ToolNames.ENTER_PLAN_MODE,
-              response: { output: 'untrusted'.repeat(1000) },
-            },
-          },
+          fnResponse(
+            ToolNames.ENTER_PLAN_MODE,
+            { output: 'untrusted'.repeat(1000) },
+            'enter-plan',
+          ),
         ],
       },
     ];
@@ -454,13 +391,7 @@ describe('tool response finalization', () => {
   it('counts protected lifecycle output in response metadata', () => {
     const reminder = getPlanModeSystemReminder(false);
     const parts: Part[] = [
-      {
-        functionResponse: {
-          id: 'enter-plan',
-          name: ToolNames.ENTER_PLAN_MODE,
-          response: { output: reminder },
-        },
-      },
+      fnResponse(ToolNames.ENTER_PLAN_MODE, { output: reminder }, 'enter-plan'),
     ];
 
     expect(toolResponseTextLength(parts)).toBe(reminder.length);
@@ -472,26 +403,22 @@ describe('tool response finalization', () => {
       entry(
         'one',
         [
-          {
-            functionResponse: {
-              id: 'one',
-              name: 'shell',
-              response: { output: `${prefix}${'a'.repeat(7000)}` },
-            },
-          },
+          fnResponse(
+            'shell',
+            { output: `${prefix}${'a'.repeat(7000)}` },
+            'one',
+          ),
         ],
         ['/tmp/one.output'],
       ),
       entry(
         'two',
         [
-          {
-            functionResponse: {
-              id: 'two',
-              name: 'shell',
-              response: { output: `${prefix}${'b'.repeat(7000)}` },
-            },
-          },
+          fnResponse(
+            'shell',
+            { output: `${prefix}${'b'.repeat(7000)}` },
+            'two',
+          ),
         ],
         ['/tmp/two.output'],
       ),
@@ -519,15 +446,7 @@ describe('tool response finalization', () => {
     const entries = [
       entry(
         'multi-artifact',
-        [
-          {
-            functionResponse: {
-              id: 'multi-artifact',
-              name: 'mcp',
-              response: { output: 'x'.repeat(10_000) },
-            },
-          },
-        ],
+        [fnResponse('mcp', { output: 'x'.repeat(10_000) }, 'multi-artifact')],
         ['/tmp/first.output', '/tmp/second.output'],
       ),
     ];
@@ -548,16 +467,14 @@ describe('tool response finalization', () => {
     };
     const entries = [
       entry('mixed', [
-        {
-          functionResponse: {
-            id: 'mixed',
-            name: 'shell',
-            response: {
-              output: 'o'.repeat(4000),
-              error: 'e'.repeat(4000),
-            },
+        fnResponse(
+          'shell',
+          {
+            output: 'o'.repeat(4000),
+            error: 'e'.repeat(4000),
           },
-        },
+          'mixed',
+        ),
         { text: 't'.repeat(4000) },
         media,
       ]),
@@ -577,15 +494,7 @@ describe('tool response finalization', () => {
     const entries = [
       entry(
         'failed',
-        [
-          {
-            functionResponse: {
-              id: 'failed',
-              name: 'shell',
-              response: { output: 'x'.repeat(10_000) },
-            },
-          },
-        ],
+        [fnResponse('shell', { output: 'x'.repeat(10_000) }, 'failed')],
         [],
       ),
     ];
@@ -602,13 +511,7 @@ describe('tool response finalization', () => {
     persist.mockRejectedValueOnce(new Error('disk unavailable'));
     const entries = [
       entry('throws', [
-        {
-          functionResponse: {
-            id: 'throws',
-            name: 'shell',
-            response: { output: 'x'.repeat(10_000) },
-          },
-        },
+        fnResponse('shell', { output: 'x'.repeat(10_000) }, 'throws'),
       ]),
     ];
 
@@ -622,13 +525,7 @@ describe('tool response finalization', () => {
 
   it('uses distinct artifact paths for duplicate call ids', async () => {
     const responseParts = (value: string): Part[] => [
-      {
-        functionResponse: {
-          id: 'duplicate',
-          name: 'shell',
-          response: { output: value.repeat(1000) },
-        },
-      },
+      fnResponse('shell', { output: value.repeat(1000) }, 'duplicate'),
     ];
     const entries = [
       entry('duplicate', responseParts('a')),
@@ -657,13 +554,7 @@ describe('tool response finalization', () => {
 
   it('avoids collisions between duplicate ids and natural suffix ids', async () => {
     const responseParts = (callId: string, value: string): Part[] => [
-      {
-        functionResponse: {
-          id: callId,
-          name: 'shell',
-          response: { output: value.repeat(1000) },
-        },
-      },
+      fnResponse('shell', { output: value.repeat(1000) }, callId),
     ];
     const entries = [
       entry('call', responseParts('call', 'a')),
@@ -682,13 +573,7 @@ describe('tool response finalization', () => {
 
   it('avoids collisions after call ids are normalized to basenames', async () => {
     const responseParts = (callId: string, value: string): Part[] => [
-      {
-        functionResponse: {
-          id: callId,
-          name: 'shell',
-          response: { output: value.repeat(1000) },
-        },
-      },
+      fnResponse('shell', { output: value.repeat(1000) }, callId),
     ];
     const entries = [
       entry('dir/call', responseParts('dir/call', 'a')),
@@ -706,13 +591,7 @@ describe('tool response finalization', () => {
   it('does not persist or rewrite responses when the budget is disabled', async () => {
     const entries = [
       entry('disabled', [
-        {
-          functionResponse: {
-            id: 'disabled',
-            name: 'shell',
-            response: { output: 'x'.repeat(10_000) },
-          },
-        },
+        fnResponse('shell', { output: 'x'.repeat(10_000) }, 'disabled'),
       ]),
     ];
 
@@ -722,16 +601,79 @@ describe('tool response finalization', () => {
     expect(persist).not.toHaveBeenCalled();
   });
 
+  it.each([ToolNames.SEARCH_MEMORY, ToolNames.TOOL_SEARCH])(
+    'does not slice structured %s output',
+    async (name) => {
+      const output = JSON.stringify({ content: '\\"'.repeat(20_000) });
+      const entries: ToolResponseBudgetEntry[] = [
+        {
+          callId: 'memory-search',
+          toolName: name,
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'memory-search',
+                name,
+                response: { output },
+              },
+            },
+          ],
+        },
+      ];
+
+      const result = await finalizeToolResponses(config(100), entries);
+
+      const retained =
+        result[0]?.responseParts[0]?.functionResponse?.response?.['output'];
+      expect(retained).toBe(output);
+      expect(() => JSON.parse(String(retained))).not.toThrow();
+      expect(persist).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([ToolNames.SEARCH_MEMORY, ToolNames.TOOL_SEARCH])(
+    'keeps %s output intact inside a send-boundary batch',
+    (name) => {
+      const output = JSON.stringify({ content: 'memory body'.repeat(200) });
+      const entries: ToolResponseBudgetEntry[] = [
+        {
+          callId: 'send-boundary',
+          toolName: 'tool-response-batch',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'memory-search',
+                name,
+                response: { output },
+              },
+            },
+            {
+              functionResponse: {
+                id: 'shell',
+                name: 'shell',
+                response: { output: 'x'.repeat(1_000) },
+              },
+            },
+          ],
+        },
+      ];
+
+      const result = enforceFunctionResponseBudget(entries, 100);
+      const retained =
+        result[0]?.responseParts[0]?.functionResponse?.response?.['output'];
+
+      expect(retained).toBe(output);
+      expect(() => JSON.parse(String(retained))).not.toThrow();
+      expect(
+        result[0]?.responseParts[1]?.functionResponse?.response?.['output'],
+      ).not.toBe('x'.repeat(1_000));
+    },
+  );
+
   it('does not split UTF-16 surrogate pairs', () => {
     const entries = [
       entry('unicode', [
-        {
-          functionResponse: {
-            id: 'unicode',
-            name: 'shell',
-            response: { output: '😀'.repeat(1000) },
-          },
-        },
+        fnResponse('shell', { output: '😀'.repeat(1000) }, 'unicode'),
       ]),
     ];
 
@@ -760,13 +702,7 @@ describe('tool response finalization', () => {
     const entries = [
       entry('send', [
         { text: userText },
-        {
-          functionResponse: {
-            id: 'send',
-            name: 'shell',
-            response: { output: 'x'.repeat(1000) },
-          },
-        },
+        fnResponse('shell', { output: 'x'.repeat(1000) }, 'send'),
       ]),
     ];
 
@@ -786,13 +722,11 @@ describe('tool response finalization', () => {
         callId: 'send-boundary',
         toolName: 'tool-response-batch',
         responseParts: [
-          {
-            functionResponse: {
-              id: 'enter-plan',
-              name: ToolNames.ENTER_PLAN_MODE,
-              response: { output: reminder },
-            },
-          },
+          fnResponse(
+            ToolNames.ENTER_PLAN_MODE,
+            { output: reminder },
+            'enter-plan',
+          ),
         ],
       },
     ];
@@ -807,13 +741,11 @@ describe('tool response finalization', () => {
         callId: 'send-boundary',
         toolName: 'tool-response-batch',
         responseParts: [
-          {
-            functionResponse: {
-              id: 'enter-plan',
-              name: ToolNames.ENTER_PLAN_MODE,
-              response: { output: `${reminder}\n\n${'hook'.repeat(1000)}` },
-            },
-          },
+          fnResponse(
+            ToolNames.ENTER_PLAN_MODE,
+            { output: `${reminder}\n\n${'hook'.repeat(1000)}` },
+            'enter-plan',
+          ),
         ],
       },
     ];

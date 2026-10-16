@@ -27,6 +27,7 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
   let summary: JavaAgentSession = {
     sessionId: SESSION_ID,
     title: 'Managed progress regression',
+    agentId: 'qwen-code',
     status: 'active',
     createdAt: Date.now() - 10_000,
     updatedAt: Date.now(),
@@ -38,8 +39,14 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
     },
     environment: { state: 'ready' },
     lastSequence: 0,
+    capabilities: {
+      tasks: true,
+      artifacts: false,
+      actions: false,
+      workspaceTurns: false,
+    },
   };
-  function append(type: string, data?: Record<string, unknown>) {
+  function append(type: string, data: Record<string, unknown> = {}) {
     const sequence = events.length + 1;
     events.push({
       sequence,
@@ -105,7 +112,12 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
           submittedAt: Date.now(),
         },
       };
-      append('turn.accepted', { input: body.input });
+      append('turn.accepted', {
+        input: body.input.map((block: { text: string }) => ({
+          type: 'text',
+          text: block.text,
+        })),
+      });
       append('turn.started');
       return respond(
         {
@@ -149,8 +161,10 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
     `/?managed=1&managedProvider=java&managedSession=${SESSION_ID}`,
   );
   await expect(
-    page.getByRole('textbox', { name: 'Message the managed agent' }),
-  ).toBeEnabled();
+    page
+      .getByRole('region', { name: 'Managed conversation' })
+      .locator('[data-web-shell-composer-editor] .cm-content'),
+  ).toHaveAttribute('contenteditable', 'true');
   await waitForCurrentStream();
   return { daemon, prompts, cancellations, errors, emit, waitForCurrentStream };
 }
@@ -186,10 +200,12 @@ test('Managed progress stays visible through a long transcript and live thought/
 }, testInfo) => {
   const fixture = await installManagedScenario(page, testInfo);
   await expectScrollableTranscript(page);
-  const composer = page.getByRole('textbox', {
-    name: 'Message the managed agent',
-  });
-  const send = page.getByRole('button', { name: 'Send', exact: true });
+  const composer = page
+    .getByRole('region', { name: 'Managed conversation' })
+    .locator('[data-web-shell-composer-editor] .cm-content');
+  const send = page
+    .getByRole('region', { name: 'Managed conversation' })
+    .getByRole('button', { name: 'Send message', exact: true });
   await composer.fill('Inspect marker.txt');
   await send.click();
   await fixture.waitForCurrentStream();
@@ -197,8 +213,17 @@ test('Managed progress stays visible through a long transcript and live thought/
     'Thinking / responding',
   );
   await expect(page.locator('[data-managed-progress]')).toBeInViewport();
-  await expect(composer).toBeDisabled();
-  await expect(send).toBeDisabled();
+  await expect(composer).toHaveAttribute('contenteditable', 'false');
+  await expect(
+    page
+      .getByRole('region', { name: 'Managed conversation' })
+      .locator('[data-web-shell-composer-submit]'),
+  ).toHaveAccessibleName('esc to cancel');
+  await expect(
+    page
+      .getByRole('region', { name: 'Managed conversation' })
+      .getByRole('button', { name: 'esc to cancel', exact: true }),
+  ).toBeEnabled();
   await expect(page.locator('[data-managed-progress]')).toContainText(
     /[1-9]\d*s elapsed/,
   );
@@ -236,7 +261,7 @@ test('Managed progress stays visible through a long transcript and live thought/
   await expectScrollableTranscript(page);
   await fixture.emit('turn.completed');
   await expect(page.locator('[data-managed-progress]')).toHaveCount(0);
-  await expect(composer).toBeEnabled();
+  await expect(composer).toHaveAttribute('contenteditable', 'true');
   expect(fixture.prompts).toHaveLength(1);
   expect(fixture.prompts[0].key).toBeTruthy();
   expect(fixture.daemon.promptRequests()).toHaveLength(0);
@@ -247,24 +272,35 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   page,
 }, testInfo) => {
   const fixture = await installManagedScenario(page, testInfo);
-  const composer = page.getByRole('textbox', {
-    name: 'Message the managed agent',
-  });
-  const send = page.getByRole('button', { name: 'Send', exact: true });
+  const composer = page
+    .getByRole('region', { name: 'Managed conversation' })
+    .locator('[data-web-shell-composer-editor] .cm-content');
+  const send = page
+    .getByRole('region', { name: 'Managed conversation' })
+    .getByRole('button', { name: 'Send message', exact: true });
   await composer.fill('Turn to cancel');
   await send.click();
   await fixture.waitForCurrentStream();
-  await page.getByRole('button', { name: 'Cancel turn', exact: true }).click();
+  await page
+    .getByRole('region', { name: 'Managed conversation' })
+    .getByRole('button', { name: 'esc to cancel', exact: true })
+    .click();
   await fixture.waitForCurrentStream();
-  expect(fixture.cancellations).toEqual([{ turnId: 'p2' }]);
+  // waitForCurrentStream can pass on the still-running turn's stale cursor
+  // while the cancel POST is still on the wire: poll the actual list.
+  await expect.poll(() => fixture.cancellations).toEqual([{ turnId: 'p2' }]);
   await expect(page.locator('[data-managed-progress]')).toContainText(
     'Cancelling',
   );
-  await expect(composer).toBeDisabled();
-  await expect(send).toBeDisabled();
+  await expect(composer).toHaveAttribute('contenteditable', 'false');
+  await expect(
+    page
+      .getByRole('region', { name: 'Managed conversation' })
+      .locator('[data-web-shell-composer-submit]'),
+  ).toBeDisabled();
   await fixture.emit('turn.cancelled');
   await expect(page.locator('[data-managed-progress]')).toHaveCount(0);
-  await expect(composer).toBeEnabled();
+  await expect(composer).toHaveAttribute('contenteditable', 'true');
   await composer.fill('Continue after cancellation');
   await send.click();
   await fixture.waitForCurrentStream();
@@ -275,13 +311,58 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   await expect(
     page.getByText('Continuation succeeded', { exact: true }),
   ).toBeInViewport();
-  await expect(composer).toBeEnabled();
+  await expect(composer).toHaveAttribute('contenteditable', 'true');
   await expect(page).toHaveURL(new RegExp(`managedSession=${SESSION_ID}`));
   expect(fixture.prompts.map((request) => request.prompt)).toEqual([
-    [{ type: 'text', text: 'Turn to cancel' }],
-    [{ type: 'text', text: 'Continue after cancellation' }],
+    [{ type: 'input_text', text: 'Turn to cancel' }],
+    [{ type: 'input_text', text: 'Continue after cancellation' }],
   ]);
   expect(new Set(fixture.prompts.map((request) => request.key)).size).toBe(2);
   expect(fixture.daemon.promptRequests()).toHaveLength(0);
   expect(fixture.errors).toEqual([]);
+});
+
+test('a permanently failing pending create exposes a discard path @smoke', async ({
+  page,
+}, testInfo) => {
+  await installManagedScenario(page, testInfo);
+  // Registered after the scenario's catch-all, so it wins for this path:
+  // the create fails permanently and the pending prompt would otherwise
+  // wedge the whole composer on an indefinite retry.
+  const attempts: string[] = [];
+  await page.route(
+    '**/api/agent/web-shell/v1/sessions/create',
+    async (route) => {
+      attempts.push(String(route.request().postDataJSON()?.idempotencyKey));
+      await route.fulfill({
+        status: 500,
+        json: { error: { code: 'create_down', message: 'permanent failure' } },
+      });
+    },
+  );
+
+  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  const composer = page
+    .getByRole('region', { name: 'Managed conversation' })
+    .locator('[data-web-shell-composer-editor] .cm-content');
+  await composer.fill('Fragile draft');
+  await page
+    .getByRole('region', { name: 'Managed conversation' })
+    .getByRole('button', { name: 'Send message', exact: true })
+    .click();
+
+  await expect(
+    page.getByText('The request outcome is unconfirmed', { exact: false }),
+  ).toBeVisible();
+  await expect(composer).toHaveAttribute('contenteditable', 'false');
+
+  await page.getByRole('button', { name: 'Discard this request' }).click();
+  await expect(
+    page.getByText('The request outcome is unconfirmed', { exact: false }),
+  ).toBeHidden();
+  await expect(composer).toHaveAttribute('contenteditable', 'true');
+  await expect(composer).toHaveText('Fragile draft');
+
+  // Discard is quiet: no resubmission, no new idempotency key for the draft.
+  expect(attempts).toHaveLength(1);
 });

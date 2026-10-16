@@ -47,6 +47,11 @@ Owner 持久化留在包外。#12693 正在引入 reader/writer 基础；最小�
 中对齐。本切片不新建格式，也不要求整个 Stage G 完成。生产启用需要完成 host 接线。
 Legacy host 回执、owner 持久化和冷恢复选择器见 B2a 后续设计
 [双引擎 owner 选择与类型化拒绝](./2026-09-26-paired-engine-owner-selection.zh-CN.md)。
+宿主接线与新会话的选择规则见 B2d 设计
+[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)。
+[普通宿主的 Managed 引擎](./2026-09-27-ordinary-host-managed-engine.zh-CN.md)
+设计确定了二者的关系：Managed 会话是一份 Managed Session log，其第一个事务先记录
+owner，再记录 header。
 
 ### 通道与准入
 
@@ -70,9 +75,12 @@ Shutdown 等待所有引擎启动、选择、会话操作和物理通道，强�
 返回的 Session ID。缺失、非法或冲突回执拒绝注册。可安全寻址的未注册 Session 在原 connection 上关闭；ID 无法安全寻址时隔离原通道，等待
 其他会话排空，并保持准入到物理退出。不能因异常响应返回了其他 Session 的 ID 就关闭它。
 
-隔离通道上的已有会话仍可继续 Prompt。该引擎的新工作会持续被阻止，直到这些会话
-排空且通道退出；本切片没有有限排空期限或自动回收机制。生产启用前，#12380 必须
-定义运维恢复策略，并考虑这些活跃会话及物理准入占用。
+隔离恢复按 #12737 的决策执行，详见
+[双引擎按引擎的运维行为](./2026-09-26-paired-engine-per-engine-operations.zh-CN.md)
+（B2c）。被隔离的通道不再接收新的 Prompt、来自其他会话的消息与 side 请求；汇报已有
+后台工作的通知回合在通道开始终止之前仍被放行，但被收紧权限的工作区变更围栏的会话除外。
+它关闭已结算的会话，排空后退出；排空期限从隔离开始时只计一次，到期即终止通道。在观察到
+通道退出之前，准入、ID 与 owner 保持占用；在子进程的进程树被释放之前，该引擎持续拒绝新会话。
 
 ACP 恢复成功后发生的校验失败，仍按原通道清理。对外超时不代表物理操作完成。
 迟到成功即使缺少 Session ID，也仍需清理或隔离，不能等同明确的 RPC 失败。
@@ -88,9 +96,10 @@ Prompt、取消、审批、模型变更和关闭使用 entry 绑定的 connectio
 
 工作区 MCP、配置/状态控制与预热使用 Legacy。整体存活与活动状态检查两个引擎；
 空闲回收按实际 candidate ID 找到通道。预热 keepalive 只延长 Legacy 的空闲期限；
-Managed 的会话和在途工作仍会阻止其通道被回收，本切片不提供独立的 Managed 预热
-keepalive。子进程资源采样与用户语言下发也仍只覆盖 Legacy。生产启用前，#12380
-需结合 host 接线确定按引擎聚合资源与传播语言的行为。
+Managed 的会话和在途工作仍会阻止其通道被回收；Managed 没有自己的预热或
+keepalive，资源采样也不会让它保持运行。子进程资源采样覆盖每个存活通道，用户语言
+变更送达每个存活引擎；之后才启动的 Managed 通道会在第一个会话之前收到最后一次变更。
+两者均由 B2c 规定。
 
 生产配对 host 接线还必须先满足以下工作区契约：
 
@@ -105,9 +114,12 @@ keepalive。子进程资源采样与用户语言下发也仍只覆盖 Legacy。�
   悄悄让已有 Managed 会话继续使用旧权限。
 
 这些是 #12380 host 集成的验收门槛，当前仅走 Legacy 的工作区控制实现尚不提供这些能力。
+B2b 后续设计[双引擎工作区 runtime 身份](./2026-09-26-paired-engine-workspace-runtime-identity.zh-CN.md)
+给出了前两项门槛的方案，[双引擎工作区变更传播](./2026-09-27-paired-engine-workspace-change-propagation.zh-CN.md)
+给出了第三项的方案。
 
-现有工作区 stop 回执只表示一个物理通道，因此多个通道存活时明确拒绝 stop，直到
-回执扩展；只有一个通道时仍可停止。
+本切片的工作区 stop 回执只表示一个物理通道，因此多个通道存活时拒绝 stop；只有一个
+通道时仍可停止。B2b 后续设计把回执扩展到所有存活通道。
 Managed branch/side-task 在修改历史前拒绝。
 
 ## 文件与消费者
@@ -119,7 +131,10 @@ Managed branch/side-task 在修改历史前拒绝。
 | 会话路由 | `session-control-plane.ts`、`BridgeClient` 回调                             |
 | 验证     | 同目录 Bridge/lifecycle 测试与隔离进程脚本                                  |
 
-现有 daemon、Channels 与嵌入构造方保持单 factory 路径，不增加 daemon route。
+除非启用双引擎，所有构造方保持单 factory 路径：`qwen serve --experimental-paired-engines`
+为 daemon 的普通工作区 runtime 配对，设置同一 serve 选项的嵌入方为 serve app 的默认
+Bridge 配对（见[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)）。
+不增加 daemon route。
 工作区控制归工作区，所有会话操作归活跃 Session owner。Managed owner 缺失或失败
 时绝不回退到 Legacy 或 primary runtime。
 
@@ -139,4 +154,5 @@ Managed branch/side-task 在修改历史前拒绝。
 主要风险是清理完成前释放准入，或把一个引擎的 current channel 当作整个工作区。
 测试必须观察真实 factory/connection 调用和未完成清理，而不只检查最终 Session 数量。
 Owner 持久化依赖与生产 host 回执实现仍是 #12380 中待对齐的接线问题；在此期间可通过
-Bridge 注入接口验证契约。B2a 后续设计实现了 Legacy 回执与恢复选择器，宿主接线仍待完成。
+Bridge 注入接口验证契约。B2a 后续设计实现了 Legacy 回执与恢复选择器；B2d 在实验性
+开关之后把双引擎接入普通宿主，目前尚未注册 Managed 引擎。

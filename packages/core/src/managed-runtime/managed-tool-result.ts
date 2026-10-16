@@ -19,8 +19,8 @@ import {
 
 // The managed-tool-result/1 contract (O1a of #12723). The shared fixtures in
 // contracts/managed-tool-result-v1.fixtures.json pin it, and a conformance
-// test in packages/sdk-java/runtime-broker pins the same constants. Nothing
-// uses it until the local segment store (O1b) and the worker (O1c).
+// test in packages/managed-agent-server pins the same constants. The local
+// segment store consumes it in O1b; the worker follows in O1c.
 
 export const MANAGED_TOOL_RESULT_PROTOCOL = 'managed-tool-result/1';
 
@@ -237,7 +237,10 @@ export interface ToolResultPage {
 }
 
 export interface ToolResultCapture {
-  readonly captureStatus: Exclude<ToolResultCaptureStatus, 'pending'>;
+  /** 'detached': a settled call whose output streams through its own record. */
+  readonly captureStatus:
+    | Exclude<ToolResultCaptureStatus, 'pending'>
+    | 'detached';
   readonly captureReason: ToolResultCaptureReason | null;
   readonly manifest: ManagedSessionDurableRef | null;
   readonly previewTruncated: boolean;
@@ -518,7 +521,7 @@ function parseDescriptor(
 }
 
 /** The capture status that a manifest's descriptors imply. */
-function impliedStatus(
+export function impliedStatus(
   contents: readonly ToolResultContentDescriptor[],
 ): ToolResultCaptureStatus {
   if (contents.some((entry) => entry.state === 'open')) return 'pending';
@@ -803,9 +806,39 @@ function isDescriptorSuccessor(
 }
 
 /**
+ * Whether `next` continues the same capture as `previous`: the same
+ * capture identity, a later revision, and a contents chain that only
+ * extends what the earlier revision recorded. This is the integrity a
+ * record's output advance insists on — a higher number from another
+ * capture would chain the record's view to bytes the capture never wrote.
+ * Unlike `isToolResultManifestSuccessor` this admits a gap: when one
+ * forward inside the funnel throws once, the missed revision carries
+ * nothing the next revision does not already extend, by construction, so
+ * the record goes forward by it.
+ */
+export function isToolResultManifestChainLink(
+  previous: unknown,
+  next: unknown,
+): boolean {
+  const before = attempt(() => parseToolResultManifest(previous));
+  const after = attempt(() => parseToolResultManifest(next));
+  return (
+    !!before &&
+    !!after &&
+    FIXED_KEYS.every((key) => before[key] === after[key]) &&
+    after.revision > before.revision &&
+    after.contents.length >= before.contents.length &&
+    before.contents.every((entry, index) =>
+      isDescriptorSuccessor(entry, after.contents[index]),
+    )
+  );
+}
+
+/**
  * Whether `next` may follow `previous` as the next revision of one capture:
- * only a pending revision has a successor, and a successor may only extend
- * what the earlier revision recorded.
+ * a pending revision's successor may only extend what it recorded; a fully
+ * sealed revision gets exactly one — the revision that names the physical
+ * end over byte-for-byte identical descriptors, never a newer story.
  */
 export function isToolResultManifestSuccessor(
   previous: unknown,
@@ -816,7 +849,6 @@ export function isToolResultManifestSuccessor(
   if (
     !before ||
     !after ||
-    before.captureStatus !== 'pending' ||
     after.revision !== before.revision + 1 ||
     FIXED_KEYS.some((key) => before[key] !== after[key]) ||
     (before.upstreamTruncated && !after.upstreamTruncated) ||
@@ -824,16 +856,28 @@ export function isToolResultManifestSuccessor(
   ) {
     return false;
   }
-  if (
-    before.executionStatus !== 'unknown' &&
-    (before.executionStatus !== after.executionStatus ||
-      before.exitCode !== after.exitCode ||
-      before.signal !== after.signal)
-  ) {
-    return false;
+  if (before.captureStatus === 'pending') {
+    if (
+      before.executionStatus !== 'unknown' &&
+      (before.executionStatus !== after.executionStatus ||
+        before.exitCode !== after.exitCode ||
+        before.signal !== after.signal)
+    ) {
+      return false;
+    }
+    return before.contents.every((entry, index) =>
+      isDescriptorSuccessor(entry, after.contents[index]),
+    );
   }
-  return before.contents.every((entry, index) =>
-    isDescriptorSuccessor(entry, after.contents[index]),
+  // The settle-family transition, one and only one leg: still previews
+  // nothing of the physical end → exactly the revision that names it.
+  return (
+    before.captureStatus === 'complete' &&
+    before.executionStatus === 'unknown' &&
+    before.exitCode === null &&
+    before.signal === null &&
+    after.executionStatus !== 'unknown' &&
+    sameJson(before.contents, after.contents)
   );
 }
 
@@ -866,14 +910,18 @@ function parseCapture(value: unknown): ToolResultCapture {
   const capture = closed(value, CAPTURE_KEYS, 'result.capture');
   const captureStatus = oneOf(
     capture.captureStatus,
-    ['complete', 'partial', 'unavailable'] as const,
+    ['complete', 'partial', 'unavailable', 'detached'] as const,
     'result.capture.captureStatus',
   );
   const captureReason = nullable(capture.captureReason, (reason) =>
     oneOf(reason, CAPTURE_REASONS, 'result.capture.captureReason'),
   );
-  if ((captureReason === null) !== (captureStatus === 'complete')) {
-    fail('result.capture.captureReason must be set unless it is complete.');
+  const reasonless =
+    captureStatus === 'complete' || captureStatus === 'detached';
+  if ((captureReason === null) !== reasonless) {
+    fail(
+      'result.capture.captureReason must be set unless the capture is complete or detached.',
+    );
   }
   const manifest = nullable(capture.manifest, (ref) =>
     reference(
@@ -883,8 +931,17 @@ function parseCapture(value: unknown): ToolResultCapture {
       LIMITS.maxManifestBytes,
     ),
   );
-  if (manifest === null && captureStatus !== 'unavailable') {
-    fail('result.capture.manifest is required unless it is unavailable.');
+  if (
+    manifest === null &&
+    captureStatus !== 'unavailable' &&
+    captureStatus !== 'detached'
+  ) {
+    fail(
+      'result.capture.manifest is required unless the capture is unavailable or detached.',
+    );
+  }
+  if (manifest !== null && captureStatus === 'detached') {
+    fail('result.capture.manifest must be null while the capture is detached.');
   }
   return Object.freeze({
     captureStatus,
@@ -992,6 +1049,84 @@ export interface ToolResultPrefix extends ToolResultSealReceipt {
   readonly sealed: boolean;
 }
 
+export interface ToolResultPublishRequest {
+  readonly captureId: string;
+  readonly streamId: string;
+  readonly ordinal: number;
+  readonly bytes: Uint8Array;
+  readonly expectedDigest: string | null;
+}
+
+export interface ToolResultSealRequest extends ToolResultSealReceipt {
+  readonly captureId: string;
+  readonly streamId: string;
+}
+
+export interface ToolResultPrefixRequest {
+  readonly captureId: string;
+  readonly streamId: string;
+}
+
+/** Shared request gates for the in-memory ledger and the local store. */
+export function parseToolResultPublishRequest(
+  request: unknown,
+): ToolResultPublishRequest {
+  const value = closed(
+    request,
+    ['bytes', 'captureId', 'digest', 'ordinal', 'streamId'],
+    'publish',
+    ['digest'],
+  );
+  const bytes = value.bytes;
+  if (
+    !(bytes instanceof Uint8Array) ||
+    bytes.byteLength < 1 ||
+    bytes.byteLength > LIMITS.maxSegmentBytes
+  ) {
+    fail('publish.bytes must be 1 to 16 MiB.');
+  }
+  return {
+    captureId: token(value.captureId, 'captureId'),
+    streamId: token(value.streamId, 'streamId'),
+    ordinal: count(value.ordinal, 'publish.ordinal', 0, LIMITS.maxOrdinal),
+    bytes,
+    expectedDigest:
+      'digest' in value ? digest(value.digest, 'publish.digest') : null,
+  };
+}
+
+export function parseToolResultSealRequest(
+  request: unknown,
+): ToolResultSealRequest {
+  const value = closed(
+    request,
+    ['byteLength', 'captureId', 'digest', 'segmentCount', 'streamId'],
+    'seal',
+  );
+  return {
+    captureId: token(value.captureId, 'captureId'),
+    streamId: token(value.streamId, 'streamId'),
+    segmentCount: count(
+      value.segmentCount,
+      'seal.segmentCount',
+      0,
+      LIMITS.maxOrdinal + 1,
+    ),
+    byteLength: count(value.byteLength, 'seal.byteLength'),
+    digest: digest(value.digest, 'seal.digest'),
+  };
+}
+
+export function parseToolResultPrefixRequest(
+  request: unknown,
+): ToolResultPrefixRequest {
+  const value = closed(request, ['captureId', 'streamId'], 'prefix');
+  return {
+    captureId: token(value.captureId, 'captureId'),
+    streamId: token(value.streamId, 'streamId'),
+  };
+}
+
 function refused(code: ToolResultStoreCode): ToolResultStoreOutcome<never> {
   return Object.freeze({ status: 'refused', code });
 }
@@ -1020,39 +1155,19 @@ export class ToolResultSegmentLedger {
   readonly #streams = new Map<string, Stream>();
 
   publish(request: unknown): ToolResultStoreOutcome<ToolResultSegmentReceipt> {
-    const fields = attempt(() => {
-      const value = closed(
-        request,
-        ['bytes', 'captureId', 'digest', 'ordinal', 'streamId'],
-        'publish',
-        ['digest'],
-      );
-      const bytes = value.bytes;
-      if (
-        !(bytes instanceof Uint8Array) ||
-        bytes.byteLength < 1 ||
-        bytes.byteLength > LIMITS.maxSegmentBytes
-      ) {
-        fail('publish.bytes must be 1 to 16 MiB.');
-      }
-      return {
-        key: streamKey(value),
-        ordinal: count(value.ordinal, 'publish.ordinal', 0, LIMITS.maxOrdinal),
-        bytes: Uint8Array.from(bytes),
-        expected:
-          'digest' in value ? digest(value.digest, 'publish.digest') : null,
-      };
-    });
+    const fields = attempt(() => parseToolResultPublishRequest(request));
     if (!fields) return refused('managed_tool_result_invalid');
-    const received = sha256([fields.bytes]);
-    if (fields.expected !== null && fields.expected !== received) {
+    const bytes = Uint8Array.from(fields.bytes);
+    const received = sha256([bytes]);
+    if (fields.expectedDigest !== null && fields.expectedDigest !== received) {
       return refused('managed_tool_result_digest_mismatch');
     }
-    const stream = this.#streams.get(fields.key);
+    const key = streamKey(fields);
+    const stream = this.#streams.get(key);
     const stored = stream?.segments.get(fields.ordinal);
     if (stored) {
       return sha256([stored]) === received &&
-        stored.byteLength === fields.bytes.byteLength
+        stored.byteLength === bytes.byteLength
         ? ok(segmentReceipt(fields.ordinal, stored))
         : refused('managed_tool_result_conflict');
     }
@@ -1060,37 +1175,21 @@ export class ToolResultSegmentLedger {
       return refused('managed_tool_result_conflict');
     }
     const target: Stream = stream ?? { segments: new Map() };
-    target.segments.set(fields.ordinal, fields.bytes);
-    this.#streams.set(fields.key, target);
-    return ok(segmentReceipt(fields.ordinal, fields.bytes));
+    target.segments.set(fields.ordinal, bytes);
+    this.#streams.set(key, target);
+    return ok(segmentReceipt(fields.ordinal, bytes));
   }
 
   seal(request: unknown): ToolResultStoreOutcome<ToolResultSealReceipt> {
-    const fields = attempt(() => {
-      const value = closed(
-        request,
-        ['byteLength', 'captureId', 'digest', 'segmentCount', 'streamId'],
-        'seal',
-      );
-      return {
-        key: streamKey(value),
-        segmentCount: count(
-          value.segmentCount,
-          'seal.segmentCount',
-          0,
-          LIMITS.maxOrdinal + 1,
-        ),
-        byteLength: count(value.byteLength, 'seal.byteLength'),
-        digest: digest(value.digest, 'seal.digest'),
-      };
-    });
+    const fields = attempt(() => parseToolResultSealRequest(request));
     if (!fields) return refused('managed_tool_result_invalid');
     const wanted = {
       segmentCount: fields.segmentCount,
       byteLength: fields.byteLength,
       digest: fields.digest,
     };
-    const stream: Stream = this.#streams.get(fields.key) ?? {
+    const key = streamKey(fields);
+    const stream: Stream = this.#streams.get(key) ?? {
       segments: new Map(),
     };
     if (stream.seal) {
@@ -1116,16 +1215,15 @@ export class ToolResultSegmentLedger {
       return refused('managed_tool_result_digest_mismatch');
     }
     stream.seal = Object.freeze(wanted);
-    this.#streams.set(fields.key, stream);
+    this.#streams.set(key, stream);
     return ok({ ...wanted });
   }
 
   /** The verified prefix: the stored segments from ordinal 0 without a gap. */
   prefix(request: unknown): ToolResultStoreOutcome<ToolResultPrefix> {
-    const key = attempt(() =>
-      streamKey(closed(request, ['captureId', 'streamId'], 'prefix')),
-    );
-    if (key === undefined) return refused('managed_tool_result_invalid');
+    const fields = attempt(() => parseToolResultPrefixRequest(request));
+    if (fields === undefined) return refused('managed_tool_result_invalid');
+    const key = streamKey(fields);
     const stream = this.#streams.get(key);
     const chunks: Uint8Array[] = [];
     for (

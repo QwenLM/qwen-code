@@ -25,11 +25,20 @@ import {
 } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
 import { preparePackage } from '../prepare-package.js';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const realReadFileSync = fs.readFileSync;
 const realReaddirSync = fs.readdirSync;
 const realStatSync = fs.statSync;
 const realRmSync = fs.rmSync;
+
+function reportsMissingArtifact(message, missingArtifact, pathFlavor = path) {
+  const normalized = String(message).split(pathFlavor.sep).join('/');
+  return (
+    normalized.includes('Required package artifact not found') &&
+    normalized.includes(missingArtifact)
+  );
+}
 
 describe('package asset scripts', () => {
   const tempDirs = [];
@@ -561,12 +570,12 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable
-  // there. The case skips rather than running into the other branch — a
-  // readable tree, stamped as usual — and failing red against the no-stamp
-  // assertion.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // chmod is the only lever this case has: on Windows it is a no-op, and
+  // root with its DAC capabilities reads through it, so the branch under
+  // test is unreachable there. The case skips rather than running into the
+  // other branch — a readable tree, stamped as usual — and failing red
+  // against the no-stamp assertion.
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses when a digest root exists but cannot be listed',
     () => {
       // The root-level arm of the unlistable-directory refusal: with the
@@ -666,6 +675,7 @@ describe('package asset scripts', () => {
     expect(distPackageJson.files).toContain('export-transcript-document.js');
     expect(distPackageJson.files).toContain('export-transcript-document.css');
     expect(distPackageJson.files).toContain('execution-worker.js');
+    expect(distPackageJson.files).toContain('mem0');
   });
 
   it('names the missing stylesheet when only the renderer JS was built', () => {
@@ -704,33 +714,51 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  it.each(['execution-worker.js', 'export-transcript-document.css'])(
-    'fails packaging when the published %s is missing',
-    (missingArtifact) => {
-      const rootDir = createFixtureRoot();
-      createBundleArtifacts(rootDir);
-      rmSync(path.join(rootDir, 'dist', missingArtifact));
-      stubConsole();
-      vi.spyOn(console, 'error').mockImplementation(() => {});
-      // verifyBundleArtifacts reports with console.error + process.exit(1), not a
-      // throw, so the exit has to become one to keep the rest of the suite alive.
-      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-        throw new Error('process.exit(1)');
-      });
+  it.each([
+    'execution-worker.js',
+    'mem0/main.js',
+    'mem0/write-confirmation.js',
+    'sandboxBwrapRelay.js',
+    'sandboxLandlockRelay.js',
+    'sandboxFileWorker.js',
+    'export-transcript-document.css',
+  ])('fails packaging when the published %s is missing', (missingArtifact) => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    rmSync(path.join(rootDir, 'dist', missingArtifact));
+    stubConsole();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // verifyBundleArtifacts reports with console.error + process.exit(1), not a
+    // throw, so the exit has to become one to keep the rest of the suite alive.
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit(1)');
+    });
 
-      expect(() =>
-        preparePackage({ rootDir, requireNativeAudioCapture: false }),
-      ).toThrow('process.exit(1)');
-      expect(exit).toHaveBeenCalledWith(1);
-      expect(
-        console.error.mock.calls
-          .map(([message]) => String(message))
-          .some(
-            (message) =>
-              message.includes('Required package artifact not found') &&
-              message.includes(missingArtifact),
-          ),
-      ).toBe(true);
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: false }),
+    ).toThrow('process.exit(1)');
+    expect(exit).toHaveBeenCalledWith(1);
+    // verifyBundleArtifacts builds `requiredPath` with path.join, so on Windows
+    // the reported message carries `\`. The two multi-segment entries above
+    // (`mem0/main.js`, `mem0/write-confirmation.js`) are spelled with `/`, so
+    // normalise the separator before matching; otherwise they pass on POSIX and
+    // go red in the test_windows lane (which runs test:scripts).
+    expect(
+      console.error.mock.calls.some(([message]) =>
+        reportsMissingArtifact(message, missingArtifact),
+      ),
+    ).toBe(true);
+  });
+
+  it.each(['mem0/main.js', 'mem0/write-confirmation.js'])(
+    'recognizes a Windows missing-artifact error for %s',
+    (missingArtifact) => {
+      const message =
+        'Error: Required package artifact not found: ' +
+        path.win32.join('D:\\publish\\dist', ...missingArtifact.split('/'));
+      expect(reportsMissingArtifact(message, missingArtifact, path.win32)).toBe(
+        true,
+      );
     },
   );
 
@@ -1200,12 +1228,12 @@ describe('package asset scripts', () => {
     ).toThrow(/Prepared package unpacked size \d+ bytes exceeds 50000 bytes/);
   });
 
-  it('enforces a 128 MiB default unpacked size budget', () => {
+  it('enforces a 160 MiB default unpacked size budget', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
     writeFile(rootDir, 'dist/chunks/large.bin', '');
     const largeFile = path.join(rootDir, 'dist', 'chunks', 'large.bin');
-    truncateSync(largeFile, 127 * 1024 * 1024);
+    truncateSync(largeFile, 159 * 1024 * 1024);
     stubConsole();
 
     expect(() =>
@@ -1215,7 +1243,7 @@ describe('package asset scripts', () => {
       }),
     ).not.toThrow();
 
-    truncateSync(largeFile, 128 * 1024 * 1024);
+    truncateSync(largeFile, 160 * 1024 * 1024);
 
     expect(() =>
       preparePackage({
@@ -1223,7 +1251,7 @@ describe('package asset scripts', () => {
         requireNativeAudioCapture: false,
       }),
     ).toThrow(
-      /Prepared package unpacked size \d+ bytes exceeds 134217728 bytes/,
+      /Prepared package unpacked size \d+ bytes exceeds 167772160 bytes/,
     );
   });
 
@@ -1558,8 +1586,13 @@ describe('package asset scripts', () => {
   }
 
   function createBundleArtifacts(rootDir) {
+    writeFile(rootDir, 'dist/mem0/main.js', '');
+    writeFile(rootDir, 'dist/mem0/write-confirmation.js', '');
     writeFile(rootDir, 'dist/cli.js', '');
     writeFile(rootDir, 'dist/execution-worker.js', '');
+    writeFile(rootDir, 'dist/sandboxBwrapRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxLandlockRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxFileWorker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,

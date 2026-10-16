@@ -628,6 +628,7 @@ export async function tryRunServeFastPath(
   let handle: RunHandle;
   try {
     handle = await runQwenServe(parsed.options, {
+      updateRestartArgv: rawArgv,
       ...(settings ? { bootSettings: settings } : {}),
       resolveOnListen: true,
       deferRuntimeUntilFirstHealth: !parsed.open,

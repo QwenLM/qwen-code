@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Two agreements nothing else in the suite reads, both of which fail green.
+// Two agreements nothing else in the suite reads, all of which fail green.
 //
 // 1. `scripts/check-desktop-isolation.js` keeps a `nativePrefixes` list, and
 //    the root workspace manifests keep a `!packages/*` negation per native
@@ -16,12 +16,8 @@
 //    guard to keep covering the package. Deleting the added line changes
 //    neither the guard's output nor its exit code, so only this file notices.
 //
-// 2. The `desktop_shell` job in `ci.yml` names the crate directory in five
-//    places -- the changed-files filter, the `Cargo.toml` existence guard and
-//    its `::notice::` text, the rust-cache `workspaces:`, and two
-//    `working-directory:` values. They have to name the same directory as each
-//    other and a directory that exists, or the job skips and reports success
-//    having compiled nothing.
+// 2. The Desktop release gate must agree on the crate directory across its
+//    presence guard, cache and working directories, and retain release tests.
 //
 // The npm/pnpm mirror of the negation list is already pinned by
 // `package-scripts.test.js` ("mirrors the npm workspace boundaries in
@@ -71,7 +67,11 @@ const npmNegations = JSON.parse(read('package.json'))
   .map((entry) => entry.slice(1));
 
 const ci = parseYaml(read('.github', 'workflows', 'ci.yml'));
-const desktopJob = ci.jobs.desktop_shell;
+const desktop = parseYaml(
+  read('.github', 'workflows', 'desktop-packaging-check.yml'),
+);
+const release = parseYaml(read('.github', 'workflows', 'desktop-release.yml'));
+const desktopJob = release.jobs.desktop_shell;
 const stepNamed = (name) =>
   desktopJob.steps.find((step) => step.name === name) ??
   desktopJob.steps.find((step) => String(step.uses ?? '').includes(name));
@@ -125,12 +125,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
   const filterStep = desktopJob.steps.find((step) => step.id === 'filter');
   const filterRun = String(filterStep?.run ?? '');
 
-  it('still carries the Cargo.toml existence guard, and it clears changed', () => {
-    // Not redundant with the filter: the filter also matches on ci.yml and
-    // desktop-release.yml changing, which a head with no crate at all can do.
-    // That is the #8132 failure the job's header comment describes.
-    // The condition is only half the guard: without the assignment inside its
-    // own body, every gated step still runs against a crate that is not there.
+  it('fails when the release commit does not contain the desktop crate', () => {
     const guardBody =
       /! -f \S+\/src-tauri\/Cargo\.toml \]\]; then\n([\s\S]*?)\n[ \t]*fi/u.exec(
         filterRun,
@@ -141,22 +136,16 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
     ).toBeDefined();
     expect(
       guardBody,
-      'the Cargo.toml guard no longer sets changed=false inside its own body, so a head without the crate runs every gated step and reports a missing working directory as a failure of the PR',
-    ).toMatch(/^\s*changed=false\s*$/mu);
+      'a release commit without the desktop crate must fail the gate',
+    ).toMatch(/^\s*exit 1\s*$/mu);
   });
 
-  it('names one crate directory in all five places, and it exists', () => {
-    const filterAlternative = /\^\(([^|]+)\|/u.exec(filterRun)?.[1];
-    expect(
-      filterAlternative,
-      'changed-files filter lost its path alternative',
-    ).toBeDefined();
-
+  it('names one existing crate directory in every step', () => {
     const guardPath = /! -f (\S+)\/src-tauri\/Cargo\.toml/u.exec(
       filterRun,
     )?.[1];
-    // The notice names the crate's src-tauri, not the package directory.
-    const noticePath = /::notice::(\S+) is absent from this head/u
+    // The error names the crate's src-tauri, not the package directory.
+    const noticePath = /::error::(\S+) is absent from the release commit/u
       .exec(filterRun)?.[1]
       .replace(/\/src-tauri$/u, '');
 
@@ -170,11 +159,9 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       .filter((value) => value !== undefined)
       .map(String);
 
-    expect(filterAlternative).toBeDefined();
     const sites = {
-      'changed-files filter': filterAlternative.replace(/\/$/u, ''),
       'Cargo.toml guard': guardPath,
-      'guard ::notice::': noticePath,
+      'guard ::error::': noticePath,
       'rust-cache workspaces': cacheRoot,
       ...Object.fromEntries(
         workingDirs.map((dir, index) => [`working-directory[${index}]`, dir]),
@@ -182,7 +169,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
     };
 
     // Every site must resolve; an undefined one means the parser fell behind a
-    // rewrite of ci.yml, which must not read as agreement.
+    // rewrite of the workflow, which must not read as agreement.
     for (const [site, value] of Object.entries(sites)) {
       expect(
         value,
@@ -194,20 +181,66 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       JSON.stringify(sites, null, 2),
     ).toBe(1);
 
-    const crateDir = sites['changed-files filter'];
+    const crateDir = sites['Cargo.toml guard'];
     expect(
       existsSync(join(root, crateDir, 'src-tauri', 'Cargo.toml')),
-      `${crateDir}/src-tauri/Cargo.toml does not exist, so every gated step in desktop_shell skips and the job reports success having compiled nothing.`,
+      `${crateDir}/src-tauri/Cargo.toml does not exist, so the release gate cannot test the desktop crate.`,
     ).toBe(true);
-    // The filter is `grep -Eq '^(<alternative>|...)'` over the PR's changed
-    // file names, so the alternative is a bare path prefix and has to end in
-    // `/`: without it, `packages/desktop` also matches a sibling such as
-    // `packages/desktop-extra/`, and the job runs on heads that never touch
-    // the crate. Building a path out of `crateDir` -- this same alternative
-    // with the slash stripped -- and comparing it back proves nothing.
-    expect(
-      filterAlternative.endsWith('/'),
-      `the filter alternative ${filterAlternative} has no trailing slash, so the changed-files filter also matches sibling paths that merely start with it`,
-    ).toBe(true);
+  });
+
+  it('runs daily or manually without registering PR desktop jobs', () => {
+    expect(ci.jobs.desktop_shell).toBeUndefined();
+    expect(desktop.jobs.desktop_shell).toBeUndefined();
+    expect(desktop.jobs.package.uses).toBe(
+      './.github/workflows/desktop-release.yml',
+    );
+    expect(desktop.jobs.package.with.dry_run).toBe(true);
+    expect(Object.keys(desktop.on).sort()).toEqual([
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(desktop.on.schedule).toEqual([{ cron: '0 16 * * *' }]);
+    expect(desktopJob.defaults.run.shell).toBe('bash');
+  });
+
+  it('gates publication on parallel checks of the same release commit', () => {
+    expect(desktopJob.needs).toBe('prepare');
+    expect(desktopJob.if).toBe(
+      "${{ needs.prepare.outputs.already_published != 'true' }}",
+    );
+    expect(desktopJob.strategy.matrix.os).toEqual([
+      'ubuntu-22.04',
+      'windows-2022',
+    ]);
+    expect(desktopJob['continue-on-error']).toBeUndefined();
+    // The shell lane runs in parallel with build; publish joins on both, so
+    // a failed shell check blocks publication without serializing ahead of
+    // the 120-minute build that runs the same tests on every matrix entry.
+    expect(release.jobs.build.needs).toBe('prepare');
+    expect(release.jobs.publish.needs).toEqual([
+      'prepare',
+      'desktop_shell',
+      'build',
+    ]);
+    for (const name of ['desktop_shell', 'build', 'publish']) {
+      const checkout = release.jobs[name].steps.find((step) =>
+        step.uses?.startsWith('actions/checkout@'),
+      );
+      expect(checkout.with.ref).toBe(
+        '${{ needs.prepare.outputs.qwen_code_sha }}',
+      );
+    }
+    expect(release.jobs.build.env.QWEN_CODE_COMMIT).toBe(
+      '${{ needs.prepare.outputs.qwen_code_sha }}',
+    );
+  });
+
+  it('runs release tests whenever the desktop crate is present', () => {
+    expect(filterRun).toMatch(/^changed=true$/mu);
+    const lane = stepNamed('Run desktop release tests');
+    expect(lane.run).toBe('node scripts/test-release.js');
+    expect(lane.if).toBe(
+      "${{ steps.filter.outputs.changed == 'true' && runner.os == 'Linux' }}",
+    );
   });
 });

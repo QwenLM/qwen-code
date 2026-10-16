@@ -33,6 +33,7 @@ These commands help you save, restore, and summarize work progress.
 | `/rewind`        | Rewind conversation to a previous turn                                   | `/rewind` or `/rollback`                                      |
 | `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
 | `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
+| `/commit`        | Create a git commit with an AI-drafted message                           | `/commit` or `/commit only stage the parser changes`          |
 
 > [!note]
 >
@@ -520,6 +521,8 @@ Use `/auth` inside a Qwen Code session to configure authentication. Use `/doctor
 | Standalone `@`      | Used when discussing `@` symbol itself       | `@ What is this symbol used for in programming?` |
 
 Note: Spaces in paths need to be escaped with backslash (e.g., `@My\ Documents/file.txt`)
+
+In the interactive prompt, `@` completion supports Unicode filenames, including emoji. Emoji elsewhere in the prompt do not change the file path used for completion.
 
 ## 3. Exclamation Commands (`!`) - Shell Command Execution
 
@@ -1069,9 +1072,10 @@ waiting out an expiry. Where a held message should surface for those
 sessions is not settled yet.
 
 A session registers unless its own settings turn
-`agents.crossSessionMessaging` off. Turned off, it stays invisible,
-because the only reason to list a session nobody can message would be to
-advertise an address that never answers.
+`agents.crossSessionMessaging` off, or it was started with `--bare` or
+`--safe-mode` — those turn messaging off whatever the setting says. Turned
+off, it stays invisible, because the only reason to list a session nobody
+can message would be to advertise an address that never answers.
 
 ### Programs that are not Qwen Code sessions
 

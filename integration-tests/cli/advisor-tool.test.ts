@@ -127,6 +127,9 @@ async function setupRig(
       tools: { visible: visible ? ['advisor'] : [] },
       toolSearch: { threshold: 0 },
       ui: { enableFollowupSuggestions: false },
+      // The background memory extractor adds an executor-model request to
+      // every tool-completing turn; these tests assert exact request counts.
+      memory: { enableManagedAutoMemory: false },
     },
   });
   configureEnv(nextRig.testDir!, baseUrl);

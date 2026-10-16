@@ -261,7 +261,11 @@ describe('runPlan', () => {
   });
 
   it('refuses to submit when the estimate exceeds the budget', async () => {
-    const h = (harness = setup({ maxCostUsd: 0.000001 }));
+    const h = (harness = setup({
+      maxCostUsd: 0.000001,
+      maxOutputTokens: 1000,
+      enableThinking: false,
+    }));
     h.deps.env = {
       ...h.deps.env,
       QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
@@ -499,16 +503,22 @@ describe('collectTask', () => {
     await collectTask(h.deps, taskId);
     let task = h.store.load(taskId);
     expect(task.items.every((item) => item.state === 'delivered')).toBe(true);
-    // A failed deletion leaves the attempt uncollected: marking it anyway
-    // would leak the remote files forever.
-    expect(task.attempts[0].collected).toBe(false);
+    // Harvested regardless: a failed deletion is only a pending cleanup,
+    // which the next collect retries without blocking anything meanwhile.
+    expect(task.attempts[0]).toMatchObject({
+      collected: true,
+      remoteCleaned: false,
+    });
     expect(h.err.join('\n')).toMatch(/could not delete remote file file-in-1/);
 
     const polls = h.api.getBatch.mock.calls.length;
     const downloads = h.api.downloadFile.mock.calls.length;
     const summary = await collectTask(h.deps, taskId);
     task = h.store.load(taskId);
-    expect(task.attempts[0].collected).toBe(true);
+    expect(task.attempts[0]).toMatchObject({
+      collected: true,
+      remoteCleaned: true,
+    });
     // The settled batch was re-fetched to retry cleanup, but results were
     // not re-downloaded or re-announced.
     expect(h.api.getBatch.mock.calls.length).toBe(polls + 1);
@@ -905,7 +915,11 @@ describe('retryTask', () => {
   });
 
   it('applies the plan budget to retries too', async () => {
-    const h = (harness = setup({ maxCostUsd: 5 }));
+    const h = (harness = setup({
+      maxCostUsd: 5,
+      maxOutputTokens: 1000,
+      enableThinking: false,
+    }));
     h.deps.env = {
       ...h.deps.env,
       QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
@@ -924,7 +938,11 @@ describe('retryTask', () => {
   });
 
   it('gates the retry on the real assembly, not the run-time average', async () => {
-    const h = (harness = setup({ maxCostUsd: 0.01 }));
+    const h = (harness = setup({
+      maxCostUsd: 0.005,
+      maxOutputTokens: 100,
+      enableThinking: false,
+    }));
     h.deps.env = {
       ...h.deps.env,
       QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
@@ -1304,6 +1322,23 @@ describe('listTasks', () => {
     await listTasks(h.deps);
     expect(h.out.join('\n')).toMatch(/no batch tasks/);
   });
+
+  it('names a task record it cannot read instead of listing around it', async () => {
+    const h = (harness = setup());
+    const dir = path.join(h.home, 'tasks', 'paid-but-unreadable');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'task.json'), '{ truncated');
+
+    await listTasks(h.deps);
+
+    expect(h.err.join('\n')).toContain(
+      '[batch] skipping unreadable task record paid-but-unreadable',
+    );
+    // A record that is there but unreadable must not be reported as no tasks.
+    expect(h.out.join('\n')).toMatch(
+      /no readable batch tasks under .* \(1 unreadable\)/,
+    );
+  });
 });
 
 describe('review fixes', () => {
@@ -1573,8 +1608,11 @@ describe('review fixes', () => {
     expect(
       fs.readFileSync(path.join(h.root, 'docs', 'en', 'b.md'), 'utf8'),
     ).toBe('# B\n\nBeta.');
-    // The cleanup retry is not lost: the attempt stays uncollected.
-    expect(task.attempts[0].collected).toBe(false);
+    // The cleanup retry is not lost: it stays pending, blocking nothing.
+    expect(task.attempts[0]).toMatchObject({
+      collected: true,
+      remoteCleaned: false,
+    });
     expect(h.err.join('\n')).toMatch(/cannot re-fetch batch-1/);
   });
 
@@ -1638,5 +1676,152 @@ describe('review fixes', () => {
     const item = h.store.load(taskId).items[0];
     expect(item).toMatchObject({ state: 'held', sourceChanged: true });
     expect(fs.existsSync(path.join(h.root, 'docs', 'en', 'a.md'))).toBe(false);
+  });
+});
+
+describe('provider anomalies (#12707 item 1)', () => {
+  const settledOutput = `${outputLine('a#1', '# A\n\nAlpha.')}\n${JSON.stringify({ custom_id: 'b#1', response: { status_code: 500, body: {} } })}\n`;
+
+  it('does not let a cleanup that keeps failing block retry', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, { output: settledOutput });
+    const taskId = taskIdOf(h);
+    h.api.deleteFile.mockRejectedValue(new Error('HTTP 403: forbidden'));
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).attempts[0]).toMatchObject({
+      collected: true,
+      remoteCleaned: false,
+    });
+    await retryTask(h.deps, taskId);
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(2);
+  });
+
+  it('cleans a harvested task whose remote cleanup failed, naming what is left', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    h.api.deleteFile.mockRejectedValue(new Error('HTTP 403: forbidden'));
+    await collectTask(h.deps, taskId);
+    await cleanTask(h.deps, taskId);
+    expect(h.store.list()).toEqual([]);
+    expect(h.err.join('\n')).toMatch(
+      /remote files of batch-1 were not deleted/,
+    );
+  });
+
+  it('finishes the harvest when a fresh download still maps no line', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('zzz#1', 'a format we could not map')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    // First pass: maybe a download cut short, so drop it and re-download.
+    await expect(collectTask(h.deps, taskId)).rejects.toThrow(
+      /account for 0 of 2/,
+    );
+    // Second pass, from a fresh copy: the provider's file itself is short.
+    await collectTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    expect(task.items.map((item) => item.state)).toEqual(['failed', 'failed']);
+    expect(task.items[0].lastError).toMatch(/no usable line/);
+    expect(task.attempts[0]).toMatchObject({
+      collected: true,
+      remoteKept: true,
+    });
+    expect(h.api.downloadFile).toHaveBeenCalledTimes(2);
+    expect(h.api.deleteFile).not.toHaveBeenCalled();
+    expect(h.err.join('\n')).toMatch(/kept the remote files of batch-1/);
+  });
+
+  it('fails the items whose result file the provider no longer has', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n`,
+    });
+    h.api.downloadFile.mockRejectedValue(
+      Object.assign(new Error('HTTP 404'), { status: 404 }),
+    );
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    const task = h.store.load(taskId);
+    expect(task.items.map((item) => item.state)).toEqual(['failed', 'failed']);
+    expect(task.items[0].lastError).toMatch(/no longer has/);
+    expect(task.attempts[0].collected).toBe(true);
+  });
+});
+
+describe('maxCostUsd against the worst case (#12707 thinking note)', () => {
+  const prices = {
+    QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
+    QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD: '6',
+  };
+
+  it('refuses when the forecast fits but the worst case at the caps does not', async () => {
+    const h = (harness = setup({
+      maxCostUsd: 0.01,
+      expectedOutputTokensPerItem: 1,
+      maxOutputTokens: 100000,
+      enableThinking: false,
+    }));
+    h.deps.env = { ...h.deps.env, ...prices };
+    await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(
+      /worst-case Batch cost \$[\d.]+ at the request caps exceeds/,
+    );
+    expect(h.api.uploadJsonl).not.toHaveBeenCalled();
+  });
+
+  it('submits when the worst case at the caps fits', async () => {
+    const h = (harness = setup({
+      maxCostUsd: 0.01,
+      expectedOutputTokensPerItem: 1,
+      maxOutputTokens: 100,
+      enableThinking: false,
+    }));
+    h.deps.env = { ...h.deps.env, ...prices };
+    await runPlan(h.deps, h.planPath);
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
+    expect(h.out.join('\n')).toMatch(
+      /worst case ≤ \$[\d.]+ at the request caps/,
+    );
+  });
+
+  it('refuses when a request may think without a thinking_budget', async () => {
+    const h = (harness = setup({ maxCostUsd: 1, maxOutputTokens: 100 }));
+    h.deps.env = { ...h.deps.env, ...prices };
+    h.deps.ep = {
+      ...h.deps.ep,
+      generationConfig: { extra_body: { enable_thinking: true } },
+    };
+    await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(
+      /no finite output bound/,
+    );
+    expect(h.api.uploadJsonl).not.toHaveBeenCalled();
+  });
+
+  it('bounds a thinking request by its thinking_budget', async () => {
+    const h = (harness = setup({ maxCostUsd: 0.01, maxOutputTokens: 100 }));
+    h.deps.env = { ...h.deps.env, ...prices };
+    h.deps.ep = {
+      ...h.deps.ep,
+      generationConfig: {
+        extra_body: { enable_thinking: true, thinking_budget: 100000 },
+      },
+    };
+    // (100 + 100000) output tokens per item bound the batch above $0.01.
+    await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(
+      /worst-case Batch cost/,
+    );
+  });
+
+  it('says the forecast leaves out thinking when a request may think', async () => {
+    const h = (harness = setup());
+    h.deps.ep = {
+      ...h.deps.ep,
+      generationConfig: { extra_body: { enable_thinking: true } },
+    };
+    await runPlan(h.deps, h.planPath, { dryRun: true });
+    expect(h.out.join('\n')).toMatch(/excludes thinking tokens/);
   });
 });

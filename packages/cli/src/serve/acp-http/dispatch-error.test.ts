@@ -21,6 +21,8 @@ import {
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
 import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionTranscriptSnapshotUnavailableError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import { WorkspaceTrustGrantIneffectiveError } from '../workspace-service/types.js';
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 
@@ -139,10 +141,14 @@ describe('paired Bridge rejections', () => {
     ['host selection', new SessionExecutionEngineError('id', 'empty')],
     [
       'the ACP child',
-      new RequestError(-32024, 'belongs to managed', {
-        errorKind: 'session_execution_engine_unavailable',
-        sessionId: 'id',
-      }),
+      {
+        code: -32024,
+        message: 'belongs to managed',
+        data: {
+          errorKind: 'session_execution_engine_unavailable',
+          sessionId: 'id',
+        },
+      },
     ],
   ])('maps an owner rejection from %s to 409', (_source, error) => {
     expect(toRpcError(error)).toEqual({
@@ -153,6 +159,74 @@ describe('paired Bridge rejections', () => {
         httpStatus: 409,
         errorKind: 'session_execution_engine_unavailable',
       },
+    });
+  });
+
+  it('maps a Managed engine quarantine to a temporary refusal, never the resume-conflict shape', () => {
+    expect(
+      toRpcError({
+        code: -32024,
+        message:
+          "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+        data: { errorKind: 'managed_engine_quarantined' },
+      }),
+    ).toEqual({
+      code: -32024,
+      message:
+        "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      data: {
+        httpStatus: 503,
+        errorKind: 'managed_engine_quarantined',
+      },
+    });
+  });
+
+  it('answers the service-level quarantine code with httpStatus 503', () => {
+    // After the bindAndRelease translation a liftable refusal arrives as a
+    // StandaloneSessionServiceError; the ladder must keep 503=retry-later
+    // instead of falling to the default 409 the ACP surface already avoids.
+    expect(
+      toRpcError(
+        new StandaloneSessionServiceError(
+          'managed_engine_quarantined',
+          'session-1',
+          'The Managed engine is quarantined while a Runtime worker stop stays unproven; retry once it proves.',
+          true,
+        ),
+      ),
+    ).toMatchObject({
+      data: {
+        code: 'managed_engine_quarantined',
+        errorKind: 'managed_engine_quarantined',
+        httpStatus: 503,
+        retryable: true,
+      },
+    });
+  });
+});
+
+describe('transcript snapshot rejections', () => {
+  it.each([
+    [
+      'the daemon',
+      new SessionTranscriptSnapshotUnavailableError('id'),
+      'Transcript snapshot is unavailable for session id',
+    ],
+    [
+      'the ACP child',
+      // What the ACP SDK rejects with: the JSON-RPC error object, not an Error.
+      {
+        code: -32010,
+        message: 'Transcript snapshot is unavailable for session id',
+        data: { errorKind: 'transcript_snapshot_unavailable', sessionId: 'id' },
+      },
+      'Transcript snapshot is unavailable for session id',
+    ],
+  ])('maps one raised by %s to 409 like REST', (_source, error, message) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message,
+      data: { httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' },
     });
   });
 });
@@ -195,6 +269,18 @@ describe('toRpcError', () => {
       code: RPC.INVALID_PARAMS,
       message: source.message,
       data: { errorKind, httpStatus: 409 },
+    });
+  });
+
+  // The grant is durably recorded but a higher-precedence signal still wins:
+  // a conflict the client can branch on, matching the REST twin's 409.
+  it('answers an ineffective trust grant as a branchable 409', () => {
+    const error = new WorkspaceTrustGrantIneffectiveError('untrusted', 'file');
+
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: error.message,
+      data: { errorKind: 'trust_grant_ineffective', httpStatus: 409 },
     });
   });
 

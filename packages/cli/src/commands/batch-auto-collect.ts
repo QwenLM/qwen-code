@@ -192,7 +192,13 @@ export function createBatchAutoCollector(
     let tasks: BatchTask[];
     try {
       tasks = store
-        .list(records)
+        // A record this build cannot parse is never collected, so it is worth
+        // a line — logged rather than notified, because from here an archived
+        // or hand-edited record is indistinguishable from a paid batch, and
+        // `qwen batch list` is the surface that names it to the user.
+        .list(records, (detail) =>
+          log(`batch auto-collect: unreadable task record ${detail}`),
+        )
         .filter(
           (task) =>
             isOpen(task) && belongsTo(options.projectRoot, task.projectRoot),

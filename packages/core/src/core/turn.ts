@@ -24,13 +24,19 @@ import type {
 import { ToolErrorType } from '../tools/tool-error.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
+import { resolveApiErrorRequestId } from '../utils/errorParsing.js';
 import {
   getErrorMessage,
   getErrorStatus,
   UnauthorizedError,
   toFriendlyError,
 } from '../utils/errors.js';
-import type { LlmChat } from './llm-chat.js';
+import {
+  LlmRequestPreparationError,
+  type LlmChat,
+  type LlmPreparedRequest,
+  type LlmPreparedRequestCallback,
+} from './llm-chat.js';
 import type { RetryInfo } from '../utils/rateLimit.js';
 import {
   getThoughtSummary,
@@ -43,6 +49,7 @@ import type {
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+import { toolCallArgumentsWereIncomplete } from './incomplete-tool-call-args.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
@@ -109,6 +116,13 @@ export type ServerLlmModelFallbackEvent = {
 export interface StructuredError {
   message: string;
   status?: number;
+  /**
+   * Provider request id (e.g. the `x-request-id` response header openai-node
+   * stamps onto every APIError), resolved here while the original Error is
+   * still whole. Downstream formatters only ever receive this structured
+   * value, so an id not captured at this point is unrecoverable.
+   */
+  requestId?: string;
 }
 
 export interface LlmErrorEventValue {
@@ -188,6 +202,13 @@ export interface ToolCallRequestInfo {
   response_id?: string;
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
+  /**
+   * Set to true when this call's arguments arrived unterminated and were
+   * repaired into shape, but the output token limit was *not* what cut them.
+   * The data-loss guard needs this fact; the user-visible wording needs the
+   * distinction. See `incomplete-tool-call-args.ts`.
+   */
+  hadIncompleteArguments?: boolean;
   goalContext?: GoalTurnPermit;
   /**
    * Provenance of this request. Only set by in-process callers; absent on
@@ -697,6 +718,9 @@ export class Turn {
     private readonly chat: LlmChat,
     private readonly prompt_id: string,
     goalContext?: GoalTurnPermit,
+    private readonly promptIdentity?: string,
+    private readonly retractDeliveredOutputOnRetry?: boolean,
+    private readonly onPreparedRequest?: LlmPreparedRequestCallback,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -705,21 +729,46 @@ export class Turn {
     model: string,
     req: PartListUnion,
     signal: AbortSignal,
+    prepared?: LlmPreparedRequest,
   ): AsyncGenerator<ServerLlmStreamEvent> {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      const responseStream = await this.chat.sendMessageStream(
-        model,
-        {
-          message: req,
-          config: {
-            abortSignal: signal,
-          },
-        },
-        this.prompt_id,
-        this.goalContext,
-      );
+      // Keep the no-options call shape: callers without either flag pass
+      // `undefined`, as before either option existed.
+      const sendOptions =
+        this.promptIdentity !== undefined ||
+        this.retractDeliveredOutputOnRetry === true ||
+        this.onPreparedRequest !== undefined
+          ? {
+              ...(this.onPreparedRequest
+                ? { onPreparedRequest: this.onPreparedRequest }
+                : {}),
+              ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
+              ...(this.retractDeliveredOutputOnRetry
+                ? { retractDeliveredOutputOnRetry: true }
+                : {}),
+            }
+          : undefined;
+      const responseStream = prepared
+        ? await this.chat.sendPreparedMessageStream(
+            prepared,
+            this.prompt_id,
+            signal,
+            this.onPreparedRequest,
+          )
+        : await this.chat.sendMessageStream(
+            model,
+            {
+              message: req,
+              config: {
+                abortSignal: signal,
+              },
+            },
+            this.prompt_id,
+            this.goalContext,
+            sendOptions,
+          );
 
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
@@ -846,6 +895,7 @@ export class Turn {
         }
       }
     } catch (e) {
+      if (e instanceof LlmRequestPreparationError) throw e;
       if (signal.aborted) {
         yield { type: LlmEventType.UserCancelled };
         // Regular cancellation error, fail gracefully.
@@ -853,6 +903,10 @@ export class Turn {
       }
 
       const originalStatus = getErrorStatus(e);
+      // Resolve against the raw caught error: toFriendlyError() below can
+      // return a different Error that no longer carries the SDK's `.headers`,
+      // and this is the last point where the request id is still reachable.
+      const requestId = resolveApiErrorRequestId(e);
       const error = toFriendlyError(e);
       if (error instanceof UnauthorizedError) {
         throw error;
@@ -883,6 +937,7 @@ export class Turn {
       const structuredError: StructuredError = {
         message: getErrorMessage(error),
         status: getErrorStatus(error) ?? originalStatus,
+        ...(requestId ? { requestId } : {}),
       };
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
       yield { type: LlmEventType.Error, value: { error: structuredError } };
@@ -908,6 +963,9 @@ export class Turn {
       isClientInitiated: false,
       prompt_id: this.prompt_id,
       response_id: this.currentResponseId,
+      ...(toolCallArgumentsWereIncomplete(fnCall)
+        ? { hadIncompleteArguments: true }
+        : {}),
       ...(this.goalContext ? { goalContext: { ...this.goalContext } } : {}),
     };
 

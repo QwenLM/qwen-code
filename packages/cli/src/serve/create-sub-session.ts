@@ -38,11 +38,14 @@
 import { randomUUID } from 'node:crypto';
 import {
   createDebugLogger,
-  escapeXml,
   SessionService,
   Storage,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
+import {
+  escapeXml,
+  escapeXmlWithinBudget,
+} from '@qwen-code/qwen-code-core/utils/xml.js';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
@@ -219,35 +222,6 @@ function truncateCodePoints(value: string, max: number): string {
   return `${codePoints.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
-function escapeXmlWithinBudget(value: string, budget: number): string {
-  if (budget <= 0) return '';
-  const escapedCodePoints: string[] = [];
-  let length = 0;
-  let truncated = false;
-  for (const codePoint of value) {
-    const escaped = escapeXml(codePoint);
-    if (length + escaped.length > budget) {
-      truncated = true;
-      break;
-    }
-    escapedCodePoints.push(escaped);
-    length += escaped.length;
-  }
-  if (!truncated) return escapedCodePoints.join('');
-
-  while (
-    escapedCodePoints.length > 0 &&
-    length + SENT_COMPLETION_RESULT_TRUNCATION_MARKER.length > budget
-  ) {
-    length -= escapedCodePoints.pop()!.length;
-  }
-  return `${escapedCodePoints.join('')}${
-    SENT_COMPLETION_RESULT_TRUNCATION_MARKER.length <= budget - length
-      ? SENT_COMPLETION_RESULT_TRUNCATION_MARKER
-      : ''
-  }`;
-}
-
 function buildSentCompletionNotification(
   sessionId: string,
   label: string,
@@ -282,10 +256,13 @@ function buildSentCompletionNotification(
       modelTextPrefix.length -
       modelTextSuffix.length,
   );
-  const modelText = `${modelTextPrefix}${escapeXmlWithinBudget(
-    safeResult,
-    resultBudget,
-  )}${modelTextSuffix}`;
+  let preview = escapeXmlWithinBudget(safeResult, resultBudget);
+  const marker = SENT_COMPLETION_RESULT_TRUNCATION_MARKER;
+  if (preview.truncated && marker.length <= resultBudget) {
+    preview = escapeXmlWithinBudget(safeResult, resultBudget - marker.length);
+    preview.text += marker;
+  }
+  const modelText = `${modelTextPrefix}${preview.text}${modelTextSuffix}`;
   return {
     displayText: `Sub-session ${sessionLink} ${statusText}.`,
     modelText,

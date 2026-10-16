@@ -48,6 +48,12 @@ import {
   isToolExcludedForCurrentContext,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { isMediaPolicyToolHiddenFromModel } from '../omni/policy/model-access.js';
+import {
+  describeCodeModeBinding,
+  ToolMode,
+  type CodeModeToolBinding,
+} from './code-mode.js';
+import { getToolCallRuntime } from '../code-mode/tool-call-runtime.js';
 
 const debugLogger = createDebugLogger('TOOL_SEARCH');
 
@@ -124,10 +130,23 @@ interface ScoredTool {
   score: number;
 }
 
-function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
-  return Boolean(
-    registry.getTool(ToolNames.TOOL_SEARCH) &&
-      registry.getTool(ToolNames.TOOL_CALL),
+export function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
+  const toolNames = registry.getAllToolNames();
+  return (
+    toolNames.includes(ToolNames.TOOL_SEARCH) &&
+    toolNames.includes(ToolNames.TOOL_CALL)
+  );
+}
+
+/**
+ * Whether model-facing prose may offer the Direct-mode route (`tool_search`,
+ * then `tool_call`): the bridge is registered and the session is not
+ * CodeModeOnly, which hides and refuses `tool_call` even though both halves
+ * stay registered there.
+ */
+export function isDirectToolBridgeAvailable(registry: ToolRegistry): boolean {
+  return (
+    !registry.isCodeModeOnly?.() && isDeferredToolBridgeAvailable(registry)
   );
 }
 
@@ -142,6 +161,10 @@ Query forms:
 - "keyword phrase" — keyword search, up to max_results best matches
 - "+must-word other" — require "must-word" in the name, rank remaining terms
 `;
+
+const codeModeSearchDescription = `Find tools whose descriptions and parameter schemas are deferred from the exec declaration. Invoke this as a separate top-level tool call, outside exec; tool_search is not a JavaScript global or a tools binding. Search by keywords when the registered name is unknown. Use "select:<name>,<name>" with exact registered names, including the full mcp__<server>__<tool> name for MCP tools. Prefix a required keyword with "+". Keyword results are limited by max_results.
+
+Results contain each tool's description, full parameter schema, normalized JavaScript name (jsName), and signature. Read the results, then call tools.<jsName>(args) inside a later exec call using the returned jsName exactly. Supply all required parameters according to the returned schema. Reuse schemas already in the current context; search again if a schema is missing, including after context compression. Tools remain callable through exec; searching does not change the active tool declarations. Only tools callable in your current execution scope are returned.`;
 
 class ToolSearchInvocation extends BaseToolInvocation<
   ToolSearchParams,
@@ -159,6 +182,18 @@ class ToolSearchInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    const codeMode = this.config.getToolMode?.() === ToolMode.CodeModeOnly;
+    const allowedNames = getToolCallRuntime()?.allowedToolNames;
+    const bindings = codeMode
+      ? new Map(
+          this.config
+            .getToolRegistry()
+            .getCodeModeBindingPlan(
+              allowedNames ? new Set(allowedNames) : undefined,
+            )
+            .bindings.map((binding) => [binding.name, binding]),
+        )
+      : undefined;
     const query = (this.params.query ?? '').trim();
     if (!query) {
       return {
@@ -183,7 +218,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // to re-issue another ToolSearch for them instead of silently
     // assuming they were reviewed.
     if (query.toLowerCase().startsWith('select:')) {
-      const knownNames = this.config.getToolRegistry().getAllToolNames();
+      const knownNames = bindings
+        ? [...bindings.keys()]
+        : this.config.getToolRegistry().getAllToolNames();
       const seen = new Set<string>();
       const names: string[] = [];
       const truncated: string[] = [];
@@ -215,7 +252,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
         }
         names.push(stripped);
       }
-      return this.returnSchemas(names, truncated);
+      return this.returnSchemas(names, truncated, bindings);
     }
 
     // Mode 2: keyword search. Require-word prefix with "+" boosts mandatory
@@ -238,7 +275,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
       };
     }
 
-    if (!isDeferredToolBridgeAvailable(this.config.getToolRegistry())) {
+    if (
+      !codeMode &&
+      !isDeferredToolBridgeAvailable(this.config.getToolRegistry())
+    ) {
       const message =
         'The deferred-tool bridge is unavailable in this session, so hidden tool schemas cannot be reviewed or invoked.';
       return {
@@ -248,7 +288,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       };
     }
 
-    const candidates = this.collectCandidates();
+    const candidates = this.collectCandidates(bindings);
     const scored: ScoredTool[] = [];
     for (const tool of candidates) {
       if (!candidateMatchesRequired(tool, requiredTerms)) continue;
@@ -264,11 +304,11 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const matches = scored.slice(0, maxResults).map((s) => s.tool.name);
     if (matches.length === 0) {
       return {
-        llmContent: `No tools found matching '${query}'. Try broader keywords or use \`select:ToolName\`.`,
+        llmContent: `No tools found matching '${escapeJsonTagCharacters(query)}'. Try broader keywords or use \`select:ToolName\`.`,
         returnDisplay: `No matches for '${query}'`,
       };
     }
-    return this.returnSchemas(matches);
+    return this.returnSchemas(matches, [], bindings);
   }
 
   /**
@@ -281,7 +321,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
    * want to re-inspect the schema of a visible tool — and handles its
    * own lookup via {@link returnSchemas}.
    */
-  private collectCandidates(): AnyDeclarativeTool[] {
+  private collectCandidates(
+    bindings?: ReadonlyMap<string, CodeModeToolBinding>,
+  ): AnyDeclarativeTool[] {
     const registry = this.config.getToolRegistry();
     // Mirror the invocation side (resolveDeferredToolCall): a subagent or
     // teammate must not even be SHOWN the schema of a tool the exclusion set
@@ -296,6 +338,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
     return registry.getAllTools().filter(
       (t) =>
         registry.isDeferredAndHidden(t.name) &&
+        registry.isToolDeclared(t.name) &&
+        (!bindings || bindings.has(t.name)) &&
         // Context-gated: the leader's discovery stays unrestricted (the
         // predicate itself is ungated so prepareTools can fail closed).
         !(
@@ -311,6 +355,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
   private async returnSchemas(
     names: string[],
     truncated: string[] = [],
+    bindings?: ReadonlyMap<string, CodeModeToolBinding>,
   ): Promise<ToolResult> {
     if (names.length === 0) {
       return {
@@ -325,13 +370,18 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const missing: string[] = [];
     const blocked: string[] = [];
     const bridgeUnavailable: string[] = [];
-    const bridgeAvailable = isDeferredToolBridgeAvailable(registry);
+    const bridgeAvailable =
+      !!bindings || isDeferredToolBridgeAvailable(registry);
 
     // Resolve across all known names (instance names + factory names) with
     // the rule tool_call applies, so the schema reviewed here is the tool
     // that call invokes. Preserve the user-supplied casing in the error list
-    // so the response matches what the model asked for.
-    const knownNames = registry.getAllToolNames();
+    // so the response matches what the model asked for. In Code Mode the
+    // binding names are the only resolvable names, which is what keeps lookup
+    // inside the current agent's allowed tools.
+    const knownNames = bindings
+      ? [...bindings.keys()]
+      : registry.getAllToolNames();
     const ambiguous: Array<{ requested: string; candidates: string[] }> = [];
 
     for (const requested of names) {
@@ -439,17 +489,37 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // JSON unicode escapes decode back to their original characters when the
     // model interprets the JSON, but as raw text inside the wrapper they are
     // no longer tag delimiters.
-    const schemaBlocks = reviewed.map(
-      (tool) =>
-        `<function>${escapeJsonTagCharacters(JSON.stringify(tool.schema))}</function>`,
-    );
+    const schemaBlocks = reviewed.map((tool) => {
+      const binding = bindings?.get(tool.name);
+      const declaration = {
+        ...tool.schema,
+        ...(tool instanceof DiscoveredMCPTool
+          ? { serverName: tool.serverName }
+          : {}),
+        ...(binding
+          ? {
+              jsName: binding.jsName,
+              signature: describeCodeModeBinding(binding),
+            }
+          : {}),
+      };
+      return `<function>${escapeJsonTagCharacters(JSON.stringify(declaration))}</function>`;
+    });
     let llmContent = '';
     if (schemaBlocks.length > 0) {
       llmContent += `<functions>\n${schemaBlocks.join('\n')}\n</functions>`;
+      if (bindings) {
+        llmContent +=
+          '\n\nCall these tools through exec using tools.<jsName>(args) and the required parameters above.';
+      }
     }
     if (missing.length > 0) {
       const header = llmContent ? '\n\n' : '';
-      llmContent += `${header}Not found: ${missing.join(', ')}`;
+      llmContent += `${header}Not found: ${escapeJsonTagCharacters(missing.join(', '))}`;
+      if (bindings) {
+        llmContent +=
+          '\nselect: requires the registered name, including mcp__<server>__<tool> for MCP tools. Search with keywords without select: to discover the full name and schema, then use the returned jsName in exec.';
+      }
     }
     if (ambiguous.length > 0) {
       const header = llmContent ? '\n\n' : '';
@@ -461,7 +531,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // counts as a duplicate call and can end the turn as a loop.
       const entries = ambiguous.map(
         ({ requested, candidates }) =>
-          `"${requested}" matches more than one registered tool by case. Re-run tool_search with one exact name, e.g. ${candidates
+          `"${escapeJsonTagCharacters(requested)}" matches more than one registered tool by case. Re-run tool_search with one exact name, e.g. ${candidates
             .map((name) => `select:${name}`)
             .join(' or ')}.`,
       );
@@ -498,7 +568,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // assume every requested name was reviewed and later receive an
       // "unknown tool" API error.
       const header = llmContent ? '\n\n' : '';
-      llmContent += `${header}Truncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
+      llmContent += `${header}Truncated by max_results — request these in a follow-up call: ${escapeJsonTagCharacters(truncated.join(', '))}`;
     }
 
     const displayParts: string[] = [];
@@ -531,11 +601,18 @@ export class ToolSearchTool extends BaseDeclarativeTool<
 > {
   static readonly Name = ToolNames.TOOL_SEARCH;
 
+  override get maxOutputChars(): number {
+    // The bridge requires complete schema blocks; max_results bounds their count.
+    return Number.POSITIVE_INFINITY;
+  }
+
   constructor(private readonly config: Config) {
     super(
       ToolSearchTool.Name,
       ToolDisplayNames.TOOL_SEARCH,
-      toolSearchDescription,
+      config.getToolMode?.() === ToolMode.CodeModeOnly
+        ? codeModeSearchDescription
+        : toolSearchDescription,
       Kind.Other,
       {
         type: 'object',

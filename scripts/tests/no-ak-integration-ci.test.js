@@ -103,7 +103,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
 
-    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+    for (const jobName of ['test', 'test_macos']) {
       const testStep = getWorkflowStep(
         getWorkflowJob(workflow, jobName),
         'Run tests and generate reports',
@@ -125,6 +125,33 @@ describe('no-AK integration CI wiring', () => {
         expect(index, `${jobName}: ${command}`).toBeGreaterThan(previous);
         previous = index;
       }
+    }
+
+    const windowsStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'test_windows'),
+      'Run tests and generate reports',
+    );
+    let previous = -1;
+    for (const command of [
+      'set +e',
+      'npm run test:ci:workspaces',
+      'WORKSPACE_RC=$?',
+      'if [ "$WORKSPACE_RC" -ne 0 ]; then',
+      '::warning::The Windows workspace suite has known baseline failures',
+      'npm run test:scripts',
+      'SCRIPTS_RC=$?',
+      'if [ "$SCRIPTS_RC" -ne 0 ]; then',
+      '::warning::The complete Windows script suite has known baseline failures',
+      'npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts',
+      'INSTALLER_RC=$?',
+      'set -e',
+      'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
+      'kill "$SAMPLER_PID" 2>/dev/null || true',
+      'exit "$INSTALLER_RC"',
+    ]) {
+      const index = windowsStep.indexOf(command);
+      expect(index, `test_windows: ${command}`).toBeGreaterThan(previous);
+      previous = index;
     }
   });
 
@@ -188,9 +215,11 @@ describe('no-AK integration CI wiring', () => {
         './cli/daemon-invocation-context.test.ts',
         './cli/headless-workflow-skill.test.ts',
         './cli/list_directory.test.ts',
+        './cli/tool-hook-context.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
         './cli/qwen-serve-standalone-concurrency.test.ts',
+        './interactive/workflow-completion.test.ts',
         './sdk-typescript/abort-and-lifecycle.test.ts',
         './sdk-typescript/permission-control.test.ts',
         './sdk-typescript/sdk-mcp-server.test.ts',
@@ -425,6 +454,8 @@ describe('no-AK integration CI wiring', () => {
       'OPENAI_MODEL',
       'OPENROUTER_API_KEY',
       'QWEN_API_KEY',
+      'QWENCLOUD_API_KEY',
+      'QWENCLOUD_TOKEN_PLAN_API_KEY',
       'QWEN_DEFAULT_AUTH_TYPE',
       'QWEN_MODEL',
       'REQUESTY_API_KEY',

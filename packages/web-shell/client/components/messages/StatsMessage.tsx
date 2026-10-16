@@ -16,6 +16,13 @@ interface ParsedStats {
   status: DaemonSessionStatsStatus;
 }
 
+export function createStatsMessageData(
+  status: DaemonSessionStatsStatus,
+  view: StatsView = 'overview',
+) {
+  return { type: SENTINEL, view, status };
+}
+
 export function serializeStatsMessage(
   status: DaemonSessionStatsStatus,
   view: StatsView = 'overview',
@@ -23,7 +30,19 @@ export function serializeStatsMessage(
   return `${SENTINEL}${JSON.stringify({ _view: view, ...status })}`;
 }
 
-export function parseStatsMessage(content: string): ParsedStats | null {
+export function parseStatsMessage(
+  content: string,
+  data?: unknown,
+): ParsedStats | null {
+  const structured = data as
+    | ReturnType<typeof createStatsMessageData>
+    | undefined;
+  if (
+    structured?.type === SENTINEL &&
+    typeof structured.status?.durationMs === 'number'
+  ) {
+    return { view: structured.view, status: structured.status };
+  }
   if (!content.startsWith(SENTINEL)) return null;
   try {
     const parsed = JSON.parse(content.slice(SENTINEL.length));
@@ -139,16 +158,16 @@ function PivotRow({
         ? styles.metricCellSub
         : styles.metricCell;
   return (
-    <div className={styles.pivotRow}>
-      <span className={cellClass}>
+    <tr className={styles.pivotRow}>
+      <td className={cellClass}>
         {variant === 'sub' ? `↳ ${metric}` : metric}
-      </span>
+      </td>
       {values.map((v, i) => (
-        <span key={i} className={styles.modelCell}>
+        <td key={i} className={styles.modelCell}>
           {v}
-        </span>
+        </td>
       ))}
-    </div>
+    </tr>
   );
 }
 
@@ -325,80 +344,85 @@ function ModelStatsCard({ status }: { status: DaemonSessionStatsStatus }) {
       <div className={styles.title}>{t('stats.modelStats')}</div>
       <div className={styles.spacer} />
 
-      {/* Header row */}
-      <div className={styles.pivotRow}>
-        <span className={styles.metricCellSection}>{t('stats.metric')}</span>
-        {entries.map((e) => (
-          <span key={e.key} className={styles.modelCellHeader}>
-            {e.label}
-          </span>
-        ))}
-      </div>
-      <div className={styles.divider} />
+      <table className={styles.pivotTable}>
+        <thead>
+          <tr className={styles.pivotHeader}>
+            <th scope="col" className={styles.metricCellSection}>
+              {t('stats.metric')}
+            </th>
+            {entries.map((e) => (
+              <th scope="col" key={e.key} className={styles.modelCellHeader}>
+                {e.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {/* API section */}
+          <PivotRow metric={t('stats.api')} values={[]} variant="section" />
+          <PivotRow
+            metric={t('stats.requests')}
+            values={vals((m) => m.api.totalRequests.toLocaleString())}
+          />
+          <PivotRow
+            metric={t('stats.errors')}
+            values={vals((m) => {
+              const rate = calculateErrorRate(m);
+              return (
+                <span
+                  className={m.api.totalErrors > 0 ? styles.error : undefined}
+                >
+                  {m.api.totalErrors.toLocaleString()} ({rate.toFixed(1)}%)
+                </span>
+              );
+            })}
+          />
+          <PivotRow
+            metric={t('stats.avgLatency')}
+            values={vals((m) => formatDuration(calculateAvgLatency(m)))}
+          />
 
-      {/* API section */}
-      <PivotRow metric={t('stats.api')} values={[]} variant="section" />
-      <PivotRow
-        metric={t('stats.requests')}
-        values={vals((m) => m.api.totalRequests.toLocaleString())}
-      />
-      <PivotRow
-        metric={t('stats.errors')}
-        values={vals((m) => {
-          const rate = calculateErrorRate(m);
-          return (
-            <span className={m.api.totalErrors > 0 ? styles.error : undefined}>
-              {m.api.totalErrors.toLocaleString()} ({rate.toFixed(1)}%)
-            </span>
-          );
-        })}
-      />
-      <PivotRow
-        metric={t('stats.avgLatency')}
-        values={vals((m) => formatDuration(calculateAvgLatency(m)))}
-      />
-
-      <div className={styles.spacer} />
-
-      {/* Tokens section */}
-      <PivotRow metric={t('stats.tokens')} values={[]} variant="section" />
-      <PivotRow
-        metric={t('stats.total')}
-        values={vals((m) => (
-          <span className={styles.warning}>
-            {m.tokens.total.toLocaleString()}
-          </span>
-        ))}
-      />
-      <PivotRow
-        metric={t('stats.inputTokens')}
-        values={vals((m) => m.tokens.prompt.toLocaleString())}
-        variant="sub"
-      />
-      {hasCached && (
-        <PivotRow
-          metric={t('stats.cached')}
-          values={vals((m) => (
-            <span className={styles.success}>
-              {m.tokens.cached.toLocaleString()} (
-              {calculateCacheHitRate(m).toFixed(1)}%)
-            </span>
-          ))}
-          variant="sub"
-        />
-      )}
-      <PivotRow
-        metric={t('stats.outputTokens')}
-        values={vals((m) => m.tokens.candidates.toLocaleString())}
-        variant="sub"
-      />
-      {hasThoughts && (
-        <PivotRow
-          metric={t('stats.thoughts')}
-          values={vals((m) => m.tokens.thoughts.toLocaleString())}
-          variant="sub"
-        />
-      )}
+          {/* Tokens section */}
+          <PivotRow metric={t('stats.tokens')} values={[]} variant="section" />
+          <PivotRow
+            metric={t('stats.total')}
+            values={vals((m) => (
+              <span className={styles.warning}>
+                {m.tokens.total.toLocaleString()}
+              </span>
+            ))}
+          />
+          <PivotRow
+            metric={t('stats.inputTokens')}
+            values={vals((m) => m.tokens.prompt.toLocaleString())}
+            variant="sub"
+          />
+          {hasCached && (
+            <PivotRow
+              metric={t('stats.cached')}
+              values={vals((m) => (
+                <span className={styles.success}>
+                  {m.tokens.cached.toLocaleString()} (
+                  {calculateCacheHitRate(m).toFixed(1)}%)
+                </span>
+              ))}
+              variant="sub"
+            />
+          )}
+          <PivotRow
+            metric={t('stats.outputTokens')}
+            values={vals((m) => m.tokens.candidates.toLocaleString())}
+            variant="sub"
+          />
+          {hasThoughts && (
+            <PivotRow
+              metric={t('stats.thoughts')}
+              values={vals((m) => m.tokens.thoughts.toLocaleString())}
+              variant="sub"
+            />
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
