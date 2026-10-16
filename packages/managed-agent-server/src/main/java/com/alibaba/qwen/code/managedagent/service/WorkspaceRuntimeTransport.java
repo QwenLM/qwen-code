@@ -87,7 +87,16 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             if (LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
                 WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
             } else if (SshRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
-                resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
+                try {
+                    resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
+                } catch (RuntimeBrokerException error) {
+                    // Nothing is claimed yet, so the probe verdict is a definite
+                    // refusal: surface the workspace_unavailable contract the
+                    // Hosted tool turn recognizes instead of the ssh_runtime_*
+                    // verdict an unrecognized code would park into Session
+                    // recovery. The original verdict stays as the cause.
+                    throw WorkspaceExecutionStore.unavailable(error);
+                }
             } else {
                 throw WorkspaceExecutionStore.unavailable();
             }

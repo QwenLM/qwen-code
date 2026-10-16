@@ -52,6 +52,24 @@ class WorkspaceRuntimeTransportTest {
     }
 
     @Test
+    void sshPreflightVerdictsTranslateToTheDefiniteRefusalContract() throws Exception {
+        var fixture = sshAcquisitionFixture();
+        var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
+        for (String verdict : new String[] {"ssh_runtime_state_unavailable", "ssh_runtime_identity_conflict"}) {
+            doThrow(new RuntimeBrokerException(409, verdict, "SSH preflight refused the directory.", false))
+                    .when(fixture.resolver()).verifyInstallable(binding, binding.getCwdRelative());
+            assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.session()))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                        assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                        assertThat(error.getCause()).isInstanceOfSatisfying(RuntimeBrokerException.class,
+                                cause -> assertThat(cause.getCode()).isEqualTo(verdict));
+                    });
+            verify(fixture.ownership(), never()).claim(any(), any());
+            verifyNoInteractions(fixture.http());
+        }
+    }
+
+    @Test
     void remotePreflightPrecedesClaimButAnUncertainInstallStillRetainsOwnership() throws Exception {
         var fixture = sshAcquisitionFixture();
         var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
