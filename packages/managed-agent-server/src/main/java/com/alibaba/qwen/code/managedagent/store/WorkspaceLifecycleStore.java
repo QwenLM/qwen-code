@@ -34,6 +34,12 @@ public class WorkspaceLifecycleStore {
     private final ManagedExtensionRecordStore records;
     private final ObjectProvider<RuntimeBindingRepository> bindings;
     private WorkspaceProfileLifecycleVerifier profiles;
+    private ResidentWorkspaces residents = new ResidentWorkspaces(java.util.List.of());
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setResidentConfiguration(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties properties) {
+        residents = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
+    }
 
     @org.springframework.beans.factory.annotation.Autowired
     void setProfiles(WorkspaceProfileLifecycleVerifier profiles) { this.profiles = profiles; }
@@ -230,6 +236,12 @@ public class WorkspaceLifecycleStore {
         if (!writers.isEmpty() && "ACTIVE".equals(writers.getFirst().get("state"))
                 && ((Number) writers.getFirst().get("live_writer")).intValue() != 0) {
             throw blocked("workspace_lifecycle_writer_active");
+        }
+        if (residents.verifyClosed(jdbc, operation.tenantId(), operation.sessionId())) {
+            if (!writers.isEmpty() && !"SEALED".equals(writers.getFirst().get("state"))) {
+                throw blocked("workspace_lifecycle_writer_active");
+            }
+            return;
         }
         RuntimeBindingRepository repository = bindings.getIfAvailable();
         if (repository == null) {

@@ -5,7 +5,11 @@
  */
 
 import { LlmEventType, Turn } from '@qwen-code/qwen-code-core/core/turn.js';
-import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import {
+  llmPreparedProviderPin,
+  type LlmPreparedRequest,
+  type LlmPreparedRequestCallback,
+} from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
 import type { Content, Part } from '@google/genai';
 import type { ConfigInitializeOptions } from '@qwen-code/qwen-code-core/config/config.js';
@@ -56,6 +60,7 @@ function config(
     type: LlmEventType;
     value?: unknown;
     isContinuation?: boolean;
+    toModel?: string;
   }>,
 ) {
   const tools = new Set(['run_shell_command']);
@@ -105,6 +110,7 @@ function config(
       sendMessageStream,
     }),
     getModel: () => 'test-model',
+    getContentGeneratorConfig: () => undefined,
     setUserMemory,
     setPromptToolSnapshot,
     setPromptAgentReachable,
@@ -764,6 +770,148 @@ describe('Hosted Harness model boundary', () => {
       undefined,
     );
   });
+
+  it('records the resolved context capacity alongside provider prompt usage without mutating it', async () => {
+    const reported = {
+      promptTokenCount: 1_234,
+      totalTokenCount: 9_999_999,
+      contextWindowSize: 17,
+    };
+    config([
+      {
+        type: LlmEventType.Finished,
+        value: { usageMetadata: reported },
+      },
+    ]);
+    state.config['getContentGeneratorConfig'] = () => ({
+      contextWindowSize: 8_192,
+    });
+    const complete = vi.fn().mockResolvedValue(undefined);
+    await runHostedHarnessTextTurn({
+      ...input,
+      modelScope: {
+        bindBudget: vi.fn(),
+        evaluate: vi.fn(),
+        beginMainAttempt: vi.fn().mockResolvedValue(complete),
+      },
+    });
+    expect(complete).toHaveBeenCalledWith(true, [
+      { ...reported, contextWindowSize: 8_192 },
+    ]);
+    expect(reported.contextWindowSize).toBe(17);
+  });
+
+  it.each([true, false])(
+    'uses the active window only when the prepared route pin matches (%s)',
+    async (matchingRoute) => {
+      const model = config([]);
+      state.config['getContentGeneratorConfig'] = () => ({
+        model: 'actual-model',
+        contextWindowSize: 8_192,
+      });
+      model.sendMessageStream.mockImplementation(
+        async function* (_request, _signal, _promptId, options) {
+          await (
+            options as { onPreparedRequest: LlmPreparedRequestCallback }
+          ).onPreparedRequest({
+            request: { model: 'actual-model', contents: [], config: {} },
+            history: [],
+            completedToolCallIds: [],
+            routeSelector: 'test-route',
+            providerPin: llmPreparedProviderPin({
+              model: 'actual-model',
+              contextWindowSize: matchingRoute ? 8_192 : 16_384,
+            }),
+            promptTokensForClamp: 0,
+          });
+          yield {
+            type: LlmEventType.Finished,
+            value: { usageMetadata: { promptTokenCount: 7 } },
+          };
+        },
+      );
+      const complete = vi.fn().mockResolvedValue(undefined);
+      const beginMainAttempt = vi.fn().mockResolvedValue(complete);
+      await runHostedHarnessTextTurn({
+        ...input,
+        prepareModel: vi.fn().mockResolvedValue(undefined),
+        modelScope: {
+          bindBudget: vi.fn(),
+          evaluate: vi.fn(),
+          beginMainAttempt,
+        },
+      });
+      expect(beginMainAttempt).toHaveBeenCalledWith('actual-model', undefined);
+      expect(complete).toHaveBeenCalledWith(true, [
+        {
+          promptTokenCount: 7,
+          ...(matchingRoute ? { contextWindowSize: 8_192 } : {}),
+        },
+      ]);
+    },
+  );
+
+  it('omits the active model window after a fallback without a prepared route', async () => {
+    config([
+      { type: LlmEventType.ModelFallback, toModel: 'fallback-model' },
+      {
+        type: LlmEventType.Finished,
+        value: { usageMetadata: { promptTokenCount: 7 } },
+      },
+    ]);
+    state.config['getContentGeneratorConfig'] = () => ({
+      contextWindowSize: 8_192,
+    });
+    const primaryComplete = vi.fn(async (success, usage) => {
+      expect(success).toBe(false);
+      expect(usage).toEqual([]);
+    });
+    const complete = vi.fn().mockResolvedValue(undefined);
+    const beginMainAttempt = vi
+      .fn()
+      .mockResolvedValueOnce(primaryComplete)
+      .mockResolvedValueOnce(complete);
+    await runHostedHarnessTextTurn({
+      ...input,
+      hooks: hostedHooks().session,
+      modelScope: {
+        bindBudget: vi.fn(),
+        evaluate: vi.fn(),
+        beginMainAttempt,
+      },
+    });
+    expect(beginMainAttempt.mock.calls).toEqual([
+      ['test-model'],
+      ['fallback-model'],
+    ]);
+    expect(primaryComplete).toHaveBeenCalledOnce();
+    expect(complete).toHaveBeenCalledWith(true, [{ promptTokenCount: 7 }]);
+  });
+
+  it.each([undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity])(
+    'omits an unknown or invalid context capacity instead of trusting provider metadata (%s)',
+    async (contextWindowSize) => {
+      config([
+        {
+          type: LlmEventType.Finished,
+          value: {
+            usageMetadata: { promptTokenCount: 7, contextWindowSize: 123 },
+          },
+        },
+      ]);
+      state.config['getContentGeneratorConfig'] = () => ({ contextWindowSize });
+      const complete = vi.fn().mockResolvedValue(undefined);
+      await runHostedHarnessTextTurn({
+        ...input,
+        modelScope: {
+          bindBudget: vi.fn(),
+          evaluate: vi.fn(),
+          beginMainAttempt: vi.fn().mockResolvedValue(complete),
+        },
+      });
+      expect(complete).toHaveBeenCalledWith(true, [{ promptTokenCount: 7 }]);
+    },
+  );
 
   it('reports provider failure through StopFailure and leaves Hook recovery failures untouched', async () => {
     config([
@@ -1451,6 +1599,7 @@ describe('Hosted Harness resume and retraction', () => {
         },
       }),
       getModel: () => 'test-model',
+      getContentGeneratorConfig: () => undefined,
       setUserMemory: vi.fn(),
       setPromptToolSnapshot: vi.fn(),
       setPromptAgentReachable: vi.fn(),
@@ -1628,6 +1777,30 @@ it('uses the unique configured route for a definition model', async () => {
     requireCachedCredentials: true,
   });
   expect(mocks.refreshAuth).toHaveBeenCalled();
+});
+
+it('uses the accepted Turn model selection while retaining the original Agent definition', async () => {
+  config([{ type: LlmEventType.Finished }]);
+  const switchModel = vi.fn(async () => undefined);
+  state.config['getAllConfiguredModels'] = () => [
+    { id: 'selected', authType: 'openai' },
+  ];
+  state.config['switchModel'] = switchModel;
+  const agentDefinition = {
+    agentId: `agent_${'a'.repeat(32)}`,
+    revision: '1',
+    digest: 'b'.repeat(64),
+    model: { id: 'original' },
+  };
+  await runHostedHarnessTextTurn({
+    ...input,
+    agentDefinition,
+    modelSelection: { modelId: 'selected', revision: 2 },
+  });
+  expect(switchModel).toHaveBeenCalledWith('openai', 'selected', {
+    requireCachedCredentials: true,
+  });
+  expect(agentDefinition.model.id).toBe('original');
 });
 
 it.each([

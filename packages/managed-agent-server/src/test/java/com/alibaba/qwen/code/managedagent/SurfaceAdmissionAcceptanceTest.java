@@ -413,6 +413,9 @@ class SurfaceAdmissionAcceptanceTest {
                 if (entry.capabilities().contains(Capability.ACTION_RESPOND)) {
                     expect(entry, OPERATOR, 202, "action_response");
                     expect(entry, OWNER_RANK, 202, "action_response");
+                } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)) {
+                    expect(entry, OPERATOR, 409, "unsupported_feature");
+                    expect(entry, OWNER_RANK, 409, "unsupported_feature");
                 } else {
                     expect(entry, OPERATOR, 409, "workspace_unavailable");
                     expect(entry, OWNER_RANK, 409, "workspace_unavailable");
@@ -421,10 +424,10 @@ class SurfaceAdmissionAcceptanceTest {
                 // routes name the missing principal up front, the rest
                 // stay invisible so an unauthenticated caller learns
                 // nothing about the bound Session.
-                expect(entry, null, entry.capabilities().contains(
-                        Capability.SESSION_CWD_CHANGE) ? 401 : 404,
-                        entry.capabilities().contains(
-                                Capability.SESSION_CWD_CHANGE)
+                boolean actorRequired = entry.capabilities().contains(Capability.SESSION_CWD_CHANGE)
+                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE);
+                expect(entry, null, actorRequired ? 401 : 404,
+                        actorRequired
                                 ? "actor_required" : "session_not_found");
             }
             case TASK_OPERATOR -> {
@@ -452,7 +455,13 @@ class SurfaceAdmissionAcceptanceTest {
                         automationEntry(entry) ? "actor_required"
                                 : "session_not_found");
             }
+            case WORKSPACE_ALLOCATION -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 409, "workspace_creation_unavailable");
+            }
             case WORKSPACE_DISCOVERY ->
+                expect(entry, null, 401, "actor_required");
+            case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
             case INTERNAL_WRITER ->
                 expectInternal(entry);
@@ -1523,6 +1532,11 @@ class SurfaceAdmissionAcceptanceTest {
             case ARTIFACT_GET -> "{\"sessionId\":\"" + session
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
+            case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
+            case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
+            case SESSION_MODELS -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session
+                    + "\",\"idempotencyKey\":\"model-change\",\"modelId\":\"model-a\",\"expectedRevision\":0}";
             case WORKSPACE_LIST -> "{}";
             case WORKSPACE_GET -> "{\"workspaceId\":\"ws\"}";
             case AUTOMATION_CREATE -> "{\"session_id\":\"" + session

@@ -617,7 +617,7 @@ class Issue13181QueryBudgetTest {
         assertThat(webShellPage).hasSize(20);
         System.out.println("[issue-13181] listWebShellSessions(20 rows): "
                 + fixture.ledger.summary());
-        // Page + latest turns + environment events.
+        // Page + latest turns + environment events; unbound rows read no model metadata.
         assertThat(fixture.ledger.total()).isEqualTo(3);
         // The latest-turn batch read projects only the summary columns.
         assertThat(fixture.ledger.count("turn_record.*")).isZero();
@@ -720,8 +720,11 @@ class Issue13181QueryBudgetTest {
                 + " rows): " + fixture.ledger.summary());
         // Page + the latest-turn read + the workspace-close batch; without
         // turns the environment-event read is skipped, and the approval mode
-        // rides on the page's own SELECT *.
-        assertThat(fixture.ledger.total()).isEqualTo(3);
+        // rides on the page's own SELECT *. Model selection and context add
+        // one bounded query each, regardless of the Workspace page size.
+        assertThat(fixture.ledger.total()).isEqualTo(5);
+        assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
+        assertThat(fixture.ledger.count("from ma_session_record r join ma_resource u")).isEqualTo(1);
         assertThat(fixture.ledger.count(
                 "approval_mode from ma_session"))
                 .isZero();
@@ -818,8 +821,11 @@ class Issue13181QueryBudgetTest {
                 + " role rows): " + fixture.ledger.summary());
         // Page + latest turns + the close batch + the grant batch across
         // both workspaces + the execution-facts batch over the
-        // submit-shaped sessions: constant, not per row.
-        assertThat(fixture.ledger.total()).isEqualTo(5);
+        // submit-shaped sessions, plus model selection and context batches:
+        // constant, not per row.
+        assertThat(fixture.ledger.total()).isEqualTo(7);
+        assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
+        assertThat(fixture.ledger.count("from ma_session_record r join ma_resource u")).isEqualTo(1);
         assertThat(fixture.ledger.count("from ma_workspace r join ma_workspace_access"))
                 .isEqualTo(1);
         assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isEqualTo(1);
@@ -860,7 +866,9 @@ class Issue13181QueryBudgetTest {
             var page = fixture.service.listWebShellSessions(tenant, "actor", null, 20).data();
             assertThat(page).hasSize(size);
             assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("cwdChange").asBoolean()).isTrue());
-            assertThat(fixture.ledger.total()).isEqualTo(5);
+            assertThat(fixture.ledger.total()).isEqualTo(7);
+            assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
+            assertThat(fixture.ledger.count("from ma_session_record r join ma_resource u")).isEqualTo(1);
             assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isEqualTo(1);
         }
     }
