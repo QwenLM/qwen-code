@@ -108,6 +108,7 @@ describe('Session.pendingWorktreeNotice', () => {
         .fn()
         .mockResolvedValue(undefined),
       beginManagedAutoMemoryRecall: vi.fn(),
+      drainPendingMcpReminders: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
       commitManagedAutoMemoryRecallDelivery: vi.fn(),
       discardManagedAutoMemoryRecallDelivery: vi.fn(),
