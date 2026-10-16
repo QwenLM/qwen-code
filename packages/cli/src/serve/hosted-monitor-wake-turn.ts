@@ -22,7 +22,13 @@ import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-c
  * would silently consume every recovery exception while the wiring stays
  * green, which is exactly how the round-9 regression shipped.
  */
-export function monitorWakeNeedsRecovery(cause: unknown): boolean {
+export function monitorWakeNeedsRecovery(
+  cause: unknown,
+): cause is
+  | HostedToolRecoveryRequiredError
+  | HostedMcpRecoveryRequiredError
+  | HostedHookRecoveryRequiredError
+  | LlmRequestPreparationError {
   return (
     cause instanceof HostedToolRecoveryRequiredError ||
     cause instanceof HostedMcpRecoveryRequiredError ||
