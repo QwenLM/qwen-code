@@ -59,6 +59,28 @@ unit 只执行经过审阅的 source 入口；可执行文件校验来自受保�
 独立 pre-start 程序。这些检查尚未完整测量已安装策略语义、实际 runtime handler、
 admission actors 或独占 CSI 接线，不提供释放权限。
 
+## 离线镜像输入
+
+首次执行前 renderer 除三份 host 产物和创建契约原字节外，还必须取得真实 worker 与
+sandbox OCI blob layout 及其具体 manifest digest。它核对每个有序 layer 的压缩字节
+摘要、长度和未压缩 diff ID，在处理 whiteout 与 opaque directory 后生成最终文件清单。
+不解压落地、执行、下载或安装镜像内容。JSON 字段必须唯一，采用 UTF-8，数值必须有限。
+仅接受具体 OCI manifest、Linux amd64/arm64 配置和未压缩或 gzip OCI layer。
+worker composer 将已验证的 gzip base blob 标记为 OCI gzip layer，即使 base 原来
+使用 Docker layer descriptor，也不改变 blob 字节、digest 或 diff ID。
+
+镜像命令必须通过有界 symlink 解析为与 host 产物同架构的可执行 ELF。每个 ELF
+interpreter 必须解析到同镜像中的另一份可执行 ELF。其他可执行文件仍只是清单数据，
+不成为额外获准入口。拒绝越过镜像根的链接、循环、非目录或隐式父项、不支持的文件
+类型/xattr 和外部 blob descriptor。hardlink 仅支持同一 layer 中更早的普通文件，
+并要求 inode metadata 一致；不支持跨 layer hardlink。每层压缩与展开字节分别限制为
+1 GiB，整个镜像展开字节限制为 4 GiB，每层及最终树限制为 65,536 项。
+manifest/configuration 合计限制为 64 KiB，每份输出清单限制为 16 MiB。
+
+version-2 artifact manifest 绑定两份原始镜像 digest、完整清单字节及两个生成器文件。
+候选输出独占且私有，所有输入校验先于目录创建。这接通了后续策略生成所需的离线镜像
+输入路径；完整五角色策略、编译/加载、实际 actor 排除和下述安装权威仍待实现。
+
 ## 来源与释放依赖
 
 当前 source/6 格式保留配对 sandbox/worker 出生、实际镜像及 snapshot 祖先链、原始消费

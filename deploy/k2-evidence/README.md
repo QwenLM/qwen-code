@@ -159,12 +159,17 @@ python3 deploy/k2-evidence/render-pre-exec.py \
   --source /absolute/output/k2-node-evidence \
   --shim /absolute/output/containerd-shim-qwen-k2-v1 \
   --runc /absolute/reviewed/runc \
+  --worker-layout /absolute/reviewed/worker-oci \
+  --worker-image-sha256 REVIEWED_WORKER_MANIFEST_SHA256 \
+  --sandbox-layout /absolute/reviewed/sandbox-oci \
   --sandbox-image-sha256 REVIEWED_SANDBOX_MANIFEST_SHA256 \
   --creation-contract /absolute/reviewed/creation-contract.json \
   --output /absolute/output/new-pre-exec-candidate
 ```
 
 The renderer hashes the actual artifact bytes, checks their ELF header architecture agrees, preserves the contract bytes, refuses duplicate JSON and existing output, and writes root-private candidate files. It checks the contract envelope; the shim and Java consumer perform the complete semantic validation. It does not establish artifact source provenance or execution compatibility.
+
+Both image layouts must contain the exact selected OCI manifest, configuration and ordered layer blobs. `image-catalog.py` measures compressed hashes/sizes and uncompressed diff IDs, applies whiteouts, and resolves the original ELF entry and loaders without extracting or executing them. Version 2 of the artifact manifest binds both image digests and complete `worker-catalog.json` / `sandbox-catalog.json` bytes. The supported subset requires explicit directory parents and same-layer hardlinks with unchanged metadata; cross-layer links, external blobs, unknown file types/xattrs, mismatched architectures and missing loaders refuse before output creation. See the birth design for bounds. This is an offline input artifact, not a complete AppArmor bundle or installed protection evidence.
 
 `shim.json` is the candidate for `/etc/qwen-k2/shim.json`; `runtime-handler.toml` is a fragment for the reviewed containerd CRI runtime configuration, with explicit `runtime_path` and `io.containerd.qwen-k2.v1` runtime type. The existing RuntimeClass name/handler remains `qwen-k2-runc-v1`. The source configuration additionally requires the generated `sandboxImageSha256`. The tmpfiles fragment supplies the fixed private directories. None of these files is installed or applied by this tool.
 

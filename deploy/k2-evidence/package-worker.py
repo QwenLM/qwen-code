@@ -137,6 +137,7 @@ def main():
         'Cmd': ['managed-runtime-worker', '--container-boot', '/var/run/qwen-runtime/boot.json'],
         'ExposedPorts': {'43190/tcp': {}}}, 'rootfs': {'type': 'layers', 'diff_ids': diffs + [worker_layer['digest']]}}
     config_descriptor = blob(encode(config), 'application/vnd.oci.image.config.v1+json')
+    layers = [{**layer, 'mediaType': 'application/vnd.oci.image.layer.v1.tar+gzip'} for layer in layers]
     manifest = blob(encode({'schemaVersion': 2, 'mediaType': 'application/vnd.oci.image.manifest.v1+json', 'config': config_descriptor, 'layers': layers + [worker_layer], 'annotations': {'org.opencontainers.image.base.digest': base_pin}}), 'application/vnd.oci.image.manifest.v1+json')
     (args.output / 'oci-layout').write_bytes(encode({'imageLayoutVersion': '1.0.0'}))
     (args.output / 'index.json').write_bytes(encode({'schemaVersion': 2, 'mediaType': 'application/vnd.oci.image.index.v1+json', 'manifests': [{**manifest, 'platform': {'os': 'linux', 'architecture': args.architecture}}]}))

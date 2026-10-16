@@ -83,6 +83,39 @@ configuration, rather than a separate pre-start executable. These checks do
 not yet measure the complete installed policy semantics, effective runtime
 handler, admission actors or exclusive CSI wiring. None grants release.
 
+## Offline image inputs
+
+The pre-execution renderer now requires the actual worker and sandbox OCI blob
+layouts and their concrete manifest digests, in addition to the three host
+artifacts and original creation contract. It measures every ordered layer's
+compressed digest, length and uncompressed diff ID, and constructs the final
+file catalogue after whiteouts and opaque directories. It never extracts,
+executes, downloads or installs image contents. JSON fields are unique, UTF-8
+and finite. Only concrete OCI manifests, Linux amd64/arm64 configurations and
+uncompressed or gzip OCI layers are accepted.
+The worker composer labels verified gzip base blobs as OCI gzip layers without
+changing their bytes, digests or diff IDs, including when the base used Docker
+layer descriptors.
+
+The image command must resolve through bounded symlinks to an executable ELF of
+the same architecture as the host artifacts. Every ELF interpreter must resolve
+to another executable ELF in the same image. Other executable files remain
+catalogue data; they are not additional approved entry points. Refuse links
+escaping the image, cycles, non-directory or implicit parents, unsupported file
+types/xattrs and external blob descriptors. Hardlinks require an earlier
+regular file in the same layer with identical inode metadata; cross-layer
+hardlinks are unsupported. Each layer has a 1 GiB compressed and expanded
+bound, the image has a 4 GiB expanded bound, and each layer/final tree is limited
+to 65,536 entries. Manifest/configuration bytes have a combined 64 KiB bound;
+each output catalogue has a 16 MiB bound.
+
+The version-2 artifact manifest binds both original image digests, the complete
+catalogue bytes and both generator files. Candidate output is exclusive and
+private, and all input validation precedes directory creation. This closes the
+offline image input path for a future generated policy. It does not provide the
+complete five-role policy, its compilation/loading, actual actor exclusions or
+the installation authority required below.
+
 ## Source and release dependency
 
 The current source/6 format preserves paired sandbox/worker births, actual image

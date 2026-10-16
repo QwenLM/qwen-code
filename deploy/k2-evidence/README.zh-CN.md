@@ -135,12 +135,17 @@ python3 deploy/k2-evidence/render-pre-exec.py \
   --source /absolute/output/k2-node-evidence \
   --shim /absolute/output/containerd-shim-qwen-k2-v1 \
   --runc /absolute/reviewed/runc \
+  --worker-layout /absolute/reviewed/worker-oci \
+  --worker-image-sha256 REVIEWED_WORKER_MANIFEST_SHA256 \
+  --sandbox-layout /absolute/reviewed/sandbox-oci \
   --sandbox-image-sha256 REVIEWED_SANDBOX_MANIFEST_SHA256 \
   --creation-contract /absolute/reviewed/creation-contract.json \
   --output /absolute/output/new-pre-exec-candidate
 ```
 
 工具对实际产物字节计算 hash，核对 ELF header 架构相同，保留契约原字节，拒绝重复 JSON 和已存在的输出，生成 root-private 候选文件。工具检查契约 envelope；shim 与 Java consumer 执行完整语义校验。这不建立 artifact 源码 provenance 或实际执行兼容性。
+
+两个镜像 layout 必须包含选定 OCI manifest、configuration 和有序 layer 的准确 blob。`image-catalog.py` 核对压缩摘要/大小和未压缩 diff ID，处理 whiteout，在不解压落地或执行内容的前提下解析原 ELF 入口与 loader。version 2 artifact manifest 绑定两个镜像 digest 和完整 `worker-catalog.json` / `sandbox-catalog.json` 字节。当前支持子集要求显式目录父项与 metadata 不变的同 layer hardlink；跨 layer 链接、外部 blob、未知文件类型/xattr、架构不符和缺失 loader 都在创建输出前拒绝。具体上限见出生设计。这是离线输入产物，不是完整 AppArmor bundle 或已安装的保护证据。
 
 `shim.json` 对应拟安装的 `/etc/qwen-k2/shim.json`；`runtime-handler.toml` 是经审阅 containerd CRI runtime 配置的 fragment，明确使用 `runtime_path` 与 `io.containerd.qwen-k2.v1` runtime type。既有 RuntimeClass name/handler 仍为 `qwen-k2-runc-v1`。source 配置还必须加入生成的 `sandboxImageSha256`。tmpfiles fragment 提供固定私有目录。工具不会安装或 apply 这些文件。
 

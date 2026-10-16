@@ -4,10 +4,15 @@
 import argparse
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
-import re
+
+
+spec = importlib.util.spec_from_file_location("k2_image_catalog", Path(__file__).with_name("image-catalog.py"))
+IMAGE = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(IMAGE)
 
 
 def require(valid, message):
@@ -54,11 +59,22 @@ def artifact(path):
     return {"sha256": digest.hexdigest(), "bytes": length, "architecture": "amd64" if machine == 62 else "arm64"}
 
 
-def render(source, shim, runc, sandbox_image, contract, output):
-    require(re.fullmatch(r"[0-9a-f]{64}", sandbox_image) is not None, "fixed sandbox manifest SHA-256 required")
+def render(source, shim, runc, worker_layout, worker_image, sandbox_layout, sandbox_image, contract, output):
     inputs = {"source": artifact(source), "shim": artifact(shim), "runc": artifact(runc)}
     require(len({value["architecture"] for value in inputs.values()}) == 1, "artifact architectures differ")
     raw = contract_bytes(contract)
+    document = json.loads(raw, object_pairs_hook=unique_object)
+    catalogues = {
+        "worker": IMAGE.catalogue(worker_layout, worker_image, "worker", document),
+        "sandbox": IMAGE.catalogue(sandbox_layout, sandbox_image, "sandbox", document),
+    }
+    require(all(value["architecture"] == inputs["source"]["architecture"] for value in catalogues.values()),
+            "image and host artifact architectures differ")
+    catalog_files = {}
+    for role, catalogue in catalogues.items():
+        content = json.dumps(catalogue, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        require(len(content.encode("utf-8")) <= IMAGE.CATALOG_LIMIT, "image catalogue exceeds its byte bound")
+        catalog_files[role + "-catalog.json"] = content
     configuration = {
         "inputs": {
             "bundleRoot": "/run/containerd/io.containerd.runtime.v2.task/k8s.io",
@@ -85,10 +101,19 @@ def render(source, shim, runc, sandbox_image, contract, output):
     SystemdCgroup = true
 '''
     manifest = {
-        "format": "qwen-k2-pre-exec-artifacts/1",
+        "format": "qwen-k2-pre-exec-artifacts/2",
         "artifacts": inputs,
         "creationContractSha256": hashlib.sha256(raw).hexdigest(),
         "sandboxImageSha256": sandbox_image,
+        "workerImageSha256": worker_image,
+        "catalogues": {
+            name: {"bytes": len(content.encode("utf-8")), "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+            for name, content in catalog_files.items()
+        },
+        "generators": {
+            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ("render-pre-exec.py", "image-catalog.py")
+        },
     }
     files = {
         "shim.json": json.dumps(configuration, indent=2) + "\n",
@@ -96,6 +121,7 @@ def render(source, shim, runc, sandbox_image, contract, output):
         "source-config.patch.json": json.dumps({"sandboxImageSha256": sandbox_image}, indent=2) + "\n",
         "artifact-manifest.json": json.dumps(manifest, indent=2) + "\n",
         "qwen-k2-pre-exec.conf": "d /var/lib/qwen-k2/inputs 0700 root root -\nd /run/qwen-k2/source 0700 root root -\nd /run/qwen-k2/shims 0700 root root -\nd /run/qwen-k2/runc 0700 root root -\n",
+        **catalog_files,
     }
     os.mkdir(output, 0o700)
     for name, value in files.items():
@@ -106,13 +132,15 @@ def render(source, shim, runc, sandbox_image, contract, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("source", "shim", "runc", "creation-contract", "output"):
+    for name in ("source", "shim", "runc", "worker-layout", "sandbox-layout", "creation-contract", "output"):
         parser.add_argument("--" + name, required=True, type=Path)
+    parser.add_argument("--worker-image-sha256", required=True)
     parser.add_argument("--sandbox-image-sha256", required=True)
     args = parser.parse_args()
     try:
-        render(args.source, args.shim, args.runc, args.sandbox_image_sha256, args.creation_contract, args.output)
-    except (OSError, ValueError) as failure:
+        render(args.source, args.shim, args.runc, args.worker_layout, args.worker_image_sha256,
+               args.sandbox_layout, args.sandbox_image_sha256, args.creation_contract, args.output)
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, EOFError, IMAGE.tarfile.TarError, IMAGE.struct.error) as failure:
         parser.exit(1, "Pre-exec candidate rendering refused: " + str(failure) + "\n")
 
 
