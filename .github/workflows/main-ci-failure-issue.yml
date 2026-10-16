@@ -15,8 +15,10 @@ on:
     # one per red merge, not per red nightly only.
     # Daily Java and Desktop checks report main regressions through the same
     # deduplicated issue and autofix route as the nightly CLI checks.
+    # The Managed Agent gate's post-merge fast tier rides the push arm.
     workflows:
       - 'E2E Tests'
+      - 'Managed Agent gate'
       - 'SDK Java'
       - 'SDK Python'
       - 'Qwen Code CI'

@@ -877,12 +877,18 @@ describe('Java SDK release validation gate', () => {
       required: true,
       type: 'string',
     });
+    // The only lane condition is the fast-tier skip, and the release caller
+    // passes no tier, so the default 'full' runs every lane.
+    expect(checks.on.workflow_call.inputs.tier).toMatchObject({
+      required: false,
+      default: 'full',
+    });
     for (const lane of Object.values(checks.jobs)) {
       const checkout = lane.steps.find((entry) =>
         entry.uses?.startsWith('actions/checkout@'),
       );
       expect(checkout.with.ref).toBe('${{ inputs.ref || github.sha }}');
-      expect(lane.if).toBeUndefined();
+      expect([undefined, "${{ inputs.tier != 'fast' }}"]).toContain(lane.if);
       expect(lane['continue-on-error']).toBeUndefined();
     }
     expect(release.jobs.java_checks).toMatchObject({
@@ -890,6 +896,7 @@ describe('Java SDK release validation gate', () => {
       uses: './.github/workflows/sdk-java.yml',
       with: { ref: '${{ needs.prepare.outputs.release_sha }}' },
     });
+    expect(release.jobs.java_checks.with.tier).toBeUndefined();
     expect(release.jobs.java_checks['continue-on-error']).toBeUndefined();
     expect(release.jobs.release.needs).toEqual(['prepare', 'java_checks']);
     expect(release.jobs.release.if).toBeUndefined();

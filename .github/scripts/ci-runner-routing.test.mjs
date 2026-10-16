@@ -706,6 +706,14 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       'pull_request',
       ['push', 'workflow_dispatch'],
     ],
+    // managed-agent-gate.yml calls sdk-java.yml on an approval, whose event
+    // a fork PR can raise too: approving one must not put it on the pool.
+    [
+      'sdk-java.yml',
+      'mysql-integration',
+      'pull_request_review',
+      ['push', 'merge_group', 'workflow_dispatch'],
+    ],
     [
       'assign-pr-owner.yml',
       'assign',

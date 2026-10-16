@@ -199,7 +199,7 @@ describe('Hosted real-process gates', () => {
     const job = java.jobs['hosted-harness-mysql'];
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
-    expect(job.if).toBeUndefined();
+    expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
     expect(java.jobs['mysql-integration'].services.mariadb.image).toMatch(
       /^mariadb:/,
     );

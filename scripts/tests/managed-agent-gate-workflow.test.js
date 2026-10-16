@@ -1,0 +1,340 @@
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { parse } from 'yaml';
+import { afterAll, describe, expect, it } from 'vitest';
+import { touchesManagedAgent } from '../../.github/scripts/managed-agent-gate-scope.mjs';
+
+const gate = parse(
+  readFileSync('.github/workflows/managed-agent-gate.yml', 'utf8'),
+);
+const sdkJava = parse(readFileSync('.github/workflows/sdk-java.yml', 'utf8'));
+
+// Evaluates the &&/||/==/!= subset of a GitHub expression that these
+// workflows use; both languages return the winning operand.
+function evaluate(text, context) {
+  const body = String(text)
+    .trim()
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '')
+    .replace(/!=/g, '!==')
+    .replace(/([^!=])==/g, '$1===')
+    .replace(/\bfromJSON\(/g, 'JSON.parse(')
+    .replace(/\bformat\(/g, 'format(');
+  const format = (pattern, ...args) =>
+    pattern.replace(/\{(\d+)\}/g, (_, i) => String(args[i]));
+  return new Function(
+    'github',
+    'needs',
+    'inputs',
+    'format',
+    `return (${body});`,
+  )(context.github ?? {}, context.needs ?? {}, context.inputs ?? {}, format);
+}
+
+const interpolate = (text, context) =>
+  String(text).replace(/\$\{\{([\s\S]*?)\}\}/g, (_, expr) =>
+    String(evaluate(expr, context)),
+  );
+
+const github = (eventName, event = {}) => ({
+  event_name: eventName,
+  sha: 'merge-sha',
+  ref: 'refs/pull/7/merge',
+  event: { review: {}, pull_request: {}, ...event },
+});
+
+describe('Managed Agent gate scope', () => {
+  it.each([
+    'packages/managed-agent-server/src/main/java/A.java',
+    'packages/sdk-java/qwencode/pom.xml',
+    'packages/cli/src/serve/server.ts',
+    'packages/core/src/managed-runtime/runtime.ts',
+    'integration-tests/helpers/hosted-harness-process.ts',
+    'integration-tests/vitest.hosted.config.ts',
+    'scripts/run-managed-agent-server-e2e.ts',
+    '.github/workflows/sdk-java.yml',
+    '.github/workflows/managed-agent-gate.yml',
+    '.github/scripts/managed-agent-gate-scope.mjs',
+  ])('runs the suite for %s', (path) => {
+    expect(touchesManagedAgent(['README.md', path])).toBe(true);
+  });
+
+  it.each([
+    'README.md',
+    'packages/cli/src/ui/App.tsx',
+    'packages/core/src/tools/shell.ts',
+    'packages/web-shell/client/App.tsx',
+    'integration-tests/cli/run.test.ts',
+    '.github/workflows/ci.yml',
+  ])('leaves %s to the nightly run', (path) => {
+    expect(touchesManagedAgent([path])).toBe(false);
+  });
+
+  it('reads paths from stdin when run as a script', () => {
+    const run = (input) =>
+      spawnSync('node', ['.github/scripts/managed-agent-gate-scope.mjs'], {
+        input,
+        encoding: 'utf8',
+      }).stdout;
+    expect(run('docs/a.md\npackages/sdk-java/x\n')).toBe('true\n');
+    expect(run('docs/a.md\n')).toBe('false\n');
+    expect(run('')).toBe('false\n');
+  });
+});
+
+describe('Managed Agent gate triggers', () => {
+  it('runs on every PR, approval, main push and merge group', () => {
+    expect(gate.on).toEqual({
+      pull_request: { branches: ['main'] },
+      pull_request_review: { types: ['submitted'] },
+      push: { branches: ['main'] },
+      merge_group: null,
+    });
+  });
+
+  it('calls the SDK Java suite with the selected commit and tier', () => {
+    expect(gate.jobs.suite).toMatchObject({
+      needs: 'scope',
+      if: "${{ needs.scope.outputs.tier != 'none' }}",
+      uses: './.github/workflows/sdk-java.yml',
+      with: {
+        ref: '${{ needs.scope.outputs.sha }}',
+        tier: '${{ needs.scope.outputs.tier }}',
+      },
+    });
+  });
+
+  it('separates pushes, approvals and comments in the concurrency groups', () => {
+    const group = (ctx) => interpolate(gate.concurrency.group, ctx);
+    const review = (state, sha) =>
+      github('pull_request_review', {
+        review: { state },
+        pull_request: { number: 7, head: { sha } },
+      });
+    const pr = (number) => github('pull_request', { pull_request: { number } });
+    expect(group({ github: review('approved', 'h1') })).toBe(
+      group({ github: review('approved', 'h1') }),
+    );
+    expect(group({ github: review('approved', 'h1') })).not.toBe(
+      group({ github: review('commented', 'h1') }),
+    );
+    expect(group({ github: review('approved', 'h1') })).not.toBe(
+      group({ github: review('approved', 'h2') }),
+    );
+    expect(group({ github: pr(7) })).toBe(group({ github: pr(7) }));
+    expect(group({ github: pr(7) })).not.toBe(group({ github: pr(8) }));
+    expect(group({ github: pr(7) })).not.toBe(
+      group({ github: review('approved', 'h1') }),
+    );
+    const cancel = gate.concurrency['cancel-in-progress'];
+    for (const event of ['pull_request_review', 'push', 'merge_group']) {
+      expect(evaluate(cancel, { github: github(event) }), event).toBe(false);
+    }
+    expect(evaluate(cancel, { github: github('pull_request') })).toBe(true);
+  });
+});
+
+describe('Managed Agent gate required check', () => {
+  const name = (event, tier, touched) =>
+    evaluate(gate.jobs.gate.name, {
+      github: github(event),
+      needs: { scope: { outputs: { tier, touched } } },
+    });
+
+  it.each([
+    ['pull_request', 'none', 'false', 'Managed Agent gate'],
+    ['pull_request', 'fast', 'true', 'Managed Agent fast tier'],
+    ['pull_request_review', 'full', 'true', 'Managed Agent gate'],
+    [
+      'pull_request_review',
+      'none',
+      'true',
+      'Managed Agent review (no full run)',
+    ],
+    ['pull_request_review', 'none', 'false', 'Managed Agent gate'],
+    ['push', 'fast', 'true', 'Managed Agent gate'],
+    ['merge_group', 'fast', 'true', 'Managed Agent gate'],
+    // A failed tier selection leaves the outputs empty and must still
+    // report, and fail, under the required name.
+    ['pull_request', '', '', 'Managed Agent gate'],
+    ['pull_request_review', '', '', 'Managed Agent gate'],
+  ])(
+    '%s with tier %j, touched %j reports as %s',
+    (event, tier, touched, expected) => {
+      expect(name(event, tier, touched)).toBe(expected);
+    },
+  );
+
+  it('always reports after the tier selection and the suite', () => {
+    expect(gate.jobs.gate.if).toBe('${{ always() }}');
+    expect(gate.jobs.gate.needs).toEqual(['scope', 'suite']);
+  });
+
+  const report = gate.jobs.gate.steps.find(
+    (s) => s.name === 'Report the tier result',
+  ).run;
+  it.each([
+    ['failure', '', '', 'skipped', 1],
+    ['cancelled', '', '', 'skipped', 1],
+    ['success', 'none', 'false', 'skipped', 0],
+    ['success', 'none', 'true', 'skipped', 0],
+    ['success', 'fast', 'true', 'success', 0],
+    ['success', 'fast', 'true', 'failure', 1],
+    ['success', 'full', 'true', 'success', 0],
+    ['success', 'full', 'true', 'failure', 1],
+    ['success', 'full', 'true', 'cancelled', 1],
+  ])(
+    'scope %s, tier %j, touched %j, suite %s exits %i',
+    (scope, tier, touched, suite, code) => {
+      const result = spawnSync('bash', ['-c', report], {
+        env: {
+          PATH: process.env.PATH,
+          SCOPE_RESULT: scope,
+          TIER: tier,
+          TOUCHED: touched,
+          SUITE_RESULT: suite,
+        },
+      });
+      expect(result.status).toBe(code);
+    },
+  );
+});
+
+describe('Managed Agent gate tier selection', () => {
+  const step = gate.jobs.scope.steps.find((s) => s.name === 'Choose the tier');
+  const dir = mkdtempSync(join(tmpdir(), 'managed-agent-gate-'));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  // A stand-in gh: check-runs prints FAKE_URLS, and a run lookup prints the
+  // event recorded for that run id in FAKE_EVENTS ("id=event ...").
+  writeFileSync(
+    join(dir, 'gh'),
+    [
+      '#!/usr/bin/env bash',
+      'case "$2" in',
+      '  */check-runs*) printf "%s" "${FAKE_URLS}" ;;',
+      '  */actions/runs/*) id="${2##*/}"; for p in ${FAKE_EVENTS}; do [[ "${p%%=*}" == "${id}" ]] && echo "${p#*=}"; done ;;',
+      'esac',
+    ].join('\n'),
+  );
+  chmodSync(join(dir, 'gh'), 0o755);
+
+  const tier = (env) => {
+    const output = join(dir, 'output');
+    writeFileSync(output, '');
+    const result = spawnSync('bash', ['-c', step.run], {
+      env: {
+        PATH: `${dir}:${process.env.PATH}`,
+        GITHUB_OUTPUT: output,
+        REPO: 'QwenLM/qwen-code',
+        RUN_ID: '100',
+        HEAD_SHA: 'h1',
+        BASE_REF: 'main',
+        TOUCHED: 'true',
+        FAKE_URLS: '',
+        FAKE_EVENTS: '',
+        ...env,
+      },
+      encoding: 'utf8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    return readFileSync(output, 'utf8').trim();
+  };
+  const url = (run) =>
+    `https://github.com/QwenLM/qwen-code/actions/runs/${run}/job/9`;
+
+  it.each(['pull_request', 'push', 'merge_group'])(
+    'runs the fast tier for a touched %s',
+    (event) => {
+      expect(tier({ EVENT_NAME: event })).toBe('tier=fast');
+      expect(tier({ EVENT_NAME: event, TOUCHED: 'false' })).toBe('tier=none');
+    },
+  );
+
+  it('runs the full suite on the first approval of a touched head', () => {
+    const approve = {
+      EVENT_NAME: 'pull_request_review',
+      REVIEW_STATE: 'approved',
+    };
+    expect(tier(approve)).toBe('tier=full');
+    expect(tier({ ...approve, TOUCHED: 'false' })).toBe('tier=none');
+    expect(tier({ ...approve, REVIEW_STATE: 'commented' })).toBe('tier=none');
+    expect(tier({ ...approve, BASE_REF: 'feature' })).toBe('tier=none');
+  });
+
+  it('skips an approval only when an earlier approval run covers the head', () => {
+    const approve = {
+      EVENT_NAME: 'pull_request_review',
+      REVIEW_STATE: 'approved',
+    };
+    expect(
+      tier({
+        ...approve,
+        FAKE_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review',
+      }),
+    ).toBe('tier=none');
+    // An unaffected-change pass from the PR push run is no full run.
+    expect(
+      tier({ ...approve, FAKE_URLS: url(42), FAKE_EVENTS: '42=pull_request' }),
+    ).toBe('tier=full');
+    // A rerun of this run's own jobs is not an earlier approval.
+    expect(
+      tier({
+        ...approve,
+        FAKE_URLS: url(100),
+        FAKE_EVENTS: '100=pull_request_review',
+      }),
+    ).toBe('tier=full');
+  });
+});
+
+describe('SDK Java fast tier', () => {
+  const legs = (tier) =>
+    evaluate(sdkJava.jobs.test.strategy.matrix.include, { inputs: { tier } });
+
+  it('keeps only the Linux Java 21 leg on the fast tier', () => {
+    expect(legs('fast')).toEqual([{ os: 'ubuntu-latest', java: '21' }]);
+  });
+
+  it.each(['full', undefined])('runs all five legs for tier %j', (tier) => {
+    expect(legs(tier)).toEqual([
+      { os: 'ubuntu-latest', java: '11' },
+      { os: 'ubuntu-latest', java: '17' },
+      { os: 'ubuntu-latest', java: '21' },
+      { os: 'macos-latest', java: '21' },
+      { os: 'windows-latest', java: '21' },
+    ]);
+  });
+
+  it('skips exactly the slow lanes on the fast tier', () => {
+    const skipped = Object.entries(sdkJava.jobs)
+      .filter(([, job]) => job.if === "${{ inputs.tier != 'fast' }}")
+      .map(([id]) => id)
+      .sort();
+    expect(skipped).toEqual([
+      'event-transport-broker',
+      'event-transport-multi-node',
+      'hosted-harness-mysql',
+      'mysql-integration',
+    ]);
+    for (const id of ['test', 'flyway-migrations', 'daemon-e2e']) {
+      expect(sdkJava.jobs[id].if, id).toBeUndefined();
+    }
+  });
+
+  it('keys the callee concurrency by event and commit', () => {
+    expect(sdkJava.concurrency).toEqual({
+      group:
+        'sdk-java-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}',
+      'cancel-in-progress': false,
+    });
+  });
+});

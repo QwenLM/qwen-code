@@ -7,9 +7,17 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: 'Immutable source commit selected by the release preflight.'
+        description: 'Immutable source commit selected by the caller.'
         required: true
         type: 'string'
+      # 'fast' keeps the flyway guard, the real-daemon E2E and the Linux
+      # Java 21 leg for managed-agent-gate.yml's push-time tier; anything
+      # else, including no value on the nightly, runs every lane.
+      tier:
+        description: 'fast for the push-time subset; full otherwise.'
+        required: false
+        type: 'string'
+        default: 'full'
 
 permissions:
   contents: 'read'
@@ -19,29 +27,24 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  group: 'sdk-java-${{ github.workflow }}-${{ github.ref }}'
+  # Keyed by event and commit: a Managed Agent gate fast run and a full run
+  # on the same pull request must not queue behind each other, where a newer
+  # pending run would displace the older one.
+  group: 'sdk-java-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}'
   # Release callers and daily runs must not displace each other's validation.
   cancel-in-progress: false
 
 jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
-    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
+    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: 'ubuntu-latest'
-            java: '11'
-          - os: 'ubuntu-latest'
-            java: '17'
-          - os: 'ubuntu-latest'
-            java: '21'
-          - os: 'macos-latest'
-            java: '21'
-          - os: 'windows-latest'
-            java: '21'
+        include: >-
+          ${{ fromJSON(inputs.tier == 'fast' && '[{"os":"ubuntu-latest","java":"21"}]' ||
+          '[{"os":"ubuntu-latest","java":"11"},{"os":"ubuntu-latest","java":"17"},{"os":"ubuntu-latest","java":"21"},{"os":"macos-latest","java":"21"},{"os":"windows-latest","java":"21"}]') }}
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -259,7 +262,7 @@ jobs:
   # default merge-ref checkout is kept on both — the merge result is the point.
   flyway-migrations:
     name: 'Flyway migration version uniqueness'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:
       - name: 'Restore workspace ownership'
@@ -384,11 +387,12 @@ jobs:
 
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
     # Pool routing per the flyway job (#13245): hosted queue starvation fails
     # a zero-step job outright (#13623), the pool does not. The job is
     # pool-safe: the database is a per-job service container on a random host
     # port, and every Maven run holds the test job's per-host sdk-java lock.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # 15 covered the hosted lane. On the pool this job takes the per-host
     # sdk-java lock once per Maven step — three acquisitions today. The
     # 20-minute per-acquisition budget was sized on one quiet window
@@ -643,6 +647,7 @@ jobs:
 
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
     # The step ceilings (45 + 16×10 + 20 + 50 = 275 — the Verify, admission
     # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
@@ -921,6 +926,7 @@ jobs:
 
   event-transport-broker:
     name: 'EventTransport broker gates / RocketMQ 5.5.1 / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
     # Hosted: the gates boot their own broker on fixed ports.
     runs-on: 'ubuntu-latest'
     # 10 + 20 capped minutes plus the uncapped setup.
@@ -999,6 +1005,7 @@ jobs:
 
   event-transport-multi-node:
     name: 'EventTransport multi-node gates / RocketMQ 5.5.1 + MySQL 8.4 / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
     # Hosted: the gate boots its own broker on fixed ports and its own
     # control-plane nodes.
     runs-on: 'ubuntu-latest'
@@ -1111,7 +1118,7 @@ jobs:
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
     # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
     # npm ci 5.9 + build 5.2 -- and the Java daemon E2E it exists for costs
     # about a minute. On the shared pool that setup is what stretches: npm ci

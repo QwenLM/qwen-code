@@ -28,6 +28,7 @@ describe('main CI failure issue workflow', () => {
     // autofix route as the nightly CLI checks.
     const watchedFiles = {
       'E2E Tests': 'e2e',
+      'Managed Agent gate': 'managed-agent-gate',
       'SDK Java': 'sdk-java',
       'SDK Python': 'sdk-python',
       'Qwen Code CI': 'ci',
@@ -40,7 +41,7 @@ describe('main CI failure issue workflow', () => {
     // workflow_run.workflows matches the watched workflow's name: key, so a
     // watch entry is live only while its file still carries that name —
     // renaming one silently unhooks the suite's failure issues, and nothing
-    // else here reads the coupling for all five.
+    // else here reads the coupling for all of them.
     for (const [watchedName, watchedFile] of Object.entries(watchedFiles)) {
       const definition = parse(
         readFileSync(`.github/workflows/${watchedFile}.yml`, 'utf8'),
