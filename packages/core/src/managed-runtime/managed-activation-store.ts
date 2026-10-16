@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { appendFile, mkdir, readFile, truncate } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, stat, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -267,6 +267,8 @@ export class FileManagedActivationStore {
   private nextSequence = 1;
   private tail: Promise<void> = Promise.resolve();
   private fatalError: Error | undefined;
+  /** File bytes known to end at a complete event boundary. */
+  private syncedBytes = 0;
 
   private constructor(
     readonly filePath: string,
@@ -307,6 +309,7 @@ export class FileManagedActivationStore {
       store.apply(parseEvent(line, index + 1));
     });
     if (!complete) await truncate(filePath, validLength);
+    store.syncedBytes = validLength;
     return store;
   }
 
@@ -314,12 +317,14 @@ export class FileManagedActivationStore {
     input: ManagedActivationDescriptor,
     limits: ManagedActivationQueueLimits,
   ): Promise<ManagedActivationEnqueueResult> {
+    const capturedInput = structuredClone(input);
+    const capturedLimits = structuredClone(limits);
     return this.serial(async () => {
       const at = this.getCurrentTime();
-      const activation = descriptor(input);
-      positive('maxQueued', limits.maxQueued);
-      positive('maxQueuedPerTenant', limits.maxQueuedPerTenant);
-      if (limits.maxQueuedPerTenant > limits.maxQueued) {
+      const activation = descriptor(capturedInput);
+      positive('maxQueued', capturedLimits.maxQueued);
+      positive('maxQueuedPerTenant', capturedLimits.maxQueuedPerTenant);
+      if (capturedLimits.maxQueuedPerTenant > capturedLimits.maxQueued) {
         throw new Error('maxQueuedPerTenant cannot exceed maxQueued.');
       }
       const existing = this.activations.get(activationKey(activation));
@@ -335,20 +340,20 @@ export class FileManagedActivationStore {
       const queued = [...this.activations.values()].filter(
         (state) => state.status === 'queued',
       );
-      if (queued.length >= limits.maxQueued) {
+      if (queued.length >= capturedLimits.maxQueued) {
         throw new ManagedActivationAdmissionError(
           'GLOBAL_QUEUE_FULL',
-          `Managed activation queue is full (${limits.maxQueued}).`,
+          `Managed activation queue is full (${capturedLimits.maxQueued}).`,
         );
       }
       if (
         queued.filter(
           (state) => state.descriptor.tenantId === activation.tenantId,
-        ).length >= limits.maxQueuedPerTenant
+        ).length >= capturedLimits.maxQueuedPerTenant
       ) {
         throw new ManagedActivationAdmissionError(
           'TENANT_QUEUE_FULL',
-          `Managed activation queue for tenant '${activation.tenantId}' is full (${limits.maxQueuedPerTenant}).`,
+          `Managed activation queue for tenant '${activation.tenantId}' is full (${capturedLimits.maxQueuedPerTenant}).`,
         );
       }
 
@@ -388,9 +393,10 @@ export class FileManagedActivationStore {
     workerId: string,
     leaseDurationMs: number,
   ): Promise<ManagedActivationLease | undefined> {
+    const captured = structuredClone(input);
     return this.serial(async () => {
       const at = this.getCurrentTime();
-      const activation = identity(input);
+      const activation = identity(captured);
       if (!workerId.trim()) throw new Error('workerId must be non-empty.');
       positive('leaseDurationMs', leaseDurationMs);
       const state = this.activations.get(activationKey(activation));
@@ -428,9 +434,10 @@ export class FileManagedActivationStore {
     input: ManagedActivationLease,
     leaseDurationMs: number,
   ): Promise<ManagedActivationLease> {
+    const captured = structuredClone(input);
     return this.serial(async () => {
       const at = this.getCurrentTime();
-      const currentLease = lease(input);
+      const currentLease = lease(captured);
       positive('leaseDurationMs', leaseDurationMs);
       const state = this.current(currentLease, at);
       const expiresAt = at + leaseDurationMs;
@@ -456,11 +463,13 @@ export class FileManagedActivationStore {
     input: ManagedActivationLease,
     result: ManagedActivationOutcome,
   ): Promise<ManagedActivationSnapshot> {
+    const capturedInput = structuredClone(input);
+    const capturedResult = structuredClone(result);
     return this.serial(async () => {
       const at = this.getCurrentTime();
-      const currentLease = lease(input);
+      const currentLease = lease(capturedInput);
       this.current(currentLease, at);
-      const releaseOutcome = outcome(result);
+      const releaseOutcome = outcome(capturedResult);
       await this.persist({
         v: 1,
         sequence: this.nextSequence,
@@ -526,22 +535,59 @@ export class FileManagedActivationStore {
   }
 
   private async persist(event: JournalEvent): Promise<void> {
+    const line = Buffer.from(`${JSON.stringify(event)}\n`);
     try {
       await mkdir(path.dirname(this.filePath), { recursive: true });
-      await appendFile(
-        this.filePath,
-        Buffer.from(`${JSON.stringify(event)}\n`),
-        {
-          flush: true,
-          mode: 0o600,
-        },
-      );
+      await appendFile(this.filePath, line, {
+        flush: true,
+        mode: 0o600,
+      });
+    } catch (error) {
+      // A failed append may have torn the tail. The open() loader repairs
+      // exactly that by truncating to the last complete line, so do the same
+      // here: if the journal is back at the last byte this store synced, the
+      // write provably never happened and the failure is transient. The
+      // length is observed, not assumed: truncate() extends a shorter file
+      // with NUL bytes and reports success, so on its own it cannot tell a
+      // torn tail apart from a journal that lost synced bytes out of band —
+      // that is consistency damage, and consistency damage is fatal.
+      const failure = error instanceof Error ? error : new Error(String(error));
+      try {
+        const { size } = await stat(this.filePath);
+        if (size < this.syncedBytes) {
+          throw new Error(
+            `Managed activation journal holds ${size} bytes, short of` +
+              ` the ${this.syncedBytes} already synced.`,
+          );
+        }
+        // Only a torn tail needs the truncate: at exactly the synced length
+        // the journal is intact and the failed write provably never
+        // happened, so a no-op truncate a read-only filesystem refuses must
+        // not halt the healthy store (review round 9, R9-5).
+        if (size > this.syncedBytes) {
+          await truncate(this.filePath, this.syncedBytes);
+        }
+      } catch (repairError) {
+        if (
+          (repairError as NodeJS.ErrnoException).code !== 'ENOENT' ||
+          this.syncedBytes !== 0
+        ) {
+          // The halt is caused by the failed repair, not the original
+          // transient write failure — keep it on the causal chain.
+          failure.cause = repairError;
+          this.fatalError = failure;
+        }
+      }
+      throw this.fatalError ?? failure;
+    }
+    try {
       this.apply(event);
     } catch (error) {
       this.fatalError =
         error instanceof Error ? error : new Error(String(error));
       throw this.fatalError;
     }
+    this.syncedBytes += line.byteLength;
   }
 
   private apply(event: JournalEvent): void {

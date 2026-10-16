@@ -8,7 +8,6 @@ import { spawn } from 'node:child_process';
 import {
   closeSync,
   constants,
-  createReadStream,
   fstatSync,
   openSync,
   readFileSync,
@@ -19,7 +18,7 @@ import {
 import type { Readable } from 'node:stream';
 import { MAX_STATUS_BYTES, parseBwrapStatus } from './bwrap-status.js';
 
-const [parentPid, statusPath, payloadEnvPath, bwrap, ...args] =
+const [parentPid, statusPath, payloadEnvPath, inputBridge, bwrap, ...args] =
   process.argv.slice(2);
 if (process.ppid !== Number(parentPid)) process.exit(1);
 const parentWatch = setInterval(() => {
@@ -62,28 +61,34 @@ if (input.isFIFO()) {
     shareInput = false;
   }
 }
+if (!shareInput && !inputBridge) {
+  writeFileSync(
+    fd,
+    JSON.stringify({ state: 'unconfirmed', payloadExitObserved: false }),
+  );
+  closeSync(fd);
+  process.stderr.write(
+    'Host-backed stdin requires the Linux x64/arm64 input helper.\n',
+  );
+  process.exit(125);
+}
 // Initialize Node's shared output descriptors before bwrap restores blocking
 // mode; lazy initialization after spawn would race and re-enable O_NONBLOCK.
 void process.stdout;
 void process.stderr;
-const child = spawn(bwrap, ['--json-status-fd', '3', ...args], {
-  stdio: [shareInput ? 'inherit' : 'pipe', 'inherit', 'inherit', 'pipe'],
-  env,
-});
-if (!shareInput && child.stdin) {
-  // Host-backed descriptors can bypass mount policy through fd operations.
-  // Copy their bytes through a relay-owned pipe instead of sharing the fd.
-  const sink = child.stdin;
-  const source = createReadStream('', { fd: 0, autoClose: false });
-  source.on('error', () => sink.end());
-  sink.on('error', () => source.destroy());
-  child.on('close', () => source.destroy());
-  source.pipe(sink);
-}
+const backendArgs = ['--json-status-fd', '3', ...args];
+const child = spawn(
+  shareInput ? bwrap : inputBridge,
+  shareInput ? backendArgs : ['--relay-stdin', bwrap, ...backendArgs],
+  {
+    stdio: ['inherit', 'inherit', 'inherit', 'pipe'],
+    env,
+  },
+);
 let wire = '';
 let bytes = 0;
 let failed = false;
-// Only a bwrap spawn error proves the payload never ran. A status-stream
+// A backend or input-helper spawn error proves the payload never ran. A status-stream
 // transport error or a wire overflow can happen after the payload has
 // executed, so those must stay unattested (PR #12067 review, round 2).
 let spawnFailed = false;
@@ -102,7 +107,7 @@ child.on('error', () => {
 });
 child.on('close', (code, signal) => {
   clearInterval(parentWatch);
-  // A spawn failure of bwrap itself means the payload provably never ran —
+  // A spawn failure of the backend or input helper means the payload never ran —
   // attest that explicitly so the finalizer can clean up instead of
   // retaining the dirs for inspection. Every other failure mode leaves the
   // field absent: absence of evidence is not evidence of absence.

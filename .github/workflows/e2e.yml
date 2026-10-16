@@ -334,6 +334,16 @@ jobs:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
 
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
+
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
@@ -488,6 +498,16 @@ jobs:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
 
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
+
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
@@ -595,6 +615,16 @@ jobs:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
 
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
+
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
@@ -698,6 +728,16 @@ jobs:
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
 
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"

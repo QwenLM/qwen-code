@@ -36,6 +36,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { addCommand } from '../commands/mcp/add.js';
 import * as Mem0Settings from './mem0-settings.js';
 import {
   isCrossSessionMessagingActive,
@@ -335,17 +336,23 @@ describe('parseArguments', () => {
     'reports bwrap migration before prompt conflicts: %j',
     async (...flags) => {
       process.argv = ['node', 'script.js', ...flags, '-p', 'test prompt'];
-      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-        throw new Error('process.exit called');
-      });
       mockWriteStderrLine.mockClear();
-      try {
-        await expect(parseArguments()).rejects.toThrow('process.exit called');
-        expect(mockWriteStderrLine).toHaveBeenCalledWith(
-          expect.stringContaining('Whole-CLI bwrap has been removed'),
-        );
-      } finally {
-        exit.mockRestore();
+      await expect(parseArguments()).rejects.toThrow(
+        'Whole-CLI bwrap has been removed',
+      );
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['docker', 'podman', 'sandbox-exec'])(
+    'preserves named sandbox selection %s',
+    async (backend) => {
+      for (const flags of [[`--sandbox=${backend}`], ['-s', backend]]) {
+        process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+        expect(await parseArguments()).toMatchObject({
+          sandbox: backend,
+          prompt: 'query',
+        });
       }
     },
   );
@@ -363,6 +370,151 @@ describe('parseArguments', () => {
     });
     process.argv = ['node', 'script.js', '--', '--sandbox', 'bwrap'];
     expect((await parseArguments())._).toEqual(['--sandbox', 'bwrap']);
+  });
+
+  it('keeps the MCP scope alias in its own command grammar', async () => {
+    const handler = vi
+      .spyOn(addCommand, 'handler')
+      .mockImplementation(() => {});
+    process.argv = [
+      'node',
+      'script.js',
+      '--debug',
+      'mcp',
+      'add',
+      '-s',
+      'project',
+      'myserver',
+      'npx',
+      '-y',
+      'foo',
+    ];
+    await expect(parseArguments()).rejects.toThrow(
+      'process.exit unexpectedly called with "0"',
+    );
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: 'project', name: 'myserver' }),
+    );
+    handler.mockRestore();
+  });
+
+  it.each([
+    ['--sandbox=docker', 'mcp', 'list'],
+    ['-s', 'docker', 'mcp', 'list'],
+    ['--sandbox=podman', 'extensions', 'list'],
+  ])(
+    'rejects session options on subcommands instead of starting a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      mockWriteStderrLine.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Unknown argument'),
+      );
+    },
+  );
+
+  it.each([
+    ['--sandbox=true', 'query'],
+    ['--sandbox', '-p', 'query'],
+  ])(
+    'supports explicit automatic selection with a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt: 'query',
+      });
+    },
+  );
+
+  it('keeps a positional query separate from explicit automatic sandbox selection', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', 'explain the parser'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'explain the parser',
+    });
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--sandbox=true',
+      'explain the parser',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      query: 'explain the parser',
+    });
+  });
+
+  it('uses one option grammar and stops parsing options after --', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'docker',
+      query: 'explain what does',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      'fix',
+      'the',
+      '--sandbox',
+      'false',
+      'bug',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'fix the bug',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      '--',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect((await parseArguments())._).toEqual([
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ]);
+  });
+
+  it.each(['explain what -s docker does', 'fix the --sandbox false bug'])(
+    'keeps option-like text inside an explicit prompt: %s',
+    async (prompt) => {
+      process.argv = ['node', 'script.js', '--sandbox=true', '-p', prompt];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt,
+      });
+    },
+  );
+
+  it('keeps last-wins selection without treating an absent option as false', async () => {
+    for (const flags of [
+      ['--sandbox=docker', '--no-sandbox'],
+      ['--sandbox=true', '--sandbox=false'],
+    ]) {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+      expect((await parseArguments()).sandbox).toBe(false);
+    }
+    process.argv = ['node', 'script.js', '-p', 'query'];
+    expect((await parseArguments()).sandbox).toBeUndefined();
   });
 
   it('includes every approval mode description in --help', async () => {
@@ -3190,6 +3342,26 @@ describe('loadCliConfig', () => {
     },
   );
 
+  it('passes the Managed engine quarantine sink to the session Config', async () => {
+    const onManagedEngineQuarantine = vi.fn();
+    await loadCliConfig(
+      {},
+      {} as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { onManagedEngineQuarantine },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({ onManagedEngineQuarantine }),
+    );
+  });
+
   it('should explain when --fork-session fails to copy the source session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {
@@ -4744,6 +4916,108 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
     expect(config.isMcpServerDisabled('server3')).toBe(false);
   });
 
+  it('should exclude exactly the named server via --disable-mcp-server', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server1'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    // Exclusion is a disabled-status flag, not removal from the server map —
+    // the same contract as settings.mcp.excluded above.
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+      server3: { url: 'http://localhost:8082' },
+    });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should exclude multiple servers with repeated --disable-mcp-server flags', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--disable-mcp-server',
+      'server1',
+      '--disable-mcp-server',
+      'server2',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should union --disable-mcp-server with settings mcp.excluded', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server2'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      ...baseSettings,
+      mcp: { excluded: ['server1'] },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should disable nothing when --disable-mcp-server is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(false);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should apply --disable-mcp-server alongside an allow-list (allow-then-deny)', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--allowed-mcp-server-names',
+      'server1,server2',
+      '--disable-mcp-server',
+      'server1',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    // The allow-list narrows the returned map; the disable flag still applies
+    // on top of it, so a server named by both ends up disabled.
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+    });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+  });
+
+  it('should still apply --disable-mcp-server under --safe-mode', async () => {
+    // Safe mode drops settings.mcpServers entirely (only top-tier session and
+    // `--mcp-config` servers survive), so these servers come from --mcp-config.
+    process.argv = [
+      'node',
+      'script.js',
+      '--safe-mode',
+      '--disable-mcp-server',
+      'cli-server-1',
+      '--mcp-config',
+      JSON.stringify({
+        mcpServers: {
+          'cli-server-1': { command: 'cmd-1' },
+          'cli-server-2': { command: 'cmd-2' },
+        },
+      }),
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.getMcpServers()).toEqual({
+      'cli-server-1': { command: 'cmd-1' },
+      'cli-server-2': { command: 'cmd-2' },
+    });
+    expect(config.isMcpServerDisabled('cli-server-1')).toBe(true);
+    expect(config.isMcpServerDisabled('cli-server-2')).toBe(false);
+  });
+
   it('should apply allowedMcpServers filter but excluded servers are still returned', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -4851,6 +5125,35 @@ describe('loadCliConfig with --mcp-config', () => {
     expect(mcpServers['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
+  });
+
+  it('should parse a config file that starts with a UTF-8 BOM', async () => {
+    // `fs` is mocked in this file, so use the untouched `fs.promises` to write
+    // a real file and widen `existsSync` for just this path.
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-bom-'));
+    const file = path.join(dir, 'mcp.json');
+    await fs.promises.writeFile(
+      file,
+      '\uFEFF' +
+        JSON.stringify({ mcpServers: { 'bom-server': { command: 'node' } } }),
+    );
+    const originalExists = vi.mocked(fs.existsSync).getMockImplementation();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p) => p === file || Boolean(originalExists?.(p)),
+    );
+    try {
+      process.argv = ['node', 'script.js', '--mcp-config', file];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getMcpServers()).toEqual({
+        'bom-server': { command: 'node' },
+      });
+    } finally {
+      if (originalExists) {
+        vi.mocked(fs.existsSync).mockImplementation(originalExists);
+      }
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('should override settings file servers with same name', async () => {

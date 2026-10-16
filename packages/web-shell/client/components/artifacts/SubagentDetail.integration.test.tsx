@@ -45,7 +45,9 @@ const {
     current: undefined as Record<string, unknown> | undefined,
   },
   latestOpenSubagent: {
-    current: undefined as ((tool: ACPToolCall) => void) | undefined,
+    current: undefined as
+      | ((tool: ACPToolCall, parentSessionId?: string) => void)
+      | undefined,
   },
   messages: [
     {
@@ -317,6 +319,12 @@ it('opens a nested subagent within the parent session scope', async () => {
     'parent-session',
     '/work/project',
   );
+  act(() => latestOpenSubagent.current?.(nestedTool, 'original-chat-a'));
+  expect(onOpenSubagent).toHaveBeenLastCalledWith(
+    nestedTool,
+    'original-chat-a',
+    '/work/project',
+  );
 });
 
 it('backs off polling after repeated failures following a running result', async () => {
@@ -447,6 +455,52 @@ it.each([false, true])(
           workspaceCwd: '/work/project',
           sourceSessionId: 'subagent-session',
         }),
+      );
+    }
+  },
+);
+
+it.each([true, false])(
+  'only offers standalone agent cancellation (workflow=%s)',
+  async (workflow) => {
+    workspaceClient.resolveSubagentSession.mockResolvedValue({
+      sessionId: 'subagent-session',
+      status: 'running',
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <SubagentDetail
+            sessionId="parent-session"
+            rootToolCallId="workflow-agent"
+            initialRootTool={{
+              callId: 'workflow-agent',
+              toolName: 'agent',
+              status: 'in_progress',
+              rawOutput: {
+                type: 'task_execution',
+                ...(workflow ? { workflowRunId: 'wf-1' } : {}),
+              },
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    const stop = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Stop',
+    );
+    expect(Boolean(stop)).toBe(!workflow);
+    if (stop) {
+      workspaceClient.cancelSubagentSession.mockResolvedValue({
+        cancelled: true,
+      });
+      await act(async () => stop.click());
+      expect(workspaceClient.cancelSubagentSession).toHaveBeenCalledWith(
+        'parent-session',
+        'workflow-agent',
       );
     }
   },
