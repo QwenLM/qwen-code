@@ -734,10 +734,11 @@ jobs:
           wait "$smoke" || true
           rmdir /sys/fs/cgroup/fg8/smoke
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        # Must outlive the hosted-harness-mysql failsafe fork timeout (1800 s,
+        # Must outlive the hosted-harness-mysql failsafe fork timeout (2100 s,
         # raised 900→1200 for the FG7 channel classes and 1200→1800 for the
-        # L4 recovery class after its #14125 per-commit kill, then shared by
-        # the FG8 monitor/run letters) plus the wrapped
+        # L4 recovery class after its #14125 per-commit kill, shared by the
+        # FG8 monitor/run letters, then raised 1800→2100 in the same diff
+        # that adds the FG9 session/relay letters) plus the wrapped
         # compile/surefire/spotbugs/checkstyle work: a step killed before its
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
@@ -852,6 +853,7 @@ jobs:
             packages/managed-agent-server/target/hosted-latency-baseline.json
             packages/managed-agent-server/target/fg7-cases/
             packages/managed-agent-server/target/fg8-cases/
+            packages/managed-agent-server/target/fg9-cases/
             packages/managed-agent-server/target/fg10-cases/
             packages/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
