@@ -165,6 +165,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                         "scope", Map.of("tenantId", record.getRequest().getScope().getTenantId(),
                                 "workspaceId", record.getRequest().getScope().getWorkspaceId(),
                                 "workspaceGeneration", record.getRequest().getScope().getWorkspaceGeneration(),
+                                "isolationClass", record.getRequest().getScope().getIsolationClass(),
                                 "capabilityDigest", record.getRequest().getScope().getCapabilityDigest()),
                         "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()))));
                 return;
@@ -263,10 +264,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             RuntimeScope scope = record.getSession().getScope();
             var savedScope = new LinkedHashMap<String, Object>(Map.of("tenantId", scope.getTenantId(),
                     "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
+                    "isolationClass", scope.getIsolationClass(),
                     "capabilityDigest", scope.getCapabilityDigest()));
             if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
                 savedScope.put("canonicalCwd", scope.getCanonicalCwd());
-                savedScope.put("isolationClass", scope.getIsolationClass());
             }
             response.put("scope", savedScope);
             response.put("runtime", Map.of("bindingId", record.getBindingId(),

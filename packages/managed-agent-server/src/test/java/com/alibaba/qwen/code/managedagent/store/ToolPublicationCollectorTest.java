@@ -711,8 +711,10 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                     () -> new com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration()
                             .managedToolOutputScheduler(new org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder()));
             context.registerBean("collector", ToolPublicationCollector.class, () -> collector(objects));
-            context.registerBean("materializer", com.alibaba.qwen.code.managedagent.service.MessageMaterializer.class,
-                    () -> new com.alibaba.qwen.code.managedagent.service.MessageMaterializer(state));
+            context.registerBean("materializer",
+                    com.alibaba.qwen.code.managedagent.service.MessageMaterializer.class,
+                    () -> new com.alibaba.qwen.code.managedagent.service.MessageMaterializer(
+                            state));
             try {
                 context.refresh();
                 assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();

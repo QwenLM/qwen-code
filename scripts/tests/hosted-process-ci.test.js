@@ -537,29 +537,34 @@ describe('Hosted real-process gates', () => {
     }
   });
 
-  it('keeps every HostedTeamLeadMySqlIT ceiling together inside the shared fork budget', () => {
-    const source = hostedTestSource('HostedTeamLeadMySqlIT');
-    const cases = [
-      ...source.matchAll(
-        /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
-      ),
-    ].length;
-    const ceilings = ceilingsOf(source);
-    expect(cases).toBeGreaterThan(0);
-    expect(ceilings).toHaveLength(cases);
-    // A regression such as a lost wake Turn leaves no failed row for the
-    // cases to stop on, so every case may stall to its ceiling at once.
-    const total = ceilings.reduce((sum, ceiling) => sum + ceiling, 0);
-    expect(total + hostedForkHealthySeconds).toBeLessThanOrEqual(
-      hostedForkSeconds(),
-    );
-    // Awaitility ignores the interrupt a @Timeout sends, so a ceiling holds
-    // only when every wait goes through the helper that fails on it.
-    expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
-    expect(read(hostedTestPath('HostedTeamLeadMySqlIT'))).toContain(
-      'await().failFast("The case\'s @Timeout interrupted it"',
-    );
-  });
+  it.each(['HostedTeamLeadMySqlIT', 'HostedTeamMemberCommandMySqlIT'])(
+    'keeps every %s ceiling together inside the shared fork budget',
+    (className) => {
+      const source = hostedTestSource(className);
+      const cases = [
+        ...source.matchAll(
+          /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
+        ),
+      ].length;
+      const ceilings = ceilingsOf(source);
+      expect(cases).toBeGreaterThan(0);
+      expect(ceilings).toHaveLength(cases);
+      // A regression such as a lost wake Turn or a stalled message relay
+      // leaves no failed row for the cases to stop on, so every case may
+      // stall to its ceiling at once.
+      const total = ceilings.reduce((sum, ceiling) => sum + ceiling, 0);
+      expect(total + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+      // Awaitility ignores the interrupt a @Timeout sends, so a ceiling
+      // holds only when every wait goes through the helper that fails on
+      // it.
+      expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
+      expect(read(hostedTestPath(className))).toContain(
+        'await().failFast("The case\'s @Timeout interrupted it"',
+      );
+    },
+  );
 
   // The Hosted*IT classes share one fork, and Spring caches a test context
   // for the rest of it. A Managed Agent context's recovery scans cover

@@ -742,6 +742,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/file/write' ||
         suffix === '/workspace/file/edit' ||
         suffix === '/workspace/file/upload' ||
+        suffix === '/workspace/file/delete' ||
         suffix === '/workspace/mcp/servers' ||
         suffix === '/workspace/memory' ||
         suffix === '/workspace/agents' ||
