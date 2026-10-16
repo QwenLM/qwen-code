@@ -1491,7 +1491,7 @@ export class QQChannel extends ChannelBase {
       // live sessions, so no unbounded growth.
       return;
     }
-    let state = this.streamState.get(sessionId);
+    const state = this.streamState.get(sessionId);
     // A cancelled turn's stashed HEAD must still be delivered: while the
     // previous turn's deferred chain owned the entry, this turn's chunks went
     // to the side buffer, and a cancel never runs onResponseComplete. Merge
@@ -1959,7 +1959,7 @@ export class QQChannel extends ChannelBase {
     // fullText is only the fallback for a turn that never created an entry and
     // never flushed, so a buffered residual shadows the daemon task output the
     // bridge picks.
-    let remaining = state?.buffer ?? (wasFlushed ? '' : fullText);
+    const remaining = state?.buffer ?? (wasFlushed ? '' : fullText);
     // A live turn's stashed pre-boundary text must go out with the final text
     // only when a boundary cleared the bridge's collection since it was taken —
     // state.buffer and fullText both miss it then. Without a boundary, fullText
