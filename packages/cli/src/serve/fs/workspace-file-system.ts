@@ -282,6 +282,8 @@ export interface SameHostToolTextWriteRequest {
  * threaded through every operation.
  */
 export interface WorkspaceFileSystem {
+  /** Permanent regular-file deletion; absent on SSH/custom factories. */
+  deleteFile?(input: string): Promise<ResolvedPath>;
   resolve(input: string, intent: Intent): Promise<ResolvedPath>;
   stat(p: ResolvedPath): Promise<FsStat>;
   readText(
@@ -1620,6 +1622,76 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       throw this.recordAndWrap(err, 'write', p as string, {
         audit: !(isFsError(err) && err.kind === 'file_already_exists'),
       });
+    }
+  }
+
+  async deleteFile(input: string): Promise<ResolvedPath> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'delete');
+      const basename = path.basename(input);
+      if (
+        !input ||
+        input.includes('\0') ||
+        hasSuspiciousPathPattern(input) ||
+        input.endsWith('/') ||
+        input.endsWith(path.sep) ||
+        basename === '.' ||
+        basename === '..'
+      ) {
+        throw new FsError(
+          'parse_error',
+          'Deletion requires a regular file path',
+        );
+      }
+      // Resolve only the parent: resolving the leaf would follow symlinks.
+      const parent = await resolveWithinWorkspace(
+        path.dirname(input),
+        this.deps.workspaces.map((workspace) => workspace.path),
+        'delete',
+      );
+      const target = path.join(parent, basename) as ResolvedPath;
+      if (
+        !this.workspaceForPath(target) ||
+        this.deps.workspaces.some((workspace) => workspace.path === target)
+      ) {
+        throw new FsError(
+          'path_outside_workspace',
+          'Cannot delete a workspace root',
+        );
+      }
+      return await this.deps.pathLocks.runExclusive(target, async () => {
+        this.deps.generationGuard?.assertOpen();
+        assertTrustedForIntent(this.deps.trusted, 'delete');
+        if ((await fsp.realpath(parent)) !== parent) {
+          throw new FsError('symlink_escape', 'Deletion parent changed');
+        }
+        const stat = await fsp.lstat(target);
+        if (!stat.isFile()) {
+          throw new FsError(
+            stat.isSymbolicLink() ? 'symlink_escape' : 'parse_error',
+            'Only regular files can be deleted',
+          );
+        }
+        if ((await fsp.realpath(parent)) !== parent) {
+          throw new FsError('symlink_escape', 'Deletion parent changed');
+        }
+        this.deps.generationGuard?.assertOpen();
+        assertTrustedForIntent(this.deps.trusted, 'delete');
+        const verdict = this.ignoreVerdict(target, 'file');
+        await fsp.unlink(target);
+        this.deps.audit.recordAccess(this.deps.ctx, {
+          intent: 'delete',
+          absolute: target,
+          durationMs: performance.now() - start,
+          sizeBytes: stat.size,
+          matchedIgnore: verdict.ignored ? verdict.category : undefined,
+        });
+        return target;
+      });
+    } catch (err) {
+      throw this.recordAndWrap(err, 'delete', input);
     }
   }
 
