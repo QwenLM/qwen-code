@@ -131,7 +131,7 @@ public class ManagedAgentService {
         if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
             return false;
         }
-        return session.workspace() == null || runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
+        return session.workspace() == null || RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
                 && harness.supportsLifecycle(session.toolProfile());
     }
 
@@ -1202,8 +1202,9 @@ public class ManagedAgentService {
         if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
             return false;
         }
-        return retention || session.workspace() != null && runtimeWarmer != null
-                && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(session.toolProfile());
+        return retention || session.workspace() != null
+                && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
+                && harness.supportsLifecycle(session.toolProfile());
     }
 
     private Boolean foregroundShell(SessionRecord session) {

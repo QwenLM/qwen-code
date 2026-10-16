@@ -44,6 +44,7 @@ import type {
 } from './managed-agent-provider';
 import { isManagedApprovalMode } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
+import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
 
 interface PendingCreation {
   agentId: string;
@@ -82,7 +83,10 @@ function readPendingWorkspace(key: string): PendingWorkspace | undefined {
       ((item['sourceWorkspaceId'] === undefined &&
         item['cwdRelative'] === undefined) ||
         (typeof item['sourceWorkspaceId'] === 'string' &&
-          typeof item['cwdRelative'] === 'string'))
+          typeof item['cwdRelative'] === 'string')) &&
+      !('nodeId' in item) &&
+      !('path' in item) &&
+      !('operationId' in item)
     ) {
       return {
         displayName: item['displayName'],
@@ -218,6 +222,8 @@ export function WorkspaceBindingCreator({
   const [error, setError] = useState<string>();
   const [pathError, setPathError] = useState<string>();
   const [switchTo, setSwitchTo] = useState<string>();
+  const [registrationAvailable, setRegistrationAvailable] = useState(false);
+  const [registrationOpen, setRegistrationOpen] = useState(false);
   const editor = useRef<EditorHandle | null>(null);
   const acceptedCommit = useRef<ComposerSubmitCommit | undefined>(undefined);
   const lifetime = useRef<AbortController | undefined>(undefined);
@@ -928,6 +934,16 @@ export function WorkspaceBindingCreator({
               ))}
             </SelectContent>
           </Select>
+          {registrationAvailable && binding.registration && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() => setRegistrationOpen(true)}
+            >
+              {t('managed.remoteWorkspaceAdd')}
+            </Button>
+          )}
           {workspaceCreationSupported && (
             <Button
               type="button"
@@ -1020,6 +1036,12 @@ export function WorkspaceBindingCreator({
               disableLegacyHistoryFallback
               shellModeEnabled={false}
               workspaceFeaturesEnabled={false}
+              existingFolderWorkspaceSupported={
+                registrationAvailable && Boolean(binding.registration)
+              }
+              onOpenExistingWorkspace={() => {
+                if (!busy && !pendingRef.current) setRegistrationOpen(true);
+              }}
               attachmentsEnabled={false}
               visibleToolbarActions={
                 interactive
@@ -1084,7 +1106,9 @@ export function WorkspaceBindingCreator({
                 interactive && workspaceCreationSupported
               }
               onCreateScratchWorkspace={() => setWorkspaceDialogOpen(true)}
-              workspaceMutationBusy={workspaceCreating}
+              workspaceMutationBusy={
+                busy || workspaceCreating || Boolean(pending)
+              }
               workspaceSelectionDisabled={
                 !interactive ||
                 !supported ||
@@ -1108,7 +1132,10 @@ export function WorkspaceBindingCreator({
                 !approvalReady
               }
               dialogOpen={
-                !interactive || workspaceDialogOpen || Boolean(directoryPicker)
+                !interactive ||
+                workspaceDialogOpen ||
+                Boolean(directoryPicker) ||
+                registrationOpen
               }
               isPreparing={busy || loading || optionsLoading}
               placeholderText={t('managed.prompt')}
@@ -1204,6 +1231,29 @@ export function WorkspaceBindingCreator({
               sourceWorkspaceId: directoryPicker.workspaceId,
               cwdRelative: clean.slice(root.length + 1) || '.',
             });
+          }}
+        />
+      )}
+      {interactive && binding.registration && (
+        <RemoteWorkspaceRegistration
+          key={provider.storageKey}
+          provider={provider}
+          clientId={clientId}
+          open={registrationOpen}
+          onOpenChange={setRegistrationOpen}
+          onAvailable={setRegistrationAvailable}
+          onRegistered={(workspace) => {
+            setItems((current) => [
+              ...current.filter(
+                (item) => item.workspaceId !== workspace.workspaceId,
+              ),
+              workspace,
+            ]);
+            setSelected(workspace.workspaceId);
+            setCwdRelative(workspace.defaultCwdRelative ?? '.');
+            cwdEdited.current = false;
+            setError(undefined);
+            setPathError(undefined);
           }}
         />
       )}

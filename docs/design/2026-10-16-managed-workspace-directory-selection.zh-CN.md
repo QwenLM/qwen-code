@@ -12,11 +12,11 @@
 
 New workspace 在创建空目录之外增加已有目录模式。用户选择已授权的根目录，浏览其中的真实子目录，再为选中的项目目录创建命名 Workspace。项目保留在原位置。页面刷新后仍保留选择，并将其作为该 Workspace 新 Session 的默认工作目录。
 
-可选择的根目录是当前认证 actor 拥有 OWNER 权限的 ACTIVE ROOT Workspace。管理员先注册项目父目录并向其所有者授权；本地部署也以此方式提供 Linux 项目父目录。所选目录是工作目录，并非新的权限边界：同一 storage 中的 Workspace 继续使用现有的共享文件访问范围和 physical-owner lease 语义。
+可选择的根目录是使用本地存储、且当前认证 actor 拥有 OWNER 权限的 ACTIVE ROOT Workspace。管理员先注册项目父目录并向其所有者授权；本地部署也以此方式提供 Linux 项目父目录。所选目录是工作目录，并非新的权限边界：同一 storage 中的 Workspace 继续使用现有的共享文件访问范围和 physical-owner lease 语义。
 
 ## API 与权限
 
-仅限 WebShell 的 `workspaces/directories/query` 接口接受 `workspaceId` 和 `cwdRelative`，返回已授权的 canonical 根目录和当前目录、有界的直接真实子目录列表，以及截断标志。该接口属于持久 Workspace 范围；读取文件系统前必须检查 tenant、actor、ACTIVE ROOT 状态、OWNER 授权、已配置 mount、native identity 和 marker。路径通过现有相对路径契约规范化。路径穿越、软链接、保留维护目录、不可访问目录和不支持的 storage 均关闭准入。目录发现不会回退到普通 daemon。
+仅限 WebShell 的 `workspaces/directories/query` 接口接受 `workspaceId` 和 `cwdRelative`，返回已授权的 canonical 根目录和当前目录、有界的直接真实子目录列表，以及截断标志。该接口属于持久 Workspace 范围；读取文件系统前必须检查 tenant、actor、ACTIVE ROOT 状态、OWNER 授权、已配置 mount、native identity 和 marker。路径通过现有相对路径契约规范化。路径穿越、软链接、保留维护目录、不可访问目录和不支持的 storage 均关闭准入。目录发现不会回退到普通 daemon。SSH 和 CSI storage 不会出现在本地目录候选中，并在解析本地文件系统之前被拒绝；SSH 注册继续使用独立的 node/path 检查及操作接口。OpenAPI v1.53 为本地浏览请求使用单独名称，与 v1.52 的 SSH 目录检查请求区分。
 
 现有创建请求增加可选的 `sourceWorkspaceId` 和 `cwdRelative` 字段，二者必须同时提供。缺省时保持创建空目录的行为。提供时验证源 Workspace 和目录，使用源 storage、配置和策略发布新的逻辑 Workspace，不再创建或注册 physical root。receipt 固定源身份及 generation，并在发布前再次检查。源身份发生变化或权限被撤销后，待完成请求不能继续成功。
 

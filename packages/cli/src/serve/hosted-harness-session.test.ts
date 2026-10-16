@@ -13936,6 +13936,138 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
+    'persists the SSH foreground-only surface through resident and cold loads of %s',
+    async (profile) => {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      const server = await app(true);
+      const surface = async (clientId: string) => {
+        let names: Array<string | undefined> = [];
+        state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+          const declarations = await toolTurn!.declarations(signal);
+          names = declarations.map((tool) => tool.name);
+          for (const tool of declarations) {
+            if (tool.name === 'run_shell_command') {
+              expect(tool.parametersJsonSchema).not.toHaveProperty(
+                'properties.is_background',
+              );
+            }
+          }
+          return { text: 'ok', model: 'test-model' };
+        });
+        const prompt = [{ type: 'text', text: randomUUID() }];
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId: randomUUID(),
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+          .expect(202);
+        await vi.waitFor(
+          async () => {
+            const status = await headers(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', clientId);
+            expect(status.body.hasActivePrompt).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
+        expect(names).toEqual([
+          'read_file',
+          'write_file',
+          'edit',
+          ...(profile.includes('shell') ? ['run_shell_command'] : []),
+        ]);
+      };
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: profile,
+          foregroundOnly: true,
+          ...(profile.includes('shell') ? { captureBytes: 1024 * 1024 } : {}),
+        })
+        .expect(200);
+      let clientId = created.body.clientId as string;
+      await surface(clientId);
+      for (const foregroundOnly of [undefined, true]) {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+          .send({
+            managedSessionStore: store(),
+            passiveManagedRuntimeRecovery: true,
+            ...(foregroundOnly === undefined ? {} : { foregroundOnly }),
+          })
+          .expect(200);
+        await surface(clientId);
+      }
+      await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: store(),
+          foregroundOnly: false,
+        })
+        .expect(409);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: store(),
+          childWorkspaces: true,
+        })
+        .expect(409);
+      await surface(clientId);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+      for (const incompatible of [
+        { foregroundOnly: false },
+        { childWorkspaces: true },
+      ]) {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+          .send({
+            managedSessionStore: store(),
+            ...incompatible,
+          })
+          .expect(409);
+      }
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: store(),
+        })
+        .expect(200);
+      clientId = loaded.body.clientId as string;
+      await surface(clientId);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+    },
+  );
+
+  it.each([
+    { foregroundOnly: 'true' },
+    { childWorkspaces: true },
+    { mcpServers: [] },
+    { hookCatalog: {} },
+    { lineage: {} },
+    { toolProfile: 'hosted-workspace-mcp/1' },
+  ])('refuses incompatible SSH foreground-only creation: %j', async (extra) => {
+    const server = await app(true);
+    await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        foregroundOnly: true,
+        ...extra,
+      })
+      .expect(400);
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
   // #13753 I2: `childWorkspaces` describes the host, not the Session: the
   // create that carries it advertises isolation, and a later load answers
   // whatever that load restates, since nothing persists it.

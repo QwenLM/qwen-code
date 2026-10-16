@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -265,6 +266,27 @@ class WorkspaceCreationStoreTest {
             assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Refused", "role-" + role,
                     parent.workspaceId(), "project")).isInstanceOf(ApiException.class);
         }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void localDirectorySelectionRefusesRemoteStorageEvenIfGeneralVerificationSucceeds() {
+        var parent = store(guard).create("tenant", "actor", "Projects", "remote-parent");
+        assertThat(parent.canSelectDirectory()).isTrue();
+        jdbc.update("UPDATE ma_storage SET storage_kind = 'SSH_LOCAL' WHERE alias_key = ?",
+                WorkspaceCsiRegistration.aliasKey("tenant", storage(parent.workspaceId())));
+        assertThat(registry.findReadable("tenant", "actor", parent.workspaceId()).canSelectDirectory()).isFalse();
+        assertThat(registry.listReadable("tenant", "actor", null, 10))
+                .allSatisfy(item -> assertThat(item.canSelectDirectory()).isFalse());
+        var remoteAware = spy(guard);
+        org.mockito.Mockito.doNothing().when(remoteAware).verify(org.mockito.ArgumentMatchers.any());
+        assertThatThrownBy(() -> remoteAware.verifiedRoot(binding(parent.workspaceId())))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        assertThatThrownBy(() -> store(guard).directories("tenant", "actor", parent.workspaceId(), "."))
+                .isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Remote", "remote-selection",
+                parent.workspaceId(), ".")).isInstanceOf(ApiException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(1);
     }
 

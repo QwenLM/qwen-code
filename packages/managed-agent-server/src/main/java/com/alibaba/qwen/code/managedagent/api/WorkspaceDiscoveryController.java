@@ -4,7 +4,9 @@ import com.alibaba.qwen.code.managedagent.service.WorkspaceDiscoveryService;
 import com.alibaba.qwen.code.managedagent.service.WorkspaceDiscoveryService.WorkspacePage;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.WorkspaceSummary;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCreationStore;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.CacheControl;
@@ -85,7 +87,12 @@ public class WorkspaceDiscoveryController {
     }
 
     public record CreateRequest(@NotBlank String displayName, @NotBlank String idempotencyKey,
-            String sourceWorkspaceId, String cwdRelative) {}
+            String sourceWorkspaceId, String cwdRelative) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Workspace creation field");
+        }
+    }
 
     public record DirectoryRequest(@NotBlank String workspaceId, @NotBlank String cwdRelative) {}
 
