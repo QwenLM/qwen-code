@@ -1370,6 +1370,8 @@ export interface BridgeClientRequestContext {
    * smuggle a continuation through the prompt path.
    */
   continue?: boolean;
+  /** Explicit confirmation to resume a legacy cancellation of unknown intent. */
+  confirmCancellation?: string;
   /**
    * Internal recovery identity accepted only by the Hosted Harness private
    * continuation route. The ACP child verifies it against the current durable

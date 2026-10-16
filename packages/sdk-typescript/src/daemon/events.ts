@@ -871,6 +871,8 @@ export interface DaemonSessionMessagesDeletedData {
   sessionId: string;
   deletedGroupIds: string[];
   deletedPromptIds: string[];
+  removedApiPromptIds?: string[];
+  [key: string]: unknown;
 }
 
 export interface DaemonSessionRewoundData {
@@ -1864,12 +1866,7 @@ export function asKnownDaemonEvent(
         ? (event as DaemonTurnErrorEvent)
         : undefined;
     case 'session_messages_deleted':
-      return isRecord(event.data) &&
-        typeof event.data.sessionId === 'string' &&
-        Array.isArray(event.data.deletedGroupIds) &&
-        event.data.deletedGroupIds.every((id) => typeof id === 'string') &&
-        Array.isArray(event.data.deletedPromptIds) &&
-        event.data.deletedPromptIds.every((id) => typeof id === 'string')
+      return isSessionMessagesDeletedData(event.data)
         ? (event as DaemonSessionMessagesDeletedEvent)
         : undefined;
     case 'session_rewound':
@@ -1887,6 +1884,22 @@ export function asKnownDaemonEvent(
     default:
       return undefined;
   }
+}
+
+function isSessionMessagesDeletedData(
+  value: unknown,
+): value is DaemonSessionMessagesDeletedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    Array.isArray(value['deletedGroupIds']) &&
+    value['deletedGroupIds'].every((id) => typeof id === 'string') &&
+    Array.isArray(value['deletedPromptIds']) &&
+    value['deletedPromptIds'].every((id) => typeof id === 'string') &&
+    (value['removedApiPromptIds'] === undefined ||
+      (Array.isArray(value['removedApiPromptIds']) &&
+        value['removedApiPromptIds'].every((id) => typeof id === 'string')))
+  );
 }
 
 function isSessionRewoundData(

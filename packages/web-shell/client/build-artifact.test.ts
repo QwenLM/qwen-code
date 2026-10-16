@@ -518,12 +518,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     // At 31e02ace main measures 1,330,293; the read-only artifact hook with
     // those actions excluded measures 1,330,497, below the same ceiling.
     // Merging 17d5f774 measures 1,340,638, leaving 2,362 units of margin.
+    // Main's Managed home, Workspace creation, approval and model/context copy
+    // also enter the shared table. With main 17d5f774 that branch measures
+    // 1,334,173 UTF-16 units; the unchanged 1,336,000 ceiling retains 1,827
+    // units of margin. Managed interactive code remains excluded here.
+    // Merging 87dcc4a7 and updating deletion error copy measures 1,344,854.
+    // The 1,347,000 ceiling leaves 2,146 units of margin.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_343_000);
+    expect(js.length).toBeLessThan(1_347_000);
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {
@@ -533,6 +539,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       'writeWorkspaceFile',
       'createWorkspaceDirectory',
       'deleteWorkspaceDirectory',
+      'deleteWorkspaceFile',
       'uploadWorkspaceFile',
     ]) {
       expect(packaged).toContain(method);
@@ -558,6 +565,10 @@ describe('build artifact — transcript entry (#11031)', () => {
       'files.sourceTooLarge',
     ] as const)
       expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
+    for (const key of Object.keys(FILES_MESSAGES_EN)) {
+      expect(bundle).not.toContain(`"${key}"`);
+      expect(bundle).not.toContain(`'${key}'`);
+    }
   });
 
   it('carries no Live Voice strings and looks none up', () => {

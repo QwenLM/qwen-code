@@ -12,6 +12,24 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('pluralizes deletion counts and explains unsupported sessions in both locales', () => {
+    const en = getTranslator('en');
+    expect(en('messageDelete.selected', { count: 1 })).toBe('1 group selected');
+    expect(en('messageDelete.selected', { count: 2 })).toBe(
+      '2 groups selected',
+    );
+    expect(en('messageDelete.confirmTitle', { count: 1 })).toBe(
+      'Delete 1 message group?',
+    );
+    expect(en('messageDelete.confirmTitle', { count: 2 })).toBe(
+      'Delete 2 message groups?',
+    );
+    for (const language of ['en', 'zh-CN'] as const) {
+      expect(getTranslator(language)('messageDelete.unsupported')).not.toBe(
+        'messageDelete.unsupported',
+      );
+    }
+  });
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');

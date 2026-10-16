@@ -87,8 +87,31 @@ export function useMessageDeletion(
     () => (active || busy ? registerBlocker() : undefined),
     [active, busy, registerBlocker],
   );
+  useEffect(() => {
+    if (!active || busy || !connection.loadingTranscript) return;
+    operation.current += 1;
+    setSelection(undefined);
+    setConfirming(false);
+    setError(t('messageDelete.conflict'));
+  }, [active, busy, connection.loadingTranscript, t]);
 
   if (!supported && localGroups.length === 0) return undefined;
+  const failureMessage = (cause: unknown) => {
+    const code =
+      cause instanceof DaemonHttpError
+        ? (cause.body as { code?: string } | undefined)?.code
+        : undefined;
+    return t(
+      code === 'unsupported_operation' ||
+        code === 'session_message_deletion_unsupported'
+        ? 'messageDelete.unsupported'
+        : code === 'session_busy'
+          ? 'messageDelete.busy'
+          : code === 'message_history_invalid'
+            ? 'messageDelete.invalidHistory'
+            : 'messageDelete.failed',
+    );
+  };
   const cancel = () => {
     if (busy) return;
     operation.current += 1;
@@ -117,7 +140,10 @@ export function useMessageDeletion(
         ...localGroups,
       ]);
       const groupId = mapping.get(message.id);
-      if (!groupId) throw new Error(t('messageDelete.unavailable'));
+      if (!groupId) {
+        setError(t('messageDelete.unavailable'));
+        return;
+      }
       const index = catalog.groups.findIndex((group) => group.id === groupId);
       const visibleOrder = [...new Set(mapping.values())];
       const preceding = visibleOrder.slice(
@@ -138,9 +164,9 @@ export function useMessageDeletion(
         ...preceding,
       ]);
       setSelection({ key, ...catalog, selected: new Set([groupId]), allowed });
-    } catch {
+    } catch (cause) {
       if (currentKey.current === key && token === operation.current)
-        setError(t('messageDelete.unavailable'));
+        setError(failureMessage(cause));
     } finally {
       if (currentKey.current === key && token === operation.current)
         setBusy(false);
@@ -238,15 +264,9 @@ export function useMessageDeletion(
           setError(t('messageDelete.conflict'));
         } else
           setError(
-            t(
-              reopenRequired
-                ? 'messageDelete.reopenRequired'
-                : body?.code === 'session_busy'
-                  ? 'messageDelete.busy'
-                  : body?.code === 'message_history_invalid'
-                    ? 'messageDelete.invalidHistory'
-                    : 'messageDelete.failed',
-            ),
+            reopenRequired
+              ? t('messageDelete.reopenRequired')
+              : failureMessage(cause),
           );
       }
     } finally {

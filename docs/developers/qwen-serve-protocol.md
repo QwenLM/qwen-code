@@ -227,7 +227,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
- 'workspace_file_upload', 'workspace_directory_create', 'workspace_directory_delete',
+ 'workspace_file_upload', 'workspace_file_delete', 'workspace_directory_create', 'workspace_directory_delete',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
@@ -364,7 +364,9 @@ written into the workspace without ever overwriting — an occupied name is
 auto-numbered (`name (1).ext`, `name (2).ext`, ...). It is also a strict
 mutation route.
 
-When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, and `/workspaces/:workspace/file/upload`.
+`workspace_file_delete` covers only `POST /workspaces/:workspace/file/delete`; no legacy-primary `/file/delete` route exists. The JSON body is `{ "path": "relative/file.txt" }`, and success returns `{ "kind": "file_delete", "path": "relative/file.txt" }`. This strict mutation route permanently removes one regular file from the selected trusted local workspace. Directories and symlinks are rejected; unsupported factories (including SSH) return 422. The capability describes protocol support, not permission to delete in every workspace. Clients must also preflight `workspace_qualified_rest_core`.
+
+When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, `/workspaces/:workspace/file/upload`, and `/workspaces/:workspace/file/delete` (the last route additionally requires `workspace_file_delete`).
 
 `workspace_directory_create` and `workspace_directory_delete` independently advertise `POST /workspaces/:workspace/directory/create` and `POST /workspaces/:workspace/directory/delete`. Preflight the operation's tag alongside `workspace_qualified_rest_core`; older qualified daemons may lack these routes. Both are strict mutations owned by the trusted active selected local runtime, with no primary fallback or legacy-primary counterpart. Creation is exclusive under an existing parent; deletion is permanent and recursive.
 
@@ -3632,6 +3634,68 @@ daemon does not reshape it, so the top level carries no `modelId`. Read the
 switch details from `_meta.qwenModelSwitch`.
 
 On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also records the session model in the session JSONL on a best-effort basis; when the record is written, daemon load/resume attempts to restore this session's model before authentication. If the recorded model can no longer be applied (model removed, credentials unavailable), restore uses a same-id registry route when one exists — for a runtime-snapshot record that can be a different endpoint than the recorded binding — and continues on the `settings.model.name` default only when no route resolves. `settings.model.name` is still updated as the default for **new** sessions.
+
+### `GET /session/:id/message-groups`
+
+Capability tag: `session_message_deletion`. Bridge → ACP extMethod `qwen/status/session/message_groups`. This is a live-session-owner read: it resolves the session's owning runtime and never falls back to the primary workspace. The daemon-wide capability does not imply support for every session; SSH workspaces and Managed authoritative storage refuse deletion.
+
+Lists safely attributable prompt/reply or command-display groups in active-history order. It does not acquire a writer lease for an ordinary legacy recorder. The read waits for earlier history mutations; a returned snapshot may become stale as the session changes. Deletion itself requires an idle session.
+
+Response (200):
+
+```json
+{
+  "snapshot": "<opaque selection token>",
+  "groups": [
+    {
+      "id": "<group-id>",
+      "promptId": "<prompt-id>",
+      "recordIds": ["<user-record-id>", "<reply-record-id>"]
+    }
+  ]
+}
+```
+
+`promptId` and `promptIds` are optional prompt identities; `recordIds` identifies the group's saved records. An empty history returns `groups: []`. Treat group IDs and the snapshot as opaque; pass the returned snapshot unchanged when deleting.
+
+Errors include `404` for an unknown session, `400 unsupported_operation` for an SSH workspace, and `422 session_message_deletion_unsupported` for unsupported storage or unavailable recording. Existing writer-integrity errors may also return `409 session_writer_conflict`, `409 session_writer_lost`, `409 session_transcript_changed`, or `503 session_writer_unavailable`.
+
+### `POST /session/:id/messages/delete`
+
+Capability tag: `session_message_deletion`. Bridge → ACP extMethod `qwen/control/session/messages_delete`. Strict mutation gate; live-session-owner scoped with no fallback to the primary workspace. Accepts optional `X-Qwen-Client-Id` for event attribution.
+
+Request:
+
+```json
+{ "snapshot": "<token from message-groups>", "groupIds": ["<group-id>"] }
+```
+
+Both fields are required. `snapshot` must be non-empty; `groupIds` must contain distinct non-empty strings. The selected groups must still exist in that snapshot. The server rejects busy sessions rather than queuing deletion behind a model turn.
+
+Response (200):
+
+```json
+{
+  "deletedGroupIds": ["<group-id>"],
+  "deletedPromptIds": ["<daemon-prompt-id>"]
+}
+```
+
+A successful response may additionally contain `removedApiPromptIds` for removed API-history identities. Selected original records and their owned raw compression context are physically removed from JSONL. Existing summary text, command effects, and project files are preserved. Deleting every group leaves the session available for later prompts.
+
+Errors:
+
+- `400 invalid_message_groups` — malformed, unknown, or duplicate group selection.
+- `400 invalid_client_id` — malformed attribution header.
+- `404` — session unknown.
+- `409 session_busy` — prompt or history mutation active; retry after it finishes.
+- `409 message_groups_conflict` — selection snapshot is stale; fetch groups again and require a new selection before retrying.
+- `409 message_history_invalid` — history cannot be safely attributed; changing the selection token alone cannot repair it.
+- `400 unsupported_operation` / `422 session_message_deletion_unsupported` — session/workspace storage does not support this operation; refreshing and repeating the request will not enable it.
+- `409 session_writer_conflict`, `409 session_writer_lost`, `409 session_transcript_changed`, or `503 session_writer_unavailable` — exclusive transcript ownership could not be established or retained.
+- `503 message_deletion_context_unavailable` — deletion **has persisted**, but the live context could not be installed. The JSON body includes `persisted: true`, `deletedGroupIds`, and `deletedPromptIds`. Reconcile the UI from authoritative history and reopen the session before sending another prompt. Do not retry deletion as though nothing was removed; later prompts remain refused with this code until reopening.
+
+After persistence the session publishes `session_messages_deleted` with data `{sessionId, deletedGroupIds, deletedPromptIds, removedApiPromptIds?}` and optional `originatorClientId` on the **event envelope**. This event also occurs for the persisted-503 path. Peers must invalidate cached transcript, navigation, search and selection state and reload authoritative history. The originator must reconcile both successful HTTP responses and `persisted: true` errors; it must not rely on processing its own SSE echo.
 
 ### `POST /session/:id/recap`
 

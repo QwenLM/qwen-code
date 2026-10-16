@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getEventListeners } from 'node:events';
+import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   DEFAULT_MAX_QUEUED_BYTES,
   EventBus,
@@ -27,29 +28,17 @@ async function collect(
 }
 
 describe('EventBus', () => {
-  it('discards stale replay even when the compaction engine cannot reset', () => {
-    const old = {
-      id: 1,
-      v: 1 as const,
-      type: 'session_update',
-      data: { text: 'deleted' },
-    };
-    const bus = new EventBus(10, 10, {
-      ingest: () => undefined,
-      seedReplayEvents: () => {
-        throw new Error('reset failure');
-      },
-      snapshot: () => ({
-        compactedTurns: [old],
-        liveJournal: [],
-        lastEventId: 1,
-      }),
-      close: () => undefined,
-    });
-    bus.publish({ type: 'session_update', data: { text: 'deleted' } });
+  it('clears stale replay and keeps the compaction engine usable', () => {
+    const bus = new EventBus(10, 10, new TurnBoundaryCompactionEngine());
+    bus.seedReplayEvents([{ type: 'old', data: { text: 'deleted' } }]);
+    expect(bus.snapshotReplay()?.compactedTurns).toHaveLength(1);
     bus.resetReplay();
-    expect(bus.snapshotReplay()).toBeUndefined();
+    expect(bus.snapshotReplay()?.compactedTurns).toEqual([]);
     expect(bus.lastEventId).toBe(1);
+    bus.seedReplayEvents([{ type: 'new', data: { text: 'retained' } }]);
+    expect(bus.snapshotReplay()?.compactedTurns).toMatchObject([
+      { id: 2, type: 'new', data: { text: 'retained' } },
+    ]);
     bus.close();
   });
 

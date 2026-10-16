@@ -87,7 +87,7 @@ export function MessageDeletionToolbar({
               {t('common.cancel')}
             </AlertDialogCancel>
             <AlertDialogAction
-              disabled={controls.busy}
+              disabled={controls.disabled || controls.selected.size === 0}
               onClick={(event) => {
                 event.preventDefault();
                 controls.submit();

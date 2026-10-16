@@ -276,6 +276,23 @@ describe('recorded message deletion', () => {
     expect(await fs.readFile(transcriptPath, 'utf8')).toBe(unchanged);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'preserves transcript permissions during replacement',
+    async () => {
+      const { transcriptPath, lease, options } = await fixture();
+      await lease.release();
+      await fs.chmod(transcriptPath, 0o640);
+      const replacementLease = await SessionWriterLease.acquire(options);
+      cleanups.push(() => replacementLease.release());
+      const original = await replacementLease.readTranscript();
+      await replacementLease.replaceTranscript(
+        '{"retained":true}\n',
+        createHash('sha256').update(original).digest('hex'),
+      );
+      expect((await fs.stat(transcriptPath)).mode & 0o777).toBe(0o640);
+    },
+  );
+
   it('fences an outside writer and serializes replacement with appends', async () => {
     const { transcriptPath, lease } = await fixture();
     const original = await lease.readTranscript();

@@ -29,6 +29,169 @@ function stamp(
   };
 }
 
+for (const code of [
+  'transport',
+  'unsupported_operation',
+  'session_message_deletion_unsupported',
+]) {
+  test(`listing failure explains ${code} accurately @smoke`, async ({
+    page,
+  }, info) => {
+    await setup(page, String(info.project.use.baseURL));
+    await page.route('**/session/*/message-groups', (route) =>
+      code === 'transport'
+        ? route.abort('failed')
+        : route.fulfill({
+            status: code === 'unsupported_operation' ? 400 : 422,
+            json: { error: 'Unsupported storage', code },
+          }),
+    );
+    await startDeletion(
+      page,
+      page
+        .getByRole('button', { name: 'More message actions', exact: true })
+        .last(),
+    );
+    await expect(
+      page.locator('[data-web-shell-message-deletion] [role="alert"]'),
+    ).toHaveText(
+      code === 'transport'
+        ? 'Unable to delete messages. Please reload and try again.'
+        : 'Deleting saved messages is not supported for this session.',
+    );
+    await expect(
+      page.getByRole('checkbox', { name: 'Select message group' }),
+    ).toHaveCount(0);
+  });
+}
+
+for (const code of [
+  'unsupported_operation',
+  'session_message_deletion_unsupported',
+]) {
+  test(`unsupported deletion explains ${code} without a reload loop @smoke`, async ({
+    page,
+  }, info) => {
+    await setup(page, String(info.project.use.baseURL));
+    await page.route('**/session/*/messages/delete', (route) =>
+      route.fulfill({
+        status: code === 'unsupported_operation' ? 400 : 422,
+        json: { error: 'Unsupported storage', code },
+      }),
+    );
+    await startDeletion(
+      page,
+      page
+        .getByRole('button', { name: 'More message actions', exact: true })
+        .last(),
+    );
+    await page
+      .getByRole('button', { name: 'Delete selected', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: 'Delete permanently', exact: true })
+      .click();
+    await expect(
+      page.locator('[data-web-shell-message-deletion] [role="alert"]'),
+    ).toHaveText('Deleting saved messages is not supported for this session.');
+    await expect(page.getByText('Question 3', { exact: true })).toBeVisible();
+  });
+}
+
+test('unmatched saved history keeps its specific listing explanation @smoke', async ({
+  page,
+}, info) => {
+  await setup(page, String(info.project.use.baseURL));
+  await page.route('**/session/*/message-groups', (route) =>
+    route.fulfill({ json: { snapshot: 'empty', groups: [] } }),
+  );
+  await startDeletion(
+    page,
+    page
+      .getByRole('button', { name: 'More message actions', exact: true })
+      .last(),
+  );
+  await expect(
+    page.locator('[data-web-shell-message-deletion] [role="alert"]'),
+  ).toContainText('cannot be safely matched');
+});
+
+test('confirmation disables if a peer starts streaming after it opens @smoke', async ({
+  page,
+}, info) => {
+  const { daemon, deletions } = await setup(
+    page,
+    String(info.project.use.baseURL),
+  );
+  await startDeletion(
+    page,
+    page
+      .getByRole('button', { name: 'More message actions', exact: true })
+      .last(),
+  );
+  await page
+    .getByRole('button', { name: 'Delete selected', exact: true })
+    .click();
+  const confirm = page.getByRole('button', {
+    name: 'Delete permanently',
+    exact: true,
+  });
+  await expect(confirm).toBeEnabled();
+  await daemon.sendEvent(
+    stamp(
+      assistantTextEvent('Concurrent peer output', { id: 99 }),
+      'peer-running',
+      'peer-answer',
+    ),
+  );
+  await expect(confirm).toBeDisabled();
+  expect(deletions).toEqual([]);
+});
+
+test('peer deletion clears an active selection and its confirmation @smoke', async ({
+  page,
+}, info) => {
+  const { daemon, scenario, groups } = await setup(
+    page,
+    String(info.project.use.baseURL),
+  );
+  await startDeletion(
+    page,
+    page
+      .getByRole('button', { name: 'More message actions', exact: true })
+      .last(),
+  );
+  await page
+    .getByRole('button', { name: 'Delete selected', exact: true })
+    .click();
+  scenario.events = scenario.events.filter((event) => {
+    const data = event.data as {
+      update?: { _meta?: { promptId?: string } };
+      promptId?: string;
+    };
+    return (data.update?._meta?.promptId ?? data.promptId) !== 'p2';
+  });
+  groups.splice(2, 1);
+  await daemon.sendEvent({
+    v: 1,
+    type: 'session_messages_deleted',
+    originatorClientId: 'peer',
+    data: {
+      sessionId: scenario.sessionId,
+      deletedGroupIds: ['u2'],
+      deletedPromptIds: ['p2'],
+    },
+  });
+  await expect(page.getByText('Question 3', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(
+    page.getByRole('checkbox', { name: 'Select message group' }),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('[data-web-shell-message-deletion] [role="alert"]'),
+  ).toContainText('Select the messages again');
+});
+
 async function setup(
   page: import('@playwright/test').Page,
   baseURL: string,
