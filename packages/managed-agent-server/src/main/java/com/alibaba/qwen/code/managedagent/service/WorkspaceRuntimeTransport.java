@@ -410,9 +410,14 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         // recovery fleet can still adopt this identity. The worker keeps the
         // installation a re-drive reuses, so the detach stays owed to the
         // later full release, recorded before the holder clears so that
-        // release can never take the absent-holder shortcut past it.
+        // release can never take the absent-holder shortcut past it. A
+        // RELEASING Session still holding the mount is one whose physical
+        // release has not landed yet (a cleanup release that failed at the
+        // worker), so it owes the same detach; one with no holder never
+        // installed anything and keeps the shortcut.
         Context context = context(lease, session, false);
-        if (context.session().getState() == RuntimeSessionRecord.State.READY) {
+        if (context.session().getState() == RuntimeSessionRecord.State.READY
+                || ownership.isHeld(context.binding(), context.session())) {
             detachOwed.add(detachKey(context));
         }
         ownership.release(context.binding(), context.session());

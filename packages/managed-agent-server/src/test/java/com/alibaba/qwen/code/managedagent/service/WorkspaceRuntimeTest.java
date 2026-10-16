@@ -66,6 +66,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -568,6 +569,54 @@ class WorkspaceRuntimeTest {
         authority.assertHeld(binding, rival);
         assertThat(fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join()).isTrue();
         verify(fixture.http()).release(fixture.lease(), runtimeSession);
+    }
+
+    @Test
+    void mountHandbackAfterAFailedCleanupReleaseKeepsTheWorkerDetachOwed() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var binding = session.workspace();
+        var runtimeSession = fixture.record().getSession();
+        var ready = acquireReady(fixture);
+        assertThat(new JdbcRuntimeSessionRepository(dataSource).compareAndSet(ready,
+                ready.withState(RuntimeSessionRecord.State.RELEASING, Instant.now()))).isNotNull();
+        // #13800: the turn's cleanup release failed at the worker, so the
+        // Session parks RELEASING with its installation still in place and
+        // hands its mount back.
+        when(fixture.http().release(any(), any()))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("lost release")))
+                .thenReturn(CompletableFuture.completedFuture(true));
+        assertThatThrownBy(() -> fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join())
+                .hasRootCauseMessage("lost release");
+        assertThat(fixture.transport().releaseMount(fixture.lease(), runtimeSession).toCompletableFuture().join())
+                .isTrue();
+        var rival = holder(session, "rival");
+        authority.claim(binding, rival);
+        // The retried cleanup release still reaches the worker and the
+        // deactivation instead of the absent-holder shortcut.
+        assertThat(fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join()).isTrue();
+        verify(fixture.http(), times(2)).release(fixture.lease(), runtimeSession);
+        verify(fixture.http()).activateWorkspace(any(), any(), any(), eq(false));
+        authority.assertHeld(binding, rival);
+    }
+
+    @Test
+    void mountHandbackOfANeverInstalledSessionOwesNoDetach() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var rival = holder(session, "holder");
+        authority.claim(session.workspace(), rival);
+        assertBusy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()));
+        assertThat(fixture.transport().releaseMount(fixture.lease(), fixture.record().getSession())
+                .toCompletableFuture().join()).isTrue();
+        var releasing = new JdbcRuntimeSessionRepository(dataSource).compareAndSet(fixture.record(),
+                fixture.record().withState(RuntimeSessionRecord.State.RELEASING, Instant.now()));
+        assertThat(releasing).isNotNull();
+        assertThat(fixture.transport().release(fixture.lease(), releasing.getSession()).toCompletableFuture().join())
+                .isTrue();
+        authority.assertHeld(session.workspace(), rival);
+        verify(fixture.http(), never()).release(any(), any());
+        verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), any(Boolean.class));
     }
 
     @Test
