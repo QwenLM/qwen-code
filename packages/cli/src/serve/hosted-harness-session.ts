@@ -22,7 +22,6 @@ import {
   readHostedTurnModelSelection,
   type HostedModelSelection,
 } from './hosted-model-selection.js';
-import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import {
   findHostedApprovalContinuation,
   type RestoredHostedApprovalContinuation,
@@ -415,6 +414,7 @@ interface HostedSession {
    * here; other recovery blocks keep naming themselves at the caller. */
   recoveryReason?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
+  foregroundOnly?: boolean;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
   shell?: HostedShellTurnOptions;
   // The record funnel of a publication-mode turn's background Shells and
@@ -3186,6 +3186,7 @@ async function executeHostedTurn(
                   hooks: session.hooks,
                   skills: session.skills,
                   profile: session.toolProfile,
+                  foregroundOnly: session.foregroundOnly,
                   context: workspaceContext,
                   childRuns: session.childRuns,
                   monitors: session.monitors,
@@ -3304,13 +3305,7 @@ async function executeHostedTurn(
             result.model,
           );
         } catch (cause) {
-          if (
-            cause instanceof HostedToolRecoveryRequiredError ||
-            cause instanceof HostedMcpRecoveryRequiredError ||
-            cause instanceof HostedHookRecoveryRequiredError ||
-            cause instanceof LlmRequestPreparationError
-          )
-            throw cause;
+          if (monitorWakeNeedsRecovery(cause)) throw cause;
           const outcome = settledTurnOutcome(abort);
           state = outcome.state;
           stopReason = outcome.stopReason;
@@ -3371,6 +3366,10 @@ async function executeHostedTurn(
             'qwen serve: Turn completed with cleanup still owed: ' +
               String(cause),
           );
+          // The owed cleanup keeps retrying its full release; the mount
+          // goes back now, or the parked Session wedges its storage until
+          // that release lands (#13800).
+          await toolTurn?.releaseForRecoveryBlock();
         }
         // H4b: the tool-arm results this turn answered are consumed
         // facts only once the turn's own settlement commits durably — a
@@ -3407,14 +3406,29 @@ async function executeHostedTurn(
   // unbounded, and a stalled Session Store would otherwise leave the Session
   // permanently unavailable and undeletable. Each turn owns its publisher,
   // so a next turn shares no listener or capture state with this drain.
-  await running.finally(() => {
-    void toolTurn?.close().catch((cause: unknown) => {
-      session.blocked = true;
-      writeStderrLineSafe(
-        'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
-      );
+  try {
+    await running.finally(() => {
+      void toolTurn?.close().catch((cause: unknown) => {
+        session.blocked = true;
+        writeStderrLineSafe(
+          'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
+        );
+      });
     });
-  });
+  } catch (cause) {
+    // The recovery-blocked exit hands back the Workspace mount before the
+    // block verdict parks the Session: the lease is the turn's, and a turn
+    // that never runs again must not hold it against every later Session
+    // on the same storage (#13800). finish() kept it for the uncertain
+    // case; the block transition is exactly where the turn proves it will
+    // never replay, so this is where the exclusion ends. A turn whose
+    // terminal record never landed skipped the cleanup its release is owed
+    // to; the route may park it blocked over that write, and the durable
+    // cleanup debt keeps owing the full release, so its mount goes back too.
+    if (monitorWakeNeedsRecovery(cause) || toolTurn?.cleanupPending)
+      await toolTurn?.releaseForRecoveryBlock();
+    throw cause;
+  }
   if (!turnResult) throw new Error('Hosted turn did not settle.');
   return turnResult;
 }
@@ -3425,6 +3439,16 @@ export function registerHostedHarnessSessionRoutes(
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
 ): void {
+  // The owed mount handbacks of recovery-blocked turns (#13800) outlive
+  // their Session, whose close never frees a parked turn's mount; the
+  // daemon owns them and stops them at shutdown.
+  const mountHandbacks = new Set<() => void>();
+  (
+    app.locals as { stopHostedMountHandbacks?: () => void }
+  ).stopHostedMountHandbacks = () => {
+    for (const stop of [...mountHandbacks]) stop();
+  };
+  if (brokerOptions) brokerOptions = { ...brokerOptions, mountHandbacks };
   const sessions = new Map<string, HostedSession>();
   const opening = new Set<string>();
   const epoch = contract.bootId.replaceAll('-', '_');
@@ -3524,6 +3548,29 @@ export function registerHostedHarnessSessionRoutes(
     }
     let toolProfile = body?.['toolProfile'];
     let captureBytes = body?.['captureBytes'];
+    const requestedForegroundOnly = body?.['foregroundOnly'];
+    let foregroundOnly = requestedForegroundOnly === true;
+    if (
+      requestedForegroundOnly !== undefined &&
+      typeof requestedForegroundOnly !== 'boolean'
+    ) {
+      error(res, 400, 'invalid_hosted_foreground_only');
+      return;
+    }
+    if (
+      foregroundOnly &&
+      ((toolProfile !== undefined &&
+        toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+        toolProfile !== 'hosted-workspace-shell/1') ||
+        (create && toolProfile === undefined) ||
+        body?.['mcpServers'] !== undefined ||
+        body?.['hookCatalog'] !== undefined ||
+        body?.['childWorkspaces'] === true ||
+        body?.['lineage'] !== undefined)
+    ) {
+      error(res, 400, 'hosted_tool_profile_unavailable');
+      return;
+    }
     if (
       (agentDefinition?.skillsRef !== undefined &&
         (!toolProfile || !brokerOptions)) ||
@@ -3649,6 +3696,26 @@ export function registerHostedHarnessSessionRoutes(
     const stopMessages = body?.['stopMessages'] === true;
     const childWorkspaces = body?.['childWorkspaces'] === true;
     const childSnapshots = childWorkspaces && body?.['childSnapshots'] === true;
+    if (
+      resident &&
+      requestedForegroundOnly !== undefined &&
+      (resident.foregroundOnly === true) !== foregroundOnly
+    ) {
+      error(res, 409, 'hosted_tool_profile_conflict');
+      return;
+    }
+    if (
+      resident?.foregroundOnly &&
+      (childWorkspaces ||
+        mcpServers !== undefined ||
+        hookCatalog !== undefined ||
+        (toolProfile !== undefined &&
+          toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+          toolProfile !== 'hosted-workspace-shell/1'))
+    ) {
+      error(res, 409, 'hosted_tool_profile_conflict');
+      return;
+    }
     if (
       resident &&
       !create &&
@@ -4280,6 +4347,7 @@ export function registerHostedHarnessSessionRoutes(
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
                   ...(toolProfile ? { toolProfile } : {}),
+                  ...(foregroundOnly ? { foregroundOnly: true } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
                   ...(hookCatalog ? { hookCatalog } : {}),
                   ...(isHostedWorkspaceShellProfile(toolProfile)
@@ -4360,6 +4428,17 @@ export function registerHostedHarnessSessionRoutes(
       }
       const savedProfile = definition?.['toolProfile'];
       if (
+        (definition?.['foregroundOnly'] !== undefined &&
+          typeof definition['foregroundOnly'] !== 'boolean') ||
+        (requestedForegroundOnly !== undefined &&
+          foregroundOnly !== (definition?.['foregroundOnly'] === true))
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      foregroundOnly = definition?.['foregroundOnly'] === true;
+      if (
         !create &&
         toolProfile === undefined &&
         isHostedWorkspaceProfile(savedProfile)
@@ -4395,6 +4474,13 @@ export function registerHostedHarnessSessionRoutes(
         captureBytes = definition?.['captureBytes'];
       const workspaceProfile = isHostedWorkspaceProfile(toolProfile);
       if (
+        (foregroundOnly &&
+          ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+            toolProfile !== 'hosted-workspace-shell/1') ||
+            mcpServers !== undefined ||
+            hookCatalog !== undefined ||
+            childWorkspaces ||
+            definition?.['lineage'] !== undefined)) ||
         ((hookCatalog !== undefined || skills !== undefined) &&
           (!toolProfile || !brokerOptions)) ||
         (toolProfile !== undefined &&
@@ -4440,6 +4526,7 @@ export function registerHostedHarnessSessionRoutes(
         ...(childWorkspaces ? { childWorkspaces: true } : {}),
         ...(childSnapshots ? { childSnapshots: true } : {}),
         ...(toolProfile ? { toolProfile } : {}),
+        ...(foregroundOnly ? { foregroundOnly: true } : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes !== undefined
           ? {
@@ -4447,10 +4534,14 @@ export function registerHostedHarnessSessionRoutes(
                 owner: stores.publication,
                 captureBytes: captureBytes as number,
               },
-              backgroundLane: {
-                resources: stores.toolResultResources,
-                assertWritable: stores.assertWritable,
-              },
+              ...(!foregroundOnly
+                ? {
+                    backgroundLane: {
+                      resources: stores.toolResultResources,
+                      assertWritable: stores.assertWritable,
+                    },
+                  }
+                : {}),
             }
           : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
@@ -4503,7 +4594,7 @@ export function registerHostedHarnessSessionRoutes(
           session.mcp?.broker,
           () => session.lifecycleProtocolVersion === 2,
         );
-      if (session.toolProfile && brokerOptions) {
+      if (!foregroundOnly && session.toolProfile && brokerOptions) {
         session.childRuns = new HostedChildRunSession(
           {
             authority: session.managed.authority,
@@ -4583,6 +4674,7 @@ export function registerHostedHarnessSessionRoutes(
       // ensureMemberPlanMode at tool-turn construction — the first committed
       // input may not exist yet while the Session assembles on create.
       if (
+        !foregroundOnly &&
         session.toolProfile &&
         brokerOptions &&
         (session.shell || session.backgroundLane)
@@ -6603,12 +6695,7 @@ export function registerHostedHarnessSessionRoutes(
         );
         settled = true;
       } catch (cause) {
-        if (
-          cause instanceof HostedToolRecoveryRequiredError ||
-          cause instanceof HostedMcpRecoveryRequiredError ||
-          cause instanceof HostedHookRecoveryRequiredError ||
-          cause instanceof LlmRequestPreparationError
-        ) {
+        if (monitorWakeNeedsRecovery(cause)) {
           if (admitted) session.blocked = true;
           else if (!res.headersSent)
             error(res, 503, 'hosted_mcp_recovery_required');
@@ -8369,6 +8456,7 @@ export function registerHostedHarnessSessionRoutes(
             mcp: session.mcp,
             skills: session.skills,
             profile: session.toolProfile,
+            foregroundOnly: session.foregroundOnly,
             context: workspaceContext,
             childRuns: session.childRuns,
             monitors: session.monitors,
@@ -8769,8 +8857,11 @@ export function registerHostedHarnessSessionRoutes(
         // discipline in executeHostedTurn. A recovery-blocked exit keeps the
         // adopted lease held: the parked Turn still owns it, and a release
         // would persist RELEASED, wedging the later takeover's same-identity
-        // re-acquire on runtime_session_not_acquirable.
+        // re-acquire on runtime_session_not_acquirable. Every arm that parks
+        // the re-drive blocked hands its Workspace mount back here, the way
+        // the prompt route's turn does (#13800).
         if (!session.blocked) releaseRecoveredRuntime(session);
+        else await toolTurn?.releaseForRecoveryBlock();
         session.active = undefined;
         void toolTurn?.close().catch((cause: unknown) => {
           session.blocked = true;
@@ -9299,15 +9390,16 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 400, 'invalid_event_cursor');
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-store');
+    // Disable proxy buffering (nginx): the keepalives below exist to put
+    // bytes on the wire during quiet phases, and a buffering intermediary
+    // would hold them until the client's idle watchdog aborts a healthy
+    // stream. The event-stream content type alone doesn't always reach
+    // the client through every proxy.
+    res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('X-Qwen-Event-Epoch', epoch);
     res.flushHeaders();
     let cursor = after;
     let busy = false;
-    const stop = (): void => {
-      clearInterval(timer);
-      if (!res.destroyed && !res.writableEnded) res.end();
-    };
-    session.streams.add(stop);
     // Seeded once per stream, then updated as deltas flow: a committed
     // message whose text streamed must not project a second chunk.
     const streamedDeltaIds = new Set(
@@ -9353,8 +9445,28 @@ export function registerHostedHarnessSessionRoutes(
       void pump();
     }, 250);
     timer.unref();
+    // Mirror the primary route's keepalive: while no event is committed
+    // the pump writes nothing, and clients bound that silence with an
+    // idle watchdog (the Java SDK defaults to 45s), so a healthy but
+    // quiet stream must still put bytes on the wire.
+    const keepaliveTimer = setInterval(() => {
+      if (res.destroyed || res.writableEnded) return;
+      res.write(': keepalive\n\n');
+    }, 15_000);
+    keepaliveTimer.unref();
+    // stop funnels every teardown path — backpressure, pump failure,
+    // session close — through both timer clears; it is declared after
+    // the timers so it can clear them unconditionally, and the
+    // synchronous route body registers it before any path can fire.
+    const stop = (): void => {
+      clearInterval(timer);
+      clearInterval(keepaliveTimer);
+      if (!res.destroyed && !res.writableEnded) res.end();
+    };
+    session.streams.add(stop);
     res.on('close', () => {
       clearInterval(timer);
+      clearInterval(keepaliveTimer);
       session.streams.delete(stop);
     });
     void pump();

@@ -112,6 +112,33 @@ export class HostedMcpSession {
     return this.acquired;
   }
 
+  /**
+   * The recovery-blocked turn's handback of this Session-scoped mount
+   * (#13800), under the claim of the acquire that holds it now. Only MCP
+   * work proven settled lets it go — the Broker cannot see an MCP
+   * operation, nor a Hook run that shares this owner (`hookWorkUnproven`)
+   * — and its next acquire claims the mount again (a lookup that finds it
+   * gone re-acquires). The owner stays booked as acquired, so the close
+   * still runs the full release.
+   */
+  mountHandback(
+    hookWorkUnproven: () => boolean,
+  ): (() => Promise<void>) | undefined {
+    const claim = this.broker.mountClaim();
+    if (claim === undefined) return undefined;
+    return async () => {
+      if (
+        this.initializing ||
+        this.refreshing > 0 ||
+        this.configuring.size > 0 ||
+        this.recoveryBlocked ||
+        hookWorkUnproven()
+      )
+        throw new Error('MCP work on the Workspace mount is unproven.');
+      await this.broker.releaseMount(claim);
+    };
+  }
+
   private grantsRenewed = false;
   private readonly bindings = new Map<
     string,

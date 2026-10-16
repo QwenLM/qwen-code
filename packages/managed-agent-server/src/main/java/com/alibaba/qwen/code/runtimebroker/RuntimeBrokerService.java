@@ -295,6 +295,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return provisioner.supportsDrainedStop();
     }
 
+    public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
+        return provisioner.supportsDrainedStop(binding);
+    }
+
     public void requestHarnessDrain(String tenantId, String harnessSessionId) {
         requireOpen();
         bindingRepository.requestHarnessDrain(tenantId, harnessSessionId);
@@ -465,7 +469,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     ? CompletableFuture.completedFuture(null)
                     : failed(conflict("workspace_close_identity_unverified", "Released binding has no original stop proof"));
         }
-        if (!saved.getRequest().isManagedContext() || !provisioner.supportsDrainedStop()
+        if (!saved.getRequest().isManagedContext() || !provisioner.supportsDrainedStop(saved)
                 || saved.getState() == RuntimeBindingRecord.State.OPERATOR_RECOVERY
                 || saved.getState() == RuntimeBindingRecord.State.FAILED) {
             return failed(conflict("workspace_close_identity_unverified", "Original worker needs recovery"));
@@ -526,7 +530,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
                     }
                     var receipt = renewal.current.get().getDrainReceipt();
-                    return receipt == null ? provisioner.stopDrained(draining)
+                    return receipt == null ? stopAcknowledgedRuntime(draining)
                             : CompletableFuture.completedFuture(receipt);
                 }).thenAccept(receipt -> {
                     if (authority != null) {
@@ -572,6 +576,98 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
                 : drainSessions(binding, renewal, authority, batch.getLast().getRuntimeSessionId()));
+    }
+
+    private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor) {
+        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        var batch = executionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
+        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
+        for (var execution : batch) {
+            work = work.thenCompose(ignored -> acknowledgePersistedTools(binding, execution));
+        }
+        return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
+                : acknowledgeDrainedTools(binding, batch.getLast().getExecutionCallId()));
+    }
+
+    private CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding) {
+        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
+            return acknowledgeDrainedTools(binding, null).thenCompose(ignored -> provisioner.stopDrained(binding));
+        }
+        return safeStage(() -> provisioner.reconcile(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), binding.getLease())).handle((observation, error) -> {
+                    if (error != null) {
+                        Throwable cause = unwrap(error);
+                        if (cause instanceof RuntimeBrokerException failure && failure.getCode().contains("conflict")) {
+                            return RuntimeBrokerService.<RuntimeDrainReceipt>failed(failure);
+                        }
+                        return safeStage(() -> provisioner.stopDrained(binding));
+                    }
+                    if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.READY) {
+                        return safeStage(() -> provisioner.stopDrained(binding));
+                    }
+                    RuntimeLease lease = binding.getLease();
+                    if (!binding.getResourceHandle().equals(observation.getHandle())
+                            || !lease.getRuntimeInstanceId().equals(observation.getRuntimeInstanceId())
+                            || !lease.getLeaseId().equals(observation.getLeaseId()) || lease.getEpoch() != observation.getEpoch()
+                            || !lease.getEndpoint().equals(observation.getEndpoint())) {
+                        return RuntimeBrokerService.<RuntimeDrainReceipt>failed(conflict("workspace_close_identity_unverified",
+                                "Original SSH worker identity changed"));
+                    }
+                    return acknowledgeDrainedTools(binding, null).thenCompose(ignored -> provisioner.stopDrained(binding));
+                }).thenCompose(stage -> stage);
+    }
+
+    private CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
+        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                || !execution.isSettled() || execution.getResult() == null
+                || ProviderRuntimeProtocol.isReference(execution.getReference())) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Map<String, Object> noStart = sshNoStartReceipt(binding, execution);
+        if (noStart == null && (execution.getResult().containsKey("capture")
+                || Integer.valueOf(3).equals(execution.getReference().get("runtimeProtocol"))
+                || "deferred_v3".equals(execution.getReference().get("dispatchMode")))) {
+            return CompletableFuture.completedFuture(null);
+        }
+        RuntimeSessionRecord session = sessionRepository.findById(binding.getRequest().getScope(),
+                execution.getRuntimeSessionId());
+        if (binding.getLease() == null || session == null || !execution.belongsTo(session)
+                || !binding.getBindingId().equals(execution.getBindingId())
+                || binding.getGeneration() != execution.getRuntimeGeneration()
+                || !binding.getRequest().getIsolationKey().equals(execution.getHarnessSessionId())) {
+            return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
+        }
+        if (noStart != null) {
+            CompletionStage<Map<String, Object>> acknowledgement = "deferred_v3".equals(execution.getReference().get("dispatchMode"))
+                    ? transport.acknowledgeV3(binding.getLease(), session.getSession(), execution.getReference(), noStart)
+                    : transport.acknowledge(binding.getLease(), session.getSession(), execution.getReference(), noStart);
+            return acknowledgement.thenAccept(answer -> {
+                if (answer == null || !Set.of("settled", "unknown").contains(answer.get("state"))) {
+                    throw conflict("runtime_execution_conflict", "Original Runtime did not confirm the no-start acknowledgement");
+                }
+            });
+        }
+        return transport.acknowledgeV2(binding.getLease(), session.getSession(), execution.getReference());
+    }
+
+    private static Map<String, Object> sshNoStartReceipt(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
+        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                || !execution.isSettled() || !"not_started".equals(execution.getExecutionStatus())
+                || execution.getResult() == null || !execution.getResult().containsKey("capture")
+                || execution.getResult().get("capture") != null
+                || !(Integer.valueOf(3).equals(execution.getReference().get("runtimeProtocol"))
+                        || "deferred_v3".equals(execution.getReference().get("dispatchMode")))
+                || ProviderRuntimeProtocol.isReference(execution.getReference())) {
+            return null;
+        }
+        Map<String, Object> receipt = new LinkedHashMap<>();
+        receipt.put("executionCallId", execution.getExecutionCallId());
+        receipt.put("manifest", null);
+        receipt.put("deliveryStatus", "committed");
+        receipt.put("historyRevision", null);
+        return BrokerValues.immutableMap(receipt);
     }
 
     private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
@@ -685,6 +781,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     public CompletionStage<RuntimeSessionRecord> acquire(String harnessSessionId, String runtimeSessionId,
             String turnKind, RuntimeLifecycleAuthority authority) {
+        return acquire(harnessSessionId, runtimeSessionId, turnKind, authority, null);
+    }
+
+    /**
+     * Acquires the Runtime Session and records {@code mountClaimId} as the
+     * claim a later {@link #releaseMount} must name: any later acquire of
+     * the same identity supersedes it, so a stale mount handback can never
+     * free the mount of a turn that re-drove this Session. A mount handed
+     * back earlier is claimed again here, never left to fail every tool.
+     */
+    public CompletionStage<RuntimeSessionRecord> acquire(String harnessSessionId, String runtimeSessionId,
+            String turnKind, RuntimeLifecycleAuthority authority, String mountClaimId) {
         requireOpen();
         String harnessId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
@@ -694,17 +802,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 "runtimeSessionId");
         CompletableFuture<SessionContext> current = sessions.get(runtimeId);
         if (current != null) {
-            return current.thenApply(context -> {
+            return current.thenCompose(context -> {
+                RuntimeSessionRecord record;
                 context.lock();
                 try {
                     bindingRepository.requireHarnessAdmission(context.binding().getRequest(),
                             context.session().getScope(), harnessId, authority);
                     requireSameSession(context.session(), new RuntimeSession(harnessId,
                             runtimeId, turnKind, context.session().getScope()));
-                    return requireAcquireSessionRecord(context);
+                    record = requireAcquireSessionRecord(context);
+                    context.mountClaim(mountClaimId);
                 } finally {
                     context.unlock();
                 }
+                return reclaimMount(context, record);
             });
         }
         // A Runtime Session this process does not hold yet admits new work
@@ -713,7 +824,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return resolveScope(harnessId, true, authority).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
                     runtimeId, turnKind, scope);
-            return acquireSession(session);
+            return acquireSession(session, mountClaimId);
         });
     }
 
@@ -724,6 +835,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     public CompletionStage<RuntimeSessionRecord> acquireRecovery(String harnessSessionId, String runtimeSessionId,
             String bindingId, long generation, RuntimeLifecycleAuthority authority) {
+        return acquireRecovery(harnessSessionId, runtimeSessionId, bindingId, generation, authority, null);
+    }
+
+    public CompletionStage<RuntimeSessionRecord> acquireRecovery(String harnessSessionId, String runtimeSessionId,
+            String bindingId, long generation, RuntimeLifecycleAuthority authority, String mountClaimId) {
         requireOpen();
         RuntimeBindingRecord original = bindingRepository.findById(bindingId);
         boolean shared = original != null && HarnessOwnership.sharesRuntimeSessions(original.getRequest());
@@ -743,25 +859,38 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         CompletionStage<RuntimeBindingRecord> recovered = matchingLiveBinding(original) == null
                 ? recoverBinding(bindingId, generation, true) : CompletableFuture.completedFuture(original);
-        return recovered.thenApply(record -> {
+        return recovered.thenCompose(record -> {
             if (record.getState() != RuntimeBindingRecord.State.READY || !record.sameIdentity(original)) {
                 throw conflict("workspace_close_identity_unverified", "Original Hook Runtime cannot be recovered");
             }
             BindingContext live = requireLiveBinding(record);
             var context = CompletableFuture.completedFuture(new SessionContext(saved.getSession(), record, live.lease()));
             var existing = sessions.putIfAbsent(runtimeSessionId, context);
+            SessionContext selected = context.join();
             if (existing != null) {
                 if (!existing.isDone() || existing.isCompletedExceptionally()) {
                     throw conflict("workspace_close_identity_unverified", "Original Hook Session is not attested in this Broker");
                 }
-                SessionContext current = existing.join();
-                requireSameSession(current.session(), saved.getSession());
-                if (!current.binding().sameIdentity(original)) {
+                selected = existing.join();
+                requireSameSession(selected.session(), saved.getSession());
+                if (!selected.binding().sameIdentity(original)) {
                     throw conflict("workspace_close_identity_unverified", "Hook Runtime identity changed");
                 }
             }
-            return saved;
+            selected.mountClaim(mountClaimId);
+            return reclaimMount(selected, saved);
         });
+    }
+
+    // A recovery-blocked turn may have handed the mount back (#13800); the
+    // Session that acquires this identity again needs it held, or every
+    // tool and recovery control would answer workspace_busy. The claim is
+    // holder-conditioned, so a mount still held is left as it is and one a
+    // rival took answers the retryable busy refusal.
+    private CompletionStage<RuntimeSessionRecord> reclaimMount(SessionContext context,
+            RuntimeSessionRecord record) {
+        return safeStage(() -> transport.reclaimMount(context.lease(), context.session()))
+                .thenApply(ignored -> record);
     }
 
     public CompletionStage<RuntimeScope> authorizeLifecycle(String harnessSessionId, RuntimeLifecycleAuthority authority) {
@@ -1403,6 +1532,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         || !record.getExecutionCallId().equals(savedReceipt.get("executionCallId"))) {
                     throw conflict("runtime_execution_conflict", "Only the original settled Tool v3 result can be acknowledged");
                 }
+                Map<String, Object> noStart = sshNoStartReceipt(context.binding(), record);
+                if (noStart != null && !sameReceipt(noStart, savedReceipt)) {
+                    throw conflict("runtime_execution_conflict", "Session receipt conflicts with the durable no-start result");
+                }
                 context.beginControl();
             } finally {
                 context.unlock();
@@ -1437,7 +1570,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (!execution.isSettled()
                                 || !execution.getBindingId().equals(context.binding().getBindingId())
                                 || execution.getRuntimeGeneration() != context.binding().getGeneration()
-                                || publicationVerifier == null) {
+                                || publicationVerifier == null && sshNoStartReceipt(context.binding(), execution) == null) {
                             throw conflict("runtime_execution_conflict", "Original Tool v3 execution is unavailable");
                         }
                         context.beginControl();
@@ -1470,7 +1603,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             .whenComplete((ignored, error) -> context.endControl());
                     }
                     return mapFailure(safeStage(() -> {
-                        Map<String, Object> saved = publicationVerifier.receipt(original);
+                        Map<String, Object> saved = sshNoStartReceipt(context.binding(), original);
+                        if (saved == null) {
+                            saved = publicationVerifier.receipt(original);
+                        }
                         if (saved == null || !sameReceipt(saved, receipt)) {
                             throw conflict("runtime_execution_conflict", "Session receipt conflicts with publication");
                         }
@@ -2179,6 +2315,76 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
     }
 
+    /**
+     * Frees only the Workspace execution mount the Session holds, for the
+     * recovery-blocked turn that parks alive forever by contract: the
+     * Session row keeps its READY identity for the recovery fleet, so the
+     * full release path — and its RELEASED-forever verdict — never runs
+     * here. Only the latest acquire's claim may hand the mount back, and a
+     * lifecycle operation's window refuses it like the sibling release.
+     * A Session with an active operation keeps its mount honestly, the
+     * same freeze the fleet promises while anything is unproven — every
+     * kind of unsettled row counts, background processes included (the
+     * drain excludes them because its sweep stops or settles them first,
+     * and this path runs no sweep). A settled execution whose capture
+     * never proved its writer stopped keeps the mount for good: the
+     * operator-recovery family fences exactly that Workspace, and the
+     * distinct refusal tells the caller that waiting settles nothing. The
+     * gate reads the state as registered at this instant; it does not
+     * fence a concurrent out-of-contract admission landing one instant
+     * later. Resident-only: a Session this Broker does not hold (a dead
+     * Daemon's residue) belongs to the LOST family's own sweep.
+     */
+    public CompletionStage<Boolean> releaseMount(String harnessSessionId,
+            String runtimeSessionId, String mountClaimId,
+            RuntimeLifecycleAuthority authority) {
+        requireOpen();
+        String harnessId = BrokerValues.requireId(harnessSessionId,
+                "harnessSessionId");
+        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+                "runtimeSessionId");
+        String claimId = BrokerValues.requireId(mountClaimId, "mountClaimId");
+        CompletableFuture<SessionContext> local = sessions.get(runtimeId);
+        if (local == null) {
+            return failed(unavailable("runtime_reconciliation_required",
+                    "Runtime Session is not active in this Broker process"));
+        }
+        return local.thenCompose(context -> {
+            if (!context.session().getHarnessSessionId().equals(harnessId)) {
+                throw conflict("runtime_session_conflict",
+                        "Runtime Session belongs to another Harness Session");
+            }
+            requireLifecycleRelease(context.binding().getRequest(), context.session(), authority);
+            // The check and the clear share the lock every acquire records
+            // its claim under, so a re-drive that claimed this identity
+            // after the block can never lose its mount to the old handback.
+            context.lock();
+            try {
+                if (!claimId.equals(context.mountClaim())) {
+                    throw conflict("runtime_session_conflict",
+                            "Mount claim was superseded by a later acquire");
+                }
+                if (context.hasActiveControl()
+                        || executionRepository.hasActiveByRuntimeSession(
+                                context.binding().getBindingId(),
+                                context.binding().getGeneration(), runtimeId)) {
+                    throw conflict("runtime_session_busy",
+                            "Runtime Session has an active operation");
+                }
+                if (executionRepository.hasUnprovenCaptureByRuntimeSession(
+                        context.binding().getBindingId(),
+                        context.binding().getGeneration(), runtimeId)) {
+                    throw conflict("workspace_writer_unproven",
+                            "A settled execution never proved its writer stopped");
+                }
+                return safeStage(() -> transport.releaseMount(context.lease(),
+                        context.session())).toCompletableFuture();
+            } finally {
+                context.unlock();
+            }
+        });
+    }
+
     private CompletionStage<Boolean> releasedSession(
             String harnessSessionId, String runtimeSessionId,
             boolean drain, RuntimeLifecycleAuthority authority) {
@@ -2813,7 +3019,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<RuntimeSessionRecord> acquireSession(
-            RuntimeSession session) {
+            RuntimeSession session, String mountClaimId) {
         String runtimeSessionId = session.getRuntimeSessionId();
         CompletableFuture<SessionContext> created =
                 new CompletableFuture<>();
@@ -2832,16 +3038,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                     });
         }
-        return selected.thenApply(context -> {
+        return selected.thenCompose(context -> {
+            RuntimeSessionRecord record;
             context.lock();
             try {
                 bindingRepository.requireHarnessAdmission(context.binding().getRequest(), session.getScope(),
                         session.getHarnessSessionId(), session.getScope().getLifecycleAuthority());
                 requireSameSession(context.session(), session);
-                return requireAcquireSessionRecord(context);
+                record = requireAcquireSessionRecord(context);
+                context.mountClaim(mountClaimId);
             } finally {
                 context.unlock();
             }
+            return reclaimMount(context, record);
         });
     }
 
@@ -3876,7 +4085,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         RuntimeBindingRecord record = bindingRepository.findById(bindingId);
         if (record == null || record.getGeneration() != expectedGeneration
-                || !provisioner.kind().equals(record.getRequest().getProvisionerKind())) {
+                || !provisioner.supportsKind(record.getRequest().getProvisionerKind())) {
             return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
         }
         // Close owns retirement after journal settlement. Observing its retired
@@ -4295,6 +4504,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         markUnknown(executing);
                     }
                     return null;
+                }).thenCompose(ignored -> {
+                    if (!SshRuntimeProvisioner.KIND.equals(context.binding().getRequest().getProvisionerKind())) {
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    ToolExecutionRecord settled = executionRepository.findByExecutionCallId(executing.getExecutionCallId());
+                    return settled != null && settled.sameIdentity(executing)
+                            ? acknowledgePersistedTools(context.binding(), settled).exceptionally(error -> null)
+                            : CompletableFuture.completedFuture(null);
                 }).whenComplete((ignored, error) -> renewal.close());
     }
 
@@ -5300,6 +5517,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         // belong to whoever holds this, so a concurrent caller joins it
         // instead of sweeping against it and reading its own attempts busy.
         private CompletableFuture<Boolean> releaseAttempt;
+        // The latest acquire's mount claim: only that acquirer may hand the
+        // mount back (#13800).
+        private String mountClaim;
 
         SessionContext(RuntimeSession session, RuntimeBindingRecord binding,
                 RuntimeLease lease) {
@@ -5350,6 +5570,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
             lock();
             try {
                 activeControls--;
+            } finally {
+                unlock();
+            }
+        }
+
+        String mountClaim() {
+            lock();
+            try {
+                return mountClaim;
+            } finally {
+                unlock();
+            }
+        }
+
+        void mountClaim(String next) {
+            lock();
+            try {
+                mountClaim = next;
             } finally {
                 unlock();
             }
