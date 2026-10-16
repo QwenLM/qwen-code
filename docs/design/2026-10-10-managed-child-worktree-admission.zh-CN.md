@@ -73,7 +73,7 @@ I1 交付了能力，但没有调用方。本变更把唯一的生产方——ho
 - `packages/core/src/managed-runtime/managed-child-operations.ts`：放行的模式、launch body 的模式，以及能力拒绝。
 - `packages/cli/src/serve/hosted-workspace-tool-turn.ts`：`isolation` 参数及其准入；前台结果的 workspace 行。`hosted-child-agent-session.ts`：launch 模式及其重放检查；通知的 `<workspace>` 元素。`hosted-harness-session.ts`：create 与 load 上的 `childWorkspaces` 标志。`hosted-runtime-recovery.ts`：gap fill 的 workspace 行。
 - `packages/sdk-java/qwencode`：`CreateHarnessSession` 与 `LoadHarnessSession` 携带 `childWorkspaces`。
-- `packages/sdk-java/managed-agent-server`：`ManagedAgentProperties`（durable Broker 要求）、`QwenHostedHarnessConnector`（标志）、`ChildResultRelay`（准备、提交前合并、失败时丢弃、回执）、`SessionLifecycleCoordinator`（级联的丢弃）、`ChildWorkspaceService` 与 `ChildWorkspaceStore`（只请求不执行的入口、延后的收尾、丢弃取代未开始的合并、保留已结束合并的结果）。
+- `packages/managed-agent-server`：`ManagedAgentProperties`（durable Broker 要求）、`QwenHostedHarnessConnector`（标志）、`ChildResultRelay`（准备、提交前合并、失败时丢弃、回执）、`SessionLifecycleCoordinator`（级联的丢弃）、`ChildWorkspaceService` 与 `ChildWorkspaceStore`（只请求不执行的入口、延后的收尾、丢弃取代未开始的合并、保留已结束合并的结果）。
 - 各自旁边的测试、本设计的两种语言版本，以及 I1 设计中的说明。
 
 ## 验证

@@ -65,7 +65,7 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 ## 4. 验证
 
-在 `packages/cli` 运行 `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts src/serve/managed-runtime-attestation-worker.test.ts src/serve/managed-runtime-tool-worker.test.ts`，并在 `packages/sdk-java/runtime-broker` 运行 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`。TypeScript suite 校验共享 fixtures、schema 变异用例、gate 精确放行与真实工具执行；Java suite 消费同一批契约文件。
+在 `packages/cli` 运行 `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts src/serve/managed-runtime-attestation-worker.test.ts src/serve/managed-runtime-tool-worker.test.ts`，并在 `packages/managed-agent-server` 运行 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`。TypeScript suite 校验共享 fixtures、schema 变异用例、gate 精确放行与真实工具执行；Java suite 消费同一批契约文件。
 
 ### 4.1 Java transport
 
@@ -77,7 +77,7 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 超过对应路由上限的请求在发送前被拒绝：`execute` 为 256 KiB，`status` 与 `cancel` 为 16 KiB。响应上限为 1 MiB，且必须带 `no-store` 与 JSON 响应头。解析强制信封、result、error 为封闭对象，协议版本为 2，状态与执行结局属于契约枚举，错误字符串非空，且仅在 settled 时必须携带 result。`lastSequence` 为可选非负整数，仅允许出现在 `status`。`execute` 要求结算并返回 result map；`status` 与 `cancel` 返回校验后的线上 map。共享错误码保持不变，错误消息标明操作与适用上限。服务端失败可重试，其他 HTTP 失败为终态。
 
-在 `packages/sdk-java/runtime-broker` 运行 `mvn test` 和 `mvn checkstyle:check`。HTTP fixture 回放验证 canonical 请求、成功与 unknown 应答、畸形 reference 和响应、逐路由请求上限，以及超过 16 KiB 直至 1 MiB 的工具结果。下文描述的 worker 处理器已提供这些路由。
+在 `packages/managed-agent-server` 运行 `mvn test` 和 `mvn checkstyle:check`。HTTP fixture 回放验证 canonical 请求、成功与 unknown 应答、畸形 reference 和响应、逐路由请求上限，以及超过 16 KiB 直至 1 MiB 的工具结果。下文描述的 worker 处理器已提供这些路由。
 
 ## 5. 后续工作
 

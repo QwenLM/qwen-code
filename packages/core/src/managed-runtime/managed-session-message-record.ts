@@ -25,7 +25,7 @@ import {
 // outbox entry and the target's `inbound` record is the receipt, both keyed
 // by the same `messageId`. The shared fixtures in
 // contracts/managed-session-message-record-v1.fixtures.json pin it, and
-// ManagedSessionMessageRecords in packages/sdk-java/managed-agent-server
+// ManagedSessionMessageRecords in packages/managed-agent-server
 // replays the same cases. See
 // docs/design/2026-10-09-managed-session-messages.md.
 
