@@ -376,28 +376,28 @@ Java/MySQL、Harness、Broker 和 Runtime 操作；model fixture 计数请求与
 控制准确的崩溃边界。该 fixture 足以证明编排，不等于真实 provider 验收。先仅
 替换 Harness，保留 Spring 与生产 lease/timeout；另行在 Linux 替换两侧 owner。
 
-| 门禁                                                     | 必须观测到的结果                                                                                                                          |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| A1 requested approval → Allow / Deny                     | Action/input/decision 身份相同；Allow 派发一次，Deny 对该调用派发零次；原 Turn 结算，后续 Turn 完成。                                     |
-| A2 Cancel / expiry / 无浏览器                            | deadline 不重置；等待关闭，一个取消终态及真实配对记录；所有权结算后 `close 202` 与下一 Turn 成功。                                        |
-| A3 混合调用与输入改写                                    | 先前决定保留；待付 sibling ID/顺序恢复；再次批准的输入不继承早期 Allow；已完成 Hook 不重跑。                                              |
-| A4 决定/load 响应丢失                                    | 原 response operation/key 结算一次；只有一个 driver，不新建审批；重放不重复副作用。                                                       |
-| A5 决定、wait 推进、最终计划、prepare 与结果提交后的崩溃 | 各 barrier 恢复正确阶段；最终改写计划、原 ID 与 Runtime status 证据优先于最初审批 descriptor。                                            |
-| A5a 部分 prepare / 缺失 intent                           | 按原 ID/digest 对账原生预留；完整批次 checkpoint 先于 dispatch/G1。冲突阻塞，不分配替代 ID、不重复文件副作用。                            |
-| A6 MCP/Hook/child 不确定性                               | 缺失或未知 producer 证据阻塞；不重新创建外部调用，不静默释放 Workspace lease。                                                            |
-| B1 首轮，有/无工具                                       | 只有一个原 admission 和 user record；新推理 attempt 可以完成；无工具不需要 Broker dispatch。                                              |
-| B2 streamed prefix 与两次替换                            | 新 attempt/stream 身份；新 delta 前持久撤回；live view、reload、replay 只保留存活答案和一个终态。                                         |
-| B3 先前工具之后                                          | 使用保存的 results/history；各先前 execution 一次；轮数和成本 budget 不重置。                                                             |
-| B3a Finished 与持久输出                                  | 流 Finished 后、assistant commit 前崩溃，可在证据完整时重发；assistant commit 后崩溃不再推理。不能用 attempt 状态名称证明输出持久性。     |
-| B4 已提交 assistant call 输出                            | 不跨过未付调用重发模型；驱动保存的 approval/batch 或既有 Runtime recovery。                                                               |
-| B5 snapshot 故障、pin 漂移与取消                         | ref 缺失/损坏/过大/外部或 config/authorization 漂移不产生新副作用；Store 故障重试；取消阻止新派发。                                       |
-| B6 fallback / reactive compaction                        | 规范化参数改变时发送前建立新 snapshot/attempt；等价重试复用快照。saved-request 重发不重新准备或注入 context，逻辑轮 budget 保留。         |
-| C1 终态已提交但未投递                                    | boot/epoch 改变，已消费 cursor 不动；终态重放一次；模型/工具调用零次。                                                                    |
-| C2 checkpoint 可偿付但缺少终态                           | 崩溃/丢响应下补偿一次；证据损坏时不发明结果。                                                                                             |
-| C3 清理失败后再次崩溃                                    | 原清理身份仍可发现且 fenced；重试清偿；已完成 Turn 仍为已完成。                                                                           |
-| C4 原 admission 响应丢失                                 | 对账原 command/prompt，不再次准入；重放原 admission watermark。                                                                           |
-| R1 冻结旧 writer / 不支持的 engine                       | 旧 writer 不能 append/dispatch；保留类型化 engine 拒绝与不回放 Legacy。这不认证存活旧 Spring 的 binding fencing。                         |
-| R2 新旧 reader 与 storage bundle                         | v1/v2 与旧 model attempt 保持可读并如实拒绝；门槛拒绝不兼容 acquire、renew、读取、写入与重放，包括旧 token；bundle/restore 引用闭包通过。 |
+| 门禁                                                     | 必须观测到的结果                                                                                                                                                             |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1 requested approval → Allow / Deny                     | Action/input/decision 身份相同；Allow 派发一次，Deny 对该调用派发零次；原 Turn 结算，后续 Turn 完成。                                                                        |
+| A2 Cancel / expiry / 无浏览器                            | deadline 不重置；等待关闭，一个取消终态及真实配对记录；所有权结算后 `close 202` 与下一 Turn 成功。                                                                           |
+| A3 混合调用与输入改写                                    | 先前决定保留；待付 sibling ID/顺序恢复；再次批准的输入不继承早期 Allow；已完成 Hook 不重跑。                                                                                 |
+| A4 决定/load 响应丢失                                    | 原 response operation/key 结算一次；只有一个 driver，不新建审批；重放不重复副作用。                                                                                          |
+| A5 决定、wait 推进、最终计划、prepare 与结果提交后的崩溃 | 各 barrier 恢复正确阶段；最终改写计划、原 ID 与 Runtime status 证据优先于最初审批 descriptor。                                                                               |
+| A5a 部分 prepare / 缺失 intent                           | 按原 ID/digest 对账原生预留；完整批次 checkpoint 先于 dispatch/G1。冲突阻塞，不分配替代 ID、不重复文件副作用。                                                               |
+| A6 MCP/Hook/child 不确定性                               | 缺失或未知 producer 证据阻塞；不重新创建外部调用，不静默释放 Workspace lease。                                                                                               |
+| B1 首轮，有/无工具                                       | 只有一个原 admission 和 user record；新推理 attempt 可以完成；无工具不需要 Broker dispatch。                                                                                 |
+| B2 streamed prefix 与两次替换                            | 新 attempt/stream 身份；新 delta 前持久撤回；live view、reload、replay 只保留存活答案和一个终态。                                                                            |
+| B3 先前工具之后                                          | 使用保存的 results/history；各先前 execution 一次；轮数和成本 budget 不重置。                                                                                                |
+| B3a Finished 与持久输出                                  | 流 Finished 后、assistant commit 前崩溃，可在证据完整时重发；assistant commit 后崩溃不再推理。不能用 attempt 状态名称证明输出持久性。                                        |
+| B4 已提交 assistant call 输出                            | 不跨过未付调用重发模型；驱动保存的 approval/batch 或既有 Runtime recovery。                                                                                                  |
+| B5 snapshot 故障、pin 漂移与取消                         | ref 缺失/损坏/过大/外部或 config/authorization 漂移不产生新副作用；Store 故障重试；取消阻止新派发。                                                                          |
+| B6 fallback / reactive compaction                        | 规范化参数改变时发送前建立新 snapshot/attempt；等价重试复用快照。saved-request 重发不重新准备或注入 context，逻辑轮 budget 保留。                                            |
+| C1 终态已提交但未投递                                    | boot/epoch 改变，已消费 cursor 不动；终态重放一次；模型/工具调用零次。                                                                                                       |
+| C2 checkpoint 可偿付但缺少终态                           | 崩溃/丢响应下补偿一次；证据损坏时不发明结果。                                                                                                                                |
+| C3 清理失败后再次崩溃                                    | 原清理身份仍可发现且 fenced；重试清偿；已完成 Turn 仍为已完成。                                                                                                              |
+| C4 原 admission 响应丢失                                 | 对账原 command/prompt，不再次准入；重放原 admission watermark。                                                                                                              |
+| R1 冻结旧 writer / 不支持的 engine                       | 旧 writer 不能 append/dispatch；保留类型化 engine 拒绝与不回放 Legacy。冻结控制面支路（可替换 Harness 设计 D11）覆盖醒来的旧 Spring 的过期 claim；两个存活控制面仍不受支持。 |
+| R2 新旧 reader 与 storage bundle                         | v1/v2 与旧 model attempt 保持可读并如实拒绝；门槛拒绝不兼容 acquire、renew、读取、写入与重放，包括旧 token；bundle/restore 引用闭包通过。                                    |
 
 每个物理/工具断言都检查实际文件、SQL execution 行、journal ID 和 model fixture
 流量。删除 dispatch-count、cursor 或 next-Turn 断言必须让门禁失败；HTTP 200
@@ -414,7 +414,7 @@ Allow 保留原 Action、prepare key、request digest 和 Runtime binding，产�
 
 集成回归证明：模型请求准备失败时，普通 prompt 路由和 wake driver 均保留已准入、未结算的输入；渠道中断结算仅在终态与 file-history 退役之后确认原清理 owner。首次释放失败时保留清理 fence，随后 passive resident attachment 释放相同 binding/generation，只新增一次确认，不重复终态。独立 Spring/H2 probe 通过有界撤回与 replay floor 的组合：snapshot 重建期间 reader 保持可用，覆盖范围追平后旧 cursor 再次过期。这项 probe 不属于 MySQL 或进程接管验收。
 
-机器可读报告、manifest 和保留的失败诊断位于 `.qwen/investigations/g3-step3-implementation/`，当前汇总报告为 `packaged-verification.md`。这五种打包门禁不证明上述整个矩阵。首个无工具请求崩溃、两次替换、部分 prepare 崩溃、响应丢失、损坏/外部 ref、快照超限与清理崩溃，仅有定向测试或故障探针覆盖，或仍属于更广的打包验收工作。两侧 owner 重启、真实 provider、真实混版本集群和 Q2 旧控制面 fencing 仍独立处理。
+机器可读报告、manifest 和保留的失败诊断位于 `.qwen/investigations/g3-step3-implementation/`，当前汇总报告为 `packaged-verification.md`。这五种打包门禁不证明上述整个矩阵。自[可替换 Harness 设计 D11](2026-10-02-hosted-replaceable-harness.zh-CN.md#d11--残留门禁step-3-进-ci模型轮支路q2-的-binding-半边) 起，它们是 Hosted MySQL CI 任务的步骤（该任务何时执行到它们见 D11）；同一任务里还有一条模型轮支路，把无工具 Session 的 B1 与 B2 的主要观察项做成打包门禁，但不覆盖它们的 attempt 与 stream 身份、实时 SSE 视图以及准入次数。部分 prepare 崩溃、响应丢失、损坏/外部 ref、快照超限与清理崩溃，仅有定向测试或故障探针覆盖，或仍属于更广的打包验收工作。两侧 owner 重启、真实 provider 和真实混版本集群仍独立处理。Q2 的 binding 半边有 D11 的冻结控制面支路覆盖醒来的旧 Spring 的过期 claim，并有 store 测试钉住 bind 守卫；两个存活控制面仍属后续阶段。
 
 ## 10. 实现范围
 

@@ -23,7 +23,7 @@ import {
 // record lives in the parent Session's journal, one chain per child run, and
 // projects no task. The shared fixtures in
 // contracts/managed-child-acceptance-record-v1.fixtures.json pin it, and
-// ManagedExtensionRecords in packages/sdk-java/managed-agent-server replays
+// ManagedExtensionRecords in packages/managed-agent-server replays
 // the same cases. See docs/design/2026-10-06-managed-child-agent-runtime.md.
 
 /** The body of a `managed-child_acceptance` schema version 1 record. */
