@@ -9243,6 +9243,9 @@ export function App({
   const showFallbacksDialogRef = useRef(showFallbacksDialog);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
+  useEffect(() => {
+    if (managedMode && showApprovalModeDialog) setShowApprovalModeDialog(false);
+  }, [managedMode, showApprovalModeDialog]);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
@@ -13540,6 +13543,7 @@ export function App({
 
   const setComposerMode = useCallback(
     async (modeId: string, planMode: boolean): Promise<boolean> => {
+      if (managedModeRef.current) return false;
       if (modeTransitionRef.current?.owner.isCurrent()) return false;
       if (sessionWriteBlocked) return false;
       if (!isDaemonApprovalMode(modeId) || modeId === 'plan') {
@@ -13569,6 +13573,7 @@ export function App({
         setPlanExecutionMode(executionModeRef.current);
         const approval = pendingApprovalRef.current;
         if (
+          !managedModeRef.current &&
           !planMode &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
@@ -20663,7 +20668,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {showApprovalModeDialog && (
+          {!managedMode && showApprovalModeDialog && (
             <DialogShell
               title={t('mode.select')}
               size="sm"
