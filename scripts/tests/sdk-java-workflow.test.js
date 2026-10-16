@@ -930,25 +930,30 @@ describe('Java SDK release validation gate', () => {
 // An ECS host keeps ~/.m2 between jobs, and setup-java's post-job save tars
 // that whole shared repository before reserving the key: 14 to 37 minutes per
 // job on 2026-10-16, discarded when a parallel job wins the reservation.
+//
+// The corpus is derived, not listed: a lane joins the pool with a one-line
+// runs-on ternary (3bddf6e0bb moved three), and a closed file list stays
+// green through exactly that move. Only pool-capable lanes are pinned — a
+// hosted-literal runs-on never lands there, so release-sdk-java.yml keeps
+// cache: 'maven' and mobile-shell.yml declares no cache at all.
 describe('setup-java Maven cache stays on hosted runners', () => {
   const hostedOnly =
     "${{ runner.environment == 'github-hosted' && 'maven' || '' }}";
-  const files = [
-    '.github/workflows/sdk-java.yml',
-    '.github/workflows/release-managed-agent-reference.yml',
-  ];
-  const sites = files.flatMap((file) =>
+  const sites = globSync('.github/workflows/*.{yml,yaml}').flatMap((file) =>
     Object.entries(parse(readFileSync(file, 'utf8')).jobs).flatMap(
       ([name, job]) =>
         (job.steps ?? [])
           .filter((s) => String(s.uses ?? '').startsWith('actions/setup-java'))
-          .map((s) => [`${file} ${name}`, s]),
+          .map((s) => [`${file} ${name}`, s, job['runs-on']]),
     ),
   );
-  it('finds every setup-java step', () => {
-    expect(sites.length).toBe(7);
+  const poolCapable = sites.filter(([, , runsOn]) =>
+    String(runsOn ?? '').includes('self-hosted'),
+  );
+  it('finds every pool-capable setup-java step', () => {
+    expect(poolCapable.length).toBe(4);
   });
-  it.each(sites)('%s caches Maven only on hosted runners', (_, step) => {
+  it.each(poolCapable)('%s caches Maven only on hosted runners', (_, step) => {
     expect(step.with?.cache).toBe(hostedOnly);
   });
 });
