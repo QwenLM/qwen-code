@@ -117,8 +117,19 @@ pub fn walk_tree_bounded(
     max_elements: Option<usize>,
     max_depth: Option<usize>,
 ) -> AtspiTreeResult {
+    walk_tree_bounded_with_timeout(pid, xid, query, max_elements, max_depth, native::OP_TIMEOUT)
+}
+
+pub fn walk_tree_bounded_with_timeout(
+    pid: u32,
+    xid: u64,
+    query: Option<&str>,
+    max_elements: Option<usize>,
+    max_depth: Option<usize>,
+    timeout: std::time::Duration,
+) -> AtspiTreeResult {
     let mut native_failure = None;
-    match walk_with_cold_start_retries(native::OP_TIMEOUT, |remaining| {
+    match walk_with_cold_start_retries(timeout, |remaining| {
         native::walk_tree_bounded_with_timeout(pid, xid, max_elements, max_depth, remaining)
     }) {
         Ok(Some(walked)) if !walked.markdown.is_empty() => {

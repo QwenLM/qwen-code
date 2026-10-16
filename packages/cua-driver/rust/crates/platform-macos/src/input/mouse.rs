@@ -295,9 +295,7 @@ fn click_at_xy_inner(
                 CGMouseButton::Left,
             )
             .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(down) failed"))?;
-            if flags != CGEventFlags::CGEventFlagNull {
-                down.set_flags(flags);
-            }
+            down.set_flags(flags);
 
             post_mouse_event(
                 pid,
@@ -321,9 +319,7 @@ fn click_at_xy_inner(
                 CGMouseButton::Left,
             )
             .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(up) failed"))?;
-            if flags != CGEventFlags::CGEventFlagNull {
-                up.set_flags(flags);
-            }
+            up.set_flags(flags);
 
             post_mouse_event(
                 pid,
@@ -435,9 +431,7 @@ pub fn click_at_xy_chromium(
         }
         set(58, click_group_id); // click-group ID (gesture coalescing)
         crate::input::skylight::set_window_location(ptr, local.0, local.1);
-        if flags != CGEventFlags::CGEventFlagNull {
-            event.set_flags(flags);
-        }
+        event.set_flags(flags);
     };
 
     // Belt+suspenders: SkyLight path for Chromium/Catalyst + public API for AppKit.
@@ -641,9 +635,7 @@ where
     let from_pt = CGPoint::new(from_x, from_y);
     let down = CGEvent::new_mouse_event(source.clone(), down_type, from_pt, cg_button)
         .map_err(|_| anyhow::anyhow!("drag mouseDown failed"))?;
-    if flags != CGEventFlags::CGEventFlagNull {
-        down.set_flags(flags);
-    }
+    down.set_flags(flags);
     post_mouse_event(
         pid,
         &down,
@@ -668,9 +660,7 @@ where
         let drag_pt = CGPoint::new(ix, iy);
         let drag = CGEvent::new_mouse_event(source.clone(), dragged_type, drag_pt, cg_button)
             .map_err(|_| anyhow::anyhow!("drag mouseDragged failed"))?;
-        if flags != CGEventFlags::CGEventFlagNull {
-            drag.set_flags(flags);
-        }
+        drag.set_flags(flags);
         post_mouse_event(pid, &drag, il, wid, click_group_id, 1, button_number, 0);
         observe(ix, iy);
         if step_delay_ms > 0 {
@@ -685,9 +675,7 @@ where
     let to_pt = CGPoint::new(to_x, to_y);
     let up = CGEvent::new_mouse_event(source.clone(), up_type, to_pt, cg_button)
         .map_err(|_| anyhow::anyhow!("drag mouseUp failed"))?;
-    if flags != CGEventFlags::CGEventFlagNull {
-        up.set_flags(flags);
-    }
+    up.set_flags(flags);
     post_mouse_event(pid, &up, to_local, wid, click_group_id, 1, button_number, 0);
     if foreground_release {
         // A frontmost Chromium surface can consume PID-routed down/move
@@ -816,9 +804,7 @@ where
         cg_button,
     )
     .map_err(|_| anyhow::anyhow!("foreground drag mouseDown failed"))?;
-    if flags != CGEventFlags::CGEventFlagNull {
-        down.set_flags(flags);
-    }
+    down.set_flags(flags);
     down.set_integer_value_field(core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE, 1);
     down.post(CGEventTapLocation::HID);
     std::thread::sleep(std::time::Duration::from_millis(16));
@@ -830,9 +816,7 @@ where
         let event =
             CGEvent::new_mouse_event(source.clone(), dragged_type, CGPoint::new(x, y), cg_button)
                 .map_err(|_| anyhow::anyhow!("foreground drag mouseDragged failed"))?;
-        if flags != CGEventFlags::CGEventFlagNull {
-            event.set_flags(flags);
-        }
+        event.set_flags(flags);
         event.set_integer_value_field(core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE, 1);
         post(&event);
         observe(x, y);
@@ -843,9 +827,7 @@ where
 
     let up = CGEvent::new_mouse_event(source, up_type, CGPoint::new(to_x, to_y), cg_button)
         .map_err(|_| anyhow::anyhow!("foreground drag mouseUp failed"))?;
-    if flags != CGEventFlags::CGEventFlagNull {
-        up.set_flags(flags);
-    }
+    up.set_flags(flags);
     up.set_integer_value_field(core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE, 1);
     post(&up);
     // The foreground wrapper restores the previous app immediately after this
@@ -904,9 +886,7 @@ fn middle_click_at_xy_inner(
         CGMouseButton::Center,
     )
     .map_err(|_| anyhow::anyhow!("middle mouse down failed"))?;
-    if flags != CGEventFlags::CGEventFlagNull {
-        down.set_flags(flags);
-    }
+    down.set_flags(flags);
     post_mouse_event(pid, &down, window_local, None, None, 1, 2, 3);
     std::thread::sleep(std::time::Duration::from_millis(16));
 
@@ -917,9 +897,7 @@ fn middle_click_at_xy_inner(
         CGMouseButton::Center,
     )
     .map_err(|_| anyhow::anyhow!("middle mouse up failed"))?;
-    if flags != CGEventFlags::CGEventFlagNull {
-        up.set_flags(flags);
-    }
+    up.set_flags(flags);
     post_mouse_event(pid, &up, window_local, None, None, 1, 2, 3);
 
     Ok(())
@@ -985,9 +963,7 @@ fn right_click_at_xy_inner(
         CGMouseButton::Right,
     )
     .map_err(|_| anyhow::anyhow!("right mouse down failed"))?;
-    if flags != CGEventFlags::CGEventFlagNull {
-        down.set_flags(flags);
-    }
+    down.set_flags(flags);
     // button_number = 1 (right). Stamping 0 here routes the event as a left
     // button-number on the receiving side even though the type is rightMouseDown.
     post_mouse_event(pid, &down, window_local, wid, click_group_id, 1, 1, 3);
@@ -1000,9 +976,7 @@ fn right_click_at_xy_inner(
         CGMouseButton::Right,
     )
     .map_err(|_| anyhow::anyhow!("right mouse up failed"))?;
-    if flags != CGEventFlags::CGEventFlagNull {
-        up.set_flags(flags);
-    }
+    up.set_flags(flags);
     post_mouse_event(pid, &up, window_local, wid, click_group_id, 1, 1, 3);
 
     Ok(())

@@ -900,7 +900,6 @@ fn map_x11_overlay_with_empty_input(
         &[],
     )?
     .check()?;
-    conn.map_window(win)?.check()?;
     conn.flush()?;
     Ok(())
 }
@@ -1092,6 +1091,7 @@ fn run_overlay_thread(cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
         return;
     }
     let paint_target = X11PaintTarget {
+        mapped: std::cell::Cell::new(false),
         win,
         root,
         depth,
@@ -1521,6 +1521,7 @@ struct X11PaintTile {
 /// inputs grow.
 #[cfg(target_os = "linux")]
 struct X11PaintTarget {
+    mapped: std::cell::Cell<bool>,
     win: u32,
     root: u32,
     depth: u8,
@@ -2446,6 +2447,16 @@ fn paint_x11_tiles(
     )?;
     if checked_requests {
         shape_cookie.check()?;
+    }
+
+    let should_map = !visible_shape.is_empty();
+    if should_map != target.mapped.get() {
+        if should_map {
+            conn.map_window(target.win)?.check()?;
+        } else {
+            conn.unmap_window(target.win)?.check()?;
+        }
+        target.mapped.set(should_map);
     }
 
     // Phase D — upload. A composited buffer covers the whole tile rect; pixels

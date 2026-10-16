@@ -197,22 +197,26 @@ pub(crate) fn probe_a11y_bus() -> bool {
         Err(_) => return false,
     };
     rt.block_on(async {
-        let bus = match zbus::Connection::session().await {
-            Ok(b) => b,
-            Err(_) => return false,
-        };
-        let proxy = match zbus::fdo::DBusProxy::new(&bus).await {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        // `name_has_owner` is the cheap direct existence check — avoids
-        // pulling the entire session-bus name registry just to look up one
-        // entry.
-        let bus_name = match "org.a11y.Bus".try_into() {
-            Ok(n) => n,
-            Err(_) => return false,
-        };
-        proxy.name_has_owner(bus_name).await.unwrap_or(false)
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let bus = match zbus::Connection::session().await {
+                Ok(b) => b,
+                Err(_) => return false,
+            };
+            let proxy = match zbus::fdo::DBusProxy::new(&bus).await {
+                Ok(p) => p,
+                Err(_) => return false,
+            };
+            // `name_has_owner` is the cheap direct existence check — avoids
+            // pulling the entire session-bus name registry just to look up one
+            // entry.
+            let bus_name = match "org.a11y.Bus".try_into() {
+                Ok(n) => n,
+                Err(_) => return false,
+            };
+            proxy.name_has_owner(bus_name).await.unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
     })
 }
 

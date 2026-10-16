@@ -22,6 +22,7 @@ pub struct CachedSnapshot {
 
 #[derive(Clone)]
 pub struct CachedElement {
+    pub role: String,
     pub element_key: u64,
     pub identity: Option<AtspiIdentity>,
     pub actions: Vec<String>,
@@ -45,6 +46,7 @@ impl ElementCache {
                 Some((
                     node.element_index?,
                     CachedElement {
+                        role: node.role.clone(),
                         element_key: node.element_key,
                         identity: node.identity.clone(),
                         actions: node.actions.clone(),
@@ -75,6 +77,17 @@ impl ElementCache {
             .flatten()
     }
 
+    pub fn get_element_role(&self, pid: u32, xid: u64, idx: usize) -> Option<String> {
+        self.core
+            .with_snapshot(&CacheKey { pid, xid }, |snapshot| {
+                snapshot
+                    .elements
+                    .get(&idx)
+                    .map(|element| element.role.clone())
+            })
+            .flatten()
+    }
+
     pub fn get_element_actions(&self, pid: u32, xid: u64, idx: usize) -> Option<Vec<String>> {
         self.core
             .with_snapshot(&CacheKey { pid, xid }, |snapshot| {
@@ -84,6 +97,12 @@ impl ElementCache {
                     .map(|element| element.actions.clone())
             })
             .flatten()
+    }
+
+    pub fn has_snapshot(&self, pid: u32, xid: u64) -> bool {
+        self.core
+            .with_snapshot(&CacheKey { pid, xid }, |_| true)
+            .unwrap_or(false)
     }
 
     pub fn element_count(&self, pid: u32, xid: u64) -> usize {

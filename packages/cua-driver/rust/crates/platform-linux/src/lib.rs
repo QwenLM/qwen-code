@@ -170,3 +170,29 @@ mod display_detection_tests {
         assert!(!detect_wsl(false, None));
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod test_env {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) struct DisplayOverride(
+        Option<std::ffi::OsString>,
+        std::sync::MutexGuard<'static, ()>,
+    );
+    pub(crate) fn unreachable_x11_display() -> DisplayOverride {
+        let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prior = std::env::var_os("DISPLAY");
+        std::env::set_var("DISPLAY", ":9999999");
+        DisplayOverride(prior, lock)
+    }
+    impl Drop for DisplayOverride {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(prior) => std::env::set_var("DISPLAY", prior),
+                None => std::env::remove_var("DISPLAY"),
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod at_point_policy;

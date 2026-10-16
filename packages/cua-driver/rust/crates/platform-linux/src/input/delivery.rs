@@ -31,11 +31,7 @@ impl DeliveryMode {
 
     /// Parse from a tool's JSON args, reading the `delivery_mode` field.
     pub fn from_args(args: &Value) -> Self {
-        if args.get("app_context").and_then(Value::as_bool) == Some(true) {
-            Self::Foreground
-        } else {
-            Self::parse(args.get("delivery_mode").and_then(|v| v.as_str()))
-        }
+        Self::parse(args.get("delivery_mode").and_then(|v| v.as_str()))
     }
 
     pub fn is_foreground(self) -> bool {
@@ -107,6 +103,7 @@ pub fn background_unavailable_error(
     ))
     .with_structured(serde_json::json!({
         "code": reason.code(),
+        "sent": false,
         "detail": detail,
         "suggestion": "Retry this action with delivery_mode:\"foreground\".",
         "escalation": {

@@ -13,15 +13,15 @@
 //! ordered set.
 
 use std::cell::Cell;
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use atspi::connection::{AccessibilityConnection, P2P};
 use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
 use atspi::{CoordType, Interface, State, StateSet};
+use atspi_connection::AccessibilityConnection;
 
 use super::{AtspiIdentity, AtspiNode};
 
@@ -354,25 +354,6 @@ async fn accessible_for<'a>(
     conn: &'a AccessibilityConnection,
     oref: &RawObjectRef,
 ) -> Result<AccessibleProxy<'a>> {
-    // Keep the atspi crate's peer-to-peer path when this connection actually
-    // knows the peer. Late WebKit WebProcess children are not in the initial
-    // peer snapshot; object_as_accessible's bus fallback omits their destination
-    // and targets the Accessible interface name instead. Build an explicit bus
-    // proxy below for those late peers and for well-known references.
-    if oref.name.starts_with(':') {
-        let name = atspi::zbus::names::UniqueName::try_from(oref.name.clone())
-            .map_err(|e| anyhow!("bad a11y unique name: {e}"))?;
-        let bus_name = atspi::zbus::names::BusName::Unique(name.as_ref());
-        if conn.get_peer(&bus_name).is_some() {
-            let path = atspi::zbus::zvariant::ObjectPath::try_from(oref.path.clone())
-                .map_err(|e| anyhow!("bad a11y path: {e}"))?;
-            let object = atspi::ObjectRef::new_owned(name, path);
-            return conn
-                .object_as_accessible(&object)
-                .await
-                .map_err(|e| anyhow!("AccessibleProxy build failed: {e}"));
-        }
-    }
     AccessibleProxy::builder(conn.connection())
         .cache_properties(atspi::zbus::proxy::CacheProperties::No)
         .destination(oref.name.clone())
@@ -415,6 +396,31 @@ async fn canonical_unique_owner(
         .await
         .and_then(Result::ok)
         .map(|owner| owner.to_string())
+}
+
+async fn raw_children(
+    conn: &atspi::zbus::Connection,
+    oref: &RawObjectRef,
+) -> Result<Vec<RawObjectRef>> {
+    let proxy = atspi::zbus::Proxy::new(
+        conn,
+        oref.name.as_str(),
+        oref.path.as_str(),
+        "org.a11y.atspi.Accessible",
+    )
+    .await
+    .map_err(|e| anyhow!("Accessible proxy unavailable: {e}"))?;
+    let refs: Vec<(String, atspi::zbus::zvariant::OwnedObjectPath)> = proxy
+        .call("GetChildren", &())
+        .await
+        .map_err(|e| anyhow!("Accessible.GetChildren failed: {e}"))?;
+    Ok(refs
+        .into_iter()
+        .map(|(name, path)| RawObjectRef {
+            name,
+            path: path.to_string(),
+        })
+        .collect())
 }
 
 /// Read one child without deserializing the bus-name field as a
@@ -860,6 +866,14 @@ async fn collect_visited_until<'a>(
     )))
 }
 
+fn first_application_walk(pid: u32) -> bool {
+    static PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+    PIDS.get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(pid)
+}
+
 async fn collect_visited_into<'a>(
     conn: &'a AccessibilityConnection,
     pid: u32,
@@ -878,6 +892,9 @@ async fn collect_visited_into<'a>(
         Some(a) => a,
         None => return Ok(false),
     };
+    if first_application_walk(pid) {
+        let _ = call(app.get_attributes()).await;
+    }
     let zconn = conn.connection();
     let dbus = atspi::zbus::fdo::DBusProxy::new(zconn)
         .await
@@ -1142,7 +1159,7 @@ async fn collect_visited_into<'a>(
                             .map(format_value);
                     }
                 }
-                if has_text {
+                if has_text && !role.to_ascii_lowercase().contains("password") {
                     if let Some(Ok(tp)) = call(proxies.text()).await {
                         let count = call(tp.character_count()).await.and_then(|r| r.ok());
                         if let Some(count) = count {
@@ -1167,7 +1184,7 @@ async fn collect_visited_into<'a>(
         if let Some(text) = text_content {
             // Keep editable contents separate from their accessible label so
             // edits (including clearing the field) remain observable.
-            if has_editable {
+            if has_editable && !has_value {
                 value = Some(text);
             } else if name.trim().is_empty() {
                 name = text;
@@ -1646,6 +1663,30 @@ pub fn type_into_editable(pid: u32, text: &str) -> Result<()> {
             }
         },
         || Err(anyhow!("AT-SPI editable lookup timed out for pid {pid}")),
+    ))
+}
+
+/// Insert only into the focused editable of the resolved window. Never search a sibling window.
+pub fn type_into_focused_window(pid: u32, xid: u64, text: &str) -> Result<()> {
+    let attempt = InputAttempt::default();
+    attempt.finish(bounded(
+        async {
+            let conn = shared_connection().await?;
+            let (visited, frame, _) = collect_visited_bounded(conn, pid, xid, None, None)
+                .await?
+                .ok_or_else(|| anyhow!("no AT-SPI application"))?;
+            let frame = frame.ok_or_else(|| anyhow!("window has no exact AT-SPI frame"))?;
+            let target = visited
+                .iter()
+                .find(|node| node.frame_ordinal == frame && node.focused && node.has_editable)
+                .ok_or_else(|| anyhow!("no focused editable in the selected window"))?;
+            if write_into_editable_target(target, text, &attempt).await? {
+                Ok(())
+            } else {
+                Err(anyhow!("focused element does not support insertion"))
+            }
+        },
+        || Err(anyhow!("focused window insertion timed out")),
     ))
 }
 
@@ -2376,9 +2417,13 @@ pub fn perform_action_at_screen_point(
     let result = bounded(
         async {
             let conn = shared_connection().await?;
-            let visited = match collect_visited(conn, pid).await? {
-                Some(v) => v,
-                None => return Ok(None),
+            let (visited, frame, _) =
+                match collect_visited_bounded(conn, pid, xid, None, None).await? {
+                    Some(walked) => walked,
+                    None => return Ok(None),
+                };
+            let Some(frame) = frame else {
+                return Ok(None);
             };
 
             // Reconstruct each indexable element's SCREEN frame the same way
@@ -2397,10 +2442,15 @@ pub fn perform_action_at_screen_point(
             // (element_index, x, y, w, h, is_passive_label) over the SAME indexable
             // list `perform_action`/`get_window_state` use, so the chosen index
             // maps straight back to a verified `element_index` actuation.
-            let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
+            let action_nodes: Vec<&Visited> = visited
+                .iter()
+                .filter(|v| is_indexable(v) && v.frame_ordinal == frame)
+                .collect();
             let mut frames: Vec<(usize, i32, i32, u32, u32, bool)> = Vec::new();
             for (idx, node) in action_nodes.iter().enumerate() {
-                if !node.has_component {
+                if !node.has_component
+                    || crate::at_point_policy::is_top_level_shell_role(&node.role)
+                {
                     continue;
                 }
                 let Some(Ok(proxies)) = call(node.acc.proxies()).await else {
@@ -2429,6 +2479,12 @@ pub fn perform_action_at_screen_point(
                 return Ok(None);
             };
             let target = action_nodes[idx];
+            if matches!(
+                target.role.to_ascii_lowercase().as_str(),
+                "entry" | "text" | "password text" | "combo box" | "editable text"
+            ) {
+                return Ok(None);
+            }
             let Some(chosen) = activation_index(&target.role, &target.actions) else {
                 return Ok(None);
             };
@@ -2501,6 +2557,108 @@ fn select_click_target(
     best_active.or(best_passive).map(|(_, idx)| idx)
 }
 
+const OPTION_SCAN_CAP: usize = 200;
+
+fn is_option_role(role: &str) -> bool {
+    matches!(
+        role.trim().to_ascii_lowercase().as_str(),
+        "menu item" | "check menu item" | "radio menu item" | "list item" | "option"
+    )
+}
+
+/// A combo box's options live in a child menu (GTK) or list (Qt).
+fn is_option_container_role(role: &str) -> bool {
+    matches!(
+        role.trim().to_ascii_lowercase().as_str(),
+        "menu" | "popup menu" | "list" | "list box" | "window"
+    )
+}
+
+/// Index of the option `value` names: an exact match first, then one that
+/// differs only in case or surrounding space.
+pub fn match_option(names: &[String], value: &str) -> Option<usize> {
+    let wanted = value.trim().to_lowercase();
+    let mut found = names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| name.trim().to_lowercase() == wanted);
+    let index = found.next()?.0;
+    found.next().is_none().then_some(index)
+}
+
+struct OptionNode {
+    oref: RawObjectRef,
+    name: String,
+    /// Position among its container's children: the model row of a GTK
+    /// combo box, which its `Selection.SelectChild` takes.
+    index: i32,
+}
+
+/// The options under `oref`: item children, or the items of its popup menu
+/// or list child (one level down), in order.
+async fn list_options(conn: &AccessibilityConnection, oref: &RawObjectRef) -> Vec<OptionNode> {
+    let zconn = conn.connection();
+    let mut options = Vec::new();
+    let Some(Ok(children)) = call(raw_children(zconn, oref)).await else {
+        return options;
+    };
+    for (position, child) in children.into_iter().enumerate() {
+        if options.len() >= OPTION_SCAN_CAP {
+            break;
+        }
+        let Some(Ok(acc)) = call(accessible_for(conn, &child)).await else {
+            continue;
+        };
+        let role = call(acc.get_role_name())
+            .await
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+        if is_option_role(&role) {
+            let name = call(acc.name())
+                .await
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
+            options.push(OptionNode {
+                oref: child,
+                name,
+                index: position as i32,
+            });
+            continue;
+        }
+        if !is_option_container_role(&role) {
+            continue;
+        }
+        let Some(Ok(items)) = call(raw_children(zconn, &child)).await else {
+            continue;
+        };
+        for (index, item) in items.into_iter().enumerate() {
+            if options.len() >= OPTION_SCAN_CAP {
+                break;
+            }
+            let Some(Ok(item_acc)) = call(accessible_for(conn, &item)).await else {
+                continue;
+            };
+            let item_role = call(item_acc.get_role_name())
+                .await
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
+            if !is_option_role(&item_role) {
+                continue;
+            }
+            let name = call(item_acc.name())
+                .await
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
+            options.push(OptionNode {
+                oref: item,
+                name,
+                index: index as i32,
+            });
+        }
+    }
+    options
+}
+
 pub fn set_value(pid: u32, idx: usize, identity: Option<AtspiIdentity>, value: &str) -> Result<()> {
     let attempt = InputAttempt::default();
     attempt.finish(bounded(
@@ -2516,6 +2674,43 @@ pub fn set_value(pid: u32, idx: usize, identity: Option<AtspiIdentity>, value: &
                 .proxies()
                 .await
                 .map_err(|e| anyhow!("interface proxies unavailable: {e}"))?;
+
+            if target.role.trim().eq_ignore_ascii_case("combo box") {
+                let source = RawObjectRef {
+                    name: target.acc.inner().destination().to_string(),
+                    path: target.acc.inner().path().to_string(),
+                };
+                let options = list_options(conn, &source).await;
+                let names = options
+                    .iter()
+                    .map(|option| option.name.clone())
+                    .collect::<Vec<_>>();
+                let index = match_option(&names, value).ok_or_else(|| {
+                    anyhow!(
+                    "not_settable: no unique combo option matching {value:?}; options: {names:?}"
+                )
+                })?;
+                let selection = proxies
+                    .selection()
+                    .await
+                    .map_err(|e| anyhow!("not_settable: Selection unavailable: {e}"))?;
+                attempt.dispatch();
+                if !selection.select_child(options[index].index).await? {
+                    return Err(anyhow!(
+                        "write_not_applied: Selection.SelectChild was refused"
+                    ));
+                }
+                let child = selection.get_selected_child(0).await?;
+                let selected = RawObjectRef::from_atspi(&child)
+                    .ok_or_else(|| anyhow!("write_not_applied: selected option is unavailable"))?;
+                let selected = accessible_for(conn, &selected).await?;
+                if selected.name().await? != options[index].name {
+                    return Err(anyhow!(
+                        "write_not_applied: combo selection readback differs"
+                    ));
+                }
+                return Ok(());
+            }
 
             // SetValue is a focus-free accessibility operation. Do not call
             // Component.GrabFocus here: GTK may activate and raise the entire
@@ -2735,22 +2930,12 @@ fn window_to_screen_offset(pid: u32, xid: u64, _title: Option<&str>) -> Option<(
     Some((ox + fl, oy + ft))
 }
 
-fn screen_extent_rebase(
-    x11_origin: (i32, i32),
-    accessible_frame_origin: (i32, i32),
-) -> Option<(i32, i32)> {
-    // Chromium's broken "Screen" provider is rooted at the renderer-local
-    // origin. A legitimate screen provider may differ from the X11 client
-    // origin by title-bar/CSD extents; rebasing that small decoration delta
-    // would move otherwise-correct GTK coordinates off their controls.
-    if accessible_frame_origin.0.abs() <= 2 && accessible_frame_origin.1.abs() <= 2 {
-        Some((
-            x11_origin.0 - accessible_frame_origin.0,
-            x11_origin.1 - accessible_frame_origin.1,
-        ))
-    } else {
-        None
+fn screen_extent_rebase(x11_origin: (i32, i32), frame: (i32, i32, i32, i32)) -> Option<(i32, i32)> {
+    let (x, y, w, h) = frame;
+    if w <= 0 || h <= 0 {
+        return None;
     }
+    (x.abs() <= 2 && y.abs() <= 2).then_some((x11_origin.0 - x, x11_origin.1 - y))
 }
 
 fn rebase_renderer_window_offset(
@@ -2836,7 +3021,7 @@ async fn element_bounds_for_visited(
                 Some(Ok(proxies)) => match call(proxies.component()).await {
                     Some(Ok(component)) => {
                         match call(component.get_extents(CoordType::Screen)).await {
-                            Some(Ok((x, y, _, _))) => Some((x, y)),
+                            Some(Ok(extents)) => Some(extents),
                             _ => None,
                         }
                     }
@@ -3389,9 +3574,12 @@ mod coord_tests {
 
     #[test]
     fn screen_extents_are_rebased_from_accessible_frame_to_x11_origin() {
-        assert_eq!(screen_extent_rebase((604, 80), (0, 0)), Some((604, 80)));
-        assert_eq!(screen_extent_rebase((604, 100), (604, 80)), None);
-        assert_eq!(screen_extent_rebase((604, 80), (604, 80)), None);
+        assert_eq!(
+            screen_extent_rebase((604, 80), (0, 0, 800, 600)),
+            Some((604, 80))
+        );
+        assert_eq!(screen_extent_rebase((604, 100), (604, 80, 800, 600)), None);
+        assert_eq!(screen_extent_rebase((604, 80), (604, 80, 800, 600)), None);
     }
 
     #[test]

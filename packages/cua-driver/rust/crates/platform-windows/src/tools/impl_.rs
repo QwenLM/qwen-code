@@ -447,6 +447,18 @@ impl Tool for ExactPidWindowTargetGuard {
                 if let Err(result) = exact_window_ownership_result(pid, window_id, owner_pid) {
                     return result;
                 }
+                if matches!(
+                    self.inner.def().name.as_str(),
+                    "click" | "double_click" | "right_click"
+                ) && crate::input::delivery::DeliveryMode::from_args(&args)
+                    == crate::input::delivery::DeliveryMode::Background
+                    && crate::input::delivery::is_tk_target_window(window_id)
+                {
+                    return crate::input::delivery::background_unavailable_error(
+                        window_id,
+                        crate::input::delivery::EventKind::MouseClick,
+                    );
+                }
             }
         }
         self.inner.invoke(args).await
@@ -2630,6 +2642,10 @@ impl Tool for LaunchAppTool {
             // Legacy ShellExecuteExW path — unchanged behavior for plain
             // Win32 apps and for callers passing an explicit `path` /
             // `launch_path`.
+            let launch_token = match crate::standard_user_launch::app_launch_token() {
+                Ok(token) => token,
+                Err(message) => return ToolResult::error(message),
+            };
             let urls_clone = urls.clone();
             let target_for_shell = target_file_opt.clone();
             let extra_for_shell = extra_joined.clone();
@@ -2673,39 +2689,64 @@ impl Tool for LaunchAppTool {
                 });
                 let args_w = to_wide(&extra_for_shell);
 
+                use crate::standard_user_launch::AppLaunchToken;
                 let pid = if direct_minimized_exe {
                     let target = target_for_shell
                         .as_deref()
                         .expect("checked executable path");
-                    let mut command_line = to_wide(&if extra_for_shell.is_empty() {
+                    let command_line_text = if extra_for_shell.is_empty() {
                         format!(r#""{target}""#)
                     } else {
                         format!(r#""{target}" {extra_for_shell}"#)
-                    });
-                    let startup = STARTUPINFOW {
-                        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-                        dwFlags: STARTF_USESHOWWINDOW,
-                        wShowWindow: n_show_for_shell as u16,
-                        ..Default::default()
                     };
-                    let mut process = PROCESS_INFORMATION::default();
-                    unsafe {
-                        CreateProcessW(
-                            PCWSTR(file_w.as_ptr()),
-                            PWSTR(command_line.as_mut_ptr()),
-                            None,
-                            None,
-                            false,
-                            PROCESS_CREATION_FLAGS(0),
-                            None,
-                            PCWSTR::null(),
-                            &startup,
-                            &mut process,
-                        )?;
-                        let _ = CloseHandle(process.hThread);
-                        let _ = CloseHandle(process.hProcess);
+                    if let AppLaunchToken::StandardUser(token) = &launch_token {
+                        crate::standard_user_launch::create_process(
+                            token,
+                            target,
+                            &command_line_text,
+                            n_show_for_shell,
+                        )
+                        .map_err(anyhow::Error::msg)?
+                    } else {
+                        let mut command_line = to_wide(&command_line_text);
+                        let startup = STARTUPINFOW {
+                            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+                            dwFlags: STARTF_USESHOWWINDOW,
+                            wShowWindow: n_show_for_shell as u16,
+                            ..Default::default()
+                        };
+                        let mut process = PROCESS_INFORMATION::default();
+                        unsafe {
+                            CreateProcessW(
+                                PCWSTR(file_w.as_ptr()),
+                                PWSTR(command_line.as_mut_ptr()),
+                                None,
+                                None,
+                                false,
+                                PROCESS_CREATION_FLAGS(0),
+                                None,
+                                PCWSTR::null(),
+                                &startup,
+                                &mut process,
+                            )?;
+                            let _ = CloseHandle(process.hThread);
+                            let _ = CloseHandle(process.hProcess);
+                        }
+                        process.dwProcessId
                     }
-                    process.dwProcessId
+                } else if let AppLaunchToken::StandardUser(token) = &launch_token {
+                    let file = target_for_shell
+                        .as_deref()
+                        .or_else(|| urls_clone.first().map(String::as_str))
+                        .unwrap_or("");
+                    crate::standard_user_launch::shell_execute(
+                        token,
+                        file,
+                        &extra_for_shell,
+                        n_show_for_shell,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .map_err(anyhow::Error::msg)?
                 } else {
                     let mut info = SHELLEXECUTEINFOW {
                         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -2742,6 +2783,16 @@ impl Tool for LaunchAppTool {
                 // `lpFile`, so only their remaining URLs belong here.
                 let first_unopened_url = first_unopened_shell_url_index(target_for_shell.is_some());
                 for url in &urls_clone[first_unopened_url.min(urls_clone.len())..] {
+                    if let AppLaunchToken::StandardUser(token) = &launch_token {
+                        let _ = crate::standard_user_launch::shell_execute(
+                            token,
+                            url,
+                            "",
+                            n_show_for_shell,
+                            std::time::Duration::from_secs(10),
+                        );
+                        continue;
+                    }
                     let file = to_wide(url);
                     let mut url_info = SHELLEXECUTEINFOW {
                         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -3450,6 +3501,7 @@ impl Tool for ClickTool {
             )
             .with_structured(json!({
                 "code": "background_unavailable",
+                "sent": false,
                 "effect": "refused",
                 "escalation": {
                     "recommended": "foreground",
@@ -3576,10 +3628,6 @@ impl Tool for ClickTool {
                     },
                 );
                 let btn_fg = button.clone();
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let mods_owned = modifiers.clone();
                 let activate = delivery == DeliveryMode::Foreground;
                 let send_result = tokio::task::spawn_blocking(move || {
@@ -3595,9 +3643,6 @@ impl Tool for ClickTool {
                     }
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 let half = if want_expand { "dropdown" } else { "press" };
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
@@ -3734,10 +3779,6 @@ impl Tool for ClickTool {
                 };
                 let btn_fg = btn.clone();
                 let mods_owned = modifiers.clone();
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     let mod_refs: Vec<&str> = mods_owned.iter().map(String::as_str).collect();
                     crate::input::send_click_synthesized_active_mods(
@@ -3745,9 +3786,6 @@ impl Tool for ClickTool {
                     )
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Performed SendInput click on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -4056,10 +4094,6 @@ impl Tool for ClickTool {
             // background-safe and would deliver the click without the
             // foreground swap the caller asked for).
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let mods_owned = modifiers.clone();
                 let send_result = tokio::task::spawn_blocking(move || {
                     let mod_refs: Vec<&str> = mods_owned.iter().map(String::as_str).collect();
@@ -4068,9 +4102,6 @@ impl Tool for ClickTool {
                     )
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => {
                         let click_word = match count {
@@ -4161,14 +4192,22 @@ impl Tool for ClickTool {
                     )
                 })
                 .await
-                .unwrap_or(false);
-                if invoked {
+                .unwrap_or(crate::uia::windows_enum::PointInvokeOutcome::Timeout);
+                if invoked == crate::uia::windows_enum::PointInvokeOutcome::Invoked {
                     return ToolResult::text(format!(
                         "✅ Performed UIA Invoke at ({sx},{sy}) for pid {pid}."
                     ))
                     .with_structured(
                         json!({ "path": "ax", "verified": false, "effect": "unverifiable" }),
                     );
+                }
+                if !matches!(
+                    invoked,
+                    crate::uia::windows_enum::PointInvokeOutcome::Miss
+                        | crate::uia::windows_enum::PointInvokeOutcome::Unavailable
+                ) {
+                    return ToolResult::error("UIA point action timed out or is busy; no second click was sent; observe before retrying")
+                        .with_structured(json!({"code":"uia_input_unconfirmed","sent":true}));
                 }
             }
 
@@ -6384,6 +6423,20 @@ impl Tool for SetValueTool {
             };
             let elem: IUIAutomationElement =
                 unsafe { IUIAutomationElement::from_raw(ptr as *mut _) };
+            let combo = unsafe { elem.CurrentNativeWindowHandle() }
+                .ok()
+                .and_then(|native| crate::win32::combo::combo_for_window(native.0 as isize));
+            if let Some(combo) = combo {
+                let result = crate::win32::combo::set_value(combo, &value).and_then(|write| {
+                    if crate::win32::combo::write_verified(&write, &value) {
+                        Ok("Win32Combo".to_owned())
+                    } else {
+                        anyhow::bail!("write_not_applied: combo selection readback did not match")
+                    }
+                });
+                std::mem::forget(elem);
+                return result;
+            }
             // Try ValuePattern first (text inputs, editable combos, etc).
             // The SetValue is shielded by the EnableWindow bypass: a
             // Chromium/Electron (or XAML) SetValue handler self-foregrounds via
@@ -6778,7 +6831,7 @@ impl Tool for ScrollTool {
                     windows::Win32::Foundation::HWND(hwnd as *mut _),
                     "scroll delivery",
                     || Ok(()),
-                    || crate::input::send_wheel_synthesized(cx, cy, ticks, horizontal),
+                    |_, _| crate::input::send_wheel_synthesized(cx, cy, ticks, horizontal),
                 )
             })
             .await;
@@ -7224,17 +7277,10 @@ impl Tool for DoubleClickTool {
             }
             // delivery_mode:"foreground" — route through SendInput at the cached coords.
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     crate::input::send_click_synthesized_active_mods(hwnd, cx, cy, 2, "left", &[])
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent double-click via SendInput on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -7329,10 +7375,6 @@ impl Tool for DoubleClickTool {
             }
             // delivery_mode:"foreground" — SendInput at screen coords with FG swap.
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     crate::input::send_click_synthesized_active_mods(
                         hwnd,
@@ -7344,9 +7386,6 @@ impl Tool for DoubleClickTool {
                     )
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent double-click via SendInput to pid {pid} at screen ({sx_i},{sy_i}) (delivery_mode:foreground)."
@@ -7576,17 +7615,10 @@ impl Tool for RightClickTool {
                 };
             }
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     crate::input::send_click_synthesized_active_mods(hwnd, cx, cy, 1, "right", &[])
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent right-click via SendInput on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -7678,10 +7710,6 @@ impl Tool for RightClickTool {
                 };
             }
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     crate::input::send_click_synthesized_active_mods(
                         hwnd,
@@ -7693,9 +7721,6 @@ impl Tool for RightClickTool {
                     )
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent right-click via SendInput to pid {pid} at screen ({sx_i},{sy_i}) (delivery_mode:foreground)."
@@ -7987,10 +8012,6 @@ impl Tool for DragTool {
         if delivery == DeliveryMode::Foreground {
             let btn_fg = button.clone();
             pin_overlay_above(&cursor_key, hwnd);
-            let foreground_target = crate::win32::capture_foreground_target(hwnd);
-            let prev_fg_addr = unsafe {
-                windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-            };
             let send_result = tokio::task::spawn_blocking(move || {
                 crate::input::mouse::send_drag_synthesized(
                     hwnd,
@@ -8011,9 +8032,6 @@ impl Tool for DragTool {
                 steps,
             );
             let (send_result, ()) = tokio::join!(send_result, visual_drag);
-            if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                return ToolResult::error(error);
-            }
             let button_suffix = if button == "left" {
                 String::new()
             } else {

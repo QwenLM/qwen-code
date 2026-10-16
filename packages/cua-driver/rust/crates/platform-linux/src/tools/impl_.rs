@@ -93,7 +93,56 @@ impl Tool for X11Tool {
             return ToolResult::error(error.to_string())
                 .with_structured(json!({"code": "desktop_unavailable"}));
         }
-        self.0.invoke(args).await
+        let input = matches!(
+            self.def().name.as_str(),
+            "click"
+                | "double_click"
+                | "right_click"
+                | "drag"
+                | "scroll"
+                | "type_text"
+                | "press_key"
+                | "hotkey"
+                | "set_value"
+                | "paste"
+                | "select_text"
+                | "perform_secondary_action"
+                | "invoke_menu"
+        );
+        let desktop = args["scope"] == "desktop";
+        if input && desktop {
+            crate::input::note_intentional_foreground();
+        }
+        let guard = if input
+            && !desktop
+            && !crate::input::delivery::DeliveryMode::from_args(&args).is_foreground()
+        {
+            if let Some(pid) = args["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()) {
+                match crate::input::BackgroundFocusGuard::begin(pid, resolve_cursor_key(&args)) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        return ToolResult::computer_use_error(
+                            "background_unavailable",
+                            format!("Background focus protection could not start: {error}"),
+                            false,
+                        )
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let result = self.0.invoke(args).await;
+        if let Some(guard) = guard {
+            let sent = result
+                .structured_content
+                .as_ref()
+                .is_none_or(|value| value["sent"] != false);
+            guard.finish(sent);
+        }
+        result
     }
 }
 
@@ -918,16 +967,23 @@ impl Tool for GetWindowStateTool {
         let revision_request_for_capture = observation_revision_request.clone();
         let query_for_walk = query.clone();
         let include_accessibility = args["include_accessibility"] != false;
+        let walk_timeout =
+            std::time::Duration::from_millis(if !state.element_cache.has_snapshot(pid, xid) {
+                2000
+            } else {
+                1000
+            });
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let capture = || -> anyhow::Result<_> {
                 let tree_result = if include_accessibility {
-                    let mut tree = crate::atspi::walk_tree_bounded(
+                    let mut tree = crate::atspi::walk_tree_bounded_with_timeout(
                         pid,
                         xid,
                         query_for_walk.as_deref(),
                         max_elements,
                         max_depth,
+                        walk_timeout,
                     );
                     // Compact model observations only. Internal browser setup/consent
                     // matching needs the original label boundaries from the native tree.
@@ -1258,6 +1314,7 @@ impl Tool for GetWindowStateTool {
                     }
                     structured["screenshot_width"] = json!(w);
                     structured["screenshot_height"] = json!(h);
+                    structured["screenshot_frame_valid"] = json!(true);
                     // Surface 7: mirror the MCP image part's `mimeType` onto
                     // the structured payload so consumers don't have to sniff
                     // magic bytes off the base64 to know the format.
@@ -1995,9 +2052,7 @@ fn type_text_ax_result(pid: u32, text_len: usize, route: &str) -> ToolResult {
 fn is_chromium_embedder(pid: u32) -> bool {
     fn argv_is_chromium_helper(p: u32) -> bool {
         match fs::read(format!("/proc/{p}/cmdline")) {
-            Ok(raw) => String::from_utf8_lossy(&raw).split('\0').any(|arg| {
-                arg == "--type=renderer" || arg == "--type=zygote" || arg == "--type=gpu-process"
-            }),
+            Ok(raw) => crate::at_point_policy::cmdline_is_chromium_helper(&raw),
             Err(_) => false,
         }
     }
@@ -2117,26 +2172,39 @@ fn unavailable_webkit_background(
     })
 }
 
+fn background_keyboard_refusal() -> ToolResult {
+    let mut refusal = crate::input::delivery::background_unavailable_error(
+        crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
+    );
+    let available = std::thread::spawn(crate::health_report::probe_a11y_bus)
+        .join()
+        .unwrap_or(false);
+    if !available {
+        refusal.content.push(cua_driver_core::protocol::Content::text(
+            "AT-SPI is unavailable. Start the AT-SPI bus (`/usr/libexec/at-spi-bus-launcher`) or enable accessibility in your desktop settings.",
+        ));
+    }
+    refusal
+}
+
 fn unavailable_webkit_keyboard_background(
     pid: u32,
     delivery: crate::input::delivery::DeliveryMode,
 ) -> Option<ToolResult> {
-    (!delivery.is_foreground() && is_webkitgtk_embedder(pid)).then(|| {
-        crate::input::delivery::background_unavailable_error(
-            crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
-        )
-    })
+    (!delivery.is_foreground()
+        && is_webkitgtk_embedder(pid)
+        && !crate::input::real_keyboard_input_available())
+    .then(background_keyboard_refusal)
 }
 
 fn unavailable_gtk_keyboard_background(
     pid: u32,
     delivery: crate::input::delivery::DeliveryMode,
 ) -> Option<ToolResult> {
-    (!delivery.is_foreground() && is_gtk_process(pid)).then(|| {
-        crate::input::delivery::background_unavailable_error(
-            crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
-        )
-    })
+    (!delivery.is_foreground()
+        && is_gtk_process(pid)
+        && !crate::input::real_keyboard_input_available())
+    .then(background_keyboard_refusal)
 }
 
 fn unavailable_gtk_pointer_background(
@@ -2160,7 +2228,10 @@ fn unavailable_chromium_background(
     pid: u32,
     delivery: crate::input::delivery::DeliveryMode,
 ) -> Option<ToolResult> {
-    if chromium_background_must_refuse(delivery.is_foreground(), is_chromium_embedder(pid)) {
+    if !delivery.is_foreground()
+        && chromium_background_must_refuse(false, is_chromium_embedder(pid))
+        && !crate::input::real_pointer_input_available()
+    {
         Some(crate::input::delivery::background_unavailable_error(
             crate::input::delivery::BackgroundUnavailable::ChromiumInput,
         ))
@@ -2171,6 +2242,50 @@ fn unavailable_chromium_background(
 
 fn chromium_background_must_refuse(foreground: bool, chromium: bool) -> bool {
     chromium && !foreground
+}
+
+fn is_qt5_process(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/maps"))
+        .is_ok_and(|maps| maps.contains("libQt5Gui") || maps.contains("libQt5Widgets"))
+}
+
+async fn mpx_text(args: &Value, xid: u64, text: String) -> ToolResult {
+    let session = resolve_cursor_key(args);
+    match tokio::task::spawn_blocking(move || {
+        crate::input::send_virtual_keyboard_text(&session, xid, &text)
+    })
+    .await
+    {
+        Ok(Ok(report)) if report.skipped_characters.is_empty() => {
+            ToolResult::text("Sent text through the virtual keyboard; observe before retrying.")
+                .with_structured(json!({"path":"mpx_uinput","verified":false}))
+        }
+        Ok(Ok(_)) => ToolResult::computer_use_error(
+            "text_delivery_stalled",
+            "The virtual keyboard could not deliver every character",
+            true,
+        ),
+        Ok(Err(error)) => linux_input_error(error),
+        Err(error) => ToolResult::computer_use_error("operation_failed", error.to_string(), true),
+    }
+}
+
+fn background_key(
+    session: &str,
+    xid: u64,
+    x_y: Option<(i32, i32)>,
+    key: &str,
+    modifiers: &[&str],
+) -> anyhow::Result<()> {
+    if crate::input::real_keyboard_input_available() {
+        crate::input::send_virtual_keyboard_key(session, xid, key, modifiers)?;
+        return Ok(());
+    }
+    if let Some((x, y)) = x_y {
+        crate::input::send_key_at(xid, x, y, key, modifiers)
+    } else {
+        crate::input::send_key(xid, key, modifiers)
+    }
 }
 
 /// Screen-absolute center of a window (top-left from translate_coordinates plus
@@ -2224,7 +2339,7 @@ fn x11_pixel_click_no_focus_steal(
             ) {
                 Ok(()) => return Ok(()),
                 Err(error) if crate::input::is_uinput_unavailable(&error) => return Err(error),
-                Err(e) => tracing::warn!("MPX click fell back to XSendEvent: {e}"),
+                Err(e) => return Err(e),
             }
         }
     }
@@ -2796,10 +2911,16 @@ impl Tool for ClickTool {
 
             // Chromium can execute a genuine AT-SPI action without focus. Try
             // that route before applying its background synthetic-input gate.
-            // An entry's AT-SPI "activate" can submit instead of focusing it.
-            // App clicks use pointer semantics so a subsequent typeText keeps
-            // the insertion point established by this click.
-            if !args.bool_or("app_context", false)
+            let needs_pointer_focus = xid_hint
+                .and_then(|xid| self.state.element_cache.get_element_role(pid, xid, idx))
+                .is_some_and(|role| {
+                    matches!(
+                        role.to_ascii_lowercase().as_str(),
+                        "entry" | "text" | "password text" | "combo box" | "editable text"
+                    )
+                });
+            if !delivery.is_foreground()
+                && !needs_pointer_focus
                 && button == 1
                 && count == 1
                 && modifiers.is_empty()
@@ -2836,6 +2957,15 @@ impl Tool for ClickTool {
                 return refusal;
             }
 
+            if !delivery.is_foreground()
+                && (needs_pointer_focus || !modifiers.is_empty())
+                && (is_gtk_process(pid) || is_webkitgtk_embedder(pid))
+                && !crate::input::real_pointer_input_available()
+            {
+                return crate::input::delivery::background_unavailable_error(
+                    crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
+                );
+            }
             // The AX route was unavailable. Fall back to a target-addressed
             // X11 event for toolkits that accept it.
             let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -2861,6 +2991,10 @@ impl Tool for ClickTool {
                             &modifier_refs,
                         )
                     })
+                } else if modifiers.is_empty() {
+                    x11_pixel_click_no_focus_steal(
+                        &cursor_id, xid2, lx as i32, ly as i32, button, count,
+                    )
                 } else {
                     crate::input::send_click_with_modifiers(
                         xid2,
@@ -2950,13 +3084,25 @@ impl Tool for ClickTool {
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<&'static str> {
             let inject = |fg: bool| -> anyhow::Result<&'static str> {
                 if !fg && button == 1 && count == 1 && modifiers_for_task.is_empty() {
-                    match crate::atspi::perform_action_at_point(pid, xi, yi) {
+                    let (sx, sy) = window_local_to_screen(xid, xi as f64, yi as f64)?;
+                    match crate::atspi::perform_action_at_screen_point(
+                        pid,
+                        xid,
+                        sx.round() as i32,
+                        sy.round() as i32,
+                    ) {
                         Ok(Some(_)) => return Ok("x11_atspi"),
                         Err(error) if crate::atspi::native::input_was_dispatched(&error) => {
                             return Err(error)
                         }
                         _ => {}
                     }
+                }
+                if !fg
+                    && !crate::input::real_pointer_input_available()
+                    && (is_gtk_process(pid) || is_webkitgtk_embedder(pid))
+                {
+                    return Ok("background_unavailable");
                 }
                 if fg {
                     // Foreground: the window is already activated. Deliver a REAL
@@ -3351,7 +3497,8 @@ impl Tool for TypeTextTool {
         // producing the renderer input event, so web embedders use real XTest
         // key events. Native toolkits keep their verifiable AT-SPI path below.
         if delivery.is_foreground()
-            && (resolved_elem_idx.is_some()
+            && (args.bool_or("app_context", false)
+                || resolved_elem_idx.is_some()
                 || is_chromium_embedder(pid)
                 || is_webkitgtk_embedder(pid))
         {
@@ -3399,11 +3546,15 @@ impl Tool for TypeTextTool {
         .await
         .ok()
         .flatten();
+        if focus_kind == Some(false)
+            && !delivery.is_foreground()
+            && crate::input::real_keyboard_input_available()
+        {
+            return mpx_text(&args, xid, text.clone()).await;
+        }
         if focus_kind == Some(false) {
             if !delivery.is_foreground() {
-                return crate::input::delivery::background_unavailable_error(
-                    crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
-                );
+                return background_keyboard_refusal();
             }
             let text_f = text.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -3435,9 +3586,15 @@ impl Tool for TypeTextTool {
 
         // Try AT-SPI EditableText first (focus-free, works for Qt6/GTK4).
         let text_clone = text.clone();
-        let atspi_result =
-            tokio::task::spawn_blocking(move || crate::atspi::type_into_editable(pid, &text_clone))
-                .await;
+        let app_bound = args.bool_or("app_context", false);
+        let atspi_result = tokio::task::spawn_blocking(move || {
+            if app_bound {
+                crate::atspi::native::type_into_focused_window(pid, xid, &text_clone)
+            } else {
+                crate::atspi::type_into_editable(pid, &text_clone)
+            }
+        })
+        .await;
 
         match atspi_result {
             Ok(Ok(())) => {
@@ -3456,17 +3613,28 @@ impl Tool for TypeTextTool {
             }
         }
 
+        if !delivery.is_foreground() && crate::input::real_keyboard_input_available() {
+            return mpx_text(&args, xid, text.clone()).await;
+        }
+
         // Qt5 workaround: send synthetic FocusIn to make Qt5's AT-SPI bridge
         // expose the widget tree, type via AT-SPI, then send FocusOut.
         // This doesn't change the X11 active window, so the test's focus check passes.
         let text_clone2 = text.clone();
         let qt5_result = tokio::task::spawn_blocking(move || {
+            if !is_qt5_process(pid) {
+                return Ok::<_, anyhow::Error>((Err(anyhow::anyhow!("not Qt5")), Ok(())));
+            }
             // Send FocusIn to trigger Qt5's bridge
             crate::input::send_focus_in(xid)?;
             std::thread::sleep(std::time::Duration::from_millis(100));
 
             // Try AT-SPI again now that widgets should be exposed
-            let result = crate::atspi::type_into_editable(pid, &text_clone2);
+            let result = if app_bound {
+                crate::atspi::native::type_into_focused_window(pid, xid, &text_clone2)
+            } else {
+                crate::atspi::type_into_editable(pid, &text_clone2)
+            };
 
             // Restore state with FocusOut
             let restore = crate::input::send_focus_out(xid);
@@ -3491,6 +3659,12 @@ impl Tool for TypeTextTool {
             _ => {
                 // AT-SPI still didn't work. Fall back to X11 XSendEvent.
             }
+        }
+
+        if app_bound {
+            // The legacy fallbacks search every editable or Tk interpreter.
+            // App input must stay in its selected window; foreground XTest is the next rung.
+            return background_keyboard_refusal();
         }
 
         // Track which path the final fallback chain took, so the
@@ -3546,11 +3720,7 @@ impl Tool for TypeTextTool {
                 text_len,
                 &format!("via X11, delivery_mode={mode_label}"),
             ),
-            Ok(Ok("background_unavailable")) => {
-                crate::input::delivery::background_unavailable_error(
-                    crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
-                )
-            }
+            Ok(Ok("background_unavailable")) => background_keyboard_refusal(),
             Ok(Ok(path)) => ToolResult::text(format!(
                 "Typed {text_len} character(s) (via X11, delivery_mode={mode_label})."
             ))
@@ -3744,10 +3914,11 @@ impl Tool for PressKeyTool {
         // click restores the prior top-level before returning.
         let deliver_fg = delivery.is_foreground();
         let identity_for_focus = exact_identity.clone();
+        let session_for_key = resolve_cursor_key(&args);
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             if resolved_element_idx.is_none()
                 && mods.is_empty()
-                && key_for_task.eq_ignore_ascii_case("enter")
+                && matches!(key_for_task.to_ascii_lowercase().as_str(),"enter"|"return"|"kp_enter"|"kpenter"|"numpadenter")
             {
                 if inject_terminal_input(pid, xid, "\n")? {
                     return Ok(());
@@ -3778,11 +3949,7 @@ impl Tool for PressKeyTool {
                     );
                 }
             }
-            if let Some((x, y)) = px_target {
-                crate::input::send_key_at(xid, x, y, &key_for_task, &m)
-            } else {
-                crate::input::send_key(xid, &key_for_task, &m)
-            }
+            background_key(&session_for_key,xid,px_target,&key_for_task,&m)
         })
         .await;
         let mode_label = if deliver_fg {
@@ -4040,6 +4207,7 @@ impl Tool for HotkeyTool {
         };
         let deliver_fg = delivery.is_foreground();
 
+        let session_for_key = resolve_cursor_key(&args);
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let m: Vec<&str> = mods.iter().map(String::as_str).collect();
             // foreground: activate the target first, then inject the accelerator
@@ -4051,11 +4219,7 @@ impl Tool for HotkeyTool {
                     crate::input::send_key_xtest(&key, &m)
                 });
             }
-            if let Some((x, y)) = px_target {
-                crate::input::send_key_at(xid, x, y, &key, &m)
-            } else {
-                crate::input::send_key(xid, &key, &m)
-            }
+            background_key(&session_for_key, xid, px_target, &key, &m)
         })
         .await;
         let mode_label = if deliver_fg {
@@ -4607,7 +4771,7 @@ impl Tool for ScrollTool {
                             Err(error) if crate::input::is_uinput_unavailable(&error) => {
                                 return Err(error)
                             }
-                            Err(e) => tracing::warn!("MPX scroll fell back to XSendEvent: {e}"),
+                            Err(error) => return Err(error),
                         }
                     }
                 }
@@ -5163,6 +5327,7 @@ impl Tool for DragTool {
     }
     async fn invoke(&self, args: Value) -> ToolResult {
         let cursor_id = resolve_cursor_key(&args);
+        let drag_modifiers: Vec<String> = args.str_array("modifier");
         if args.opt_str("scope").as_deref() == Some("desktop")
             && args.get("pid").is_none()
             && args.get("window_id").is_none()
@@ -5179,7 +5344,7 @@ impl Tool for DragTool {
             let path = "xtest";
             let result = tokio::task::spawn_blocking(move || {
                 {
-                    crate::input::send_drag_xtest_desktop(
+                    crate::input::send_drag_xtest_desktop_with_modifiers(
                         from_x.round() as i32,
                         from_y.round() as i32,
                         to_x.round() as i32,
@@ -5187,6 +5352,10 @@ impl Tool for DragTool {
                         button,
                         duration_ms,
                         steps,
+                        &drag_modifiers
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
                     )
                 }
             });
@@ -5305,6 +5474,39 @@ impl Tool for DragTool {
             );
         }
 
+        if !delivery.is_foreground() && !drag_modifiers.is_empty() {
+            return crate::input::delivery::background_unavailable_error(
+                crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
+            );
+        }
+        if !delivery.is_foreground() && crate::input::real_pointer_input_available() {
+            let session = cursor_id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let from = window_local_to_screen(xid, from_x, from_y)?;
+                let to = window_local_to_screen(xid, to_x, to_y)?;
+                crate::input::send_virtual_pointer_drag(
+                    &session,
+                    &crate::input::VirtualPointerDrag {
+                        target_window: xid,
+                        button,
+                        path: vec![
+                            (from.0.round() as i32, from.1.round() as i32),
+                            (to.0.round() as i32, to.1.round() as i32),
+                        ],
+                        duration_ms,
+                        steps,
+                    },
+                )
+            })
+            .await;
+            return match result {
+                Ok(Ok(_)) => {
+                    ToolResult::text("Sent virtual-pointer drag; observe before retrying.")
+                }
+                Ok(Err(error)) => linux_input_error(error),
+                Err(error) => ToolResult::error(error.to_string()),
+            };
+        }
         if delivery.is_foreground() {
             let screen_points = tokio::task::spawn_blocking(move || {
                 Ok::<_, anyhow::Error>((
@@ -5320,7 +5522,7 @@ impl Tool for DragTool {
             };
             let drag_result = tokio::task::spawn_blocking(move || {
                 crate::input::with_x11_foreground(xid, 80, || {
-                    crate::input::send_drag_xtest_desktop(
+                    crate::input::send_drag_xtest_desktop_with_modifiers(
                         screen_from_x.round() as i32,
                         screen_from_y.round() as i32,
                         screen_to_x.round() as i32,
@@ -5328,6 +5530,10 @@ impl Tool for DragTool {
                         button,
                         duration_ms,
                         steps,
+                        &drag_modifiers
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
                     )
                 })
             });
@@ -7229,7 +7435,7 @@ impl Tool for KillAppTool {
             .and_then(Value::as_i64)
             .filter(|pid| *pid > 0)
             .ok_or_else(|| "kill_app requires a positive integer pid".to_owned())?;
-        let fingerprint = crate::browser_platform::LinuxBrowserPlatform
+        let fingerprint = crate::browser_platform::LinuxBrowserPlatform::default()
             .process_fingerprint(pid)
             .await
             .map_err(|error| error.message)?;
@@ -7269,7 +7475,23 @@ impl Tool for KillAppTool {
         // SAFETY: libc::kill is a thin syscall wrapper, no thread-safety concerns.
         let rc = unsafe { libc::kill(pid_i, libc::SIGKILL) };
         if rc == 0 {
-            ToolResult::text(format!("✅ Sent SIGKILL to pid {pid_i}."))
+            let exited = tokio::task::spawn_blocking(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while crate::proc_fs::is_process_live(pid_i as u32) {
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                true
+            })
+            .await
+            .unwrap_or(false);
+            if exited {
+                ToolResult::text(format!("Terminated pid {pid_i}; process exit confirmed."))
+            } else {
+                ToolResult::error(format!("Sent SIGKILL to {pid_i}, but process exit was not confirmed; observe before retrying"))
+            }
         } else {
             let err = std::io::Error::last_os_error();
             ToolResult::error(format!(
@@ -7633,6 +7855,8 @@ pub fn build_registry_with_provider(
     compat: bool,
     provider: Option<std::sync::Arc<dyn cua_driver_core::consent::ProtectedConsentProvider>>,
 ) -> ToolRegistry {
+    static REAP: std::sync::Once = std::sync::Once::new();
+    REAP.call_once(crate::input::reap_orphaned_master_pointers);
     let state = ToolState::new();
     let cursor_outcome_reader = {
         let cursor_registry = state.cursor_registry.clone();
@@ -7935,7 +8159,9 @@ pub fn build_registry_with_provider(
         ))),
     );
     let browser_engine = cua_driver_core::browser::BrowserEngine::new_with_runtime_services(
-        Arc::new(crate::browser_platform::LinuxBrowserPlatform),
+        Arc::new(crate::browser_platform::LinuxBrowserPlatform::new(
+            state.cursor_registry.clone(),
+        )),
         r.approval_broker(),
         r.protected_resource_ownership(),
     );

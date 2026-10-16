@@ -17,7 +17,7 @@ mod pasteboard;
 mod press_key;
 mod right_click;
 mod scroll;
-mod select_text;
+pub(crate) mod select_text;
 mod set_value;
 mod set_window_frame;
 mod type_text;
@@ -288,10 +288,7 @@ pub(crate) async fn acquire_background_mutation(pid: i32) -> BackgroundMutationL
     }
 }
 
-/// Finish the post-action observation window. Embedded interactive clients
-/// that already observe the target continuously may opt out through the
-/// private registry argument to avoid adding a one-second acknowledgement
-/// delay to every input event. Regular MCP callers retain the full observer.
+/// Collect immediately available window changes. Bounded settling belongs to observations.
 pub(crate) async fn finish_window_observation(
     snapshot: crate::window_change_detector::Snapshot,
     args: &serde_json::Value,
@@ -1369,3 +1366,5 @@ mod recording_start_guard_tests {
         let _ = rec.stop_owner(None);
     }
 }
+
+mod menu_equivalent;

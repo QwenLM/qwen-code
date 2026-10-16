@@ -312,6 +312,42 @@ impl Tool for HotkeyTool {
             None
         };
 
+        if !fg && px.is_none() && element_ptr.is_none() && apps::frontmost_pid() != Some(pid) {
+            if let (Some(wid), Some(combo)) = (
+                window_id,
+                super::menu_equivalent::Combo::parse(&modifiers, &key),
+            ) {
+                let save = key.eq_ignore_ascii_case("s")
+                    && modifiers.len() == 1
+                    && matches!(
+                        modifiers[0].to_ascii_lowercase().as_str(),
+                        "cmd" | "command" | "meta" | "super"
+                    );
+                let native = !crate::apps::bundle_id_for_pid(pid)
+                    .as_deref()
+                    .is_some_and(crate::browser::BrowserJs::supports)
+                    && !crate::browser::electron_js::ElectronJs::is_electron(pid);
+                if native {
+                    let result = tokio::task::spawn_blocking(move || {
+                        super::menu_equivalent::find(pid, &combo)
+                            .map(|item| super::menu_equivalent::run(pid, wid, item, save))
+                    })
+                    .await;
+                    match result {
+                        Ok(Some(result)) => return result,
+                        Err(error) => {
+                            return ToolResult::computer_use_error(
+                                "menu_unavailable",
+                                error.to_string(),
+                                true,
+                            )
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // Web-content AX nodes can acknowledge AXFocused without moving the
         // renderer's real first responder. That makes a direct focus write an
         // unsafe oracle for Chromium/WebKit hotkeys: the following PID/HID

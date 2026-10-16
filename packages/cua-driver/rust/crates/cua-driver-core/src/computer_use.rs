@@ -74,14 +74,24 @@ fn checked(result: ToolResult, mutating: bool) -> Result<ToolResult, ToolResult>
         return Ok(result);
     }
     let structured = result.structured_content.as_ref();
+    let message = text(&result);
     let code = structured
         .and_then(|value| value.get("code").or_else(|| value.pointer("/refusal/code")))
         .and_then(Value::as_str)
+        .or_else(|| {
+            [
+                "no_focused_text_input",
+                "not_settable",
+                "write_not_applied",
+                "user_input_detected",
+                "foreground_unavailable",
+                "target_occluded",
+                "text_delivery_stalled",
+            ]
+            .into_iter()
+            .find(|code| message.contains(&format!("{code}:")))
+        })
         .unwrap_or("operation_failed");
-    let sent = structured
-        .and_then(|value| value.get("sent"))
-        .and_then(Value::as_bool)
-        .unwrap_or(mutating);
     let stale = matches!(
         code,
         "stale_element_token"
@@ -89,10 +99,19 @@ fn checked(result: ToolResult, mutating: bool) -> Result<ToolResult, ToolResult>
             | "generation_mismatch"
             | "snapshot_id_required"
     );
+    let pre_dispatch = stale
+        || matches!(
+            code,
+            "no_focused_text_input" | "not_settable" | "foreground_unavailable" | "target_occluded"
+        );
+    let sent = structured
+        .and_then(|value| value.get("sent"))
+        .and_then(Value::as_bool)
+        .unwrap_or(mutating && !pre_dispatch);
     Err(error(
         if stale { "element_stale" } else { code },
-        text(&result),
-        sent && !stale,
+        message,
+        sent,
     ))
 }
 
@@ -725,7 +744,18 @@ impl ComputerUseRuntime {
                 input["modifier"] = if key.is_string() { json!([key]) } else { key };
             }
         }
-        let result = checked(Box::pin(registry.invoke(name, input)).await, true)?;
+        let mut result = Box::pin(registry.invoke(name, input.clone())).await;
+        let refusal = result.structured_content.as_ref();
+        if cfg!(any(target_os = "windows", target_os = "linux"))
+            && result.is_error == Some(true)
+            && refusal.is_some_and(|value| {
+                value["code"] == "background_unavailable" && value["sent"] == false
+            })
+        {
+            input["delivery_mode"] = json!("foreground");
+            result = Box::pin(registry.invoke(name, input)).await;
+        }
+        let result = checked(result, true)?;
         let confirmed = result
             .action_record
             .as_ref()
@@ -748,6 +778,17 @@ mod tests {
     use crate::session_authorization::{SessionAuthorizationRegistry, SessionModeCeiling};
     use crate::tool::TrustedInvocationEvidence;
     use std::time::Duration;
+
+    #[test]
+    fn explicit_dispatch_state_survives_error_classification() {
+        let result = ToolResult::computer_use_error(
+            "not_settable",
+            "native write failed after dispatch",
+            true,
+        );
+        let checked = checked(result, true).unwrap_err();
+        assert_eq!(checked.structured_content.unwrap()["sent"], true);
+    }
 
     #[derive(Default)]
     struct Fixture {

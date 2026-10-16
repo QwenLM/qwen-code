@@ -617,7 +617,6 @@ pub fn activate_pid(pid: i32) -> bool {
 }
 
 pub fn with_app_observation<R>(pid: i32, body: impl FnOnce() -> R) -> R {
-    let prior = frontmost_pid();
     let needs_reopen = crate::ax::bindings::app_window_id_of_pid(pid).is_none();
     if needs_reopen {
         if let Some(app) = list_running_apps().into_iter().find(|app| app.pid == pid) {
@@ -627,7 +626,7 @@ pub fn with_app_observation<R>(pid: i32, body: impl FnOnce() -> R) -> R {
                 .or(app.launch_path)
                 .unwrap_or(app.name);
             let config = nsworkspace::OpenConfig {
-                activates: true,
+                activates: false,
                 reopens_running_application: true,
                 apple_event_bundle_id: app.bundle_id,
                 ..Default::default()
@@ -643,11 +642,6 @@ pub fn with_app_observation<R>(pid: i32, body: impl FnOnce() -> R) -> R {
         }
     }
     let result = body();
-    if needs_reopen {
-        if let Some(prior) = prior.filter(|prior| *prior != pid) {
-            let _ = activate_pid(prior);
-        }
-    }
     result
 }
 

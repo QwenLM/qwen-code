@@ -355,7 +355,7 @@ unsafe fn click_field(element: AXUIElementRef, pid: i32, window_id: u32) -> anyh
     )
 }
 
-unsafe fn read_range(element: AXUIElementRef) -> Option<(usize, usize)> {
+pub(crate) unsafe fn read_range(element: AXUIElementRef) -> Option<(usize, usize)> {
     let attr = CFString::new("AXSelectedTextRange");
     let mut value = std::ptr::null();
     let status = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);

@@ -545,3 +545,37 @@ mod tests {
         assert!(indices[2] > indices[0]);
     }
 }
+
+pub fn window_info(xid: u64) -> Option<WindowInfo> {
+    let window = u32::try_from(xid).ok()?;
+    let (conn, screen_num) = RustConnection::connect(None).ok()?;
+    let root = conn.setup().roots[screen_num].root;
+    let attributes = conn.get_window_attributes(window).ok()?.reply().ok()?;
+    let geom = conn.get_geometry(window).ok()?.reply().ok()?;
+    let trans = conn
+        .translate_coordinates(window, root, 0, 0)
+        .ok()?
+        .reply()
+        .ok()?;
+    let pid = get_window_pid(&conn, window).ok().flatten();
+    let title = get_window_title(&conn, window).unwrap_or_default();
+    let app_name = get_window_class(&conn, window)
+        .map(|(instance, class)| if class.is_empty() { instance } else { class })
+        .unwrap_or_default();
+    Some(WindowInfo {
+        xid,
+        pid,
+        app_name,
+        title,
+        is_on_screen: attributes.map_state == MapState::VIEWABLE,
+        z_index: None,
+        x: i32::from(trans.dst_x),
+        y: i32::from(trans.dst_y),
+        width: u32::from(geom.width),
+        height: u32::from(geom.height),
+    })
+}
+
+pub fn window_pid(xid: u64) -> Option<u32> {
+    window_owner_pid(xid)
+}
