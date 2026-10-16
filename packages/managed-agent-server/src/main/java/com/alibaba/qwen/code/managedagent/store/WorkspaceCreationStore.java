@@ -182,7 +182,7 @@ public class WorkspaceCreationStore {
         try (var entries = Files.newDirectoryStream(directory)) {
             int scanned = 0;
             for (Path child : entries) {
-                if (++scanned > 1024 || children.size() == 100) {
+                if (++scanned > 1024) {
                     truncated = true;
                     break;
                 }
@@ -190,6 +190,10 @@ public class WorkspaceCreationStore {
                 if (!reserved(name) && Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)
                         && child.equals(child.toRealPath()) && Files.isReadable(child) && Files.isExecutable(child)
                         && name.codePoints().noneMatch(Character::isISOControl)) {
+                    if (children.size() == 100) {
+                        truncated = true;
+                        break;
+                    }
                     children.add(new Directory(name, root.relativize(child).toString()));
                 }
             }

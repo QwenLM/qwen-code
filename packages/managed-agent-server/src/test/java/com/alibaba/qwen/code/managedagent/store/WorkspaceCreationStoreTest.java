@@ -250,10 +250,13 @@ class WorkspaceCreationStoreTest {
         assertThat(page.root()).isEqualTo(root.toString());
         assertThat(page.directories()).extracting(WorkspaceCreationStore.Directory::name).containsExactly("project");
         for (String path : List.of("../", "outside", ".git", ".qwen-child-workspaces")) {
+            String code = "outside".equals(path) ? "workspace_unavailable" : "invalid_cwd";
             assertThatThrownBy(() -> store(guard).directories("tenant", "actor", parent.workspaceId(), path))
-                    .isInstanceOf(RuntimeException.class);
+                    .isInstanceOfAny(ApiException.class, RuntimeBrokerException.class)
+                    .hasFieldOrPropertyWithValue("code", code);
             assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Unsafe", "unsafe-" + path,
-                    parent.workspaceId(), path)).isInstanceOf(RuntimeException.class);
+                    parent.workspaceId(), path)).isInstanceOfAny(ApiException.class, RuntimeBrokerException.class)
+                    .hasFieldOrPropertyWithValue("code", code);
         }
         assertThatThrownBy(() -> store(guard).directories("other", "actor", parent.workspaceId(), "."))
                 .isInstanceOf(ApiException.class);
@@ -267,6 +270,35 @@ class WorkspaceCreationStoreTest {
                     parent.workspaceId(), "project")).isInstanceOf(ApiException.class);
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void truncatesOnlyWhenAnotherEligibleDirectoryRemains() throws Exception {
+        var parent = store(guard).create("tenant", "actor", "Projects", "directory-limit");
+        Path root = guard.createdStorageRoot("tenant", storage(parent.workspaceId()));
+        for (int index = 0; index < 100; index++) {
+            Files.createDirectory(root.resolve("project-" + index));
+            Files.writeString(root.resolve("ignored-" + index), "not a directory");
+        }
+        var complete = store(guard).directories("tenant", "actor", parent.workspaceId(), ".");
+        assertThat(complete.directories()).hasSize(100);
+        assertThat(complete.truncated()).isFalse();
+        Files.createDirectory(root.resolve("one-more-project"));
+        var limited = store(guard).directories("tenant", "actor", parent.workspaceId(), ".");
+        assertThat(limited.directories()).hasSize(100);
+        assertThat(limited.truncated()).isTrue();
+    }
+
+    @Test
+    void preservesTheRawEntryScanBudgetWhenEntriesAreFilteredOut() throws Exception {
+        var parent = store(guard).create("tenant", "actor", "Projects", "directory-scan-limit");
+        Path root = guard.createdStorageRoot("tenant", storage(parent.workspaceId()));
+        for (int index = 0; index < 1025; index++) {
+            Files.writeString(root.resolve("ignored-" + index), "not a directory");
+        }
+        var page = store(guard).directories("tenant", "actor", parent.workspaceId(), ".");
+        assertThat(page.directories()).isEmpty();
+        assertThat(page.truncated()).isTrue();
     }
 
     @Test
