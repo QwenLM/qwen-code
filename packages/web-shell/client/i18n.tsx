@@ -1,4 +1,8 @@
 import {
+  TRAJECTORY_EXECUTION_MESSAGES_EN,
+  TRAJECTORY_EXECUTION_MESSAGES_ZH,
+} from './trajectory/execution-messages.js';
+import {
   FILES_MESSAGES_EN,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
@@ -922,8 +926,6 @@ const EN: Messages = {
   'composerMobile.commands': 'All commands',
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
-  'composerMobile.previousInput': 'Previous input',
-  'composerMobile.nextInput': 'Next input',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,
@@ -972,8 +974,13 @@ const EN: Messages = {
   'session.recovery.degraded_history':
     'Conversation history is incomplete. The interrupted task cannot be continued.',
   'session.recovery.continue': 'Continue execution',
+  'session.recovery.confirmContinue': 'Confirm and continue',
   'session.recovery.continuing': 'Continuing…',
   'session.recovery.failed': 'Could not continue the conversation.',
+  'session.recovery.unknownCancellation':
+    'This older session was cancelled, but the reason was not recorded. Confirm before continuing.',
+  'session.recovery.confirmCancellation':
+    'This turn may have been stopped intentionally. Do you want to continue it?',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -4391,6 +4398,7 @@ const EN: Messages = {
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
+  ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
@@ -5284,8 +5292,6 @@ const ZH: Messages = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜索命令',
   'composerMobile.history': '输入历史',
-  'composerMobile.previousInput': '上一条输入',
-  'composerMobile.nextInput': '下一条输入',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已添加附件/图片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此处没有可用的添加操作',
@@ -5330,8 +5336,13 @@ const ZH: Messages = {
   'session.recovery.interrupted_turn': '上次任务已中断，部分工具结果未保存。',
   'session.recovery.degraded_history': '会话历史不完整，无法继续中断的任务。',
   'session.recovery.continue': '继续执行',
+  'session.recovery.confirmContinue': '确认并继续',
   'session.recovery.continuing': '正在继续…',
   'session.recovery.failed': '无法继续此会话。',
+  'session.recovery.unknownCancellation':
+    '此旧会话已取消，但未记录来源。继续前需要你确认。',
+  'session.recovery.confirmCancellation':
+    '此轮任务可能已被主动停止，但未记录原因。确定要继续执行吗？',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
@@ -8470,6 +8481,7 @@ const ZH: Messages = {
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
+  ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };

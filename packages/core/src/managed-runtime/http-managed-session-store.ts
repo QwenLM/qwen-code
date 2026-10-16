@@ -345,6 +345,8 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     appendTransaction: rejectWrite,
     blockRecovery: rejectWrite,
     seal: rejectWrite,
+    // A snapshot-inspection handle has no open writer; nothing can append.
+    writerSealed: true,
     abort: rejectWrite,
   };
   const resourceStore: ManagedSessionResourceStore = {
@@ -421,6 +423,10 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
 
   seal(): Promise<void> {
     return this.client.seal();
+  }
+
+  get writerSealed(): boolean {
+    return this.client.writerSealed;
   }
 
   abort(): Promise<void> {
@@ -605,6 +611,10 @@ class ManagedSessionStoreHttpClient {
   private renewTimer: NodeJS.Timeout | undefined;
   private sealed = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
+
+  get writerSealed(): boolean {
+    return this.sealed;
+  }
 
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void {
     this.lifecycleAuthority = authority;
@@ -2000,6 +2010,7 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-definition',
       'managed-checkpoint',
       'managed-file_history',
       'managed-action-options',
