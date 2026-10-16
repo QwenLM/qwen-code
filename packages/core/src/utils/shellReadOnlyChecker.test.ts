@@ -228,6 +228,10 @@ describe('evaluateShellCommandReadOnly', () => {
       'git remote unknown-action',
       'git remote show remove',
       'git remote get-url prune',
+      'git remote show origin',
+      'git remote show',
+      'git remote show https://evil.example/leak',
+      'git remote show git@evil.example:owner/repo',
       'git diff --output=patch',
       'git log --output=log.out',
       'git show --output=show.out HEAD',
@@ -365,6 +369,8 @@ describe('evaluateShellCommandReadOnly', () => {
 
     it.each([
       'git remote get-url origin',
+      'git remote show -n origin',
+      'git remote show -n https://evil.example/leak',
       'git diff -- file',
       'git diff -Oorderfile',
       'git log -p',

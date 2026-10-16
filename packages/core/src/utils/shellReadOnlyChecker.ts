@@ -207,6 +207,12 @@ function evaluateGitRemoteArgs(args: string[]): boolean {
   for (const arg of args) {
     if (BLOCKED_GIT_REMOTE_ACTIONS.has(arg.toLowerCase())) return false;
   }
+  // `git remote show` queries the remote over the network (git-upload-pack)
+  // unless `-n` is given, so without that flag it is not read-only — the
+  // argument can be any URL. `get-url` never connects.
+  const end = args.indexOf('--');
+  const options = args.slice(0, end < 0 ? args.length : end);
+  if (action === 'show' && !options.includes('-n')) return false;
   return true;
 }
 
