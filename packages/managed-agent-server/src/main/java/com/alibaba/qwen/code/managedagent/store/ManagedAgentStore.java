@@ -1107,7 +1107,11 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // A per-turn admission: a long holder of the tenant's placement row
+        // answers tenant_guard_contended within the hot-path bound instead
+        // of parking the submit past the caller's budget (#13800).
+        ManagedSessionStore.lockBounded(() -> WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
@@ -3799,6 +3803,10 @@ public class ManagedAgentStore implements AgentStateStore {
                 pairs.append(",");
             }
             pairs.append(" (?, ?)");
+            // Bound as identity bytes: H2 types row-comparison parameters
+            // as VARCHAR, and a command it recompiles after binding (any
+            // new session or SET in between) refuses VARBINARY rows against
+            // VARCHAR ones. Bytes compare the same on MySQL and MariaDB.
             arguments.add(ManagedSchemaKeys.identity(turn.sessionId()));
             arguments.add(ManagedSchemaKeys.identity(turn.turnId()));
         }

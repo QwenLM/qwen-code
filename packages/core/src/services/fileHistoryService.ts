@@ -25,6 +25,9 @@ import {
   readFileHandleBytes,
   type DescriptorFileReadSource,
 } from '../utils/file-read-source.js';
+import { MAX_SNAPSHOTS } from './file-history-limits.js';
+
+export { MAX_SNAPSHOTS } from './file-history-limits.js';
 
 const debugLogger = createDebugLogger('FILE_HISTORY');
 
@@ -129,7 +132,6 @@ export interface TurnDiff {
   };
 }
 
-export const MAX_SNAPSHOTS = 100;
 export const FILE_HISTORY_DIR = 'file-history';
 
 // ---------------------------------------------------------------------------
