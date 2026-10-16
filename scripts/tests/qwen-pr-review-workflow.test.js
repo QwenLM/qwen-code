@@ -3427,7 +3427,8 @@ describe('checkout self-heal', () => {
   // A workspace whose entries the owning user cannot unlink: find -exec rm
   // exits nonzero, so the user-mode wipe leg fails deterministically. Root
   // bypasses the 0o500 lock via CAP_DAC_OVERRIDE, so the tests built on it
-  // skip there, and win32 has no POSIX permission bits to honor.
+  // skip where it keeps that capability, and win32 has no POSIX permission
+  // bits to honor.
   const lockFixture = () => {
     const parent = realpathSync(
       mkdtempSync(join(tmpdir(), 'checkout-heal-lock-')),
@@ -3443,7 +3444,7 @@ describe('checkout self-heal', () => {
     rmSync(parent, { recursive: true, force: true });
   };
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'exits 0 and keeps survivors when BOTH wipe legs fail',
     () => {
       // The wipe step has no continue-on-error, so its own never-fail exit
@@ -3473,7 +3474,7 @@ describe('checkout self-heal', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'escalates to the sudo leg when the user-mode wipe fails',
     () => {
       // Deleting the `|| sudo -n find …` leg (or flipping it to `&&`) must

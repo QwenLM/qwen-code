@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { arePermissionBitsEnforced } from './test-utils/permission-bits.js';
 
 const installer = vi.hoisted(() => ({
   ensure: vi.fn(async () => ({
@@ -93,7 +94,7 @@ describe('createBrowserBackend', () => {
     });
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'initializes when Chrome preference files are unreadable',
     async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
