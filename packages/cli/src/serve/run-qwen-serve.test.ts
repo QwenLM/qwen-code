@@ -2022,8 +2022,10 @@ describe('subSessionCompletionTtlMsFromSettings', () => {
     ).toEqual({ completionTtlMs: 0 });
   });
 
-  it('omits the key when absent so the launcher default applies', () => {
-    expect(subSessionCompletionTtlMsFromSettings({})).toEqual({});
+  it('omits the key when absent so the launcher default applies, without warning', () => {
+    const onWarning = vi.fn();
+    expect(subSessionCompletionTtlMsFromSettings({}, onWarning)).toEqual({});
+    expect(onWarning).not.toHaveBeenCalled();
   });
 
   it('rejects negative, fractional, string, and NaN values', () => {

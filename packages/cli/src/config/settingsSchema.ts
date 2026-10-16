@@ -391,10 +391,10 @@ const SETTINGS_SCHEMA = {
         label: 'Sub-Session Completion TTL (Hours)',
         category: 'Advanced',
         requiresRestart: true,
-        default: 24,
+        default: 0,
         minimum: 0,
         description:
-          'How long a completed sub-session stays in the session roster before the daemon removes it (live entry plus persisted transcript, making it not continuable). 0 keeps completed sub-sessions forever. A revived sub-session (a new prompt after completion) restarts the TTL from its latest activity; running sub-sessions are never removed.',
+          'Optional auto-cleanup of completed sub-sessions: how long a sub-session finished with a clean turn end stays in the session roster before the daemon removes it (live entry plus persisted transcript, making it not continuable). The default 0 keeps completed sub-sessions forever. A revived sub-session (a new prompt after completion) restarts the TTL from its latest activity; running sub-sessions are never removed, and sub-sessions that failed or were cancelled keep their transcripts.',
         showInDialog: false,
       },
     },

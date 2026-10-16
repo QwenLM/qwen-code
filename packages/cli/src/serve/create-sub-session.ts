@@ -34,18 +34,23 @@
  * The sub-session is fire-and-forget w.r.t. lifecycle: it is NOT kept resident,
  * so once idle the bridge's reaper closes it; its transcript persists.
  *
- * Roster hygiene on top of that: after a sub-session's turn reaches a terminal
- * state, the completion TTL (`serve.subSessionCompletionTtlHours`, default
- * 24h, `0` = keep forever) starts its clock. When it expires, the launcher
- * closes the live entry (if the reaper has not already) and removes the
- * persisted transcript/catalog row that would otherwise keep the finished
- * thread in the session list forever. A revived sub-session (a new prompt
- * after completion) restarts its clock from the latest activity; running
- * sub-sessions are never removal candidates. Once removed, the session is not
- * continuable, consistent with retained-state expiry.
+ * Roster hygiene on top of that, opt-in via
+ * `serve.subSessionCompletionTtlHours` (default `0` = keep forever): once a
+ * sub-session's turn ends in a clean completion (`end_turn`), the completion
+ * TTL starts its clock. When it expires, the launcher closes the live entry
+ * (if the reaper has not already) and removes the persisted transcript/catalog
+ * row that would otherwise keep the finished thread in the session list
+ * forever. Removal is an allowlist: failed and cancelled turns keep their
+ * diagnostic transcripts. A revived sub-session (a new prompt after completion)
+ * restarts its clock from the latest activity; running sub-sessions are never
+ * removal candidates. After a daemon restart the launcher rediscover this
+ * workspace's persisted sub-session rows and starts their clocks from the
+ * transcript's last write, so removal is not blind to transcripts written by
+ * a previous daemon lifetime. Once removed, the session is not continuable.
  */
 
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
 import {
   createDebugLogger,
   SessionService,
@@ -151,11 +156,14 @@ const MAX_NAME_LENGTH = 60;
  * only ever discards long-reaped sessions. */
 export const MAX_TRACKED_SPAWNED_SESSIONS = 1024;
 
-/** Default completion TTL: a finished sub-session stays in the session roster
- * for 24 hours before the launcher removes it. Overridable via
- * `serve.subSessionCompletionTtlHours`; `0` keeps completed sub-sessions
- * forever (the pre-TTL behavior). */
-export const DEFAULT_SUB_SESSION_COMPLETION_TTL_MS = 24 * 60 * 60_000;
+/** Default completion TTL: `0` — completed sub-sessions are kept forever
+ * (the pre-TTL behavior). Auto-removal is opt-in: set
+ * `serve.subSessionCompletionTtlHours` to a non-zero number of hours to
+ * enable it. */
+export const DEFAULT_SUB_SESSION_COMPLETION_TTL_MS = 0;
+
+/** Discovery pages the persisted session listing in bounded batches. */
+const TTL_DISCOVERY_PAGE_SIZE = 500;
 
 /** How often the launcher looks for expired completed sub-sessions. TTL
  * precision is not user-visible at hour scale, so a five-minute cadence keeps
@@ -195,12 +203,9 @@ export interface CreateSubSessionLauncherOptions {
    * {@link MAX_CONCURRENT_SUB_SESSIONS_TOTAL}. */
   maxConcurrentTotal?: number;
   /** Completion TTL for auto-removal of finished sub-sessions; defaults to
-   * {@link DEFAULT_SUB_SESSION_COMPLETION_TTL_MS}. `0` disables auto-removal
-   * (completed sub-sessions stay in the roster forever). */
+   * {@link DEFAULT_SUB_SESSION_COMPLETION_TTL_MS} (`0` = keep forever —
+   * auto-removal is opt-in). */
   completionTtlMs?: number;
-  /** Sweep cadence for the completion TTL; defaults to
-   * {@link COMPLETION_TTL_SWEEP_INTERVAL_MS}. Exposed for tests. */
-  completionTtlSweepIntervalMs?: number;
 }
 
 type IsolatedWorkspace = NonNullable<
@@ -776,19 +781,27 @@ export function createSubSessionLauncher(
   );
   const completionTtlMs =
     opts.completionTtlMs ?? DEFAULT_SUB_SESSION_COMPLETION_TTL_MS;
-  const completionTtlSweepIntervalMs =
-    opts.completionTtlSweepIntervalMs ?? COMPLETION_TTL_SWEEP_INTERVAL_MS;
   const inflight = new Map<string, number>();
   // Ids of the sub-sessions this launcher spawned — the depth-1 gate reads it.
   // Insertion-ordered and evicted FIFO past the cap so a long-lived daemon
   // can't accumulate ids forever; an evicted id belongs to a sub-session old
-  // enough to have been idle-reaped long ago.
+  // enough to have been idle-reaped long ago. Ids also leave when a TTL
+  // removal confirms the session fully gone (live entry closed, transcript
+  // gone); the gate's durable fallback (the caller's persisted parent
+  // lineage) covers restored children either way.
   const spawnedSessionIds = new Set<string>();
-  // Timestamps at which tracked sub-sessions reached a terminal turn state —
-  // the completion TTL input. Bounded with `spawnedSessionIds` (evicted in
-  // step); a finished id whose transcript the rollback cleanup already
-  // removed simply no-ops on removal.
+  // Completion clocks — the completion TTL candidate source. A clean
+  // completion (`end_turn`) stamps it in-process; a persisted row discovered
+  // on disk (previous daemon lifetime) is seeded from its transcript's last
+  // write. The sweep iterates THIS map, so FIFO eviction of the gate set
+  // above never loses a clock; entries leave only when a removal confirms the
+  // session gone or the user archived it.
   const completedAt = new Map<string, number>();
+  // Observed terminal outcomes that are not clean completions (`error`,
+  // `cancelled`, ...): the turn is over, but its diagnostic transcript is
+  // kept — these ids never become removal candidates, even once their live
+  // entry is idle-reaped.
+  const nonCleanTerminal = new Set<string>();
   // Shared AbortController — stop() aborts it, tearing down every active
   // subscription (first-turn awaits AND sent-mode background drains). This
   // prevents shutdown from waiting up to 5 min per in-flight session.
@@ -811,31 +824,100 @@ export function createSubSessionLauncher(
       const oldest = spawnedSessionIds.values().next().value;
       if (oldest === undefined) break;
       spawnedSessionIds.delete(oldest);
-      completedAt.delete(oldest);
+      // The completion clock is NOT evicted here: the sweep iterates
+      // `completedAt`, so an evicted-but-completed id still gets removed
+      // when its TTL fires (eviction bounds the depth-1 gate set only).
     }
   };
 
-  /** Terminal turn outcomes. The first-turn observer's non-terminal
-   * reportings — 'timeout' (wall-clock ceiling: the turn may still be
-   * running), 'incomplete' (stream closed before the turn ended) and
-   * 'shutdown' (daemon going away) — are no evidence the sub-session is
-   * done, so they never start the TTL clock. */
-  const isTerminalTurnStopReason = (stopReason: string): boolean =>
-    stopReason !== 'timeout' &&
-    stopReason !== 'incomplete' &&
-    stopReason !== 'shutdown';
-
-  const markCompleted = (sessionId: string): void => {
+  /** Record a turn outcome for the completion TTL. A clean completion
+   * (`end_turn`) starts the clock. An observed terminal failure (`error`,
+   * `cancelled`, and any future non-success reason) keeps the diagnostic
+   * transcript: removal is an allowlist, so those transcripts are never
+   * candidates. The first-turn observer's undecided reportings — 'timeout'
+   * (wall-clock ceiling: the turn may still be running), 'incomplete'
+   * (stream closed before the turn ended), 'shutdown' (daemon going away) —
+   * start nothing here; if the reaper later closes the session work-free,
+   * the sweep's unobserved-completion fallback starts the clock. */
+  const recordTurnOutcome = (sessionId: string, stopReason: string): void => {
     if (completionTtlMs <= 0) return;
-    completedAt.set(sessionId, Date.now());
+    if (
+      stopReason === 'timeout' ||
+      stopReason === 'incomplete' ||
+      stopReason === 'shutdown'
+    ) {
+      return;
+    }
+    if (stopReason === 'end_turn') {
+      completedAt.set(sessionId, Date.now());
+      return;
+    }
+    nonCleanTerminal.add(sessionId);
+  };
+
+  /** Remove the persisted transcript/catalog row of a sub-session, resolved
+   * under the launcher's runtime base dir when it has one, so the removed row
+   * is the one the disk-scan session listing reads. Returns whether the
+   * transcript was removed. Shared by the TTL sweep and the launch rollbacks. */
+  const removeSubSessionTranscript = async (
+    sessionId: string,
+  ): Promise<boolean> => {
+    const removeTranscript = () =>
+      new SessionService(boundWorkspace).removeSession(sessionId);
+    return runtimeBaseDir
+      ? await Storage.runWithResolvedRuntimeBaseDir(
+          runtimeBaseDir,
+          removeTranscript,
+        )
+      : await removeTranscript();
+  };
+
+  /** The persisted state a removal must confirm against: the transcript's
+   * last write (ms) and the row's archive state. Read only on the removal
+   * path, not per session per tick. */
+  const persistedRemovalState = async (
+    sessionId: string,
+  ): Promise<{ lastActivity?: number; archived: boolean }> => {
+    const read = async (): Promise<{
+      lastActivity?: number;
+      archived: boolean;
+    }> => {
+      const service = new SessionService(boundWorkspace);
+      let archived = false;
+      try {
+        archived = (await service.getSessionLocation(sessionId)) === 'archived';
+      } catch {
+        archived = false;
+      }
+      let lastActivity: number | undefined;
+      try {
+        lastActivity = fs.statSync(
+          service.getSessionTranscriptPath(sessionId),
+        ).mtimeMs;
+      } catch {
+        lastActivity = undefined;
+      }
+      return { lastActivity, archived };
+    };
+    try {
+      return runtimeBaseDir
+        ? await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, read)
+        : await read();
+    } catch {
+      return { archived: false };
+    }
   };
 
   /** Remove a TTL-expired completed sub-session: close the live entry (it
    * may already be gone — the idle reaper wins that race all the time),
-   * remove the persisted transcript/catalog row that keeps the finished
-   * thread in the session list, and advance the catalog clock. Mirrors the
+   * re-validate that no revival re-created it, remove the persisted
+   * transcript/catalog row, and advance the catalog clock. Mirrors the
    * rollback cleanup of a failed launch. Any failure keeps the entry in
-   * `completedAt` so the next sweep retries. */
+   * `completedAt` so the next sweep retries. Terminal state: once the live
+   * entry is confirmed gone and the transcript is gone (removed here or
+   * already absent), the id leaves both clocks, so a later sweep cannot
+   * re-process it; the operator line prints only when this call actually
+   * removed the transcript. */
   const removeExpiredSubSession = async (sessionId: string): Promise<void> => {
     const bridge = getBridge();
     if (!bridge) return;
@@ -849,39 +931,112 @@ export function createSubSessionLauncher(
         // Already gone (idle-reaped) — proceed to the persisted row.
       } else {
         log.debug('sub-session: TTL close failed', sessionId, error);
+        return; // keep the entry armed for the next sweep
+      }
+    }
+    // Re-validate immediately before the persisted mutation: a send_message
+    // revival can admit a live entry between the close attempt and the
+    // deletion, and that session must keep its transcript (the next sweep
+    // restarts its clock from the fresh activity).
+    try {
+      if (bridge.getSessionSummary(sessionId) !== undefined) return;
+    } catch (error) {
+      if (!(error instanceof SessionNotFoundError)) {
+        log.debug(
+          'sub-session: TTL pre-removal check failed',
+          sessionId,
+          error,
+        );
         return;
       }
     }
+    let transcriptRemoved: boolean;
     try {
-      const removeTranscript = () =>
-        new SessionService(boundWorkspace).removeSession(sessionId);
-      const transcriptRemoved = runtimeBaseDir
-        ? await Storage.runWithResolvedRuntimeBaseDir(
-            runtimeBaseDir,
-            removeTranscript,
-          )
-        : await removeTranscript();
-      if (transcriptRemoved) bridge.markSessionCatalogChanged();
+      transcriptRemoved = await removeSubSessionTranscript(sessionId);
     } catch (error) {
       log.debug('sub-session: TTL transcript removal failed', sessionId, error);
-      return;
+      return; // keep the entry armed for the next sweep
     }
+    // Terminal state: the live entry is confirmed gone and the transcript is
+    // gone. Leave no clock behind for the id.
     completedAt.delete(sessionId);
-    writeStderrLine(
-      `qwen serve: removed completed sub-session ${sessionId} from the roster ` +
-        `(completion TTL ${Math.round(completionTtlMs / 60_000)}min expired)`,
-    );
+    spawnedSessionIds.delete(sessionId);
+    if (transcriptRemoved) {
+      bridge.markSessionCatalogChanged();
+      writeStderrLine(
+        `qwen serve: removed completed sub-session ${sessionId} from the roster ` +
+          `(completion TTL ${Math.round(completionTtlMs / 60_000)}min expired)`,
+      );
+    }
   };
 
-  /** One sweep over the tracked sub-sessions. Activity after a recorded
-   * completion (a revived turn) restarts the clock from the latest activity;
-   * running sessions are never removal candidates; a spawned-but-unmarked
-   * session whose live entry the reaper already closed is provably terminal
-   * (the reaper only closes work-free sessions), so its clock starts now. */
+  /** Discover persisted sub-session transcripts once per launcher lifetime.
+   * The in-memory clocks are process-local, so after a daemon restart every
+   * previously completed sub-session would be orphaned — its transcript would
+   * outlive the configured retention indefinitely. A one-time disk scan
+   * re-arms those transcripts: every active catalog row that names a parent
+   * session is a finished or abandoned sub-session (it cannot be the daemon's
+   * primary session, and no live entry for it exists in this fresh process),
+   * so its TTL clock starts at the transcript's last write. Discovered rows
+   * are seeded into `completedAt` only — never into `spawnedSessionIds`,
+   * whose depth-1 gate must count only the live roster. A scan failure
+   * re-arms the discovery for the next sweep. */
+  let persistedSubSessionsDiscovered = false;
+  const discoverPersistedSubSessions = async (): Promise<void> => {
+    if (persistedSubSessionsDiscovered) return;
+    persistedSubSessionsDiscovered = true;
+    const listAll = async (): Promise<void> => {
+      const service = new SessionService(boundWorkspace);
+      let cursor: number | undefined;
+      for (;;) {
+        const page = await service.listSessions({
+          archiveState: 'active',
+          size: TTL_DISCOVERY_PAGE_SIZE,
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        for (const item of page.items) {
+          if (
+            item.parentSessionId !== undefined &&
+            !completedAt.has(item.sessionId)
+          ) {
+            completedAt.set(item.sessionId, item.mtime);
+          }
+        }
+        if (!page.hasMore || page.nextCursor === undefined) return;
+        cursor = page.nextCursor;
+      }
+    };
+    try {
+      await (runtimeBaseDir
+        ? Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, listAll)
+        : listAll());
+    } catch (error) {
+      log.debug('sub-session: TTL discovery failed', error);
+      persistedSubSessionsDiscovered = false;
+    }
+  };
+
+  /** One sweep over the removal candidates. The candidate set is the
+   * completion clocks (`completedAt`) plus any tracked roster id that never
+   * got a clock — iterating the clocks means a FIFO-evicted completedAt entry
+   * is never lost, while the gate set itself keeps its cap. A live entry is
+   * removable only when it is free of work: an admitted prompt, running
+   * background tasks, or an active work state all keep the transcript, and a
+   * post-completion send_message revival restarts the clock from the fresh
+   * activity. An entry with no live summary is a reaped (or discovered)
+   * transcript; its clock starts at the persisted last write, and sessions
+   * whose turn ended non-clean (error, cancel, …) are kept — their diagnostic
+   * transcripts are retained until the user archives or deletes them. */
   const sweepCompletedSubSessions = async (): Promise<void> => {
     if (stopAc.signal.aborted || completionTtlMs <= 0) return;
+    await discoverPersistedSubSessions();
+    if (stopAc.signal.aborted) return;
     const now = Date.now();
-    for (const sessionId of [...spawnedSessionIds]) {
+    const candidates = [
+      ...completedAt.keys(),
+      ...[...spawnedSessionIds].filter((id) => !completedAt.has(id)),
+    ];
+    for (const sessionId of candidates) {
       if (stopAc.signal.aborted) return;
       const bridge = getBridge();
       if (!bridge) return;
@@ -896,6 +1051,13 @@ export function createSubSessionLauncher(
         }
       }
       if (summary !== undefined) {
+        if (summary.hasActivePrompt) continue; // running — never remove
+        if (summary.hasRunningBackgroundTasks === true) continue;
+        if (summary.activeWorkState === 'active') continue;
+        if (summary.isArchived) {
+          completedAt.delete(sessionId);
+          continue;
+        }
         const lastActivity = Date.parse(summary.updatedAt ?? summary.createdAt);
         if (due !== undefined && Number.isFinite(lastActivity)) {
           if (lastActivity > due) {
@@ -903,16 +1065,38 @@ export function createSubSessionLauncher(
             completedAt.set(sessionId, due);
           }
         }
-        if (summary.hasActivePrompt) continue; // running — never remove
         if (due === undefined) continue;
-      } else if (due === undefined) {
-        // No live entry: the reaper only closes sessions holding no work, so
-        // the turn is long over. Start the clock now — the TTL bounds the
-        // extra lifetime of turns whose completion the observer missed.
-        due = now;
-        completedAt.set(sessionId, due);
+      } else {
+        if (due === undefined) {
+          if (nonCleanTerminal.has(sessionId)) continue;
+          // No live entry and no recorded completion: either the idle reaper
+          // closed a work-free session or discovery re-armed a persisted
+          // transcript. Start the clock at the persisted last write (falling
+          // back to now for a missing transcript) — the TTL bounds the extra
+          // lifetime of turns whose completion the observer missed.
+          due = (await persistedRemovalState(sessionId)).lastActivity ?? now;
+          completedAt.set(sessionId, due);
+        }
       }
       if (now - due < completionTtlMs) continue;
+      if (summary === undefined) {
+        // Removal-path confirmation: a row the user archived meanwhile is
+        // explicitly kept, and activity newer than the armed clock restarts
+        // it (a revived turn re-created the transcript after discovery).
+        const persisted = await persistedRemovalState(sessionId);
+        if (persisted.archived) {
+          completedAt.delete(sessionId);
+          continue;
+        }
+        if (
+          persisted.lastActivity !== undefined &&
+          persisted.lastActivity > due
+        ) {
+          due = persisted.lastActivity;
+          completedAt.set(sessionId, due);
+          continue;
+        }
+      }
       await removeExpiredSubSession(sessionId);
     }
   };
@@ -1180,9 +1364,7 @@ export function createSubSessionLauncher(
                     `concurrency slot (the sub-session may still be running)`,
                 );
               }
-              if (isTerminalTurnStopReason(completion.stopReason)) {
-                markCompleted(sessionId);
-              }
+              recordTurnOutcome(sessionId, completion.stopReason);
               if (notifySentCompletion) {
                 notification = buildSentCompletionNotification(
                   sessionId,
@@ -1193,11 +1375,10 @@ export function createSubSessionLauncher(
               }
             } catch (err) {
               if (stopAc.signal.aborted) return;
-              // Terminal: the turn's promise rejected (dispatch failure) or
-              // the event stream threw — the sub-session's turn is over and
-              // this launch will not observe it again, so the TTL clock
-              // starts here.
-              markCompleted(sessionId);
+              // The turn's promise rejected (dispatch failure) or the event
+              // stream threw — the turn is over and failed; its diagnostic
+              // transcript is kept (never a removal candidate).
+              nonCleanTerminal.add(sessionId);
               if (!notifySentCompletion) return;
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
@@ -1269,9 +1450,7 @@ export function createSubSessionLauncher(
           firstTurn,
           turnError,
         ]);
-        if (isTerminalTurnStopReason(stopReason)) {
-          markCompleted(sessionId);
-        }
+        recordTurnOutcome(sessionId, stopReason);
         return {
           sessionId,
           result,
@@ -1312,14 +1491,8 @@ export function createSubSessionLauncher(
         if (sessionClosed) {
           if (!promptAdmitted) {
             try {
-              const removeTranscript = () =>
-                new SessionService(boundWorkspace).removeSession(sessionId);
-              const transcriptRemoved = runtimeBaseDir
-                ? await Storage.runWithResolvedRuntimeBaseDir(
-                    runtimeBaseDir,
-                    removeTranscript,
-                  )
-                : await removeTranscript();
+              const transcriptRemoved =
+                await removeSubSessionTranscript(sessionId);
               if (transcriptRemoved) bridge.markSessionCatalogChanged();
             } catch (cleanupError) {
               log.debug(
@@ -1383,14 +1556,8 @@ export function createSubSessionLauncher(
         }
         if (sessionClosed && !promptAdmitted) {
           try {
-            const removeTranscript = () =>
-              new SessionService(boundWorkspace).removeSession(sessionId);
-            const transcriptRemoved = runtimeBaseDir
-              ? await Storage.runWithResolvedRuntimeBaseDir(
-                  runtimeBaseDir,
-                  removeTranscript,
-                )
-              : await removeTranscript();
+            const transcriptRemoved =
+              await removeSubSessionTranscript(sessionId);
             if (transcriptRemoved) bridge.markSessionCatalogChanged();
           } catch (cleanupError) {
             log.debug(
@@ -1421,7 +1588,7 @@ export function createSubSessionLauncher(
       void sweepCompletedSubSessions().finally(() => {
         completionTtlSweepInFlight = false;
       });
-    }, completionTtlSweepIntervalMs);
+    }, COMPLETION_TTL_SWEEP_INTERVAL_MS);
     if (typeof completionTtlSweeper.unref === 'function') {
       completionTtlSweeper.unref();
     }
