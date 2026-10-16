@@ -389,18 +389,24 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"exited", "signalled", "stop_requested", "capture_failed"})
+    @ValueSource(strings = {"exited", "signalled", "stop_requested", "capture_failed", "publication"})
     void verifiesOriginalBackgroundExitAndSealedOrKnownFailedOutput(String mode) throws Exception {
         var f = fixture();
         var binding = f.bindings.findOrCreate(new RuntimeProvisionRequest(f.scope(), f.session));
         var ledger = new JdbcToolExecutionRepository(f.jdbc.getDataSource());
-        var reference = Map.<String, Object>of("sessionId", "original-owner", "promptId", "turn-1", "callId", "runtime-call",
-                "argsDigest", "sha256:" + "a".repeat(64), "dispatchMode", "deferred_v3", "payloadDigest", "sha256:" + "c".repeat(64));
-        var start = ledger.findOrCreate(ToolExecutionRecord.prepared("call-1", "call-1", binding.getBindingId(), binding.getGeneration(),
+        var reference = new java.util.HashMap<String, Object>(Map.of("sessionId", "original-owner", "promptId", "turn-1", "callId", "runtime-call",
+                "argsDigest", "sha256:" + "a".repeat(64), "dispatchMode", "deferred_v3", "payloadDigest", "sha256:" + "c".repeat(64)));
+        if ("publication".equals(mode)) {
+            reference.put("publicationId", "pub-1");
+        }
+        ledger.findOrCreate(ToolExecutionRecord.prepared("call-1", "call-1", binding.getBindingId(), binding.getGeneration(),
                 f.session, "original-owner", "turn-1", "runtime-call", "sha256:" + "c".repeat(64), reference));
-        ledger.settlePrepared(start, Map.of("executionStatus", "success"), java.time.Instant.now());
+        var start = ledger.claimDispatch("call-1", "dispatcher", Duration.ofSeconds(30));
+        ledger.compareAndSet(start, start.withResult(Map.of("executionStatus", "success"), 0, java.time.Instant.now()),
+                "dispatcher", start.getDispatchGeneration());
         var processReference = new java.util.HashMap<>(reference);
         processReference.remove("payloadDigest");
+        processReference.remove("publicationId");
         processReference.put("argsDigest", "sha256:" + "c".repeat(64));
         processReference.put("dispatchMode", "background_v3_process");
         processReference.put("processOf", "call-1");
@@ -460,10 +466,15 @@ class WorkspaceProfileLifecycleTest {
         var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
         var verifier = new WorkspaceProfileLifecycleVerifier(f.jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
                 beans.getBeanProvider(ManagedToolResultStore.class));
+        verifier.verifyPublications(operation);
         f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation, java.util.List.of(binding), WorkspaceToolProfiles.SHELL));
         f.jdbc.update("DELETE FROM ma_resource WHERE resource_id = X'6d616e6966657374'");
         assertThatThrownBy(() -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation,
                 java.util.List.of(binding), WorkspaceToolProfiles.SHELL))).isInstanceOf(ApiException.class);
+        if ("publication".equals(mode)) {
+            f.jdbc.update("DELETE FROM ma_session_record WHERE domain = 'child_run'");
+            assertThatThrownBy(() -> verifier.verifyPublications(operation)).isInstanceOf(ApiException.class);
+        }
     }
 
     @ParameterizedTest
