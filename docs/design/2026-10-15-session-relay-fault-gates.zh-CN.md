@@ -58,15 +58,23 @@ proxy 的 TypeScript fault driver、每用例一个「故障确实点火」的�
   （`hosted-session-command-session.ts:885-890`）；不可达位置点名原因
   （`notReachedText`，`:859-881`）；heading 统计 N 中已送达数
   （`:895-902`）；一个都没送达时回执以 refused 提交。
-- mint-未-relay 窗口的取消：`answerCommandByJournal`
-  （`hosted-workspace-tool-turn.ts:5843-5903`）把 `planned` 条目结算为
-  `cancelled`（`settle` 只从 `planned` 出发，
-  `hosted-session-command-session.ts:392-412`）；恢复侧给出同一答案
+- mint-未-relay 窗口的取消（切片 2 在 `main` = `5af87595f3` 上重验）：
+  park 等待的 abort 臂（`hosted-workspace-tool-turn.ts:5976-5984`）经
+  `answerCommandByJournal`（`:6047-6117`）作答，它把 `planned` 条目结算
+  为 `cancelled`、把 `accepting` 条目结算为 `unknown`，settle 输掉竞态时
+  重读 journal（`settle` 的出发状态表，
+  `hosted-session-command-session.ts:403-422`：`cancelled` 只从
+  `planned` 出发）；relay 只发现 `planned`、`accepting`、`unknown` 条目
+  （`HANDOVER_SQL`，`SessionMessageRelayStore.java:73-90`），已认领、而
+  发送方已把它结算为终态的条目只做分类、不 execute（决策 2，
+  `SessionMessageRelay.java:539-549`）。恢复侧给出同一答案
   （`sessionCommandJournalAnswer`，
   `packages/cli/src/serve/hosted-runtime-recovery.ts:1180-1225`）。
 - SSE：公开流按 `Last-Event-ID` / `after` 续传
-  （`PublicAgentController.java:195-218`），WebShell 流按 `afterSequence`
-  （`WebShellAgentController.java:125-134`）。
+  （`PublicAgentController.java:198-218`，`parseSequence` `:291`），
+  WebShell 流按 `afterSequence`（`WebShellAgentController.java:131-140`）；
+  两者都经同一个 `streamEvents` 读取重放
+  （`ManagedAgentService.java:1621-1624`），然后接 live hub 尾流。
 - ground-truth 表：`ma_session_record`（journal：`domain`、
   `record_id` = `cmd_`/`msgc_`、`revision`、`delivery_state`、
   `record_resource_id`）与 `ma_delivery`（relay 台账：
@@ -114,11 +122,11 @@ proxy 的 TypeScript fault driver、每用例一个「故障确实点火」的�
    故障用例、以及被刻意禁用的 `team_message`/`team_plan` 记录体，全部
    排除（由 #14054 跟踪）。切片按此顺序落地，各自独立 PR，FG8 形态：
 
-   | 切片 | 字母           | 等待                                                                                        | 原因                                                                                                                                                              |
-   | ---- | -------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-   | 1    | **FG9a, FG9f** | 无                                                                                          | 本轮欠的语义 —— 应答丢失下的探测后再发送与答案诚实 —— 没有在飞 PR 触碰。                                                                                          |
-   | 2    | **FG9d, FG9e** | 无；排在第二只为控制切片体量                                                                | 取消与 SSE 断流字母原样复用切片 1 夹具与 FG8e 观察者。                                                                                                            |
-   | 3    | **FG9b, FG9c** | **#13918**（InnoDB 锁守卫护卫）与 **#13986**（重启证明 held-Runtime drain）—— 今天均为 OPEN | FG9b 的 marker 断言 #13918 正在重写的存储故障错误码分类；FG9c 的 member/lead 重启臂钉住 held-Runtime 回填（#13986）正在重塑的冷载恢复。与 FG8 切片 3 同批等待者。 |
+   | 切片 | 字母           | 等待                                                                                                                     | 原因                                                                                                                                                              |
+   | ---- | -------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | 1    | **FG9a, FG9f** | 无                                                                                                                       | 本轮欠的语义 —— 应答丢失下的探测后再发送与答案诚实 —— 没有在飞 PR 触碰。                                                                                          |
+   | 2    | **FG9d, FG9e** | 无；排在第二只为控制切片体量                                                                                             | 取消与 SSE 断流字母复用切片 1 夹具，新增 H4e-b3 的 relay 闩锁、公开 API 前的第二个 proxy，以及 FG8e 观察者的 in-JVM 移植（见*夹具设计*）。                        |
+   | 3    | **FG9b, FG9c** | **#13918**（InnoDB 锁守卫护卫）与 **#13986**（重启证明 held-Runtime drain）—— 之后均已合入（`53a24a5ddf`、`c24e99e9cb`） | FG9b 的 marker 断言 #13918 正在重写的存储故障错误码分类；FG9c 的 member/lead 重启臂钉住 held-Runtime 回填（#13986）正在重塑的冷载恢复。与 FG8 切片 3 同批等待者。 |
 
    下面的门禁总账写全六个字母，使整轮可作为一份设计评审；每个切片的 PR
    实现其字母并在 tracker 上标记已交付。每个字母的注入点与断言在其切片
@@ -145,7 +153,9 @@ proxy 的 TypeScript fault driver、每用例一个「故障确实点火」的�
    Turn 重发会铸出新 command id 而重复）：FG9f 各臂只重驱*同一*
    command id（同 prompt key、同 call id，跨故障与重启）；绝不编排
    「新 command id 重复」形态，且无断言与那里的现状行为冲突。两个 bug
-   在此都不修，也都不被掩盖。
+   在此都不修，也都不被掩盖。#14063 之后已随 #14296（`9280ef9845`）关闭，
+   该 PR 修正了 member-message 超时提示；FG9d 逐字断言修正后的答案文案，
+   「新 command id」形态仍不编排。#14062 仍为 OPEN。
 
 5. **#13339 纪律。** 车道没有隔离或重试机制。FG9 因此：(a) 只新增
    `Hosted*IT` 类，绝不动 `HostedWorkspaceToolTurnIT`；(b) 每个用例都先
@@ -225,27 +235,65 @@ axis 探针把经 proxy 的 warm/createOrLoad 链的 resident-vs-attach 冲突
 头下*答案文案*的诚实 —— 这是「未送达却报已送达」和「把位置从报告里静默
 丢掉」两类 bug 的所在。
 
-### FG9d —— 取消（切片 2）
+### FG9d —— 取消（切片 2，已交付）
 
-| 用例                     | 注入                                                                                                                        | 期望                                                                                                                                                                                                                                    |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cancel-after-mint`      | 在 alice 的 outbound `session_command` 已提交 `planned`、relay 尚未 handover 时取消她的 Turn（公开 `agent.session.cancel`） | 被取消的发送不产生投递：零 `msgc_` 行、零收件人 journal 行；发送方条目结算 `cancelled`（`answerCommandByJournal`，`settle` 只从 `planned` 出发）；relay 把台账行分类为 `done` 且不 execute；发送方 Turn 以 cancelled 结束，无伪造 reply |
-| `cancel-reply-lost`      | 在取消已提交后毁掉 cancel POST 的应答；客户端重发同一取消                                                                   | 重发的取消应答同一已提交状态 —— 一条取消 journal 条目、一个结算终态；无重复取消事件；条目保持未投递                                                                                                                                     |
-| `cancel-during-handover` | 在 relay 的 handover 尝试在途时取消（handover 动词的应答被 proxy 扣住，取消落地后再放行）                                   | 只有物理上已结算的 relay 产生终态：要么 handover 竞赢取消、已提交回执诚实应答，要么被取消的条目挡住 relay 不执行 —— 绝不两者兼得，绝不在被取消了的发送上出现投递；journal 持有的结局是二者之一，门禁证明是哪一个                        |
+取消是对 alice 自己的 Session 发公开 `agent.session.cancel`：先以
+`CANCELLING` 持久受理并写一条 `turn.cancel.requested`，再由 coordinator
+送到 Harness，后者中止她 park 的等待；等待的 journal 作答
+（`answerCommandByJournal`）决定这次调用被告知什么、条目变成什么。用例钉住
+这个作答可能出错的两个窗口：relay 首次认领之前（用 H4e-b3 的 relay 闩锁
+扣住），以及 handover 提交在途时。
 
-### FG9e —— SSE 断流（切片 2）
+| 用例                     | 注入                                                                                                                                                          | 期望                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cancel-after-mint`      | alice 发送前扣住 relay；她的命令提交 `planned` 后取消她的 Turn                                                                                                | 发送从未离开：条目在 revision 2 结算 `cancelled`、无 reply；alice 的调用恰好应答一次，为「未发送」文案；lead 上无回执、无 `msgc_`，bob 的 journal 上什么都没有；Turn 以 `CANCELLED` 结束，恰好一条 `turn.cancel.requested`、一条 `turn.cancelled`；relay 从未认领这条命令 —— 用例其余投递全部落账后，它的台账行为零，因为 relay 的发现只读 `planned`、`accepting`、`unknown` 条目                                                                                                                                                                                                                                                                |
+| `cancel-reply-lost`      | 同一窗口，只是 cancel POST 经公开 API 前的第二个 lose-once proxy 发出，proxy 在取消提交后毁掉应答；客户端以同一 `Idempotency-Key` 直连重发同一取消            | 重发应答 `202`、`replayed: true`、同一 Turn；该 key 恰好一条请求回执；恰好一条 `turn.cancel.requested`、一条 `turn.cancelled` —— 无重复取消；以及 `cancel-after-mint` 的全部期望                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `cancel-during-handover` | 在 store proxy 扣住 relay 的 handover 提交（`commitSessionCommand`，alice journal 上的 revision 2）的应答；取消她的 Turn；在持久的 `CANCELLING` 之后 2 s 放行 | Harness 只在被扣的提交之后才应答取消（其 cancel 路由的耗时覆盖了扣留期），所以 abort 读到的是已 handover 的条目、无法再撤回 —— 绝不同时出现「未发送」与投递：条目绝不读到 `cancelled`，而是走 planned → accepting → unknown（取消的 settle）→ accepted（回执抄回），revision 4；alice 的调用恰好应答一次，为「已到达 leader」文案；恰好一份 revision 1 的回执，alice 逐字节持有其 reply。relay 的 execute 与 alice 的 run 在取消后的结算竞跑，回执说明走了哪条臂：answered `Message sent to bob.`、一行 `msgc_` 且恰好投递并消费一次，或 refused `Your run has ended or is being stopped; …`、零 `msgc_` —— 两者都诚实，门禁按回执所指的那条断言 |
 
-公开与 WebShell 流由 in-JVM Spring 提供；客户端断开与续传就是注入，所以
-本字母不需要 proxy。一次在途的 `*` 广播提供 relay 流量。每个用例在 relay
-中途断流，让 relay 在断线期间继续推进 —— JDBC 见证续传前已有行提交在
-游标之后 —— 然后才重连，所以重放绝不是空洞的。
+落地时记下的机制注记：
 
-| 用例                        | 注入                                              | 期望                                                                                                         |
-| --------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `public-sender-resume`      | 扇出中途断开发送方公开流；按 `Last-Event-ID` 续传 | 从游标起重放序列无重复、无缺口；回执与铸出的消息在断线期间提交到游标之后（JDBC）；终态 Turn 事件恰好出现一次 |
-| `webshell-sender-resume`    | 扇出中途断开 WebShell 流；按 `afterSequence` 续传 | 对 WebShell 信封做同样的连续性断言                                                                           |
-| `public-recipient-resume`   | 在铸造与投递之间断开一名收件人的公开流；续传      | 被铸消息的投影按序重放，不丢失、不重复；收件人的消费事件恰好出现一次                                         |
-| `webshell-recipient-resume` | 同上，走收件人的 WebShell 流                      | 同样的断言                                                                                                   |
+- 在 relay 首次认领之前就被撤回的命令根本不进台账：切片 1 草稿里「relay
+  把台账行分类为 `done`」只对 relay 已认领的命令成立（决策 2），而这个
+  窗口里任何应答操纵都造不出那种形态。门禁断言零行形态，并在用例其余投递
+  全部落账之后才读。
+- Harness 把取消排在该 Session 在途的 store 提交之后：它的 cancel 路由
+  直到被扣的 handover 应答放行才返回（各次落地运行为 2.3–3.3 s，都覆盖了
+  用例在取消之后继续扣住应答的那一拍）。所以 handover 提交在途时，abort
+  总是读到已 handover 的条目，其 journal 作答结算为 `unknown`；门禁用
+  Harness 自己的请求日志见证这段重叠（cancel 路由的 `durationMs` ≥
+  1.5 s）。反方向的窗口 —— 取消的 settle 在途时 relay 到来 —— 在 store 边界
+  上造不出来：settle 的提交先于其应答被扣而落库，relay 又按已提交状态决定
+  （它只发现 `planned`、`accepting`、`unknown` 条目，并在认领后立即重读记录），
+  所以在途的 settle 就是 `cancel-after-mint` 的零认领形态。
+
+### FG9e —— SSE 断流（切片 2，已交付）
+
+用两个用例取代草稿的四个：每个用例在一个表面上从两端观察同一次 `*`
+广播 —— 发送方（alice）与一名收件人（bob）—— 因为两端搭的是同一个 relay、
+同一次团队引导，而 fork 预算（#14148）为每次团队引导付费。公开流与
+WebShell 流由 in-JVM Spring 提供；注入就是客户端自己的断开（其
+HttpClient 的 `shutdownNow`）与续传，所以本字母不需要 proxy。每条流只在
+客户端已持有全部已提交事件后才切断，只在 JDBC 证明游标之后已有事件提交后才
+续传，客户端的完整视图（切断前的帧加续传后的帧）必须是从 1 起无缺口、无
+重复的一条序列，逐帧等于该表面所提供的已提交行。
+
+| 用例              | 注入                                                                                                                                                                                                                       | 期望                                                                                                                                                                                                                                                                   |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `public-resume`   | 扣住 relay；打开 alice 与 bob 的公开流；alice 的命令 `planned` 后切断她的流，再放行 relay，使整个 relay 在她断线期间运行；两个 `msgc_` 都铸出后、bob 的投递之前切断他的流；等全部投递落账；两条流都按 `Last-Event-ID` 续传 | alice 切断时尚无任何 relay（无 `msgc_`），bob 切断时他的 journal 上什么都没有；两个 Session 都在断线期间提交了游标之后的事件；两份续传视图都连续且恰为台账（snake_case、秒级 `created_at`）；alice 的 Turn 终态一次、她 relay 之后的回答一次；bob 的启动 Turn 终态一次 |
+| `webshell-resume` | 同上，走 WebShell 流，按 `afterSequence` 续传                                                                                                                                                                              | 对 WebShell 信封做同样断言（camelCase、毫秒级 `createdAt`）                                                                                                                                                                                                            |
+
+落地时记下的机制注记：
+
+- 读取 relay 消息的那个 Turn 是 Harness 自己的唤醒 Turn，不投影到公开台账，
+  所以收件人的流里没有消息本身的投影：bob 的尾流是他的闩锁放开后启动 Turn
+  的结束，而他的投递与消费（JDBC）在切断期间落地。草稿里「收件人的消费事件
+  恰好出现一次」无事件可数；收件人这一端改为钉住：一条跨过其投递而被切断的流
+  续传后无缺口、无重复，逐帧等于它的台账。发送方一端才是依赖 relay
+  的那端：她的 Turn 尾部只在 relay 应答之后才提交。
+- 过期游标 `resync_required` 臂（开放问题 3）不武装：resync 应答属于
+  Session 流的重放地板，与事件由哪个能力产生无关，FG8 的跟踪 issue
+  （#14163）拥有那唯一的用例（`cursor-expired-resync`）—— 它的设计把该用例
+  延后，其切片 2（#14334）尚未交付。
 
 ### FG9b —— 存储故障（切片 3，#13918 之后）
 
@@ -330,7 +378,32 @@ dropped|holding|release|released <rule>`）；那几行就是字母们经
 `countOps` 断言的故障点火见证。生产超时保持默认值；FG9f 的
 `partial-timeout` 只把该字母的
 `qwen.managed-agent.harness.request-timeout` 降到 3 s，让扣住的
-mint 快速逼出 relay 侧超时加重试。
+mint 快速逼出 relay 侧超时加重试；另有 FG9e 的流心跳（见下）。
+
+**切片 2 的新增。** 五件，全部在门禁 JVM 内：
+
+- **relay 闩锁**沿用 H4e-b3：`SchedulerHold` 在单线程的
+  `messageRelayScheduler` 上停放一个任务，于是在用例放行之前不会跑任何
+  scan —— 也就没有认领、没有 handover；FG9d 的 `cancel-after-mint` /
+  `cancel-reply-lost` 与两个 FG9e 用例都在 alice 发送前拿到它；
+- **第二个 proxy 实例**只为 `cancel-reply-lost` 里客户端自己的 cancel
+  POST 挡在公开 API 前（其余一律直连 Spring），处置同为提交后丢答；
+- **观察者**是 FG8e 观察者的 in-JVM 移植：每条流一个 HttpClient
+  （HTTP/1.1），切断即该客户端的 `shutdownNow`；它把每帧的 SSE
+  `id`/`event` 与载荷的 `sequence`/`type` 对照，比对时把每个台账行按表面
+  的提供方式映射（公开为 snake_case 与秒，WebShell 为 camelCase 与毫秒，
+  省略 null）。认证 filter 现在也覆盖 `/api/agent/web-shell/v1/*` 与
+  async 派发，与 FG8 的一致；
+- FG9e 的流心跳设为 2 s。被客户端切断的流在服务端要到下一次写失败才关闭，
+  而一条打开的流会把 Spring 的优雅停机拖满整个 30 s 窗口；不沿用 FG8e 的
+  60 s 事件 poll/心跳，因为这里的续传视图几乎全是重放，长心跳只会让被切断
+  的流多活一阵；
+- Spring 与内嵌 broker 绑定临时端口、启动后再读回，两个 proxy 也只在那之后
+  才设定上游：第一次全类运行中，Spring 预选的端口到它自己绑定时已被占用
+  （`PortInUseException`）—— 预选与 Spring 绑定之间的任何临时绑定或连接都可能
+  占走它，第二个 proxy 又多加了一个。Harness
+  端口仍按 H4e 系列 IT 的做法预选，因为 Spring 的 connector 在 Harness
+  启动前就按它配置。
 
 **先见证、后释放的编排。** 切片在拒收语义上学到并在落地记下的排序课，
 各花掉它自己的一轮探针：向已完结成员发 peer 消息会在任何铸造之前被拒
@@ -342,7 +415,9 @@ WAIT 闩卡在用例自己的铸造见证（`awaitMsgcMinted` 读 `msgc_` 行）
 `recipient-stopping` 的脚本化 `request_shutdown` 由 `stophit` 闩把守到
 目标的首次模型接触 —— 取消一个尚未开始的 run 是诚实数据但不是接触，
 用例的 roster 门会永久等它；成员 session 的查取在 child_run 记录体
-**顶层**读 `childSessionId`（放宽后的记录契约之形）；
+**顶层**读 `childSessionId`（放宽后的记录契约之形），而切片 2 在任何 relay
+动作之前就要读成员 Session，于是先等那次 attach 落地 —— 它可能晚于成员的
+首次模型调用；
 `settleAndCheckDelivered` 只按 `delivery_kind = 'SESSION_MESSAGE'` 拉
 终态集合，因为三条 child-launch 的 `<childRunId>` delivery 在脚本化的
 lead 先于被闩成员完结的顺序下本来就停在 `delivered` —— 那是编排簿记，
@@ -372,11 +447,16 @@ include；`check-failsafe-reports.js hosted` 强制它必须跑过）。每
   `hosted-session-relay-gates` 聚焦 profile，拷贝
   `hosted-monitor-run-gates` 用于本地运行。
 
+切片 2 只移健康配额，按四字母全类全绿重测（本地三次健康 308–314 s，按同样的
+1.7× 预算约 534 s，切片 1 时约 300 s）：2400→2640 s。#14334 为五个 FG8 字母
+已把 hosted fork 提到 3600 s，它已覆盖一个 600 s 上限加这份健康时长（3240 s），
+所以 fork、Verify 步骤与 job 上限都保持 #14334 留下的值。
+
 ## 变异检查
 
 每个变异先应用、证明恰好其门禁变红、再还原，沿用 FG6/FG7/FG8 的文档化
-手工流程。以下切片 1 变异随本设计提交；切片 2/3 的变异随字母落地时
-细化。
+手工流程。以下切片 1 变异随本设计提交；切片 2 的紧随其后；切片 3 的变异
+随其字母落地时细化。
 
 1. FG9a —— store 客户端的不确定错误重试铸出新事务身份而不是重驱原身
    份：`admission-commit-reply` 红（出现第二行 `session_command`，或
@@ -390,10 +470,32 @@ include；`check-failsafe-reports.js hosted` 强制它必须跑过）。每
    `receipt-commit-reply` 红 —— 回执被重复提交（第二次 revision），
    或答案字节逐字节分叉。
 
-计划项，切片落地时细化：FG9d —— 取消结算接受从非 `planned` 状态出发
-的 settle（`cancel-after-mint` 在第二次 settle 冲突处红）；FG9e ——
-FG8e 变异中的按字母重放边界 off-by-one 一对，重施加到 relay 台账投影
-上；FG9b —— 被拒的 outbound 提交继续铸出 delivery 行
+切片 2，每个只对其目标用例运行（`-Dqwen.fg9d.case` /
+`-Dqwen.fg9e.case`）；两个 Harness 侧变异就地改打包产物的 chunk，事后逐字节
+还原：
+
+5. FG9d —— 取消的 journal 作答仍说「未发送」，却把条目留在 `planned`
+   （去掉 `planned` 臂的 `settle(…, 'cancelled')`）：`cancel-after-mint`
+   红 —— 条目停在 `planned`、永不结算 `cancelled`，放行的 relay 会把它
+   handover 出去。
+6. FG9d —— 取消的 request digest 在重试间不稳定（每次调用带 nonce）：
+   `cancel-reply-lost` 红 —— 重发的取消应答 `409 idempotency_conflict`，
+   而不是已提交的受理。
+7. FG9d —— 取消告诉一名已 handover 的发送方「消息未发送」（journal 作答的
+   `accepting` 臂给出 `planned` 文案，条目仍结算 `unknown`）：
+   `cancel-during-handover` 在作答断言处红 —— 被告知重发的发送方会重复一条
+   relay 已投递的消息。更强的回归 —— 取消撤回已 handover 的条目本身 —— 被
+   三层拒绝：journal 作答结算 `unknown`，`settle` 只允许从 `planned` 到
+   `cancelled`，记录契约的投递状态迁移
+   （`managed-extension-record.ts:183-187`）从不让 `accepting` 走向
+   `cancelled`；前两层被变异后，第三层拒绝每一次 settle，Turn 以
+   recovery-blocked 告终、永不离开 `CANCELLING`，本用例在那个等待处红。
+8. FG9e —— 公开 `Last-Event-ID` 游标少读一位：`public-resume` 红（续传
+   边界上一处重复）。
+9. FG9e —— WebShell `afterSequence` 游标在续传时多读一位：
+   `webshell-resume` 红（续传边界上一处缺口）。
+
+计划项，切片落地时细化：FG9b —— 被拒的 outbound 提交继续铸出 delivery 行
 （`outbound-commit-refused` 在零投递断言处红）；FG9c —— 冷载把 park
 的命令等待当成干净（`member-kill-after-mint` 在从 journal 恢复的断言
 处红）。
@@ -407,8 +509,8 @@ FG8e 变异中的按字母重放边界 off-by-one 一对，重施加到 relay �
   声明故障都点火 —— 每个丢弃计数、扣留计数、`FG9B_*` marker 与 kill
   marker 都被观察到 —— 按字母选择子可用，且快乐路径（无注入的一次
   广播）全绿、每个 roster 位置恰好一行 `msgc_`。
-- 以上切片 1 变异每个单独变红；源码还原；门禁复绿。切片 2/3 对其变异
-  重复同一流程。
+- 以上切片 1 与切片 2 变异每个单独变红；源码还原；门禁复绿。切片 3 对其
+  变异重复同一流程。
 - `hosted-process-ci.test.js` 带任何移动的预算全绿，且全车道跑完后
   `check-failsafe-reports.js hosted` 满足。
 - 按 AGENTS.md 做两轮连续干净的无方向审计与反向审计。
@@ -423,5 +525,6 @@ FG8e 变异中的按字母重放边界 off-by-one 一对，重施加到 relay �
    稳定断言由三个 store 边界字母承载。
 2. 广播 roster 是否扩到四名成员（三个收件人）以让部分臂的判定更锐 ——
    代价是每个用例多一名脚本化成员；实现时定。
-3. FG9e 是否需要 FG8e 切片延期的过期游标 `resync_required` 臂 —— 留给
-   切片 2 落地，同属重放地板机制问题。
+3. 切片 2 已定：FG9e 不武装过期游标 `resync_required` 用例。resync 应答
+   属于 Session 流的重放地板，与事件由哪个能力产生无关，FG8 的跟踪 issue
+   （#14163）仍欠着那唯一的用例。
