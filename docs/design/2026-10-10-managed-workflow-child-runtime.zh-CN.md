@@ -66,9 +66,9 @@ H4c 把 `managed-child_run` 的 `workflow` body kind 作为**禁用的记录契�
 
 - `packages/core/src/managed-runtime/managed-child-operations.ts`：workflow envelope 编解码对、`workflowLaunchBody`、决策 2 的 pin 计算；`managed-session-records.ts`：门禁列表；各自旁边的测试，含被翻转的门禁见证。
 - `packages/cli/src/serve/hosted-workspace-tool-turn.ts`：`HOSTED_WORKFLOW_TOOL`、`childWorkflowAdmissionsEnabled()`、准入臂与 `acceptChildWorkflow`；`hosted-child-agent-session.ts`：kind 参数化的 funnel（record、parse、通知 kind 与 source、workflow admit）；`hosted-harness-session.ts`（加同侪 `hosted-workflow-turn.ts`）：workflow Turn 执行、wake/close 谓词放宽；`hosted-monitor-wake-turn.ts`：consumption 谓词。各自旁边的测试。
-- `packages/sdk-java/managed-agent-server`：`ChildResultRelayStore`（两处放宽的查询、退役注释）、`ChildResultRelay`（create 按记录 kind 分支；complete 时从 workflow envelope 取描述）、`ManagedAgentService`（`createWorkflowChildSession` 与共享的 `insertChildSession`——workflow 创建臂及其首个 Turn 块、请求 digest 覆盖 pin），各自旁边的测试（`ChildResultRelayTest`、`SessionLifecycleCoordinatorTest`、store 套件）。无迁移；PR head 上最高号为 V68（来自 main），下一个空闲号是 V69。
+- `packages/managed-agent-server`：`ChildResultRelayStore`（两处放宽的查询、退役注释）、`ChildResultRelay`（create 按记录 kind 分支；complete 时从 workflow envelope 取描述）、`ManagedAgentService`（`createWorkflowChildSession` 与共享的 `insertChildSession`——workflow 创建臂及其首个 Turn 块、请求 digest 覆盖 pin），各自旁边的测试（`ChildResultRelayTest`、`SessionLifecycleCoordinatorTest`、store 套件）。无迁移；PR head 上最高号为 V68（来自 main），下一个空闲号是 V69。
 - `packages/sdk-java/qwencode`：`JsonSupport` 与其 `JsonSupportTest`——准入 digest 的 ECMAScript 字节保真正典化（对 script 侧实际所持的确切基底计算 `sha256(JSON.stringify(prompt))`）；第一个携带小数的 prompt 穿过这一 digest，迫使正典写器与其 Node oracle 黄金向量落地。
-- `packages/sdk-java/managed-agent-server`（输入准入）：持久化输入的文本若携带孤立代理项——列无法逐字节保留的字符——会在 Spring 输入准入（`ManagedAgentService`）归一化为 U+FFFD，先于 payload digest 与写库两处，于是 relay 的重放、coordinator 的重编码与列所存，描述的是同一份表示。
+- `packages/managed-agent-server`（输入准入）：持久化输入的文本若携带孤立代理项——列无法逐字节保留的字符——会在 Spring 输入准入（`ManagedAgentService`）归一化为 U+FFFD，先于 payload digest 与写库两处，于是 relay 的重放、coordinator 的重编码与列所存，描述的是同一份表示。
 - `packages/core/src/managed-runtime/contracts/`：既有 H4c 记录 fixtures 原样重放。不新增共享 envelope fixture 文件：跨语言 pin 是 Java relay 测试喂给 `createWorkflowChildSession` 的手工键入 workflow launch envelope JSON，与 TypeScript 编码器的输出形状对放重放（封闭键 `{definition, script, args}`，两侧都携带决策 2 的 pin）。
 - 双语言版本的本设计；`.qwen/e2e-tests/` 下的 E2E 计划与验收结果；H4c 与 H4b 设计的 follow-up 表加注指名本切片已交付。
 
