@@ -131,11 +131,16 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
-  it('should handle adjacent highlights at start', () => {
-    const text = '/run@file.js';
-    expect(parseInputForHighlighting(text, 0)).toEqual([
+  it('should keep an @ glued to the preceding word out of the file token', () => {
+    // parseAllAtCommands treats an '@' preceded by a word character as part
+    // of that word, so `bob@example.com` is prose and `/run@file.js` is one
+    // command run. The paint has to agree with the parser.
+    expect(parseInputForHighlighting('mail bob@example.com', 0)).toEqual([
+      { text: 'mail bob@example.com', type: 'default' },
+    ]);
+    expect(parseInputForHighlighting('/run@file.js', 0)).toEqual([
       { text: '/run', type: 'command' },
-      { text: '@file.js', type: 'file' },
+      { text: '@file.js', type: 'default' },
     ]);
   });
 

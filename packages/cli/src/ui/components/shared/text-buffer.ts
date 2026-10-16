@@ -2210,13 +2210,31 @@ export function useTextBuffer({
 
   const insert = useCallback(
     (ch: string, { paste = false }: { paste?: boolean } = {}): void => {
+      // A dragged or pasted path is inserted as an `@`-reference, and the
+      // parser only reads an `@` as a reference when the character before it
+      // is not a word character. Without this the token would glue to the
+      // word the cursor sits in and the file would never be attached.
+      const separatorBeforeInsert = (): string => {
+        const current = stateRef.current;
+        const line = current.lines[current.cursorRow] ?? '';
+        // cursorCol counts code points, so slice the line the same way.
+        const before = toCodePoints(line).slice(0, current.cursorCol);
+        const previous = before[before.length - 1];
+        // The parser reads an `@` as a reference only when the character
+        // before it is neither a word character nor a backslash, so those
+        // two are exactly when the insert needs its own separator.
+        const needsSeparator =
+          previous !== undefined && (previous === '\\' || /\w/.test(previous));
+        return needsSeparator ? ' ' : '';
+      };
+
       // Handle pastes that contain newlines (e.g., file paths separated by newlines).
       // We need to process these before the newline check below, which would
       // otherwise cause an early return and skip the @-path detection.
       if (paste && /[\n\r]/.test(ch) && !shellModeActive) {
         const validPaths = tryExtractFilePaths(ch, isValidPath);
         if (validPaths) {
-          ch = `${validPaths.join(' ')} `;
+          ch = `${separatorBeforeInsert()}${validPaths.join(' ')} `;
         }
         dispatch({ type: 'insert', payload: ch });
         return;
@@ -2235,7 +2253,7 @@ export function useTextBuffer({
       ) {
         const validPaths = tryExtractFilePaths(ch.trim(), isValidPath);
         if (validPaths) {
-          ch = `${validPaths.join(' ')} `;
+          ch = `${separatorBeforeInsert()}${validPaths.join(' ')} `;
         }
       }
 

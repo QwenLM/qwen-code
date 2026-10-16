@@ -19278,6 +19278,7 @@ describe('Session', () => {
         .mockResolvedValue({
           contentParts: 'allowed file',
           files: [],
+          dropped: [],
         } as Awaited<ReturnType<typeof core.readManyFiles>>);
       mockChat.sendMessageStream = vi
         .fn()
@@ -19331,6 +19332,7 @@ describe('Session', () => {
         .mockResolvedValue({
           contentParts: 'unexpected',
           files: [],
+          dropped: [],
         } as Awaited<ReturnType<typeof core.readManyFiles>>);
       mockChat.sendMessageStream = vi
         .fn()
@@ -19468,6 +19470,7 @@ describe('Session', () => {
           contentParts:
             '\n--- Content from referenced files ---\nContent from @editor.ts:\nexport const answer = 42;\n--- End of content ---',
           files: [],
+          dropped: [],
         } as Awaited<ReturnType<typeof core.readManyFiles>>);
       mockChat.sendMessageStream = vi
         .fn()
@@ -25363,6 +25366,7 @@ describe('Session', () => {
           .mockResolvedValue({
             contentParts: 'secret file',
             files: [],
+            dropped: [],
           });
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',
@@ -36598,6 +36602,7 @@ describe('Session', () => {
         .mockResolvedValue({
           contentParts: 'file content',
           files: [],
+          dropped: [],
         });
 
       try {
