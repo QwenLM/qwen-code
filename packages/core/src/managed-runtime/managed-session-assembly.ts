@@ -260,25 +260,40 @@ export async function openManagedSession(
     // activation would read as abandoned. An external permanent fence may
     // forbid that append. An adopted lease still stops the
     // renewal it started; only the lease itself stays with its owner.
-    // The seal runs in a finally: a writer left unsealed because releasing
-    // the activation failed can neither resume cleanly nor be taken over.
+    // The seal runs even when releasing the activation failed: a writer left
+    // unsealed can neither resume cleanly nor be taken over. A release
+    // failure rejects the close; when the seal fails too, the seal error
+    // rejects and carries the release failure as its cause, so neither is
+    // lost to a debug line that is off by default (review round 1, R1-4).
     close: async (options) => {
       renewal.stop();
       if (adopted) return;
+      let released = true;
+      let releaseError: unknown;
       try {
         if (options?.releaseActivation !== false)
           await authority.releaseActivation();
       } catch (error) {
-        // The finally's seal failure would otherwise erase this error from
-        // the caller's view entirely.
+        released = false;
+        releaseError = error;
         debugLogger.debug(
           'Managed Session activation release failed before seal',
           describeRenewalError(error),
         );
-        throw error;
-      } finally {
-        await authority.close();
       }
+      try {
+        await authority.close();
+      } catch (sealError) {
+        if (
+          !released &&
+          sealError instanceof Error &&
+          sealError.cause === undefined
+        ) {
+          sealError.cause = releaseError;
+        }
+        throw sealError;
+      }
+      if (!released) throw releaseError;
     },
   };
 }

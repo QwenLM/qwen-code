@@ -423,6 +423,14 @@ darwin 是一个未被验证的预期，而不是等待首个不可能发生的�
   未设置）的 Turn 仍以 `hosted_harness_unavailable` 终结；而带有
   submission 标记的 Turn 无论 code 如何都沿自身路径重试——预算本来就
   不看这些 Turn（那是 `transientFailure` 的既有约定，不是豁免）。
+  已绑定 Session 上的 generation 变化（`HostedHarnessGenerationException`）
+  是另一种豁免等待，准入前后都适用：单次变化受上一代 lease 约束。但每次
+  尝试之间都重启的 Harness 会反复抛出它，所以 Turn 连续四个预算都没有
+  journal 进展后（`consecutive_failures` 达到 4 × `max-pre-admission-retries`
+  或 4 × `max-post-admission-retries`），豁免即告失效：Turn 按预算耗尽处理，
+  以 `hosted_harness_unavailable` 或
+  `hosted_harness_unavailable_after_admission` 失败，而不是与健康重试无从
+  区分地无限重试（#13182 后续，R3-6）。
 - **D9b，请求超时对接管 load。** `HostedHarnessClient.loadSession`
   只在请求带恢复标志（`passiveManagedRuntimeRecovery` 或
   `driveRuntimeRecovery`）时使用独立的 `load-timeout`（默认 120 秒，

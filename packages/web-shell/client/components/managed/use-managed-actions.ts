@@ -13,7 +13,10 @@ const EXPIRY_GRACE_MS = 1_000;
 // transient failure does not hide an approval until it expires.
 const LOAD_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 // The contract's codes for an Action that already ended: it expired, was
-// cancelled, or was answered elsewhere. Retrying the answer cannot succeed.
+// cancelled, or was answered elsewhere, or the answered delivery outlived the
+// Action before its decision projected (`action_response_decision_expired`,
+// which the service never re-admits because the Action's own deadline has
+// passed). Retrying the answer cannot succeed.
 // `action_response_delivery_failed` is deliberately absent: the service
 // re-admits a retried click whose Action is still requested, so a retry
 // after a delivery failure can succeed and the card must stay retryable.
@@ -21,6 +24,7 @@ const ENDED_ACTION_CODES: ReadonlySet<string> = new Set([
   'action_expired',
   'action_cancelled',
   'action_already_resolved',
+  'action_response_decision_expired',
 ]);
 
 function endedAction(failure: unknown): boolean {

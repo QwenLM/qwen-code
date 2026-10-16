@@ -256,6 +256,28 @@ describe('managed session assembly', () => {
     expect(sealAttempted).toHaveBeenCalled();
   });
 
+  it('keeps the release failure as the cause when the seal fails too', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    vi.spyOn(session.authority, 'releaseActivation').mockRejectedValue(
+      new Error('activation store unavailable'),
+    );
+    vi.spyOn(session.authority, 'close').mockRejectedValue(
+      new Error('journal seal failed'),
+    );
+
+    const failure = await session.close().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('journal seal failed');
+    expect((failure as Error).cause).toBeInstanceOf(Error);
+    expect(((failure as Error).cause as Error).message).toBe(
+      'activation store unavailable',
+    );
+  });
+
   it('stops renewal and seals an externally fenced writer without appending activation release', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const workspace = await createWorkspace();

@@ -676,6 +676,31 @@ describe('useManagedActions', () => {
     expect(hook.latest?.action).toBeUndefined();
   });
 
+  it('drops an approval whose answered delivery outlived the Action', async () => {
+    // The terminal a replayed click returns once an answered delivery
+    // outlived its Action before the decision projected: the service never
+    // re-admits it, so the card goes and the list is read again (review
+    // round 2, R2-18).
+    const ended = Object.assign(new Error('Action decision expired'), {
+      code: 'action_response_decision_expired',
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValueOnce([]);
+    const respond = vi.fn().mockRejectedValue(ended);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    expect(hook.latest?.action).toBeUndefined();
+    expect(hook.latest?.answerError).toBeUndefined();
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+  });
+
   it('drops an approval another client already answered', async () => {
     // The code Java returns when a stale tab answers an Action that another
     // tab or the REST API already decided.
