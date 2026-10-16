@@ -778,9 +778,10 @@ export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
 After a credential-key rotation, keep each prior key in deployment config
-until no persisted Runtime binding references its key ID (quote map keys so
-the ID survives YAML parsing exactly — a plain key containing `/`, `:` or a
-space is silently rewritten, and the lookup then matches nothing):
+until no persisted Runtime binding references its key ID (wrap every map key
+in `[ ... ]` — Spring's relaxed binder normalises plain keys, so an ID like
+`legacy/v1`, `legacy:v1` or `legacy v1`, quoted or not, binds as `legacyv1`
+and matches nothing):
 
 ```yaml
 qwen:
@@ -789,7 +790,7 @@ qwen:
       credential-key-id: local-dev-v2
       credential-key: replace-with-base64-encoded-32-byte-v2-key
       previous-credential-keys:
-        'local-dev-v1': replace-with-base64-encoded-32-byte-v1-key
+        '[local-dev-v1]': replace-with-base64-encoded-32-byte-v1-key
 ```
 
 New credentials use only the active key. Reads select the active or previous
