@@ -213,7 +213,7 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
 | `store/WorkspaceRecoveryReader.java`                      | `resource_collected` 命名检查                                                                                                                                                            |
 | `config/ToolPublicationConfiguration.java`                | 复用现有调度器的回收器 bean                                                                                                                                                              |
 | `store/SessionResourceCollectionCollectorTest.java`（新） | 谓词、blocker、分页、防护、字节精确记账、退役围栏后的结果                                                                                                                                |
-| `packages/sdk-java/managed-agent-server/README.md`        | 运维一段                                                                                                                                                                                 |
+| `packages/managed-agent-server/README.md`                 | 运维一段                                                                                                                                                                                 |
 
 不在本变化内：`ToolPublicationRetentionStore`、`ToolPublicationCollector`、以及除文
 档链接外的所有 TS 包均不改动。刻意不把发布回收器与本回收器合并出一个公共骨架：
