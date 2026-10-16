@@ -149,7 +149,7 @@ public final class ManagedHostedRecoveryRecords {
                     && stored.schemaVersion() == node.get("schemaVersion").asInt()
                     && stored.byteLength() == node.get("byteLength").asLong()
                     && stored.digest().equals(node.get("digest").asText()), "Hosted nested resource conflicts.");
-            if (KINDS.contains(stored.kind()) || List.of("managed-action-options", "managed-checkpoint",
+            if (KINDS.contains(stored.kind()) || List.of("managed-action-options", "managed-checkpoint", "managed-definition",
                     "managed-hook-plan", "managed-hook-message-chunks", "managed-message-chunks").contains(stored.kind())
                     || ManagedExtensionRecords.DOMAINS.stream().anyMatch(domain -> ("managed-" + domain).equals(stored.kind()))) {
                 JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
