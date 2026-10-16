@@ -35,6 +35,8 @@ describe('isDestructiveCommand — text that is not executed', () => {
     'echo git reset --hard',
     `grep -rn 'terraform destroy' docs`,
     `rg 'git stash drop'`,
+    `grep -rn 'git reset --hard' . || true`,
+    `rg 'git checkout -- .' . src`,
     `git commit -m 'docs: explain git reset --hard'`,
     `git log --grep 'git checkout -- .'`,
     `cat <<'EOF' > notes.md\ngit reset --hard\nEOF`,
@@ -177,6 +179,8 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     `printf -- '--hard\\n' | xargs git -C /repo reset`,
     'echo reset --hard | xargs git -C /repo',
     'find . -maxdepth 0 -exec git checkout {} \\;',
+    `X='git reset --hard'; $X`,
+    `echo 'git reset --hard' | xargs -I{} sh -c '{}'`,
     // A script the same command writes and then runs.
     `printf 'git reset --hard\\n' > fixup.sh && bash fixup.sh`,
     `printf 'git reset --hard\\n' > fixup.sh && . ./fixup.sh`,
@@ -187,12 +191,22 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     `printf 'git reset --hard\\n' > fixup.sh && cat fixup.sh | bash`,
     `printf 'git reset --hard\\n' > fixup.sh && bash "$PWD/fixup.sh"`,
     `printf '#!/bin/sh\\ngit reset --hard\\n' > fixup.sh && ./fixup.sh`,
+    `printf 'git reset --hard\\n' > a.sh && cp a.sh fixup.sh && bash fixup.sh`,
+    `printf 'git reset --hard\\n' > "$PWD/fixup.sh" && bash fixup.sh`,
+    `printf '\\x67it reset --hard\\n' > fixup.sh && bash fixup.sh`,
+    `printf 'git reset --hard\\n' > fixup.sh && eval "$(cat fixup.sh)"`,
+    `bash -c "printf 'git reset --hard' > f; bash f"`,
+    `printf 'git reset --hard\\n' > f && git -c alias.x='!sh f' x`,
+    `printf 'git reset --hard\\n' > f.sh && chmod +x f.sh && timeout 60 ./f.sh`,
+    `bash <(echo 'git reset --hard')`,
+    `source <(printf 'git reset --hard\\n')`,
     // Code handed to another interpreter.
     `python3 -c "import os; os.system('git reset --hard')"`,
     `node -e "require('child_process').execSync('git clean -fd')"`,
     `python3 <<'EOF'\nimport os\nos.system('git stash drop')\nEOF`,
     `echo "import os; os.system('git reset --hard')" | python3`,
     `printf 'import os\\nos.system("git reset --hard")\\n' > f.py && python3 f.py`,
+    `awk 'BEGIN { system("git reset --hard") }'`,
     // The parser cannot read these.
     `case "$1" in x) git reset --hard ;; esac`,
     `echo 'git reset --hard`,
@@ -222,9 +236,17 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     'bash "$SCRIPT" && git commit -m done',
     `python3 -c 'print(1)' && git commit -m done`,
     'python3 manage.py migrate',
-    // With a script argument, the interpreter's stdin is data.
     'git stash list | python3 parse.py',
     `cat notes.txt | bash -c 'wc -l'`,
+    `awk '{print $1}' app.txt`,
+    `printf 'echo hello\\n' > hello.sh && bash < hello.sh`,
+    // A commit is only protected when amended.
+    `printf 'echo "remember to run git commit"\\n' > note.sh && bash note.sh`,
+    `python3 -c "import subprocess; print(subprocess.run(['git', 'status']).returncode or 'nothing to commit')"`,
+    // Commands checked word for word and comments are not hidden code.
+    './scripts/build.sh && git checkout main',
+    `timeout 300 bash -c 'npm ci && ./scripts/test.sh && git checkout -- package-lock.json'`,
+    './scripts/test.sh # then git reset --hard if it fails',
   ])('allows %j, which cannot reach a protected operation', async (command) => {
     expect(await reasonFor(command)).toBeNull();
   });

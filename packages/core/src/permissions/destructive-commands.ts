@@ -112,8 +112,8 @@ const words = (list: string) => new Set(list.split(' '));
 
 const IAC_TOOLS = words('terraform pulumi cdk');
 const SHELLS = words('sh bash zsh dash ksh fish');
-/** Run code in another language, which only its text can reveal. */
-const INTERPRETER = /^(?:python[\d.]*|node|perl|ruby|php)$/;
+/** Run code in another language, which the guard cannot read. */
+const INTERPRETER = /^(?:python[\d.]*|node|perl|ruby|php|[gmn]?awk)$/;
 const SHELL_OPTIONS_WITH_VALUE = words('-o +o -O +O --rcfile --init-file');
 /** Run the rest of their arguments as one script. */
 const SCRIPT_RUNNERS = words('eval cmd powershell pwsh');
@@ -124,16 +124,17 @@ const GIT_GLOBAL_OPTIONS_WITH_VALUE = words(
   '-C -c --git-dir --work-tree --namespace --super-prefix --config-env --attr-source',
 );
 const GIT_REPOSITORY_VARIABLES = words('GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR');
-const WRITE_REDIRECTS = words('> >> >| &> &>>');
-const WORD_NODES = words('word string raw_string concatenation');
 /** Same bound as the shell-wrapper unwrapping in `shell-semantics.ts`. */
 const MAX_SCRIPT_DEPTH = 4;
 
 const PROTECTED_OPERATIONS = words('reset checkout clean stash commit destroy');
-const PROTECTED_PROGRAM = /\b(?:git|terraform|pulumi|cdk)\b/;
 const PROTECTED_OPERATION = new RegExp(
   `\\b(?:${[...PROTECTED_OPERATIONS].join('|')})\\b`,
 );
+const PROTECTED_PROGRAM = /\b(?:git|terraform|pulumi|cdk)\b/;
+/** Text that may spell a protected operation; a commit only when amended. */
+const MENTIONED_OPERATION =
+  /\b(?:reset|checkout|clean|stash|destroy|amend)\b|--am/;
 
 /** A pathspec that resolves to the current directory or one of its parents. */
 const WHOLE_TREE_PATHSPEC = /^\.\.?(?:\/+(?:\.\.?)?)*$/;
@@ -148,9 +149,16 @@ interface Script {
   /** Directory the script starts in; undefined when it cannot be known. */
   cwd: string | undefined;
   depth: number;
+  /**
+   * Spans of `text` that cannot feed hidden code: comments, git and IaC
+   * commands checked word for word, and text run as a nested script, which
+   * is weighed on its own.
+   */
+  checked: Array<[number, number]>;
 }
 
 interface Scan {
+  /** The command itself, then every nested script it runs. */
   scripts: Script[];
   found?: string;
   /** Directory of each `git commit --amend`; undefined when unknown. */
@@ -158,25 +166,28 @@ interface Scan {
   /** A cd or repository variable may point a later git command elsewhere. */
   movesRepository: boolean;
   unverifiable: boolean;
-  /** Files the command writes, with the statements that write them. */
-  writtenFiles: Map<string, string>;
-  /** Script files the command runs; `DYNAMIC` for a run-time path. */
-  scriptRuns: string[];
+  /**
+   * The command runs code the guard cannot read: a script file, a program a
+   * shell reads from a pipe or file, interpreter code, a git setting, or a
+   * program built at run time.
+   */
+  hiddenCode: boolean;
 }
 
 interface CommandContext {
   node: SyntaxNode;
-  /** Text of the script the command belongs to. */
-  text: string;
+  /** The script the command belongs to. */
+  script: Script;
   cwd: string | undefined;
-  depth: number;
 }
 
 /**
  * Check whether a shell command runs a protected destructive operation.
- * Printed text, comments and other data never count; an operation the guard
- * cannot rule out (parse failure, run-time program or arguments) is blocked
- * too when the command mentions a protected program and operation.
+ * Printed text, comments and other data never count. A command the guard
+ * cannot parse, or one that runs code it cannot read (a program or
+ * arguments built at run time, a script file, interpreter code), is blocked
+ * too when its text mentions a protected program and operation outside the
+ * commands the guard checked.
  *
  * @param command - The shell command string
  * @param cwd - Directory the command runs in (amend check); without it an
@@ -188,27 +199,25 @@ export async function isDestructiveCommand(
   cwd?: string,
 ): Promise<DestructiveCommandResult | null> {
   const scan: Scan = {
-    scripts: [{ text: command, cwd, depth: 0 }],
+    scripts: [{ text: command, cwd, depth: 0, checked: [] }],
     amendTargets: [],
     movesRepository: false,
     unverifiable: false,
-    writtenFiles: new Map(),
-    scriptRuns: [],
+    hiddenCode: false,
   };
-  for (
-    let script = scan.scripts.shift();
-    script && !scan.found;
-    script = scan.scripts.shift()
-  ) {
-    await scanScript(script, scan);
+  for (let i = 0; i < scan.scripts.length && !scan.found; i++) {
+    await scanScript(scan.scripts[i]!, scan);
   }
-  // A script the same command writes is a program the guard cannot see run.
-  for (const file of scan.scriptRuns) {
-    const writers =
-      file === DYNAMIC
-        ? [...scan.writtenFiles.values()].join('\n')
-        : scan.writtenFiles.get(file);
-    flagIfMayRunProtected(writers ?? '', scan);
+  // Hidden code can come from anywhere in the command: text it prints,
+  // writes to a file or keeps in a variable.
+  if (scan.hiddenCode) {
+    for (const { text, checked } of scan.scripts) {
+      let rest = text;
+      for (const [start, end] of checked) {
+        rest = rest.slice(0, start) + ' '.repeat(end - start) + rest.slice(end);
+      }
+      flagIfMayRunProtected(rest, scan);
+    }
   }
 
   if (scan.found) {
@@ -253,6 +262,8 @@ async function scanScript(script: Script, scan: Scan): Promise<void> {
       const node = stack.pop()!;
       if (node.type === 'command') {
         visitCommand(node, script, scan);
+      } else if (node.type === 'comment') {
+        script.checked.push([node.startIndex, node.endIndex]);
       } else if (
         node.type === 'variable_assignment' &&
         GIT_REPOSITORY_VARIABLES.has(node.childForFieldName('name')?.text ?? '')
@@ -265,16 +276,6 @@ async function scanScript(script: Script, scan: Scan): Promise<void> {
       ) {
         // The parser does not model backquotes nested inside backquotes.
         flagIfMayRunProtected(node.text, scan);
-      } else if (
-        node.type === 'file_redirect' &&
-        node.children.some((child) => WRITE_REDIRECTS.has(child.type))
-      ) {
-        const destination = node.childForFieldName('destination');
-        recordWrite(
-          scan,
-          destination ? scriptPath(wordOf(destination)) : undefined,
-          node.parent?.text ?? '',
-        );
       }
       for (let i = node.namedChildCount - 1; i >= 0; i--) {
         stack.push(node.namedChild(i)!);
@@ -288,17 +289,24 @@ async function scanScript(script: Script, scan: Scan): Promise<void> {
 function visitCommand(node: SyntaxNode, script: Script, scan: Scan): void {
   const name = node.childForFieldName('name');
   if (!name) return;
-  const argv = [wordOf(name)];
-  for (let i = 0; i < node.childCount; i++) {
-    if (node.fieldNameForChild(i) === 'argument') {
-      argv.push(wordOf(node.child(i)!));
-    }
+  const argv = [wordOf(name), ...argumentNodes(node).map(wordOf)];
+  const program = programName(argv[0]!);
+  if (
+    (program === 'git' || IAC_TOOLS.has(program)) &&
+    !argv.some((word) => isDynamic(word))
+  ) {
+    // Checked word for word, so its text is no sign of hidden code.
+    script.checked.push([node.startIndex, node.endIndex]);
   }
-  runArgv(
-    argv,
-    { node, text: script.text, cwd: script.cwd, depth: script.depth },
-    scan,
-  );
+  runArgv(argv, { node, script, cwd: script.cwd }, scan);
+}
+
+function argumentNodes(node: SyntaxNode): SyntaxNode[] {
+  const nodes: SyntaxNode[] = [];
+  for (let i = 0; i < node.childCount; i++) {
+    if (node.fieldNameForChild(i) === 'argument') nodes.push(node.child(i)!);
+  }
+  return nodes;
 }
 
 /**
@@ -362,24 +370,6 @@ function isDynamic(word: string): boolean {
   return literalOf(word) !== word;
 }
 
-/** A literal script path, normalized so `./x.sh` and `x.sh` match. */
-function scriptPath(word: string | undefined): string | undefined {
-  return word && !isDynamic(word) ? path.posix.normalize(word) : undefined;
-}
-
-/** A script the command runs, from a literal or run-time path. */
-function recordRun(scan: Scan, word: string): void {
-  scan.scriptRuns.push(isDynamic(word) ? DYNAMIC : path.posix.normalize(word));
-}
-
-function recordWrite(scan: Scan, file: string | undefined, writer: string) {
-  if (!file) return;
-  scan.writtenFiles.set(
-    file,
-    `${scan.writtenFiles.get(file) ?? ''}\n${writer}`,
-  );
-}
-
 function programName(word: string): string {
   return word
     .slice(Math.max(word.lastIndexOf('/'), word.lastIndexOf('\\')) + 1)
@@ -397,10 +387,7 @@ function isInterpreted(word: string): boolean {
     SHELLS.has(name) ||
     INTERPRETER.test(name) ||
     SCRIPT_RUNNERS.has(name) ||
-    DIRECTORY_CHANGES.has(name) ||
-    name === 'tee' ||
-    name === '.' ||
-    name === 'source'
+    DIRECTORY_CHANGES.has(name)
   );
 }
 
@@ -408,6 +395,7 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   const [head = '', ...args] = argv;
   if (isDynamic(head)) {
     // e.g. `$GIT reset --hard`: the program is only known at run time.
+    scan.hiddenCode = true;
     if (args.some((arg) => PROTECTED_OPERATIONS.has(arg))) {
       scan.unverifiable = true;
     }
@@ -417,44 +405,29 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   if (program === 'git') return checkGit(args, ctx, scan);
   if (IAC_TOOLS.has(program)) return checkIac(program, args, scan);
   if (SHELLS.has(program)) return checkShell(args, ctx, scan);
-  if (INTERPRETER.test(program)) {
-    for (const arg of args) flagIfMayRunProtected(arg, scan);
-    // Its program is the code argument or script file, else stdin.
-    const script = args.find((arg) => !arg.startsWith('-'));
-    if (script === undefined || script === '-') {
-      readStdin(ctx, scan, (text) => flagIfMayRunProtected(text, scan));
-    } else {
-      recordRun(scan, script);
-    }
-    return;
-  }
   if (SCRIPT_RUNNERS.has(program)) {
-    return runScript(args.join(' '), ctx, scan);
+    return runScript(args.join(' '), ctx, scan, args);
   }
   if (DIRECTORY_CHANGES.has(program)) {
     scan.movesRepository = true;
     return;
   }
   if (PRINTERS.has(program)) return;
-  if (program === 'tee') {
-    // What tee writes comes from the pipeline in front of it.
-    let writer = ctx.node;
-    while (
-      writer.parent?.type === 'redirected_statement' ||
-      writer.parent?.type === 'pipeline'
-    ) {
-      writer = writer.parent;
+  if (program === 'command' || program === 'builtin') {
+    // Run the rest, builtins such as `.` included; `command -v` only looks
+    // the name up.
+    const start = args.findIndex((arg) => !arg.startsWith('-'));
+    if (start < 0 || args.slice(0, start).some((arg) => /[vV]/.test(arg))) {
+      return;
     }
-    for (const file of args.filter((arg) => !arg.startsWith('-'))) {
-      recordWrite(scan, scriptPath(file), writer.text);
-    }
+    return runArgv(args.slice(start), ctx, scan);
+  }
+  if (INTERPRETER.test(program) || program === '.' || program === 'source') {
+    scan.hiddenCode = true;
     return;
   }
-  if (program === '.' || program === 'source') {
-    if (args[0] !== undefined) recordRun(scan, args[0]);
-    return;
-  }
-  if (head.includes('/')) recordRun(scan, head);
+  // A program file, which may be a script, or one about to become runnable.
+  if (head.includes('/') || program === 'chmod') scan.hiddenCode = true;
   // sudo, env, xargs, timeout, npx and similar run the rest of their argv,
   // possibly from another directory. `find -exec` and `xargs -I` put a
   // run-time argument where `{}` stands, and xargs appends what it reads.
@@ -462,7 +435,7 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
     if (isDynamic(argv[i]!) || isInterpreted(argv[i]!)) {
       const suffix = argv
         .slice(i)
-        .map((word) => (word === '{}' ? DYNAMIC : word));
+        .map((word) => word.replaceAll('{}', DYNAMIC));
       if (program === 'xargs') suffix.push(SPLIT);
       runArgv(suffix, { ...ctx, cwd: undefined }, scan);
     }
@@ -485,7 +458,7 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
     }
     const value = equals < 0 ? (args[++i] ?? '') : arg.slice(equals + 1);
     // A split value can push other words in front of the subcommand.
-    if (value.includes(SPLIT)) flagIfMayRunProtected(ctx.text, scan);
+    if (value.includes(SPLIT)) flagIfMayRunProtected(ctx.script.text, scan);
     if (option === '-C') {
       dir =
         dir === undefined || isDynamic(value)
@@ -493,12 +466,12 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
           : path.resolve(dir, value);
     } else if (option === '--git-dir' || option === '--work-tree') {
       dir = undefined;
-    } else if (
-      option === '-c' &&
-      PROTECTED_OPERATION.test(value.slice(value.indexOf('=') + 1))
-    ) {
-      // An alias or command-valued setting may run a protected operation.
-      scan.unverifiable = true;
+    } else if (option === '-c' || option === '--config-env') {
+      // An alias or a command-valued setting can run other programs.
+      scan.hiddenCode = true;
+      if (PROTECTED_OPERATION.test(value.slice(value.indexOf('=') + 1))) {
+        scan.unverifiable = true;
+      }
     }
   }
 
@@ -509,7 +482,10 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
     return;
   }
   const rest = args.slice(i + 1);
-  if (subcommand === 'reset') {
+  if (subcommand === 'config') {
+    // It can define an alias or a command-valued setting.
+    scan.hiddenCode = true;
+  } else if (subcommand === 'reset') {
     const parsed = parseOptions(rest);
     const hard = hasLong(parsed, 'hard');
     report(scan, hard, parsed.dynamicOption, 'git reset --hard');
@@ -555,7 +531,7 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
     // in directories of their own.
     const text = rest.join(' ');
     if (mayRunProtected(text)) {
-      runScript(text, { ...ctx, cwd: undefined }, scan);
+      runScript(text, { ...ctx, cwd: undefined }, scan, rest);
     }
   }
 }
@@ -683,8 +659,7 @@ function checkShell(args: string[], ctx: CommandContext, scan: Scan): void {
     const arg = args[i]!;
     if (isDynamic(arg)) {
       // A run-time word may be an option, the script, or a script's path.
-      flagIfMayRunProtected(args.slice(i).join(' '), scan);
-      recordRun(scan, arg);
+      scan.hiddenCode = true;
       return;
     }
     if (arg === '--' || arg === '-') {
@@ -705,18 +680,14 @@ function checkShell(args: string[], ctx: CommandContext, scan: Scan): void {
   }
   // Otherwise a script file, unless the program comes from stdin.
   if (i < args.length && !readsStdin) {
-    recordRun(scan, args[i]!);
+    scan.hiddenCode = true;
     return;
   }
-  readStdin(ctx, scan, (text) => runScript(text, ctx, scan));
+  readStdin(ctx, scan);
 }
 
-/** Hands `run` each program text the command reads on stdin. */
-function readStdin(
-  ctx: CommandContext,
-  scan: Scan,
-  run: (text: string) => void,
-): void {
+/** Weighs each program a shell reads on stdin. */
+function readStdin(ctx: CommandContext, scan: Scan): void {
   const parent = ctx.node.parent;
   const stage = parent?.type === 'redirected_statement' ? parent : ctx.node;
   const redirects = [...ctx.node.namedChildren];
@@ -738,8 +709,8 @@ function readStdin(
       redirect.type === 'file_redirect' &&
       redirect.children.some((child) => child.type === '<')
     ) {
-      const source = redirect.childForFieldName('destination');
-      if (source) recordRun(scan, wordOf(source));
+      // A program file.
+      scan.hiddenCode = true;
       continue;
     }
     const body =
@@ -751,45 +722,72 @@ function readStdin(
             )
           : undefined;
     if (!body) continue;
-    run(
+    runScript(
       body.type !== 'heredoc_body'
         ? wordOf(body)
         : body.namedChildren.every((child) => child.type === 'heredoc_content')
           ? body.text
           : DYNAMIC + body.text,
+      ctx,
+      scan,
+      body,
     );
   }
-  // A program piped in from an earlier stage only exists at run time; it
-  // may be a file the command wrote.
+  // A program piped in from an earlier stage only exists at run time.
   const pipeline = stage.parent;
-  if (pipeline?.type !== 'pipeline') return;
-  const earlier = pipeline.namedChildren.filter(
-    (child) => child.startIndex < stage.startIndex,
-  );
-  if (earlier.length === 0) return;
-  flagIfMayRunProtected(pipeline.text, scan);
-  const pending = [...earlier];
-  while (pending.length > 0) {
-    const node = pending.pop()!;
-    if (WORD_NODES.has(node.type)) recordRun(scan, wordOf(node));
-    else pending.push(...node.namedChildren);
+  if (
+    pipeline?.type === 'pipeline' &&
+    pipeline.namedChildren.some((child) => child.startIndex < stage.startIndex)
+  ) {
+    scan.hiddenCode = true;
   }
 }
 
-function runScript(text: string, ctx: CommandContext, scan: Scan): void {
+/**
+ * Runs `text` as a nested script, weighed on its own; `from` are the
+ * argument words it came from, or the heredoc or here-string node.
+ */
+function runScript(
+  text: string,
+  ctx: CommandContext,
+  scan: Scan,
+  from: string[] | SyntaxNode = [text],
+): void {
   if (isDynamic(text)) {
-    flagIfMayRunProtected(text, scan);
-  } else {
-    scan.scripts.push({ text, cwd: ctx.cwd, depth: ctx.depth + 1 });
+    // Its program is only known at run time.
+    scan.hiddenCode = true;
+    return;
   }
+  const sources = Array.isArray(from)
+    ? argumentNodes(ctx.node).filter((node) => from.includes(wordOf(node)))
+    : [from];
+  for (const node of sources) {
+    ctx.script.checked.push([node.startIndex, node.endIndex]);
+  }
+  scan.scripts.push({
+    text,
+    cwd: ctx.cwd,
+    depth: ctx.script.depth + 1,
+    checked: [],
+  });
 }
 
 function mayRunProtected(text: string): boolean {
   const plain = text.replace(/["']/g, '');
-  // `g\it` is `git`, but printf's `\ngit` starts a new word.
-  return [plain.replace(/\\/g, ''), plain.replace(/\\./g, ' ')].some(
+  // `g\it` is `git`; printf's `\ngit` starts a new word, and printf,
+  // `echo -e` and `$'…'` read `\x67` as `g`.
+  const decoded = plain.replace(
+    /\\(?:x([\da-fA-F]{1,2})|u([\da-fA-F]{1,4})|0?([0-7]{1,3}))/g,
+    (_, hex?: string, unicode?: string, octal?: string) =>
+      String.fromCharCode(
+        octal === undefined
+          ? parseInt(hex ?? unicode!, 16)
+          : parseInt(octal, 8),
+      ),
+  );
+  return [plain.replace(/\\/g, ''), decoded.replace(/\\./g, ' ')].some(
     (variant) =>
-      PROTECTED_PROGRAM.test(variant) && PROTECTED_OPERATION.test(variant),
+      PROTECTED_PROGRAM.test(variant) && MENTIONED_OPERATION.test(variant),
   );
 }
 

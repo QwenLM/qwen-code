@@ -216,11 +216,13 @@ that would discard local work or tear down infrastructure:
 It reads the command the way the shell runs it, so printed text, comments
 and quoted data never trigger it, while git global options (`-C`, `-c`),
 option order and wrappers such as `bash -c`, `env` or `sudo` do not hide
-the operation. A command it cannot verify — one that builds the program
-or its arguments at run time (including arguments `xargs` reads, a
-script the same command writes and then runs, and code it hands to
-`python`, `node`, `perl`, `ruby` or `php`), or one it cannot parse — is
-blocked too when it mentions a protected command.
+the operation. A command it cannot verify is blocked too when its text
+mentions a protected command anywhere outside the git and
+infrastructure commands the guard already checked: one it cannot
+parse, or one that runs code the guard cannot read — a program or
+arguments built at run time (including arguments `xargs` reads), a
+script file, a program a shell reads from a pipe or file, or code
+handed to `python`, `node`, `perl`, `ruby`, `php` or `awk`.
 
 These blocks fail with `Blocked destructive git command: …`,
 `Blocked infrastructure destroy command: …`,
