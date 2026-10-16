@@ -765,20 +765,21 @@ const storeProxy = createServer(async (req, res) => {
     // operation only. FG8a's capture-commit arm drops the first journal
     // commit carrying a page envelope — the capture-page commit whose reply
     // is the loss — and FG8d's stop arm the first commit of the stop
-    // revision.
+    // revision. Only a commit the store accepted may lose its reply: a
+    // refused one never landed, so it relays and the arm stays armed.
+    const pageEnvelopeFell = dropNextPagePublish && carriesPageEnvelope;
+    const stopRevisionFell = dropNextStopRevision && isStopRevision;
     if (
       isCommit &&
-      (dropCommitOps.has(commitOp) ||
-        (dropNextPagePublish && carriesPageEnvelope) ||
-        (dropNextStopRevision && isStopRevision))
+      upstream.ok &&
+      (dropCommitOps.has(commitOp) || pageEnvelopeFell || stopRevisionFell)
     ) {
-      const pageEnvelopeFell = dropNextPagePublish && carriesPageEnvelope;
       dropCommitOps.delete(commitOp);
+      if (stopRevisionFell) dropNextStopRevision = false;
       if (pageEnvelopeFell) {
         dropNextPagePublish = false;
         droppedPagePublishes++;
       } else {
-        if (isStopRevision) dropNextStopRevision = false;
         droppedCommits++;
         droppedOps++;
       }
@@ -1628,11 +1629,11 @@ async function runCancelDrainCase() {
           return fullSegments(state).length >= 1;
         }, 120_000);
         step('mid-capture');
-        const processCallId = (
+        const processRow = (
           await probe<ProbeState>(current.sessionId, 'state')
-        ).executions.find((row) =>
-          row.execution_call_id.endsWith(':process'),
-        )!.execution_call_id;
+        ).executions.find((row) => row.execution_call_id.endsWith(':process'));
+        assert(processRow, 'the mid-capture run has its :process row');
+        const processCallId = processRow.execution_call_id;
         await awaitTurnHandback();
         pausedBrokerControls = true;
         step('maintenance route held');
