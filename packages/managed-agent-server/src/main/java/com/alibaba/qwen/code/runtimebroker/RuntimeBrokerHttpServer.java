@@ -29,6 +29,10 @@ import java.util.function.BiFunction;
  *
  * <p>Immediate raw-tool dispatch and durable raw-tool or provider dispatch
  * share the original execution journal. Operator resolution is unavailable.
+ * Progress streaming is also unavailable: the GET-execution {@code afterSeq}
+ * parameter is validated but never honored, and every status answers an empty
+ * {@code progress} list with {@code firstAvailableSeq} equal to
+ * {@code lastSeq}.
  */
 public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
@@ -165,6 +169,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                         "scope", Map.of("tenantId", record.getRequest().getScope().getTenantId(),
                                 "workspaceId", record.getRequest().getScope().getWorkspaceId(),
                                 "workspaceGeneration", record.getRequest().getScope().getWorkspaceGeneration(),
+                                "isolationClass", record.getRequest().getScope().getIsolationClass(),
                                 "capabilityDigest", record.getRequest().getScope().getCapabilityDigest()),
                         "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()))));
                 return;
@@ -249,13 +254,17 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 "runtimeSessionId", "acquire request");
         String turnKind = JsonCodec.requiredString(body, "turnKind",
                 "acquire request");
+        String mountClaimId = body.containsKey("mountClaimId")
+                ? JsonCodec.requiredString(body, "mountClaimId", "acquire request") : null;
         CompletionStage<RuntimeSessionRecord> acquisition;
         if (body.containsKey("recoveryBindingId")) {
             acquisition = service.acquireRecovery(harnessSessionId, runtimeSessionId,
                     JsonCodec.requiredString(body, "recoveryBindingId", "acquire request"),
-                    Long.parseLong(JsonCodec.requiredString(body, "recoveryGeneration", "acquire request")), lifecycleAuthority(exchange));
+                    Long.parseLong(JsonCodec.requiredString(body, "recoveryGeneration", "acquire request")),
+                    lifecycleAuthority(exchange), mountClaimId);
         } else {
-            acquisition = service.acquire(harnessSessionId, runtimeSessionId, turnKind, lifecycleAuthority(exchange));
+            acquisition = service.acquire(harnessSessionId, runtimeSessionId, turnKind,
+                    lifecycleAuthority(exchange), mountClaimId);
         }
         complete(exchange, acquisition, record -> {
             Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,
@@ -263,10 +272,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             RuntimeScope scope = record.getSession().getScope();
             var savedScope = new LinkedHashMap<String, Object>(Map.of("tenantId", scope.getTenantId(),
                     "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
+                    "isolationClass", scope.getIsolationClass(),
                     "capabilityDigest", scope.getCapabilityDigest()));
             if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
                 savedScope.put("canonicalCwd", scope.getCanonicalCwd());
-                savedScope.put("isolationClass", scope.getIsolationClass());
             }
             response.put("scope", savedScope);
             response.put("runtime", Map.of("bindingId", record.getBindingId(),
@@ -334,6 +343,25 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     : service.release(harnessSessionId, runtimeSessionId, drain, lifecycleAuthority(exchange));
             complete(exchange, release, released -> envelope(harnessSessionId,
                             runtimeSessionId, "released", released));
+            return;
+        }
+        if ("POST".equals(exchange.getRequestMethod())
+                && suffix.endsWith(":release-mount")) {
+            String runtimeSessionId = pathId(suffix.substring(0,
+                    suffix.length() - ":release-mount".length()));
+            Map<String, Object> body = requestBody(exchange,
+                    "mount release request");
+            requireProtocol(body);
+            JsonCodec.requiredString(body, "requestId",
+                    "mount release request");
+            String harnessSessionId = JsonCodec.requiredString(body,
+                    "harnessSessionId", "mount release request");
+            String mountClaimId = JsonCodec.requiredString(body,
+                    "mountClaimId", "mount release request");
+            complete(exchange, service.releaseMount(harnessSessionId,
+                    runtimeSessionId, mountClaimId, lifecycleAuthority(exchange)),
+                    released -> envelope(harnessSessionId, runtimeSessionId,
+                            "mountReleased", released));
             return;
         }
         throw notFound();

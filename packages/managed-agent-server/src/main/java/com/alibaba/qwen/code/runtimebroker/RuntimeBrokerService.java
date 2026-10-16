@@ -308,6 +308,51 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return drainBindings(tenantId, harnessSessionId, null);
     }
 
+    public CompletionStage<Void> closeResidentHarnessSession(RuntimeProvisionRequest request, String harnessSessionId) {
+        requireOpen();
+        if (!ResidentWorkspaceProfile.selects(request)
+                || !bindingRepository.isHarnessDraining(request.getScope().getTenantId(), harnessSessionId)) {
+            return failed(conflict("runtime_admission_closed", "Resident close requires the original Session fence"));
+        }
+        var binding = bindingRepository.findActive(request);
+        if (binding == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (!request.equals(binding.getRequest()) || binding.getState() != RuntimeBindingRecord.State.READY
+                || binding.isDrainRequested()) {
+            return failed(conflict("workspace_close_identity_unverified", "Original resident binding is unavailable"));
+        }
+        return closeResidentSessions(binding, harnessSessionId, null);
+    }
+
+    private CompletionStage<Void> closeResidentSessions(RuntimeBindingRecord binding, String harnessSessionId, String cursor) {
+        var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
+        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
+        for (var record : batch) {
+            if (record.isActive()) {
+                if (!harnessSessionId.equals(record.getSession().getHarnessSessionId())) {
+                    return failed(conflict("workspace_close_execution_unsettled", "Another resident Session remains active"));
+                }
+                work = work.thenCompose(ignored -> releaseSavedSession(binding, record, null));
+            }
+        }
+        return work.thenCompose(ignored -> {
+            if (batch.size() == 100) {
+                return closeResidentSessions(binding, harnessSessionId, batch.getLast().getRuntimeSessionId());
+            }
+            var current = bindingRepository.findActive(binding.getRequest());
+            if (current == null || !current.getBindingId().equals(binding.getBindingId())
+                    || current.getGeneration() != binding.getGeneration() || current.getState() != RuntimeBindingRecord.State.READY
+                    || current.isDrainRequested() || !current.hasSameLease(binding.getLease())
+                    || !java.util.Objects.equals(current.getResourceHandle(), binding.getResourceHandle())
+                    || sessionRepository.countActiveByBinding(binding.getBindingId(), binding.getGeneration()) != 0
+                    || executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration())) {
+                return failed(conflict("workspace_close_execution_unsettled", "Original resident work remains unsettled"));
+            }
+            return CompletableFuture.completedFuture(null);
+        });
+    }
+
     public CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,
             RuntimeLifecycleAuthority authority, boolean stoppedOnly) {
         requireOpen();
@@ -532,8 +577,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
             BindingRenewal renewal) {
         if (binding.getLease() == null || binding.getProvisionSeed() == null || binding.getResourceHandle() == null
-                || !HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
-                        && !binding.getRequest().getIsolationKey().equals(record.getSession().getHarnessSessionId())
+                || !(ResidentWorkspaceProfile.selects(binding.getRequest())
+                        || HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                        || record.getSession().getHarnessSessionId().equals(binding.getRequest().getIsolationKey()))
                 || !binding.getRequest().getScope().equals(record.getSession().getScope())) {
             return failed(conflict("workspace_close_identity_unverified", "Saved release identity is incomplete"));
         }
@@ -550,6 +596,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 && observation.getLossEvidence() != null
                                 && observation.getLossEvidence().matches(binding.getProvisionSeed(),
                                         binding.getResourceHandle(), binding.getLease())) {
+                            if (ResidentWorkspaceProfile.selects(binding.getRequest())) {
+                                return failed(conflict("workspace_close_identity_unverified", "Original resident worker is unavailable"));
+                            }
                             if (renewal == null) {
                                 return drainBinding(binding);
                             }
@@ -636,6 +685,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     public CompletionStage<RuntimeSessionRecord> acquire(String harnessSessionId, String runtimeSessionId,
             String turnKind, RuntimeLifecycleAuthority authority) {
+        return acquire(harnessSessionId, runtimeSessionId, turnKind, authority, null);
+    }
+
+    /**
+     * Acquires the Runtime Session and records {@code mountClaimId} as the
+     * claim a later {@link #releaseMount} must name: any later acquire of
+     * the same identity supersedes it, so a stale mount handback can never
+     * free the mount of a turn that re-drove this Session. A mount handed
+     * back earlier is claimed again here, never left to fail every tool.
+     */
+    public CompletionStage<RuntimeSessionRecord> acquire(String harnessSessionId, String runtimeSessionId,
+            String turnKind, RuntimeLifecycleAuthority authority, String mountClaimId) {
         requireOpen();
         String harnessId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
@@ -645,17 +706,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 "runtimeSessionId");
         CompletableFuture<SessionContext> current = sessions.get(runtimeId);
         if (current != null) {
-            return current.thenApply(context -> {
+            return current.thenCompose(context -> {
+                RuntimeSessionRecord record;
                 context.lock();
                 try {
                     bindingRepository.requireHarnessAdmission(context.binding().getRequest(),
                             context.session().getScope(), harnessId, authority);
                     requireSameSession(context.session(), new RuntimeSession(harnessId,
                             runtimeId, turnKind, context.session().getScope()));
-                    return requireAcquireSessionRecord(context);
+                    record = requireAcquireSessionRecord(context);
+                    context.mountClaim(mountClaimId);
                 } finally {
                     context.unlock();
                 }
+                return reclaimMount(context, record);
             });
         }
         // A Runtime Session this process does not hold yet admits new work
@@ -664,7 +728,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return resolveScope(harnessId, true, authority).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
                     runtimeId, turnKind, scope);
-            return acquireSession(session);
+            return acquireSession(session, mountClaimId);
         });
     }
 
@@ -675,6 +739,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     public CompletionStage<RuntimeSessionRecord> acquireRecovery(String harnessSessionId, String runtimeSessionId,
             String bindingId, long generation, RuntimeLifecycleAuthority authority) {
+        return acquireRecovery(harnessSessionId, runtimeSessionId, bindingId, generation, authority, null);
+    }
+
+    public CompletionStage<RuntimeSessionRecord> acquireRecovery(String harnessSessionId, String runtimeSessionId,
+            String bindingId, long generation, RuntimeLifecycleAuthority authority, String mountClaimId) {
         requireOpen();
         RuntimeBindingRecord original = bindingRepository.findById(bindingId);
         boolean shared = original != null && HarnessOwnership.sharesRuntimeSessions(original.getRequest());
@@ -694,25 +763,38 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         CompletionStage<RuntimeBindingRecord> recovered = matchingLiveBinding(original) == null
                 ? recoverBinding(bindingId, generation, true) : CompletableFuture.completedFuture(original);
-        return recovered.thenApply(record -> {
+        return recovered.thenCompose(record -> {
             if (record.getState() != RuntimeBindingRecord.State.READY || !record.sameIdentity(original)) {
                 throw conflict("workspace_close_identity_unverified", "Original Hook Runtime cannot be recovered");
             }
             BindingContext live = requireLiveBinding(record);
             var context = CompletableFuture.completedFuture(new SessionContext(saved.getSession(), record, live.lease()));
             var existing = sessions.putIfAbsent(runtimeSessionId, context);
+            SessionContext selected = context.join();
             if (existing != null) {
                 if (!existing.isDone() || existing.isCompletedExceptionally()) {
                     throw conflict("workspace_close_identity_unverified", "Original Hook Session is not attested in this Broker");
                 }
-                SessionContext current = existing.join();
-                requireSameSession(current.session(), saved.getSession());
-                if (!current.binding().sameIdentity(original)) {
+                selected = existing.join();
+                requireSameSession(selected.session(), saved.getSession());
+                if (!selected.binding().sameIdentity(original)) {
                     throw conflict("workspace_close_identity_unverified", "Hook Runtime identity changed");
                 }
             }
-            return saved;
+            selected.mountClaim(mountClaimId);
+            return reclaimMount(selected, saved);
         });
+    }
+
+    // A recovery-blocked turn may have handed the mount back (#13800); the
+    // Session that acquires this identity again needs it held, or every
+    // tool and recovery control would answer workspace_busy. The claim is
+    // holder-conditioned, so a mount still held is left as it is and one a
+    // rival took answers the retryable busy refusal.
+    private CompletionStage<RuntimeSessionRecord> reclaimMount(SessionContext context,
+            RuntimeSessionRecord record) {
+        return safeStage(() -> transport.reclaimMount(context.lease(), context.session()))
+                .thenApply(ignored -> record);
     }
 
     public CompletionStage<RuntimeScope> authorizeLifecycle(String harnessSessionId, RuntimeLifecycleAuthority authority) {
@@ -956,19 +1038,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
         Map<String, Object> immutable = immutableMap(deferred, "reference");
         byte[] input = inputBytes.clone();
         byte[] definition = definitionBytes.clone();
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
-            context.lock();
-            try {
-                JdbcRuntimeBindingRepository jdbc = privateCsiRepository(context);
-                ToolExecutionRecord candidate = ToolExecutionRecord.prepared(nextExecutionId(), key,
-                        context.binding().getBindingId(), context.binding().getGeneration(), harnessSessionId, runtimeSessionId,
-                        referenceString(immutable, "promptId"), referenceString(immutable, "callId"),
-                        referenceString(immutable, "argsDigest"), immutable);
-                return jdbc.prepareCsiExecution(sessionRepository, executionRepository, context.binding(), candidate, input, definition);
-            } finally {
-                context.unlock();
-            }
-        });
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenApply(context -> {
+                    context.lock();
+                    try {
+                        JdbcRuntimeBindingRepository jdbc = privateCsiRepository(context);
+                        ToolExecutionRecord candidate = ToolExecutionRecord.prepared(nextExecutionId(), key,
+                                context.binding().getBindingId(), context.binding().getGeneration(), harnessSessionId, runtimeSessionId,
+                                referenceString(immutable, "promptId"), referenceString(immutable, "callId"),
+                                referenceString(immutable, "argsDigest"), immutable);
+                        return jdbc.prepareCsiExecution(sessionRepository, executionRepository, context.binding(), candidate, input, definition);
+                    } finally {
+                        context.unlock();
+                    }
+                })));
     }
 
     public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
@@ -976,15 +1059,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         BrokerValues.requireId(promptId, "promptId");
         BrokerValues.requireId(batchId, "batchId");
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
-            context.lock();
-            try {
-                return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
-                        context.binding(), promptId, batchId);
-            } finally {
-                context.unlock();
-            }
-        });
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenApply(context -> {
+                    context.lock();
+                    try {
+                        return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
+                                context.binding(), promptId, batchId);
+                    } finally {
+                        context.unlock();
+                    }
+                })));
     }
 
     private JdbcRuntimeBindingRepository privateCsiRepository(SessionContext context) {
@@ -1179,8 +1263,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         context.unlock();
                     }
                 });
-        return unknownWhenAdmissionClosed(started, harnessSessionId,
-                runtimeSessionId, executionId);
+        return mapStoreFailure(unknownWhenAdmissionClosed(started,
+                harnessSessionId, runtimeSessionId, executionId));
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
@@ -1206,14 +1290,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         context.unlock();
                     }
                 });
-        return unknownWhenAdmissionClosed(started, harnessSessionId,
-                runtimeSessionId, executionId);
+        return mapStoreFailure(unknownWhenAdmissionClosed(started,
+                harnessSessionId, runtimeSessionId, executionId));
     }
 
     private CompletionStage<ToolExecutionRecord> createExecutionReceipt(
             String harnessSessionId, String runtimeSessionId, String key,
             Map<String, Object> reference, boolean dispatch) {
-        return safeStage(() -> {
+        // Clients replay an idempotent prepare once on retryable failure; an
+        // unmapped store outage must read as that class, not as a terminal
+        // 500 carrying an unclassified retryable flag.
+        return mapStoreFailure(safeStage(() -> {
             ToolExecutionRecord receipt = executionRepository.findByIdempotencyKey(key);
             if (receipt != null && receipt.isTerminal()) {
                 requireOwnedExecution(harnessSessionId, runtimeSessionId,
@@ -1231,7 +1318,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             return requireReadySession(harnessSessionId, runtimeSessionId)
                     .thenApply(context -> createExecution(context, key, reference, dispatch));
-        });
+        }));
     }
 
     public CompletionStage<ToolExecutionRecord> getExecution(
@@ -1240,7 +1327,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return safeStage(() -> {
+        return mapStoreFailure(safeStage(() -> {
             ToolExecutionRecord saved = requireOwnedExecution(harnessSessionId,
                     runtimeSessionId, executionId);
             if (saved.isTerminal()) {
@@ -1261,7 +1348,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             .thenApply(context -> requireExecution(context,
                                     executionId)),
                     harnessSessionId, runtimeSessionId, executionId);
-        });
+        }));
     }
 
     /**
@@ -1316,21 +1403,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String runtimeSessionId, Map<String, Object> publisher) {
         requireOpen();
         Map<String, Object> descriptor = immutableMap(publisher, "publisher");
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
-            context.lock();
-            try {
-                requireReadySessionRecord(context);
-                context.beginControl();
-            } finally {
-                context.unlock();
-            }
-            return safeStage(() -> {
-                requireUsableLease(context);
-                return transport.installPublisher(context.lease(), context.session(), descriptor);
-            }).thenApply(ignored -> Map.<String, Object>of("installed", true,
-                    "bindingGeneration", Long.toString(context.binding().getGeneration())))
-                    .whenComplete((ignored, error) -> context.endControl());
-        });
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenCompose(context -> {
+                    context.lock();
+                    try {
+                        requireReadySessionRecord(context);
+                        context.beginControl();
+                    } finally {
+                        context.unlock();
+                    }
+                    return safeStage(() -> {
+                        requireUsableLease(context);
+                        return transport.installPublisher(context.lease(), context.session(), descriptor);
+                    }).thenApply(ignored -> Map.<String, Object>of("installed", true,
+                            "bindingGeneration", Long.toString(context.binding().getGeneration())))
+                            .whenComplete((ignored, error) -> context.endControl());
+                })));
     }
 
     private CompletionStage<Map<String, Object>> acknowledgeLocalExecution(String harnessSessionId,
@@ -1369,7 +1457,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String executionCallId, Map<String, Object> receipt) {
         requireOpen();
         String id = BrokerValues.requireId(executionCallId, "executionCallId");
-        return requireReadySession(harnessSessionId, runtimeSessionId)
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     ToolExecutionRecord execution = requireExecution(context, id);
                     if (!"deferred_v3".equals(execution.getReference().get("dispatchMode"))) {
@@ -1424,7 +1512,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 original.getReference(), saved);
                     }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
                             .whenComplete((ignored, error) -> context.endControl());
-                });
+                })));
     }
 
     private static boolean sameReceipt(Map<String, Object> expected,
@@ -1471,7 +1559,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return safeStage(() -> {
+        return mapStoreFailure(safeStage(() -> {
             OwnedExecution owned = requireOwnership(harnessSessionId,
                     runtimeSessionId, executionId);
             ToolExecutionRecord stored = owned.record();
@@ -1610,7 +1698,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 });
                     }),
                     harnessSessionId, runtimeSessionId, executionId);
-        });
+        }));
     }
 
     private static boolean isPreparedProviderCancellation(ToolExecutionRecord record) {
@@ -2051,7 +2139,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String bindingId, long generation, RuntimeLifecycleAuthority authority, boolean drain) {
         requireOpen();
         RuntimeBindingRecord binding = bindingRepository.findById(bindingId);
-        boolean shared = binding != null && HarnessOwnership.sharesRuntimeSessions(binding.getRequest());
+        boolean shared = binding != null && (HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                || ResidentWorkspaceProfile.selects(binding.getRequest()));
         if (binding == null || binding.getGeneration() != generation
                 || !shared && (!harnessSessionId.equals(binding.getRequest().getIsolationKey())
                         || !"session".equals(binding.getRequest().getScope().getIsolationClass()))) {
@@ -2070,11 +2159,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     bindingId, generation, RuntimeSessionRecord.State.RELEASED, 0, clock.instant()));
         }
         if (!bindingId.equals(stored.getBindingId()) || stored.getRuntimeGeneration() != generation
+                || !binding.getRequest().getScope().equals(stored.getSession().getScope())
                 || !harnessSessionId.equals(stored.getSession().getHarnessSessionId())) {
             return failed(conflict("runtime_session_conflict", "Cleanup owner differs from original Session"));
         }
         return stored.getState() == RuntimeSessionRecord.State.RELEASED
-                ? CompletableFuture.completedFuture(true) : release(harnessSessionId, runtimeSessionId, drain);
+                ? CompletableFuture.completedFuture(true) : release(harnessSessionId, runtimeSessionId, drain, authority);
     }
 
     /**
@@ -2120,6 +2210,76 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 && !bindingRepository.isHarnessDraining(session.getScope().getTenantId(), session.getHarnessSessionId())) {
             throw conflict("runtime_admission_closed", "Lifecycle release requires resource drain");
         }
+    }
+
+    /**
+     * Frees only the Workspace execution mount the Session holds, for the
+     * recovery-blocked turn that parks alive forever by contract: the
+     * Session row keeps its READY identity for the recovery fleet, so the
+     * full release path — and its RELEASED-forever verdict — never runs
+     * here. Only the latest acquire's claim may hand the mount back, and a
+     * lifecycle operation's window refuses it like the sibling release.
+     * A Session with an active operation keeps its mount honestly, the
+     * same freeze the fleet promises while anything is unproven — every
+     * kind of unsettled row counts, background processes included (the
+     * drain excludes them because its sweep stops or settles them first,
+     * and this path runs no sweep). A settled execution whose capture
+     * never proved its writer stopped keeps the mount for good: the
+     * operator-recovery family fences exactly that Workspace, and the
+     * distinct refusal tells the caller that waiting settles nothing. The
+     * gate reads the state as registered at this instant; it does not
+     * fence a concurrent out-of-contract admission landing one instant
+     * later. Resident-only: a Session this Broker does not hold (a dead
+     * Daemon's residue) belongs to the LOST family's own sweep.
+     */
+    public CompletionStage<Boolean> releaseMount(String harnessSessionId,
+            String runtimeSessionId, String mountClaimId,
+            RuntimeLifecycleAuthority authority) {
+        requireOpen();
+        String harnessId = BrokerValues.requireId(harnessSessionId,
+                "harnessSessionId");
+        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+                "runtimeSessionId");
+        String claimId = BrokerValues.requireId(mountClaimId, "mountClaimId");
+        CompletableFuture<SessionContext> local = sessions.get(runtimeId);
+        if (local == null) {
+            return failed(unavailable("runtime_reconciliation_required",
+                    "Runtime Session is not active in this Broker process"));
+        }
+        return local.thenCompose(context -> {
+            if (!context.session().getHarnessSessionId().equals(harnessId)) {
+                throw conflict("runtime_session_conflict",
+                        "Runtime Session belongs to another Harness Session");
+            }
+            requireLifecycleRelease(context.binding().getRequest(), context.session(), authority);
+            // The check and the clear share the lock every acquire records
+            // its claim under, so a re-drive that claimed this identity
+            // after the block can never lose its mount to the old handback.
+            context.lock();
+            try {
+                if (!claimId.equals(context.mountClaim())) {
+                    throw conflict("runtime_session_conflict",
+                            "Mount claim was superseded by a later acquire");
+                }
+                if (context.hasActiveControl()
+                        || executionRepository.hasActiveByRuntimeSession(
+                                context.binding().getBindingId(),
+                                context.binding().getGeneration(), runtimeId)) {
+                    throw conflict("runtime_session_busy",
+                            "Runtime Session has an active operation");
+                }
+                if (executionRepository.hasUnprovenCaptureByRuntimeSession(
+                        context.binding().getBindingId(),
+                        context.binding().getGeneration(), runtimeId)) {
+                    throw conflict("workspace_writer_unproven",
+                            "A settled execution never proved its writer stopped");
+                }
+                return safeStage(() -> transport.releaseMount(context.lease(),
+                        context.session())).toCompletableFuture();
+            } finally {
+                context.unlock();
+            }
+        });
     }
 
     private CompletionStage<Boolean> releasedSession(
@@ -2756,7 +2916,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<RuntimeSessionRecord> acquireSession(
-            RuntimeSession session) {
+            RuntimeSession session, String mountClaimId) {
         String runtimeSessionId = session.getRuntimeSessionId();
         CompletableFuture<SessionContext> created =
                 new CompletableFuture<>();
@@ -2775,16 +2935,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                     });
         }
-        return selected.thenApply(context -> {
+        return selected.thenCompose(context -> {
+            RuntimeSessionRecord record;
             context.lock();
             try {
                 bindingRepository.requireHarnessAdmission(context.binding().getRequest(), session.getScope(),
                         session.getHarnessSessionId(), session.getScope().getLifecycleAuthority());
                 requireSameSession(context.session(), session);
-                return requireAcquireSessionRecord(context);
+                record = requireAcquireSessionRecord(context);
+                context.mountClaim(mountClaimId);
             } finally {
                 context.unlock();
             }
+            return reclaimMount(context, record);
         });
     }
 
@@ -5147,6 +5310,31 @@ public final class RuntimeBrokerService implements AutoCloseable {
         });
     }
 
+    /**
+     * Only a genuine store outage maps to a retryable 503 here: client-input
+     * errors, permanent invariant violations, and JVM errors keep the
+     * non-retryable mapping the HTTP layer gives them.
+     */
+    private static <T> CompletionStage<T> mapStoreFailure(
+            CompletionStage<T> stage) {
+        return stage.handle((value, error) -> {
+            if (error == null) {
+                return value;
+            }
+            Throwable cause = unwrap(error);
+            if (cause instanceof RuntimeBrokerException) {
+                throw new CompletionException(cause);
+            }
+            if (cause instanceof JdbcRepositorySupport.StoreFailureException) {
+                throw new CompletionException(unavailable(
+                        "runtime_broker_store_unavailable",
+                        "Managed Runtime execution store is unavailable.",
+                        cause));
+            }
+            throw new CompletionException(cause);
+        });
+    }
+
     private static Throwable unwrap(Throwable error) {
         Throwable current = error;
         while ((current instanceof CompletionException)
@@ -5218,6 +5406,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         // belong to whoever holds this, so a concurrent caller joins it
         // instead of sweeping against it and reading its own attempts busy.
         private CompletableFuture<Boolean> releaseAttempt;
+        // The latest acquire's mount claim: only that acquirer may hand the
+        // mount back (#13800).
+        private String mountClaim;
 
         SessionContext(RuntimeSession session, RuntimeBindingRecord binding,
                 RuntimeLease lease) {
@@ -5268,6 +5459,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
             lock();
             try {
                 activeControls--;
+            } finally {
+                unlock();
+            }
+        }
+
+        String mountClaim() {
+            lock();
+            try {
+                return mountClaim;
+            } finally {
+                unlock();
+            }
+        }
+
+        void mountClaim(String next) {
+            lock();
+            try {
+                mountClaim = next;
             } finally {
                 unlock();
             }
