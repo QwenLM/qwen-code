@@ -312,6 +312,13 @@
             <id>hosted-harness-mysql</id>
             <build>
                 <plugins>
+                    <!-- The H2 unit suite is mysql-integration's; repeating it
+                         in each Hosted job step cost ~11 min apiece. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration><skipTests>true</skipTests></configuration>
+                    </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-failsafe-plugin</artifactId>
@@ -379,6 +386,10 @@
         <profile>
             <id>hosted-harness-gates</id>
             <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration><skipTests>true</skipTests></configuration>
+            </plugin><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>${maven-failsafe-plugin.version}</version>
@@ -485,6 +496,10 @@
         <profile>
             <id>o4-mysql-gates</id>
             <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration><skipTests>true</skipTests></configuration>
+            </plugin><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>${maven-failsafe-plugin.version}</version>

@@ -262,6 +262,21 @@ describe('Hosted real-process gates', () => {
     );
     expect(mariadbRun.run).toContain('-Pmysql-integration');
     expect(mariadbRun.run).not.toContain('-Dit.test');
+    // The H2 unit suite runs once, in the MariaDB job: the Hosted job's three
+    // Maven steps would each repeat it, and the MariaDB job must keep it.
+    const profile = (id) =>
+      pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
+    const skipsUnits =
+      /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration><skipTests>true<\/skipTests><\/configuration>/;
+    for (const id of [
+      'hosted-harness-mysql',
+      'hosted-harness-gates',
+      'o4-mysql-gates',
+    ]) {
+      expect(profile(id), id).toMatch(skipsUnits);
+    }
+    expect(profile('mysql-integration')).not.toContain('maven-surefire-plugin');
+    expect(mariadbRun.run).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
     // Those checks read only the command lines, so each job also compares
     // the reports of its run with the source tree, right after its last
     // integration-test step.
