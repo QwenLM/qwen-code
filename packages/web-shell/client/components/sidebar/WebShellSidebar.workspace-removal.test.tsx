@@ -2642,6 +2642,42 @@ describe('WebShellSidebar workspace removal', () => {
     expect(onLoadSession).not.toHaveBeenCalled();
   });
 
+  it('starts an inline rename when F2 is pressed on the focused session row', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push(
+      {
+        sessionId: 'current-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Current session',
+      },
+      {
+        sessionId: 'other-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Other session',
+      },
+    );
+    const onLoadSession = vi.fn();
+    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
+
+    renderSidebar({ onLoadSession });
+    await expandWorkspace('project');
+
+    const row = inlineSessionAction(
+      'Other session',
+      'Rename',
+    )!.closest<HTMLElement>('[role="button"]')!;
+    await act(async () => {
+      row.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    const input = container.querySelector<HTMLInputElement>('input');
+    expect(input?.getAttribute('aria-label')).toBe('Rename: Other session');
+    expect(onLoadSession).not.toHaveBeenCalled();
+  });
+
   it('keeps the next rename editor when an earlier rename settles late', async () => {
     connection.sessionId = 'current-session';
     active.sessions.push(
@@ -2893,9 +2929,10 @@ describe('WebShellSidebar workspace removal', () => {
     });
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
     expect(inlineSessionAction('Pinned secondary', 'Delete')).toBeUndefined();
-    expect(inlineSessionAction('Pinned secondary', 'Rename')).toBeUndefined();
+    expect(inlineSessionAction('Pinned secondary', 'Rename')).toBeDefined();
     const items = await openSessionMenuItems('Pinned secondary');
-    expect(items).toEqual(expect.arrayContaining(['Rename', 'Delete']));
+    expect(items).toEqual(expect.arrayContaining(['Delete']));
+    expect(items).not.toContain('Rename');
 
     renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
     await act(async () => {
