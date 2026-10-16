@@ -34,6 +34,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   CONTRACT_DOCUMENT,
+  CONTRACT_DOCUMENT_PREDECESSOR,
   compareVersions,
   documentVersion,
 } from './contract-version-utils.js';
@@ -166,13 +167,10 @@ async function openPullRequests(repo, gh, budget) {
 // code is checked out or run. Anything the API cannot answer (a deletion
 // racing the file list, a symlike entry, a truncated read) is null, and
 // the claim is reported as unread instead of guessed.
-async function headDocument(repo, sha, gh) {
+async function headDocument(repo, sha, documentPath, gh) {
   try {
     const body = JSON.parse(
-      await gh([
-        'api',
-        `repos/${repo}/contents/${CONTRACT_DOCUMENT}?ref=${sha}`,
-      ]),
+      await gh(['api', `repos/${repo}/contents/${documentPath}?ref=${sha}`]),
     );
     if (typeof body?.content !== 'string') return null;
     return Buffer.from(body.content, 'base64').toString('utf8').trim();
@@ -189,7 +187,9 @@ async function claims(repo, prs, main, budget, gh) {
   let exhausted = false;
   const byPr = new Map();
   for (const pr of prs) {
-    const touched = pr.files.find((file) => file.path === CONTRACT_DOCUMENT);
+    const touched =
+      pr.files.find((file) => file.path === CONTRACT_DOCUMENT) ??
+      pr.files.find((file) => file.path === CONTRACT_DOCUMENT_PREDECESSOR);
     if (!touched) continue;
     if (touched.changeType === 'DELETED') {
       byPr.set(pr.number, 'deleted');
@@ -201,7 +201,7 @@ async function claims(repo, prs, main, budget, gh) {
       continue;
     }
     budget.left -= 1;
-    const text = await headDocument(repo, pr.sha, gh);
+    const text = await headDocument(repo, pr.sha, touched.path, gh);
     if (text === null) {
       byPr.set(pr.number, 'unread');
     } else if (text !== main.text) {
