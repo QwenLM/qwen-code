@@ -31922,18 +31922,29 @@ describe('App session callbacks', () => {
       workspaceCwd: '/tmp/project',
       archivable: true,
     }));
-    mockWorkspace.client.archiveSessionsData.mockImplementation(
-      async (sessionIds) => {
-        if (sessionIds.includes('side-100')) throw new Error('offline');
-        return {
-          archived: [...sessionIds],
-          alreadyArchived: [],
-          resolvedConflicts: [],
-          notFound: [],
-          errors: [],
-        };
-      },
-    );
+    const workspaceArchiveSessionsData = vi.fn(async (sessionIds: string[]) => {
+      if (sessionIds.includes('side-100')) throw new Error('offline');
+      return {
+        archived: [...sessionIds],
+        alreadyArchived: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      };
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
+      getSessionTurnIndexPage: mockWorkspace.client.getSessionTurnIndexPage,
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/project',
+        available: true,
+        pullRequests: [],
+      }),
+      archiveSessionsData: workspaceArchiveSessionsData,
+    }));
     const onToast = vi.fn();
     const consoleError = vi
       .spyOn(console, 'error')
@@ -31960,17 +31971,21 @@ describe('App session callbacks', () => {
       await testState.latestArtifactPanelProps?.onArchiveSideTasks?.(sideTasks);
     });
 
-    expect(mockWorkspace.client.archiveSessionsData).toHaveBeenCalledTimes(2);
-    expect(mockWorkspace.client.archiveSessionsData).toHaveBeenNthCalledWith(
+    expect(workspaceArchiveSessionsData).toHaveBeenCalledTimes(2);
+    expect(workspaceArchiveSessionsData).toHaveBeenNthCalledWith(
       1,
       sideTasks.slice(0, 100).map((sideTask) => sideTask.sessionId),
       { requireIdle: true },
     );
-    expect(mockWorkspace.client.archiveSessionsData).toHaveBeenNthCalledWith(
+    expect(workspaceArchiveSessionsData).toHaveBeenNthCalledWith(
       2,
       [sideTasks[100]!.sessionId],
       { requireIdle: true },
     );
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(mockWorkspace.client.archiveSessionsData).not.toHaveBeenCalled();
     expect(
       mockWorkspace.client.listWorkspaceSessions.mock.calls.length,
     ).toBeGreaterThan(catalogRequestCount);
@@ -31981,6 +31996,168 @@ describe('App session callbacks', () => {
     expect(onToast).toHaveBeenCalledWith(
       'error',
       expect.stringContaining('side-100: offline'),
+    );
+    consoleError.mockRestore();
+  });
+
+  it('archives and restores each side task through its owning workspace catalog', async () => {
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'session_archive',
+      'session_archive_idle_guard',
+    ];
+    const archiveRequests: string[][] = [];
+    const unarchiveRequests: string[][] = [];
+    const workspaceCalls: string[] = [];
+    mockWorkspace.client.workspaceByCwd.mockImplementation(
+      (workspaceCwd: string) => {
+        workspaceCalls.push(workspaceCwd);
+        return {
+          getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
+          getSessionTurnIndexPage: mockWorkspace.client.getSessionTurnIndexPage,
+          workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+          workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+          workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd,
+            available: true,
+            pullRequests: [],
+          }),
+          archiveSessionsData: vi.fn(async (sessionIds: string[]) => {
+            archiveRequests.push(sessionIds);
+            return {
+              archived: [...sessionIds],
+              alreadyArchived: [],
+              resolvedConflicts: [],
+              notFound: [],
+              errors: [],
+            };
+          }),
+          unarchiveSessionsData: vi.fn(async (sessionIds: string[]) => {
+            unarchiveRequests.push(sessionIds);
+            return {
+              unarchived: [...sessionIds],
+              alreadyActive: [],
+              resolvedConflicts: [],
+              notFound: [],
+              errors: [],
+            };
+          }),
+        };
+      },
+    );
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    await act(async () => {
+      await testState.latestArtifactPanelProps?.onArchiveSideTasks?.([
+        {
+          sessionId: 'side-secondary',
+          title: 'Secondary task',
+          workspaceCwd: '/tmp/secondary',
+          archivable: true,
+        },
+        {
+          sessionId: 'side-standalone',
+          title: 'Standalone task',
+          archivable: true,
+        },
+      ]);
+      await testState.latestArtifactPanelProps?.onUnarchiveSideTasks?.([
+        {
+          sessionId: 'arch-secondary',
+          title: 'Archived secondary',
+          workspaceCwd: '/tmp/secondary',
+        },
+        { sessionId: 'arch-standalone', title: 'Archived standalone' },
+      ]);
+    });
+
+    expect(workspaceCalls).toContain('/tmp/secondary');
+    expect(archiveRequests).toEqual([['side-secondary']]);
+    expect(unarchiveRequests).toEqual([['arch-secondary']]);
+    expect(mockWorkspace.client.archiveSessionsData).toHaveBeenCalledWith(
+      ['side-standalone'],
+      { requireIdle: true },
+    );
+    expect(mockWorkspace.client.unarchiveSessionsData).toHaveBeenCalledWith([
+      'arch-standalone',
+    ]);
+  });
+
+  it('keeps a side task and reports an error when its workspace answers notFound', async () => {
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'session_archive',
+      'session_archive_idle_guard',
+    ];
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
+      getSessionTurnIndexPage: mockWorkspace.client.getSessionTurnIndexPage,
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/secondary',
+        available: true,
+        pullRequests: [],
+      }),
+      archiveSessionsData: vi.fn(async (sessionIds: string[]) => ({
+        archived: [],
+        alreadyArchived: [],
+        resolvedConflicts: [],
+        notFound: [...sessionIds],
+        errors: [],
+      })),
+    }));
+    const onToast = vi.fn();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const { container } = renderApp({ onToast });
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const sideTask = {
+      sessionId: 'side-secondary',
+      title: 'Secondary task',
+      workspaceCwd: '/tmp/secondary',
+      archivable: true,
+    };
+    act(() => {
+      testState.latestArtifactPanelProps?.onOpenSideTask?.(sideTask);
+    });
+    await flush();
+
+    await act(async () => {
+      await testState.latestArtifactPanelProps?.onArchiveSideTasks?.([
+        sideTask,
+      ]);
+    });
+
+    expect(mockWorkspace.client.archiveSessionsData).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('button[title="Secondary task"]'),
+    ).not.toBeNull();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining(
+        'side-secondary: not found in its workspace catalog',
+      ),
     );
     consoleError.mockRestore();
   });
@@ -32136,7 +32313,7 @@ describe('App session callbacks', () => {
         return request.promise;
       },
     );
-    mockWorkspace.client.archiveSessionsData.mockResolvedValueOnce({
+    const workspaceArchiveSessionsData = vi.fn().mockResolvedValueOnce({
       archived: [completed.sessionId],
       alreadyArchived: [],
       resolvedConflicts: [],
@@ -32148,6 +32325,19 @@ describe('App session callbacks', () => {
         },
       ],
     });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
+      getSessionTurnIndexPage: mockWorkspace.client.getSessionTurnIndexPage,
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/project',
+        available: true,
+        pullRequests: [],
+      }),
+      archiveSessionsData: workspaceArchiveSessionsData,
+    }));
     const onToast = vi.fn();
     const consoleError = vi
       .spyOn(console, 'error')
@@ -32179,7 +32369,7 @@ describe('App session callbacks', () => {
       ]);
     });
     await vi.waitFor(() => {
-      expect(mockWorkspace.client.archiveSessionsData).toHaveBeenCalledWith(
+      expect(workspaceArchiveSessionsData).toHaveBeenCalledWith(
         [completed.sessionId, revived.sessionId],
         { requireIdle: true },
       );
@@ -32273,8 +32463,9 @@ describe('App session callbacks', () => {
               : [],
         ),
     );
-    mockWorkspace.client.unarchiveSessionsData.mockImplementationOnce(
-      async () => {
+    const workspaceUnarchiveSessionsData = vi
+      .fn()
+      .mockImplementationOnce(async () => {
         restored = true;
         return {
           unarchived: [archived.sessionId],
@@ -32283,8 +32474,20 @@ describe('App session callbacks', () => {
           notFound: [],
           errors: [],
         };
-      },
-    );
+      });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
+      getSessionTurnIndexPage: mockWorkspace.client.getSessionTurnIndexPage,
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/project',
+        available: true,
+        pullRequests: [],
+      }),
+      unarchiveSessionsData: workspaceUnarchiveSessionsData,
+    }));
     const { container } = renderApp();
     await flush();
     act(() => {
@@ -32309,7 +32512,7 @@ describe('App session callbacks', () => {
       ]);
     });
 
-    expect(mockWorkspace.client.unarchiveSessionsData).toHaveBeenCalledWith([
+    expect(workspaceUnarchiveSessionsData).toHaveBeenCalledWith([
       archived.sessionId,
     ]);
     await flush();

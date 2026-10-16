@@ -11424,26 +11424,44 @@ export function App({
   const archiveSideTasks = useCallback(
     async (sideTasks: readonly SideTaskListItem[]) => {
       if (!sideTaskArchiveAvailable) return;
-      const sessionIds = sideTasks
-        .filter((sideTask) => sideTask.archivable === true)
-        .map((sideTask) => sideTask.sessionId);
-      if (sessionIds.length === 0) return;
+      const eligibleTasks = sideTasks.filter(
+        (sideTask) => sideTask.archivable === true,
+      );
+      if (eligibleTasks.length === 0) return;
+      // Archive through each task's owning workspace runtime: the unscoped
+      // route resolves ids against the legacy-primary catalog, where a
+      // secondary-Workspace task answers notFound without migrating.
+      const idsByWorkspace = new Map<string | undefined, string[]>();
+      for (const sideTask of eligibleTasks) {
+        const key = sideTask.workspaceCwd?.trim()
+          ? sideTask.workspaceCwd
+          : undefined;
+        const ids = idsByWorkspace.get(key);
+        if (ids === undefined) idsByWorkspace.set(key, [sideTask.sessionId]);
+        else ids.push(sideTask.sessionId);
+      }
       try {
-        const batches = Array.from(
-          {
-            length: Math.ceil(sessionIds.length / SESSION_ARCHIVE_BATCH_SIZE),
-          },
-          (_, index) =>
-            sessionIds.slice(
-              index * SESSION_ARCHIVE_BATCH_SIZE,
-              (index + 1) * SESSION_ARCHIVE_BATCH_SIZE,
-            ),
+        const batches = [...idsByWorkspace.entries()].flatMap(([cwd, ids]) =>
+          Array.from(
+            { length: Math.ceil(ids.length / SESSION_ARCHIVE_BATCH_SIZE) },
+            (_, index) => ({
+              cwd,
+              ids: ids.slice(
+                index * SESSION_ARCHIVE_BATCH_SIZE,
+                (index + 1) * SESSION_ARCHIVE_BATCH_SIZE,
+              ),
+            }),
+          ),
         );
         const settledResults = await Promise.allSettled(
           batches.map((batch) =>
-            workspace.client.archiveSessionsData(batch, {
-              requireIdle: true,
-            }),
+            batch.cwd === undefined
+              ? workspace.client.archiveSessionsData(batch.ids, {
+                  requireIdle: true,
+                })
+              : workspace.client
+                  .workspaceByCwd(batch.cwd)
+                  .archiveSessionsData(batch.ids, { requireIdle: true }),
           ),
         );
         const results = settledResults.flatMap((result) =>
@@ -11452,7 +11470,6 @@ export function App({
         const archived = new Set([
           ...results.flatMap((result) => result.archived),
           ...results.flatMap((result) => result.alreadyArchived),
-          ...results.flatMap((result) => result.notFound),
         ]);
         if (archived.size > 0) {
           sideTaskCatalogRequestGenerationRef.current += 1;
@@ -11470,11 +11487,16 @@ export function App({
         }
         const errorMessages = [
           ...results.flatMap((result) =>
+            result.notFound.map(
+              (sessionId) => `${sessionId}: not found in its workspace catalog`,
+            ),
+          ),
+          ...results.flatMap((result) =>
             result.errors.map((entry) => `${entry.sessionId}: ${entry.error}`),
           ),
           ...settledResults.flatMap((result, index) =>
             result.status === 'rejected'
-              ? batches[index]!.map(
+              ? batches[index]!.ids.map(
                   (sessionId) =>
                     `${sessionId}: ${formatError(result.reason, t('sidebar.archiveFailed'))}`,
                 )
@@ -11499,14 +11521,31 @@ export function App({
   const unarchiveSideTasks = useCallback(
     async (sideTasks: readonly SideTaskListItem[]) => {
       if (!sideTaskRestoreAvailable) return;
-      const sessionIds = sideTasks.map((sideTask) => sideTask.sessionId);
-      if (sessionIds.length === 0) return;
+      if (sideTasks.length === 0) return;
+      const idsByWorkspace = new Map<string | undefined, string[]>();
+      for (const sideTask of sideTasks) {
+        const key = sideTask.workspaceCwd?.trim()
+          ? sideTask.workspaceCwd
+          : undefined;
+        const ids = idsByWorkspace.get(key);
+        if (ids === undefined) idsByWorkspace.set(key, [sideTask.sessionId]);
+        else ids.push(sideTask.sessionId);
+      }
       try {
-        const result = await workspace.client.unarchiveSessionsData(sessionIds);
+        const groups = [...idsByWorkspace.entries()];
+        const settledResults = await Promise.allSettled(
+          groups.map(([cwd, ids]) =>
+            cwd === undefined
+              ? workspace.client.unarchiveSessionsData(ids)
+              : workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
+          ),
+        );
+        const results = settledResults.flatMap((result) =>
+          result.status === 'fulfilled' ? [result.value] : [],
+        );
         const restored = new Set([
-          ...result.unarchived,
-          ...result.alreadyActive,
-          ...result.notFound,
+          ...results.flatMap((result) => result.unarchived),
+          ...results.flatMap((result) => result.alreadyActive),
         ]);
         if (restored.size > 0) {
           sideTaskCatalogRequestGenerationRef.current += 1;
@@ -11518,8 +11557,26 @@ export function App({
           }));
           setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
         }
-        if (result.errors.length > 0) {
-          throw new Error(result.errors.map((entry) => entry.error).join('; '));
+        const errorMessages = [
+          ...results.flatMap((result) =>
+            result.notFound.map(
+              (sessionId) => `${sessionId}: not found in its workspace catalog`,
+            ),
+          ),
+          ...results.flatMap((result) =>
+            result.errors.map((entry) => `${entry.sessionId}: ${entry.error}`),
+          ),
+          ...settledResults.flatMap((result, index) =>
+            result.status === 'rejected'
+              ? groups[index]![1].map(
+                  (sessionId) =>
+                    `${sessionId}: ${formatError(result.reason, t('sidebar.unarchiveFailed'))}`,
+                )
+              : [],
+          ),
+        ];
+        if (errorMessages.length > 0) {
+          throw new Error(errorMessages.join('; '));
         }
       } catch (error) {
         reportError(error, t('sidebar.unarchiveFailed'));
