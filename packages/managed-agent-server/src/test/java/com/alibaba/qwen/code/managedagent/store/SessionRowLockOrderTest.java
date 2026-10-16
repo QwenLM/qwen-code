@@ -136,6 +136,7 @@ class SessionRowLockOrderTest {
             "ManagedRuntimeRetentionGuard.java",
             "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
             "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
+            "ResidentWorkspaces.java",
             "ToolPublicationRetentionStore.java",
             "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
