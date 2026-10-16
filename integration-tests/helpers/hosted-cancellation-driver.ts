@@ -119,11 +119,18 @@ const proxy = createServer(async (req, res) => {
       res.end(text);
       return;
     }
+    const harnessScoped =
+      req.method === 'POST' &&
+      [
+        '/internal/runtime-broker/v1/runtimes:warm',
+        '/internal/runtime-broker/v1/tool-sessions:active-holds',
+      ].includes(url.pathname);
     assert.equal(fields.harnessSessionId, sessionId);
-    assert.equal(fields.runtimeSessionId, promptId);
+    assert.equal(fields.runtimeSessionId, harnessScoped ? undefined : promptId);
     const id = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
     if (id) assert.equal(id, executionCallId);
-    operations.push(operation);
+    if (!(harnessScoped && operation === 'active-holds'))
+      operations.push(operation);
     if (operation === 'start') {
       assert.notEqual(
         fault,
@@ -411,7 +418,7 @@ try {
     assert.equal(
       operations.length,
       traffic,
-      'Cold load must not contact Broker',
+      'Cold load must not execute Broker operations',
     );
     assert.equal(modelCalls, 1, 'Cold load must not contact model');
     assert.equal(
