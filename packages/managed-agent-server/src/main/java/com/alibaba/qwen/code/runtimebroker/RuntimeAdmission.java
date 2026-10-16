@@ -44,6 +44,7 @@ final class RuntimeAdmission {
         requireRelease(binding, session);
         if (!binding.sameIdentity(claim) || !binding.getRequest().isManagedContext()
                 || !LocalProcessRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                        && !SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
                 || !WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                 || !binding.getRequest().getIsolationKey().equals(session.getSession().getHarnessSessionId())
                 || session.getState() != RuntimeSessionRecord.State.RELEASING
