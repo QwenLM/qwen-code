@@ -547,6 +547,133 @@ describe('SkillTool', () => {
       expect(validate('mytool', tool)).toBeNull();
     });
 
+    it('resolves a bare authored name that uniquely matches one enabled extension skill (#13683)', async () => {
+      lists([
+        {
+          ...mockSkills[0],
+          name: 'portable:code-review',
+          authoredName: 'code-review',
+          extensionName: 'portable',
+          level: 'extension',
+        },
+      ]);
+      caches([
+        {
+          ...mockSkills[0],
+          name: 'portable:code-review',
+          authoredName: 'code-review',
+          extensionName: 'portable',
+          level: 'extension',
+        },
+      ]);
+      const tool = await newTool();
+      // Exact registry identity still resolves.
+      expect(validate('portable:code-review', tool)).toBeNull();
+      // The bare authored name the extension docs teach resolves too.
+      expect(validate('code-review', tool)).toBeNull();
+    });
+
+    it('keeps the not-found error with qualified candidates for an ambiguous bare name (#13683)', async () => {
+      lists([
+        {
+          ...mockSkills[0],
+          name: 'alpha:lookup',
+          authoredName: 'lookup',
+          extensionName: 'alpha',
+          level: 'extension',
+        },
+        {
+          ...mockSkills[0],
+          name: 'beta:lookup',
+          authoredName: 'lookup',
+          extensionName: 'beta',
+          level: 'extension',
+        },
+      ]);
+      caches([
+        {
+          ...mockSkills[0],
+          name: 'alpha:lookup',
+          authoredName: 'lookup',
+          extensionName: 'alpha',
+          level: 'extension',
+        },
+        {
+          ...mockSkills[0],
+          name: 'beta:lookup',
+          authoredName: 'lookup',
+          extensionName: 'beta',
+          level: 'extension',
+        },
+      ]);
+      const tool = await newTool();
+      const result = validate('lookup', tool);
+      expect(result).toMatch(/Skill "lookup" not found/);
+      expect(result).toMatch(/matches multiple extension skills/);
+      expect(result).toContain('alpha:lookup');
+      expect(result).toContain('beta:lookup');
+    });
+
+    it('prefers the exact registry identity over an authoredName match (#13683)', async () => {
+      lists([
+        {
+          ...mockSkills[0],
+          name: 'lookup',
+          level: 'user',
+        },
+        {
+          ...mockSkills[0],
+          name: 'beta:lookup',
+          authoredName: 'lookup',
+          extensionName: 'beta',
+          level: 'extension',
+        },
+      ]);
+      caches([
+        {
+          ...mockSkills[0],
+          name: 'lookup',
+          level: 'user',
+        },
+        {
+          ...mockSkills[0],
+          name: 'beta:lookup',
+          authoredName: 'lookup',
+          extensionName: 'beta',
+          level: 'extension',
+        },
+      ]);
+      const tool = await newTool();
+      // The user-level skill owns the name outright; no ambiguity error.
+      expect(validate('lookup', tool)).toBeNull();
+    });
+
+    it('does not resolve a bare name whose only match is disabled (#13683)', async () => {
+      lists([
+        {
+          ...mockSkills[0],
+          name: 'portable:code-review',
+          authoredName: 'code-review',
+          extensionName: 'portable',
+          level: 'extension',
+        },
+      ]);
+      caches([
+        {
+          ...mockSkills[0],
+          name: 'portable:code-review',
+          authoredName: 'code-review',
+          extensionName: 'portable',
+          level: 'extension',
+        },
+      ]);
+      setDisabled('portable:code-review');
+      const tool = await newTool();
+      // Capability semantics: the bare spelling never grants a disabled skill.
+      const result = validate('code-review', tool);
+      expect(result).toMatch(/Skill "code-review" not found/);
+    });
+
     it('does not allow a pending conditional skill to be invoked via the model-invocable command path', async () => {
       // Regression for /review finding: SkillCommandLoader exposes every
       // user/project skill as a model-invocable command (so it surfaces
