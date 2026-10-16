@@ -585,7 +585,11 @@ function WorkspaceFilesPane({
   return (
     <ErrorBoundary label="workspace file browser" fallback={failure}>
       <Suspense
-        fallback={<div className={styles.empty}>{t('common.loading')}</div>}
+        fallback={
+          <div className={`${styles.empty} text-center`} role="status">
+            {t('common.loading')}
+          </div>
+        }
       >
         <WorkspaceFileBrowser
           key={`${tab.workspaceCwd}:${tab.workspaceId ?? ''}`}
@@ -1299,6 +1303,7 @@ export function ArtifactPanel({
               <button
                 type="button"
                 className={styles.emptyAction}
+                data-testid="right-panel-open-web-preview"
                 onClick={onOpenWebPreview}
               >
                 <span className={styles.emptyActionIcon} aria-hidden="true">

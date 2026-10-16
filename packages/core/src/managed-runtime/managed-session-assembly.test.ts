@@ -240,6 +240,22 @@ describe('managed session assembly', () => {
     ).rejects.toThrow();
   });
 
+  // Regression for issue #13182 finding 6a: a writer left unsealed because
+  // releasing the activation failed could neither resume nor be taken over.
+  it('still attempts to seal the writer when releasing the activation fails', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const sealAttempted = vi.spyOn(session.authority, 'close');
+    vi.spyOn(session.authority, 'releaseActivation').mockRejectedValue(
+      new Error('activation store unavailable'),
+    );
+
+    await expect(session.close()).rejects.toThrow(
+      'activation store unavailable',
+    );
+    expect(sealAttempted).toHaveBeenCalled();
+  });
+
   it('stops renewal and seals an externally fenced writer without appending activation release', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const workspace = await createWorkspace();
