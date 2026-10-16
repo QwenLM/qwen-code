@@ -138,7 +138,7 @@ try {
         '-q',
         ...(settings ? ['-s', settings] : []),
         '-f',
-        'packages/sdk-java/managed-agent-server/pom.xml',
+        'packages/managed-agent-server/pom.xml',
         '-Phosted-workspace-tools',
         '-Dit.test=HostedWorkspaceToolTurnIT#providerMediaReachesModelAndSurvivesReplyLossAndBrokerRestartOnMySql',
         '-Dqwen.provider.media.bundle-ready=true',

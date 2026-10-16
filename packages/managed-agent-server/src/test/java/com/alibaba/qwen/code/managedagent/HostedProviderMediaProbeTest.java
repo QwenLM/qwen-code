@@ -138,7 +138,7 @@ class HostedProviderMediaProbeTest {
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
                 + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at)"
                 + " VALUES (?, 'runtime', ?, 'workspace', '1', '/', 'capability', 'process', 'harness',"
-                + " 'tool', 'binding', 1, 'READY', 1, CURRENT_TIMESTAMP)", "e".repeat(64), tenant);
+                + " 'tool', 'binding', 1, 'READY', 1, ?)", "e".repeat(64), tenant, System.currentTimeMillis());
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key)"
                 + " VALUES (?, ?, ?, ?, 'storage-0', ?)",
                 JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage-0"),
