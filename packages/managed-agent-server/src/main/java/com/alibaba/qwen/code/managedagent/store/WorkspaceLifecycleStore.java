@@ -115,19 +115,42 @@ public class WorkspaceLifecycleStore {
             throw blocked("workspace_lifecycle_journal_unverified");
         }
         long headRevision = ((Number) heads.getFirst().get("journal_revision")).longValue();
-        var pending = new java.util.HashSet<String>();
         // The head row locked above is the per-Session fence: writers append
-        // revisions only behind it, so this ordered scan needs no lock of its
-        // own — and a lifecycle settle no longer pins every revision of the
-        // journal while it parses them in Java (#13800). The scan itself is a
-        // snapshot read, so the locked head's revision is re-verified below:
-        // a revision this transaction's snapshot cannot see fails the check
-        // closed, rather than admitting over a live turn it cannot see.
+        // revisions only behind it, so the ordered scan first runs without a
+        // lock of its own, and a lifecycle settle does not pin every revision
+        // of the journal while it parses them in Java (#13800). That scan is
+        // a snapshot read, though, and the enclosing lifecycle transaction
+        // may have pinned its snapshot with plain reads before the head lock
+        // was granted. A revision committed in that window is invisible to
+        // it, so when the scan stops short of the locked head's revision it
+        // is repeated as a locking read, which reads the journal as committed
+        // now and decides on that (#13800 R2-3). Only a journal that still
+        // falls short of its own head fails closed.
+        var scan = scanJournal(jdbc, json, tenant, session, v2, false);
+        if (scan.maxRevision() < headRevision) {
+            scan = scanJournal(jdbc, json, tenant, session, v2, true);
+            if (scan.maxRevision() < headRevision) {
+                throw blocked("workspace_lifecycle_journal_unverified");
+            }
+        }
+        var pending = scan.pending();
+        var cleanup = scan.cleanup();
+        if (!pending.isEmpty() || !allowCleanup && cleanup.values().stream().anyMatch(state -> !"confirmed".equals(state))) {
+            throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn.");
+        }
+    }
+
+    private record JournalScan(long maxRevision, java.util.Set<String> pending, java.util.Map<String, String> cleanup) {
+    }
+
+    private static JournalScan scanJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session,
+            boolean v2, boolean locking) {
         final long[] maxScanned = {0};
+        var pending = new java.util.HashSet<String>();
         var cleanup = new java.util.HashMap<String, String>();
         var settled = new java.util.HashSet<String>();
         jdbc.query("SELECT journal_revision, record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                + " ORDER BY journal_revision", row -> {
+                + " ORDER BY journal_revision" + (locking ? " FOR UPDATE" : ""), row -> {
                 maxScanned[0] = Math.max(maxScanned[0], row.getLong("journal_revision"));
                 for (String line : new String(row.getBytes("record_bytes"), StandardCharsets.UTF_8).split("\n")) {
                     try {
@@ -156,16 +179,7 @@ public class WorkspaceLifecycleStore {
                     }
                 }
             }, tenant, session);
-        // A revision committed after this transaction's snapshot was pinned
-        // is invisible to the scan above; the locked head's revision is a
-        // current read, so anything it counts beyond the scan's maximum was
-        // committed in that window and the idle verdict cannot be trusted.
-        if (maxScanned[0] < headRevision) {
-            throw blocked("workspace_lifecycle_journal_unverified");
-        }
-        if (!pending.isEmpty() || !allowCleanup && cleanup.values().stream().anyMatch(state -> !"confirmed".equals(state))) {
-            throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn.");
-        }
+        return new JournalScan(maxScanned[0], pending, cleanup);
     }
 
     @Transactional

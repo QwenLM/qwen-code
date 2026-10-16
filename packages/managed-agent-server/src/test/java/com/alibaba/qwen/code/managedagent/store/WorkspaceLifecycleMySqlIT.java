@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
+import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
@@ -15,6 +16,7 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -244,7 +246,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                     // open one until it commits.
                     sameSession.set(pool.submit(() -> fixture.transactions.executeWithoutResult(transaction ->
                             journal.authorizeOrdinary("tenant", fixture.session, token, originalRequest))));
-                    awaitLockWaitInSchema(fixture.jdbc);
+                    MySqlLockProbe.awaitLockWaits(fixture.jdbc, schema, 1, "the same-Session authorisation");
                     assertThat(sameSession.get()).isNotDone();
                 } catch (Exception error) {
                     throw new IllegalStateException(error);
@@ -252,20 +254,6 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             });
             sameSession.get().get(10, TimeUnit.SECONDS);
         }
-    }
-
-    private void awaitLockWaitInSchema(JdbcTemplate jdbc) throws InterruptedException {
-        // INNODB_TRX refreshes at most every ~100 ms; poll slower than that.
-        for (int attempt = 0; attempt < 60; attempt++) {
-            Integer waits = jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.INNODB_TRX t"
-                    + " JOIN information_schema.PROCESSLIST p ON p.ID = t.trx_mysql_thread_id"
-                    + " WHERE t.trx_state = 'LOCK WAIT' AND p.DB = ?", Integer.class, schema);
-            if (waits != null && waits > 0) {
-                return;
-            }
-            Thread.sleep(150);
-        }
-        throw new AssertionError("Timed out waiting for the same-Session authorisation to queue");
     }
 
     @Test
@@ -288,48 +276,83 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retirement_operation_id IS NOT NULL", Integer.class)).isOne();
     }
 
-    @Test
-    void idleJournalCheckReVerifiesARevisionItsSnapshotCannotSee() throws Exception {
+    /**
+     * The lifecycle admission's composition (#13800 R2-3): its plain reads
+     * pin the REPEATABLE READ snapshot before the head lock is granted, and
+     * a writer commits a revision in between. The idle check must decide on
+     * that revision (here a still-pending Turn, so turn_active), never
+     * refuse an admission it could have read as workspace_lifecycle_journal_unverified,
+     * and never admit over it. Removing the locking rescan turns the direct
+     * arm into journal_unverified; removing the head re-verification turns
+     * it into a silent admission.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void idleJournalCheckReadsARevisionItsSnapshotCannotSee(boolean throughAdmission) throws Exception {
         var fixture = fixture();
         var store = new ManagedSessionStore(fixture.jdbc);
         var journal = fixture.transactions.execute(ignored ->
                 new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var txManager = new DataSourceTransactionManager(source);
         // Declared rather than inherited: under a server defaulted to READ
-        // COMMITTED every statement gets a fresh read view and the
-        // re-verification arm below never fires.
+        // COMMITTED every statement gets a fresh read view and the snapshot
+        // below would see the late revision anyway.
         var definition = new DefaultTransactionDefinition();
         definition.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         var snapshot = txManager.getTransaction(definition);
         try {
             // Pin this REPEATABLE READ transaction's read view with a plain
-            // consistent read on the head table before the writer appends
-            // anything else behind the head's own lock.
+            // consistent read, as the admission's replay and open-operation
+            // reads do, before the writer appends behind the head's lock.
             fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head"
                     + " WHERE tenant_id = ? AND session_id = ?", Long.class, "tenant", fixture.session);
-            var templates = ManagedHookRecordContractTest.fixtures().get("templates");
-            var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2, sha256("{}"), "e30=");
-            ObjectNode registration = templates.get("hook_registration").deepCopy();
-            registration.withObject("/catalogRef").put("digest", data.digest());
-            var input = new ManagedSessionStoreModels.CommitResource("witness-input", "managed-input", 1, 2,
-                    sha256("{}"), "e30=");
-            var request = journal.requestDomainWithInput("witness-input", "hook_registration", registration,
-                    List.of(data), "witness-turn", input);
-            try (var writer = Executors.newSingleThreadExecutor()) {
-                writer.submit(() -> fixture.transactions.executeWithoutResult(ignored -> journal.commit(request)))
-                        .get(30, TimeUnit.SECONDS);
-            }
-            // The head's revision is ahead of this transaction's read view:
-            // the unlocked scan must not vouch for the journal's idleness.
-            assertThatThrownBy(() -> WorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json,
-                    "tenant", fixture.session))
-                    .satisfies(error -> {
-                        assertThat(error).isInstanceOf(ApiException.class);
-                        assertThat(((ApiException) error).getCode())
-                                .isEqualTo("workspace_lifecycle_journal_unverified");
-                    });
+            commitPendingTurn(fixture, journal);
+            // The head's revision is ahead of this transaction's read view.
+            assertThatThrownBy(() -> {
+                if (throughAdmission) {
+                    fixture.store.beginWorkspaceLifecycle("tenant", fixture.session, OperationKind.DELETE, "owner",
+                            "a".repeat(64), "operation", "digest", true, 1);
+                } else {
+                    WorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json,
+                            "tenant", fixture.session);
+                }
+            }).isInstanceOfSatisfying(ApiException.class, error ->
+                    assertThat(error.getCode()).isEqualTo("turn_active"));
         } finally {
             txManager.rollback(snapshot);
+        }
+    }
+
+    /** A journal that falls short of its own head even when read as committed now fails closed. */
+    @Test
+    void idleJournalCheckFailsClosedOnAJournalShortOfItsHead() throws Exception {
+        var fixture = fixture();
+        var store = new ManagedSessionStore(fixture.jdbc);
+        var journal = fixture.transactions.execute(ignored ->
+                new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
+        commitPendingTurn(fixture, journal);
+        fixture.jdbc.update("UPDATE ma_session_head SET journal_revision = journal_revision + 1"
+                + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                "tenant", fixture.session);
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored ->
+                WorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json, "tenant", fixture.session)))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("workspace_lifecycle_journal_unverified"));
+    }
+
+    /** Commits, from another thread and transaction, a revision that leaves a Turn's input pending. */
+    private static void commitPendingTurn(Fixture fixture, ExtensionRecordJournal journal) throws Exception {
+        var templates = ManagedHookRecordContractTest.fixtures().get("templates");
+        var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2, sha256("{}"), "e30=");
+        ObjectNode registration = templates.get("hook_registration").deepCopy();
+        registration.withObject("/catalogRef").put("digest", data.digest());
+        var input = new ManagedSessionStoreModels.CommitResource("witness-input", "managed-input", 1, 2,
+                sha256("{}"), "e30=");
+        var request = journal.requestDomainWithInput("witness-input", "hook_registration", registration,
+                List.of(data), "witness-turn", input);
+        try (var writer = Executors.newSingleThreadExecutor()) {
+            writer.submit(() -> fixture.transactions.executeWithoutResult(ignored -> journal.commit(request)))
+                    .get(30, TimeUnit.SECONDS);
         }
     }
 
