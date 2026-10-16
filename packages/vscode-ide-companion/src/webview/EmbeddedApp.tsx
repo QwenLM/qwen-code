@@ -53,9 +53,11 @@ const REWIND_APPLIED_TIMEOUT_MS = 2_000;
 function isEditableUserBlock(
   block: DaemonTranscriptBlock | undefined,
 ): boolean {
-  const source = block?.meta?.['source'];
+  if (block?.kind !== 'user') {
+    return false;
+  }
+  const source = block.meta?.['source'];
   return (
-    block?.kind === 'user' &&
     source !== 'background_notification' &&
     source !== 'mid_turn_message_injected'
   );
