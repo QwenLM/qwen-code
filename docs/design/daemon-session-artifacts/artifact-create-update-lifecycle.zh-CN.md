@@ -2,7 +2,7 @@
 
 [English](artifact-create-update-lifecycle.md) | [简体中文](artifact-create-update-lifecycle.zh-CN.md)
 
-- 状态：提案（未实现）
+- 状态：实现中（PR 1）
 - 日期：2026-10-15
 - 关联 issue：[#14282](https://github.com/QwenLM/qwen-code/issues/14282)
 - 相关设计：[session-artifacts-persistence-v2-design.md](session-artifacts-persistence-v2-design.md)、[session-artifacts-directory-expansion.md](../session-artifacts-directory-expansion.md)、[web-shell-tool-file-preview.md](../web-shell-tool-file-preview.md)
@@ -110,8 +110,9 @@
 | Agent 写入**已登记**的文件（任意扩展名、任意登记来源） | 更新，同步内容基线，`toolCallId` 推进到本次调用               | available | updated           |
 | Agent 写入未登记且不匹配策略的文件                     | 忽略（不 stat、不 hash）                                      | –         | –                 |
 | Agent 写入**被用户删除过**的路径                       | 按 `updateOnly` 处理，不复活；显式 `record_artifact` 仍可重建 | –         | –                 |
-| 写入后、登记前文件又被改动（`expectedSha256` 不一致）  | 以 agent 写入内容为基线                                       | changed   | created / updated |
-| 内容未变的重复写入 / 真正的 no-op edit / 写入失败      | 不产生候选                                                    | –         | –                 |
+| 写入后、登记前文件又被改动                             | 与今天一致，被吸收为基线（见 4.3）                            | available | created / updated |
+| `write_file` 写入与原内容相同的内容                    | 与普通写入相同处理（不比较内容）                              | available | created / updated |
+| 真正的 no-op edit / 写入失败                           | 不产生候选                                                    | –         | –                 |
 | 用户或其他方式修改（包括 agent 的 shell 命令）         | 懒刷新时发现                                                  | changed   | 无（不变）        |
 | 文件被删除                                             | 自动登记的产物被遗忘；显式登记的标为 missing                  | missing   | removed / 无      |
 | `write_file` 设置 `record_as_artifact=false`           | 只阻止新建；已登记的产物仍同步                                | –         | –                 |
@@ -125,43 +126,42 @@
 - 返回 `null`：artifact 功能关闭、不在工作区、位于跳过目录、路径或标题不安全。
 - 匹配内置扩展名：返回普通候选。
 - 不匹配，或 `record_as_artifact=false`：返回 `updateOnly: true` 的候选。
-- `expectedSha256`：**实际写入磁盘字节**的 sha256。工具写盘时会按原文件保留编码（如 GBK）、BOM 与 CRLF 换行，内存字符串与磁盘字节不同，因此不能对字符串求 hash。由写盘实现返回它写出字节的 hash（`StandardFileSystemService` 已持有编码后的数据；`encodeTextFileContentAsync` 可得到相同字节）。拿不到时（委托给 ACP 客户端写盘、managed/远程后端、超过 100MB）不带该字段，退回今天"store 自读建基线"的行为。
 
 内置扩展名集合在现有基础上追加 `.sql`、`.py`、`.md`、`.json`，kind 均为 `file`。它们是数据与分析场景最常见的交付物；不做成配置项，是为了不引入新的 settings 面。现有的跳过规则（点目录、`node_modules`、`dist` 等）与 `record_as_artifact=false` 继续生效。artifact 登记出错不得让一次成功的文件写入变成失败的工具调用。只有新建产物时在 `llmContent` 追加提示，`updateOnly` 候选不追加。
 
-### 4.3 入站字段：`updateOnly` 与 `expectedSha256`
+### 4.3 入站字段：`updateOnly`
 
 ```ts
 interface ToolArtifact {
   // ...existing
-  /** 只更新已存在的同身份 artifact；不存在时丢弃。 */
+  /** 只刷新会话里已有的 artifact，从不新建。 */
   updateOnly?: boolean;
-  /** 工具实际写入字节的 sha256，store 用作期望指纹。 */
-  expectedSha256?: string;
 }
 ```
 
-- 两个字段都要在 `bridgeClient.ts` 的 `artifactPayloadFields` 白名单中显式加入，并加到 `SessionArtifactInput`，否则会被过滤掉。
-- 它们不进入 artifact 的 journal/snapshot，也不出现在公开 artifact 上；但会随工具结果写入 transcript。无快照回放时按原顺序重放：中间条目的 hash 与当前文件不一致会短暂为 `changed`，最后一次写入与当前文件一致则收敛为 `available`；会话结束后文件被外部改过则保持 `changed`（正确）。
-- `expectedSha256` 不经过 metadata，不放宽"输入方不得自行写入 `qwen.workspace.*`"的现有规则，只对 tool 来源生效。
+- 该字段要在 `bridgeClient.ts` 的 `artifactPayloadFields` 白名单中显式加入，并加到 `SessionArtifactInput`，否则会被过滤掉。
+- 它不进入 artifact 的 journal/snapshot，也不出现在公开 artifact 上；但会随工具结果写入 transcript。无快照回放时按原顺序重放，与今天的 `write_file` 一样，store 以当前文件内容为基线。
+
+基线仍来自 store 自己的读取，工具不传期望指纹。早期草案曾加入 `expectedSha256`（工具写出字节的 hash），让写入与登记之间的改动保持 `changed`；现已去掉：daemon 模式下 bridge 声明了 `fs.writeTextFile` 客户端能力，agent 的写盘经 ACP 委托给 bridge 的文件系统适配器，agent 手里没有最终落盘的字节，主路径上这个字段会一直缺失。由 store 读取磁盘字节，还意味着工具保留编码的文件（GBK、UTF-8 BOM、CRLF）无需工具侧处理即可保持 `available`。代价是写入与 store 读取之间那个很短的窗口内发生的改动会被吸收为基线，与今天完全一致。
 
 ### 4.4 Store 改动（`sessionArtifacts.ts`）
 
-1. **`updateOnly` 先短路**：在串行队列内、`expandWorkspaceDirectoryInput` 之前，用与 `normalizeInput` 相同的路径规范化算出身份，并按 `upsertMany` 相同的查找顺序（id、published 目标）检查是否存在；不存在则直接丢弃——不建、不删、不驱逐、不发布、不 stat/hash。存在时走正常的 `normalizeInput`。
-2. **期望指纹（新增接线）**：`upsertMany` 把 `expectedSha256` 转成 `normalizeInput` 的 `workspaceExpected: { sha256 }`，复用 `getWorkspaceStatus` 的比对。一致：沿用 store 自读的 sha/mtime/size 作为基线，`available`。不一致：状态 `changed`，并**以 `expectedSha256` 作为指纹基线**写入。否则新建时没有基线，5 秒后懒刷新会把被改动的内容当成新基线、状态退回 `available`。未携带该字段的输入行为与今天一致。
-3. **只同步内容（跨归属）**：当输入来自自动登记生产者集合 `{write_file, edit, notebook_edit}`、且已存在条目是带 `clientId` 的 client 登记时，不走 `denyCrossClientMutation` 拒绝，而是只合并内容字段：指纹基线、`status`、`sizeBytes`、`toolCallId`。`title`、`description`、`source`、`clientId`、retention、`clientRetained` 一律不变。这放宽了权限边界，**需要维护者确认**。
-4. **跨 source 采纳指纹**：对 tool 来源且通过第 2 步的输入，`mergeMetadata` 采纳 `isAdoptableContentFingerprintKey` 的键时不再要求 source 相同；其他 metadata 键、hook 来源输入、发布者信任规则不变。
-5. **按文件身份推进 turn 归属**：把"推进 `toolCallId`"与"刷新标题/描述"拆开。来自生产者集合的输入被接受时，`toolCallId` 推进到本次调用；`title`、`description`、`toolName`、`source`、`hookEventName` 仍按现有 `shouldRefreshWorkspaceDisplay` 规则，自动登记不得覆盖用户可见标题。`toolName` 保留创建者，使遗忘规则仍按"谁创建"判定。
-6. **删除后不复活**：生产者集合的非 `updateOnly` 候选命中 tombstone 时，按 `updateOnly` 处理（因不存在而丢弃）。显式 `record_artifact`、hook 与客户端登记的复活规则不变。
-7. **泛化遗忘/复查谓词**：`toolName === 'write_file'` 改为 `source === 'tool' && toolName ∈ {write_file, edit, notebook_edit}`；client 登记、`clientRetained`、`record_artifact` 显式登记的条目行为不变。
+自动登记生产者集合为 tool 来源的 `{write_file, edit, notebook_edit}`。
+
+1. **`updateOnly` 先短路**：在串行队列内、`expandWorkspaceDirectoryInput` 之前，用与 `normalizeInput` 相同的路径规范化算出身份，并按 `upsertMany` 相同的查找方式（先 id，再 published workspace 目标）检查是否存在；不存在则直接丢弃——不建、不删、不驱逐、不发布、不 stat/hash。存在时走正常的 `normalizeInput`。
+2. **只同步内容（跨归属）**：来自生产者集合的输入跳过 `denyCrossClientMutation`，因此带 `clientId` 的 client 登记会接受 agent 的写入。合并只改内容字段：指纹基线、`status`、`sizeBytes`、`toolCallId`。`title`、`description`、`source`、`clientId`、retention、`clientRetained` 一律不变：`mergeArtifact` 保留已有的 `source` 与归属，展示刷新规则不接受该工具名，`mergeRetention` 不会覆盖显式 retention。其他工具输入（如 `record_artifact`）仍被拒绝。这放宽了权限边界，**需要维护者确认**。
+3. **跨 source 采纳指纹**：对生产者集合的输入，`mergeMetadata` 采纳 `isAdoptableContentFingerprintKey` 的键时不再要求 source 相同，且不新增其他键；其他输入、hook 来源输入、发布者信任规则不变。
+4. **按文件身份推进 turn 归属**：把"推进 `toolCallId`"与"刷新标题/描述"拆开。生产者集合的输入合并到 workspace 条目时，`toolCallId` 推进到本次调用；`title`、`description`、`toolName`、`source`、`hookEventName` 仍按现有 `shouldRefreshWorkspaceDisplay` 规则，自动登记不得覆盖用户可见标题。`toolName` 保留创建者，使遗忘规则仍按"谁创建"判定。
+5. **删除后不复活**：生产者集合的非 `updateOnly` 候选命中 tombstone 时，按 `updateOnly` 处理（因不存在而丢弃）。显式 `record_artifact`、hook 与客户端登记的复活规则不变。
+6. **泛化遗忘/复查谓词**：`toolName === 'write_file'` 改为 `toolName ∈ {write_file, edit, notebook_edit}`，与今天一样不判断 source；client 登记、`clientRetained`、`record_artifact` 显式登记的条目行为不变。
 
 不采用的替代做法：让 `edit` / `notebook_edit` 伪装成 `toolName: 'write_file'`（耦合到一个不真实的名称）；整体放宽 `shouldRefreshWorkspaceDisplay`（会让自动登记覆盖用户标题）。
 
 ### 4.5 Web Shell（第一个实现 PR 内）
 
 - 不改下载规则（`changed` 已可下载）。
-- `changed` 卡片增加"登记后被其他方式修改"提示（不写"会话外"，因为 agent 的 shell 命令也会造成 `changed`），并加回归测试固定 `changed` 可下载的现有行为。
-- `getArtifactsByTurn`：在 `record_artifact` / `reportedArtifacts` 匹配之外，**同时**加入 `artifact.toolCallId` 所在 turn（目前只在没有匹配时才用）。显式登记过的产物因此也会出现在最近一次修改它的 turn；对今天的条目，`toolCallId` 与登记调用在同一 turn，结果不变。不改 `artifactsByTurn` 类型。
+- `changed` 卡片的 meta 行增加"登记后已被修改"提示（不写"会话外"，因为 agent 的 shell 命令也会造成 `changed`）。现有测试已固定 `changed` 可下载的行为。
+- `getArtifactsByTurn`：对 workspace 产物，在 `record_artifact` / `reportedArtifacts` 匹配之外，**同时**加入 `artifact.toolCallId` 所在 turn（目前只在没有匹配时才用）。显式登记过的文件因此也会出现在最近一次修改它的 turn；对今天的条目，`toolCallId` 与登记调用在同一 turn，结果不变。published 与 link 产物的 `toolCallId` 不随后续写入推进，保持旧规则。不改 `artifactsByTurn` 类型。
 
 ### 4.6 上传文件
 
@@ -180,7 +180,7 @@ interface ToolArtifact {
 | 已有会话中的 `.sql/.py/.md/.json` 文件            | 不补登记；升级后 agent 再次修改时才新建                           | 默认值放宽带来的预期行为变化                          |
 | 已有 artifact 被 agent 再次修改                   | 同一 id 发 `updated`，同步基线，`toolCallId` 推进                 | 这是修复                                              |
 | 已经是 `changed` 的旧条目（多为过去 edit 未同步） | 保持 `changed`（可下载），直到下次 agent 写入                     | **不批量重置**：无法区分旧缺陷与真实外部修改          |
-| 宿主（带 `clientId`）登记的产物                   | agent 修改时只同步内容；标题、retention、归属、tombstone 不变     | 依赖 4.4 第 3 步的维护者确认                          |
+| 宿主（带 `clientId`）登记的产物                   | agent 修改时只同步内容；标题、retention、归属、tombstone 不变     | 依赖 4.4 第 2 步的维护者确认                          |
 | hook / `record_artifact` 登记的产物               | 身份、标题、retention 不变；agent 修改时采纳新指纹                | 无                                                    |
 | 用户删除过的 `write_file` 产物                    | **行为变化**：今天再次写入会复活，升级后不复活                    | 需要时用 `record_artifact` 显式重建                   |
 | published / managed / link / external_url         | 不走 workspace 自动登记路径                                       | 无                                                    |
@@ -195,16 +195,16 @@ interface ToolArtifact {
 3. 不批量把 `changed` 改成 `available`。
 4. `updateOnly` 永不删除或驱逐已有条目。
 5. 跨归属只同步内容字段，不改标题、retention、归属。
-6. 契约测试：用升级前写下的 V2 snapshot/journal fixture restore，断言条数与 id 不变；对其中一条 `edit`，断言同一 id、动作为 `updated`；另一条未触碰但已被外部修改的条目仍为 `changed`。
+6. 契约测试：用升级前写下的 V2 snapshot restore，断言条数与 id 不变；对其中一条 `edit`，断言同一 id、动作为 `updated`；另一条未触碰但已被外部修改的条目仍为 `changed`。
 
 ## 5. 分期
 
 ### 5.1 PR 1：一致的创建/更新（本设计主体）
 
-- core：共享策略模块；`write_file` 改为调用它；`edit`、`notebook_edit` 返回 artifacts；写盘实现返回写入字节的 sha256；`ToolArtifact.updateOnly` / `expectedSha256`；工具描述同步。
-- acp-bridge：白名单透传两个新字段；`updateOnly` 短路；`expectedSha256` 接入 `workspaceExpected` 且不一致时以它为基线；跨归属只同步内容；跨 source 指纹采纳；`toolCallId` 按文件身份推进；删除后不复活；遗忘/复查谓词泛化。
-- web-shell：`changed` 提示、turn 归属并入 `toolCallId`，以及回归测试。
-- 测试：三个工具的单测（含 GBK、UTF-8 BOM、CRLF 文件的 hash 与磁盘一致）；store 覆盖 `updateOnly`（未知丢弃且不 stat、已知更新）、hash 不一致在刷新后仍为 `changed`、跨 source 与跨归属同步且标题/归属不变、`write_file` 建 + `edit` 改后 `toolCallId` 推进且标题不变、删除后不复活、由 `edit` 创建的产物被遗忘、并发排队更新；无快照回放收敛；V2 兼容契约测试。
+- core：共享策略模块；`write_file` 改为调用它；`edit`、`notebook_edit` 返回 artifacts；`ToolArtifact.updateOnly`；工具描述同步。
+- acp-bridge：白名单透传新字段；`updateOnly` 短路；跨归属只同步内容；跨 source 指纹采纳；`toolCallId` 按文件身份推进；删除后不复活；遗忘/复查谓词泛化。
+- web-shell：`changed` 提示、workspace 产物的 turn 归属并入 `toolCallId`，以及回归测试。
+- 测试：三个工具与策略模块的单测；bridge 透传 `updateOnly`；store 覆盖 `updateOnly`（未知丢弃且不 stat、已知更新）、跨 source 与跨归属同步且标题/retention/归属不变、`write_file` 建 + `edit` 改后 `toolCallId` 推进且标题不变、删除后不复活、由 `edit` 与 `notebook_edit` 创建的产物被遗忘、并发排队更新；V2 兼容契约测试。
 
 默认扩展名追加四项，不加配置，PR 本身即可独立交付价值。
 
@@ -222,10 +222,9 @@ interface ToolArtifact {
 
 - **把每次写入都当成新产物**：由"内置策略之外一律 `updateOnly`"约束，并有测试覆盖。
 - **编码场景噪音与驱逐**：新增的 `.md`、`.json`、`.py` 在普通编码会话里很常见（README、`package.json`、源码），被 agent 修改后都会成为 artifact。200 条上限不是缓解而是风险本身：超限后最老的非 `clientRetained` 条目被淘汰，会话早期的重要报告可能被挤掉。缓解：跳过目录规则不变；`record_as_artifact=false` 可逐次关闭；删除后不复活。这是放宽默认值而非新增配置的代价，评审时需确认可接受。
-- **权限边界**：跨归属内容同步绕过了 `denyCrossClientMutation`。范围限定为生产者集合的 tool 输入和内容字段，并有测试固定不改标题/归属。
-- **hash 与磁盘不一致**：若写盘实现与 hash 计算用的编码不同，每次修改都会变成 `changed`。由"写盘实现返回自己写出字节的 hash，拿不到就不带"约束。
-- **大文件**：超过 100MB 不 hash，工具不带 `expectedSha256`，保持今天按大小建立基线的行为。
-- **性能**：未登记文件的 `updateOnly` 候选在 stat 之前短路；已登记文件每次修改 stat + hash。无快照回放时，每条写入记录都会 hash 一次。
+- **权限边界**：跨归属内容同步绕过了 `denyCrossClientMutation`。范围限定为生产者集合的 tool 输入和内容字段，并有测试固定不改标题、retention、归属。
+- **写入到登记的窗口**：agent 写入与 store 读取之间的改动会被吸收为基线，与今天一致（见 4.3）。
+- **性能**：未登记文件的 `updateOnly` 候选在 stat 之前短路；已登记文件每次修改 stat + hash（超过 100MB 的文件保持今天按大小建立基线的行为）。无快照回放时，每条写入记录都会 hash 一次。
 - **transcript 与诊断**：任何文件的每次 `edit` 都会在 transcript 工具结果中多一条候选记录（路径、标题、kind），`toolResultBoundaryArtifact` 的诊断也会多报 `file` kind。
 - **journal 增长**：每次更新一条事件，沿用现有 snapshot 压缩节奏。
 
@@ -236,17 +235,16 @@ interface ToolArtifact {
 1. 上传 `orders.csv`，让 AI 用 `edit` 加一列 → 产物新建、出现在本 turn、可预览可下载。
 2. 下一轮再改 → 同一 id 发 `updated`，状态 `available`，产物出现在最新 turn。
 3. 先 `write_file` 建 `report.html`，再 `edit` 修改 → 同一 id，`toolCallId` 推进，标题不变。
-4. 上传 GBK 编码、UTF-8 BOM、CRLF 换行的 CSV 各一份，让 agent 修改 → 均为 `available`，不出现 `changed`。
+4. 上传 GBK 编码、UTF-8 BOM、CRLF 换行的 CSV 各一份，让 agent 修改 → 均为 `available`，不出现 `changed`（store 对磁盘字节求 hash）。
 5. 宿主先登记 `data.xlsx`（带 `clientId`），再让 agent 修改 → 同步更新，状态 `available`，标题、retention、归属不变。
 6. 先 `record_artifact` 登记 `notes.md`，再在后续 turn `edit` → 产物同时出现在登记 turn 与修改 turn。
 7. 上传 `orders.sql`，让 agent 用 `edit` 加字段 → 产物新建，宿主未做任何登记；`.py`、`.md`、`.json` 同理。
 8. 未登记的 `src/foo.ts`（不在内置集合）被 `edit` → 不产生 artifact，store 不 stat。
 9. 用户删除一个自动登记的产物，agent 再次修改该文件 → 不复活；之后 `record_artifact` 该路径 → 重建。
 10. 外部修改或 agent 用 shell 修改文件 → `changed`，带提示，仍可下载。
-11. 写入后、登记前文件又被改动（单测模拟）→ `changed`；5 秒后刷新仍为 `changed`。
-12. 删除 artifact 快照后 `session/load`（无快照回放）→ 结果与回放前一致。
-13. worktree / 多 workspace 下 write 与 edit 同一文件 → 同一 id。
-14. V2 兼容契约（4.7 第 6 条）。
+11. 删除 artifact 快照后 `session/load`（无快照回放）→ 结果与回放前一致。
+12. worktree / 多 workspace 下 write 与 edit 同一文件 → 同一 id。
+13. V2 兼容契约（4.7 第 6 条）。
 
 每个代码 PR 运行相关包的单测、`npm run build && npm run typecheck`，完成自审，并附 E2E 证据。
 
@@ -254,4 +252,4 @@ interface ToolArtifact {
 
 1. 外部修改（`changed`）是否需要主动发布事件，让 host 实时感知？
 2. 宿主通过 `/file/write` 保存用户修改时，是否应重设基线？这需要从 workspace 作用域路由定位到 session 作用域 store，牵涉路由归属，暂不纳入。
-3. 4.4 第 3 步的跨归属内容同步需要维护者确认权限边界。
+3. 4.4 第 2 步的跨归属内容同步需要维护者确认权限边界。
