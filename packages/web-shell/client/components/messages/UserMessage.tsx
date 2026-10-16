@@ -173,50 +173,29 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
         {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
       </div>
       <div className={styles.scheduledTaskPrompt}>
-        <UserMessageText text={run.prompt} />
+        {renderUserMessageText(run.prompt)}
       </div>
     </div>
   );
 }
 
-function UserMessageText({
-  text,
-  startsAtLineBeginning = true,
-}: {
-  text: string;
-  startsAtLineBeginning?: boolean;
-}) {
-  const parts: ReactNode[] = [];
-  let cursor = 0;
-  for (const match of text.matchAll(/(^|\r\n?|\n)(\/[^ \r\n]*)/g)) {
-    if (match[1] === '' && !startsAtLineBeginning) continue;
-    const start = match.index + match[1]!.length;
-    if (cursor < start) {
-      parts.push(
-        <LinkifiedText
-          key={`text:${cursor}`}
-          text={text.slice(cursor, start)}
-        />,
-      );
-    }
-    parts.push(
-      <span
-        key={`slash:${start}`}
-        className={styles.slashCommand}
-        data-web-shell-user-slash-command
-      >
-        <LinkifiedText text={match[2]!} />
-      </span>,
+function renderUserMessageText(text: string, isContinuation?: boolean) {
+  // Preserve captured line breaks separately from the slash tokens.
+  return text.split(/(^|\r\n?|\n)(\/[^ \r\n]*)/g).map((part, index) => {
+    const content = part.includes('://') ? (
+      <LinkifiedText key={index} text={part} />
+    ) : (
+      part
     );
-    cursor = start + match[2]!.length;
-  }
-  if (parts.length === 0) return <LinkifiedText text={text} />;
-  if (cursor < text.length) {
-    parts.push(
-      <LinkifiedText key={`text:${cursor}`} text={text.slice(cursor)} />,
+    return index % 3 === 2 &&
+      (!isContinuation || index > 2 || text[0] !== '/') ? (
+      <span key={index} data-web-shell-user-slash-command>
+        {content}
+      </span>
+    ) : (
+      content
     );
-  }
-  return parts;
+  });
 }
 
 function DefaultUserMessageContent({
@@ -246,11 +225,7 @@ function DefaultUserMessageContent({
     <>
       {segments.map((segment, index) =>
         segment.type === 'text' ? (
-          <UserMessageText
-            key={index}
-            text={segment.text}
-            startsAtLineBeginning={index === 0}
-          />
+          renderUserMessageText(segment.text, index > 0)
         ) : (
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
@@ -381,7 +356,7 @@ export const UserMessage = memo(function UserMessage({
       parseUserMessageContent,
       '[WebShell] failed to parse user message content',
     );
-    if (!parts) return <UserMessageText text={content} />;
+    if (!parts) return renderUserMessageText(content);
     const mergedParts: Array<(typeof parts)[number]> = [];
     for (const part of parts) {
       const previous = mergedParts.at(-1);
@@ -396,13 +371,7 @@ export const UserMessage = memo(function UserMessage({
     }
     return mergedParts.map((part, index) => {
       if (part.type === 'text') {
-        return (
-          <UserMessageText
-            key={index}
-            text={part.text}
-            startsAtLineBeginning={index === 0}
-          />
-        );
+        return renderUserMessageText(part.text, index > 0);
       }
       return (
         <ReadonlyComposerTag

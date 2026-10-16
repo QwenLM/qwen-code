@@ -109,19 +109,31 @@ describe('UserMessage', () => {
     expect(container.textContent).toBe(content);
   });
 
-  it('keeps URLs clickable beside a highlighted slash command', () => {
-    const content = '/review https://example.com/docs';
-    const container = render(<UserMessage content={content} />);
+  it.each([
+    ['/review https://example.com/docs', '/review', 'https://example.com/docs'],
+    [
+      '/redirect:HTTP://EXAMPLE.COM',
+      '/redirect:HTTP://EXAMPLE.COM',
+      'HTTP://EXAMPLE.COM',
+    ],
+    [
+      '/go?u=Https://Example.com/x',
+      '/go?u=Https://Example.com/x',
+      'Https://Example.com/x',
+    ],
+  ])(
+    'keeps URLs clickable beside or inside a highlighted slash command: %s',
+    (content, token, href) => {
+      const container = render(<UserMessage content={content} />);
 
-    expect(
-      container.querySelector('[data-web-shell-user-slash-command]')
-        ?.textContent,
-    ).toBe('/review');
-    expect(container.querySelector('a')?.getAttribute('href')).toBe(
-      'https://example.com/docs',
-    );
-    expect(container.textContent).toBe(content);
-  });
+      expect(
+        container.querySelector('[data-web-shell-user-slash-command]')
+          ?.textContent,
+      ).toBe(token);
+      expect(container.querySelector('a')?.getAttribute('href')).toBe(href);
+      expect(container.textContent).toBe(content);
+    },
+  );
 
   it.each(['/review @README.md/a2ui\n/help', '/review @README.md\n/help'])(
     'preserves actual line boundaries around references: %s',
@@ -481,7 +493,7 @@ describe('UserMessage', () => {
     expect(renderUserMessageContent).not.toHaveBeenCalled();
   });
 
-  it('linkifies URLs inside a scheduled-task prompt', () => {
+  it('highlights slash commands and linkifies URLs inside a scheduled-task prompt', () => {
     const content =
       'Scheduled task: Check incidents\n' +
       'Task ID: task-2\n' +
@@ -490,7 +502,7 @@ describe('UserMessage', () => {
       'Trigger: scheduled\n' +
       'Session: new chat for this run\n\n' +
       'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.\n\n' +
-      'check https://status.example.com/incidents, then reply';
+      '/review check https://status.example.com/incidents, then reply';
     const container = render(<UserMessage content={content} />);
 
     const message = container.querySelector(
@@ -501,6 +513,10 @@ describe('UserMessage', () => {
       'a[href="https://status.example.com/incidents"]',
     );
     expect(link).not.toBeNull();
+    expect(
+      message?.querySelector('[data-web-shell-user-slash-command]')
+        ?.textContent,
+    ).toBe('/review');
     expect(container.textContent).toContain(', then reply');
   });
 

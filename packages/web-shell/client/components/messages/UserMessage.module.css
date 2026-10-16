@@ -316,7 +316,7 @@
   word-break: break-word;
 }
 
-.slashCommand {
+[data-web-shell-user-slash-command] {
   color: var(--agent-blue-500, #4a9eff);
   font-weight: bold;
 }
