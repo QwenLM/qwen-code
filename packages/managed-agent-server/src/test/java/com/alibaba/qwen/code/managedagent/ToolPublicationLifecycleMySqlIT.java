@@ -82,7 +82,7 @@ class ToolPublicationLifecycleMySqlIT {
                     throw new AssertionError("Inline fixture expected");
                 }
                 @Override
-                public void requireUnversioned() {}
+                public void validateConfiguration() {}
             };
             var data = new ToolPublicationDataStore(jdbc, journal.manager, journal.store, journal.sessions,
                     objects, Duration.ofMinutes(2), Duration.ofSeconds(30),

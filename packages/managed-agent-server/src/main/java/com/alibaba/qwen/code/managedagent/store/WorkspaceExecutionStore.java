@@ -26,13 +26,22 @@ public class WorkspaceExecutionStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final WorkspaceStorageGuard storageGuard;
+    private final ResidentWorkspaces residents;
 
     @Autowired
     public WorkspaceExecutionStore(JdbcTemplate jdbc,
-            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard) {
+            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
+            com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties properties) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
         this.storageGuard = storageGuard;
+        this.residents = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
+    }
+
+    public WorkspaceExecutionStore(JdbcTemplate jdbc,
+            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard) {
+        this(jdbc, transactionManager, storageGuard,
+                new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties());
     }
 
     public WorkspaceExecutionStore(JdbcTemplate jdbc,
@@ -41,15 +50,49 @@ public class WorkspaceExecutionStore {
         this.transaction = new TransactionTemplate(transactionManager);
         // Offline saved-owner cleanup must not require the current mount.
         this.storageGuard = null;
+        this.residents = new ResidentWorkspaces(List.of());
+    }
+
+    public java.nio.file.Path createdStorageRoot(String tenantId, String storageId) {
+        return storageGuard == null ? null : storageGuard.createdStorageRoot(tenantId, storageId);
     }
 
     public boolean verifiedRecoveryEnabled() {
         return storageGuard != null && storageGuard.enabled();
     }
 
+    private void requireResidentHeld(ContextBinding binding, RuntimeSessionRecord session, boolean releasing) {
+        var selected = residents.find(binding);
+        if (selected == null || !com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.selects(session.getSession().getScope())
+                || !ResidentWorkspaces.scope(selected).equals(session.getSession().getScope())) {
+            throw unavailable();
+        }
+        ResidentWorkspaces.requireRegistration(jdbc, selected);
+        var rows = jdbc.queryForList("SELECT rs.runtime_session_id FROM ma_runtime_session rs"
+                + " JOIN ma_runtime_binding b ON b.binding_id = rs.binding_id AND b.runtime_generation = rs.runtime_generation"
+                + " JOIN ma_runtime_slot slot ON slot.active_binding_id = b.binding_id AND slot.request_key = b.request_key"
+                + " JOIN ma_storage_owner o ON o.binding_id = b.binding_id AND o.runtime_generation = b.runtime_generation"
+                + " WHERE rs.binding_id = ? AND rs.runtime_generation = ? AND rs.runtime_session_id = ?"
+                + " AND rs.harness_session_id = ? AND rs.session_state IN (" + (releasing
+                        ? "'ACQUIRING', 'READY', 'RELEASING', 'RELEASED'" : "'ACQUIRING', 'READY'") + ")"
+                + " AND b.request_key = ? AND b.binding_state = 'READY' AND b.drain_requested = FALSE"
+                + " AND o.storage_key = ? AND o.storage_kind = 'CSI' AND o.csi_phase = 'RESERVED'"
+                + " AND o.csi_revision = 1 AND o.csi_registration_key = ? AND o.csi_registration_revision = ?"
+                + " AND o.csi_provision_request_id = b.provision_request_id AND o.holder_key IS NULL"
+                + " AND o.runtime_session_id IS NULL", String.class, session.getBindingId(), session.getRuntimeGeneration(),
+                session.getRuntimeSessionId(), session.getSession().getHarnessSessionId(), residents.request(binding).requestKey(),
+                selected.registration().physicalKey(), selected.registration().aliasKey(), selected.registration().revision());
+        if (rows.size() != 1 || !session.getRuntimeSessionId().equals(rows.getFirst())
+                || !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE binding_id = ?"
+                + " AND runtime_generation = ? AND runtime_session_id <> ? AND session_state <> 'RELEASED'",
+                String.class, session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId()).isEmpty()) {
+            throw busy();
+        }
+    }
+
     public void authorize(SessionRecord session) {
         authorizePassiveAttachment(session);
-        if (storageGuard != null) {
+        if (storageGuard != null && residents.find(session.workspace()) == null) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -61,7 +104,7 @@ public class WorkspaceExecutionStore {
             throw new RuntimeBrokerException(error.getStatus().value(), error.getCode(), error.getMessage(), false, error);
         }
         authorizePassiveAttachment(session, authority);
-        if (storageGuard != null) {
+        if (storageGuard != null && residents.find(session.workspace()) == null) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -71,7 +114,7 @@ public class WorkspaceExecutionStore {
             throw unavailable();
         }
         authorizePassiveAttachment(session, null, true);
-        if (storageGuard != null) {
+        if (storageGuard != null && residents.find(session.workspace()) == null) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -144,7 +187,17 @@ public class WorkspaceExecutionStore {
                         binding.getContextConfigRef())) {
             throw unavailable();
         }
-        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        var resident = residents.find(binding);
+        if (resident == null) {
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        } else {
+            if (!WorkspaceToolProfiles.FILES.equals(session.toolProfile())
+                    || jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
+                            + " AND parent_session_id IS NULL", Long.class, session.tenantId(), session.sessionId()) != 1) {
+                throw unavailable();
+            }
+            ResidentWorkspaces.requireRegistration(jdbc, resident);
+        }
         // Verdicts per matched row: 0 structural mismatch, 1 refused only by
         // operator-mutable grant or registry state, 2 authorized.
         byte[] executionActor = cancellation || committedStop ? null
@@ -269,6 +322,13 @@ public class WorkspaceExecutionStore {
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session) {
         WorkspaceStorageKindGuard.requireFreshTransaction();
+        if (residents.find(binding) != null) {
+            transaction.executeWithoutResult(status -> {
+                WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+                requireResidentHeld(binding, session, false);
+            });
+            return;
+        }
         String holder = holderKey(session);
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
@@ -321,6 +381,10 @@ public class WorkspaceExecutionStore {
     }
 
     public void assertHeld(ContextBinding binding, RuntimeSessionRecord session) {
+        if (residents.find(binding) != null) {
+            requireResidentHeld(binding, session, false);
+            return;
+        }
         if (storageGuard != null) {
             storageGuard.verify(binding);
         }
@@ -330,6 +394,10 @@ public class WorkspaceExecutionStore {
     }
 
     public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session) {
+        if (residents.find(binding) != null) {
+            requireResidentHeld(binding, session, true);
+            return session.getState() != RuntimeSessionRecord.State.RELEASED;
+        }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
                 + " ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'",
@@ -338,6 +406,17 @@ public class WorkspaceExecutionStore {
     }
 
     public void release(ContextBinding binding, RuntimeSessionRecord session) {
+        if (residents.find(binding) != null) {
+            transaction.executeWithoutResult(status -> {
+                WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+                requireResidentHeld(binding, session, true);
+                if (session.getState() != RuntimeSessionRecord.State.RELEASING
+                        && session.getState() != RuntimeSessionRecord.State.RELEASED) {
+                    throw unavailable();
+                }
+            });
+            return;
+        }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
@@ -600,7 +679,7 @@ public class WorkspaceExecutionStore {
                 "Workspace access grant or registry state is changing.", true);
     }
 
-    private static RuntimeBrokerException busy() {
+    static RuntimeBrokerException busy() {
         return new RuntimeBrokerException(409, "workspace_busy",
                 "Workspace storage is held by another tool turn.", true);
     }

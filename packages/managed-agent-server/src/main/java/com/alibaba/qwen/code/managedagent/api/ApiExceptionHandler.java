@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationStorageException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.aliyun.oss.OSSException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -51,11 +51,11 @@ public class ApiExceptionHandler {
     public void disconnectedClient() {
     }
 
-    @ExceptionHandler(OSSException.class)
-    public ResponseEntity<Map<String, Object>> objectStore(OSSException error,
+    @ExceptionHandler(ToolPublicationStorageException.class)
+    public ResponseEntity<Map<String, Object>> objectStore(ToolPublicationStorageException error,
             HttpServletRequest request, HttpServletResponse response) {
         LOG.warn("Tool publication object store rejected request", error);
-        if ("AccessDenied".equals(error.getErrorCode())) {
+        if (error.getReason() == ToolPublicationStorageException.Reason.ACCESS_DENIED) {
             return response(request, response, HttpStatus.FORBIDDEN,
                     "managed_tool_publication_storage_denied", "Tool publication storage rejected the request.");
         }

@@ -512,7 +512,7 @@ class WorkspaceCsiSessionMainTest {
                 "owner", Duration.ofMinutes(1)));
         assertThat(renewedTurn).isTrue();
         tx.executeWithoutResult(status -> store().scheduleTurnRetry("tenant", ordinary.sessionId(),
-                ordinary.turnId(), "owner", 0));
+                ordinary.turnId(), "owner", 0, false));
         assertThat(store().findTurn("tenant", ordinary.sessionId(), ordinary.turnId()).orElseThrow().dispatchOwner())
                 .isNull();
         var reclaimedTurn = tx.execute(status -> store().claimTurn("tenant", ordinary.sessionId(), ordinary.turnId(),

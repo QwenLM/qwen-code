@@ -40,9 +40,14 @@ class AliyunToolPublicationReadRetryTest {
             throws Exception {
         try (var fixture = new Fixture("object", status, code, true)) {
             var objects = fixture.objects();
-            assertThatThrownBy(() -> objects.open("key")).isExactlyInstanceOf(OSSException.class)
+            assertThatThrownBy(() -> objects.open("key")).isExactlyInstanceOf(ToolPublicationStorageException.class)
                     .satisfies(error -> {
-                        var service = (OSSException) error;
+                        var storage = (ToolPublicationStorageException) error;
+                        assertThat(storage.getReason()).isEqualTo(code.equals("AccessDenied")
+                                ? ToolPublicationStorageException.Reason.ACCESS_DENIED
+                                : ToolPublicationStorageException.Reason.FAILURE);
+                        assertThat(error.getCause()).isInstanceOf(OSSException.class);
+                        var service = (OSSException) error.getCause();
                         if (code.equals("HTML")) {
                             assertThat(service.getRequestId()).isNull();
                         } else {
@@ -73,7 +78,7 @@ class AliyunToolPublicationReadRetryTest {
         try (var fixture = new Fixture("put", 503, "SlowDown", true)) {
             var objects = fixture.objects();
             assertThatThrownBy(() -> objects.putIfAbsent("key", "payload".getBytes(StandardCharsets.UTF_8)))
-                    .isExactlyInstanceOf(OSSException.class);
+                    .isExactlyInstanceOf(ToolPublicationStorageException.class).hasCauseInstanceOf(OSSException.class);
             assertThat(fixture.attempts.get()).isEqualTo(1);
             assertThat(fixture.forbidOverwrite.get()).isTrue();
         }
