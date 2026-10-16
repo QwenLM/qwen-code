@@ -2161,6 +2161,87 @@ describe('createTranscriptReplayMachine', () => {
     ).toBeUndefined();
   });
 
+  it('leaves a blocked spawn unattributed instead of minting from the raw request', () => {
+    // Every Agent-tool rejection returns through `buildSpawnBlockedResult`,
+    // which echoes the model-supplied `subagent_type` verbatim with
+    // `status: 'failed'`. That string never reached `SubagentValidator` and
+    // nothing ran, so replay must not stamp an identity path on it. The name
+    // is deliberately a single valid segment: only the status guard can
+    // reject this fixture, so the name guard cannot mask it.
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'error',
+          resultDisplay: {
+            type: 'task_execution',
+            subagentName: 'reviewer',
+            status: 'failed',
+            terminateReason: 'Nesting depth limit reached (max 5)',
+          },
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'blocked' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
+
+  it('leaves a spawn unattributed when the persisted name is not one segment', () => {
+    // A replayed transcript is read back from disk, so the persisted name is
+    // only as trustworthy as whichever version wrote it. Admitting a `/` here
+    // would mint `/root/security/deps` — byte-identical to the path a
+    // genuinely nested agent gets — collapsing two unrelated cards onto one
+    // identity.
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'success',
+          resultDisplay: {
+            type: 'task_execution',
+            subagentName: 'security/deps',
+            status: 'completed',
+            result: 'done',
+          },
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
+
   it('attributes persisted Agent usage to its parent and omits it in summary', () => {
     const machine = createTranscriptReplayMachine();
     const result = updates(

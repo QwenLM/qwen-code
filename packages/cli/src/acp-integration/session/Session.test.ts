@@ -1417,6 +1417,56 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('lands an undrained teammate report before the recorder stops accepting writes', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      // A reversible close holds the queue: the mailbox row is already marked
+      // read, so the queued item is the only copy still carrying the report.
+      const envelope =
+        '<teammate_message from="security">found an injection</teammate_message>';
+      session.beginClose();
+      manager.leaderCallback?.(
+        envelope,
+        '[team] security: found an injection',
+        ['security'],
+      );
+      await vi.waitFor(() => expect(sentPeerNotifications()).toHaveLength(1));
+      const { taskId } = sentPeerNotifications()[0]!._meta?.[
+        'backgroundTask'
+      ] as { taskId: string };
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+
+      // The stored-session close path runs this before `recorder.finalize()`,
+      // the last point where the write is both accepted and then flushed.
+      session.flushPendingPeerNotifications();
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        [{ text: envelope }],
+        '[team] security: found an injection',
+        expect.objectContaining({ taskId, kind: 'peer', status: 'message' }),
+      );
+
+      // Landing marks the report durable, so neither a second flush nor the
+      // `dispose()` fallback writes the same report twice.
+      session.flushPendingPeerNotifications();
+      session.dispose();
+      expect(
+        vi.mocked(mockChatRecordingService.recordNotification),
+      ).toHaveBeenCalledTimes(1);
+    });
+
     it('still projects a roster change that lands inside a reversible close', async () => {
       const manager = makeFakeTeamManager();
       session.dispose();
