@@ -214,6 +214,45 @@ class WorkspaceRuntimeTest {
             JdbcToolExecutionRepository executions, RuntimeBindingRecord binding, RuntimeSessionRecord session) { }
 
     @Test
+    void operatorRecoveryRecordsTheHeldRuntimeSessionsOwnerOnASharedBinding() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var isolated = resolver(session, temp.toRealPath()).resolve(session.sessionId()).scope();
+        var scope = new RuntimeScope(isolated.getTenantId(), isolated.getWorkspaceId(), isolated.getWorkspaceGeneration(),
+                isolated.getCanonicalCwd(), isolated.getCapabilityDigest(), "workspace");
+        var bindings = bindings();
+        RuntimeBindingRecord runtime = readyBinding(bindings,
+                new RuntimeProvisionRequest(scope, null, "local-process", session.workspace().getStorageId()), 2);
+        String runtimeSessionId = UUID.randomUUID().toString();
+        RuntimeSessionRecord held = bindings.admitSession(new JdbcRuntimeSessionRepository(dataSource),
+                new RuntimeSessionRecord(new RuntimeSession(session.sessionId(), runtimeSessionId, "bootstrap", scope),
+                        runtime.getBindingId(), runtime.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        authority.claim(session.workspace(), held);
+        String callId = UUID.randomUUID().toString();
+        var executions = new JdbcToolExecutionRepository(dataSource);
+        executions.findOrCreate(ToolExecutionRecord.prepared(callId, UUID.randomUUID().toString(),
+                runtime.getBindingId(), runtime.getGeneration(), session.sessionId(), runtimeSessionId, "prompt", "call",
+                "digest", Map.of("sessionId", runtimeSessionId, "promptId", "prompt", "callId", "call",
+                        "argsDigest", "digest", "runtimeProtocol", 3, "inputDigest", "digest", "dispatchMode", "deferred")));
+        ToolExecutionRecord dispatched = executions.claimDispatch(callId, "dispatcher", Duration.ofMinutes(1));
+        assertThat(executions.compareAndSet(dispatched, dispatched.withResult(Map.of("executionStatus", "success",
+                "responseParts", List.of(), "capture", Map.of("captureStatus", "partial", "captureReason", "producer_lost")),
+                1, Instant.now()), "dispatcher", dispatched.getDispatchGeneration())).isNotNull();
+        var seed = runtime.getProvisionSeed();
+        assertThat(bindings.compareAndSet(runtime, runtime.withRecoveryEvidence(new RuntimeRecoveryEvidence(
+                UUID.randomUUID().toString(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "registered-process-exit",
+                Instant.now(), "host", seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), runtime.getResourceHandle()),
+                null, Instant.now()))).isNotNull();
+
+        var recovery = new WorkspaceOperatorRecoveryStore(jdbc,
+                new DataSourceTransactionManager(dataSource), bindings, new ObjectMapper());
+        String recoveryId = recovery.prepare(runtime.getBindingId(), runtime.getGeneration(),
+                recovery.inspect(runtime.getBindingId(), runtime.getGeneration()).holderKey(), "operator", "verified incident");
+        assertThat(jdbc.queryForObject("SELECT session_id FROM ma_operation WHERE operation_id = ?", String.class,
+                recoveryId.getBytes(StandardCharsets.UTF_8))).isEqualTo(session.sessionId());
+    }
+
+    @Test
     void operatorRecoveryFencesTheExactHeldGenerationBeforeAttestation() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var scope = resolver(session, temp.toRealPath()).resolve(session.sessionId()).scope();

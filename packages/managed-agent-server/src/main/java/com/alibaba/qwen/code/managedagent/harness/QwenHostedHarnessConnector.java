@@ -55,6 +55,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final SshWorkspaceStore ssh;
     /** #13753 I2: this control plane serves child Workspaces (startup checks the shape). */
     private final boolean childWorkspaces;
+    private final boolean childSnapshots;
     private volatile HostedHarnessClient client;
     private volatile boolean closed;
     private final ReentrantLock clientLock = new ReentrantLock();
@@ -108,6 +109,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.credentials = new WriterCredentialPolicy(properties);
         this.ssh = ssh;
         this.childWorkspaces = properties.getRuntimeBroker().isChildWorkspacesEnabled();
+        this.childSnapshots = childWorkspaces && properties.getRuntimeBroker().isChildSnapshotsEnabled();
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
                 || this.properties.getCapabilityDigest() == null
@@ -232,7 +234,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     .withMcpServers(mcpServers(session))
                     .withHookCatalog(hookCatalog(session))
                     .withForegroundOnly(foregroundOnly(session))
-                    .withChildWorkspaces(childWorkspaces && !foregroundOnly(session))
+                    .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session))
                     .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
         }
@@ -724,7 +726,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         .withMcpServers(mcpServers(session))
                         .withHookCatalog(hookCatalog(session))
                         .withForegroundOnly(foregroundOnly(session))
-                        .withChildWorkspaces(childWorkspaces && !foregroundOnly(session))
+                        .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session))
                         .withStoppedMessages());
         if (session.workspace() != null && !actions.approvalMode(tenantId,
                 sessionId).equals(attached.getApprovalMode())) {
@@ -940,7 +942,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
                             .toolProfile(profile)
                             .foregroundOnly(foregroundOnly(session))
-                            .childWorkspaces(childWorkspaces && !foregroundOnly(session));
+                            .childWorkspaces(childWorkspaces && !foregroundOnly(session))
+                            .childSnapshots(childSnapshots && !foregroundOnly(session));
             if (WorkspaceToolProfiles.isPublicShell(profile)) {
                 builder.suppressChildAgents();
             }
@@ -1009,7 +1012,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 .withMcpServers(mcpServers(session))
                 .withHookCatalog(hookCatalog(session))
                 .withForegroundOnly(foregroundOnly(session))
-                .withChildWorkspaces(childWorkspaces && !foregroundOnly(session)));
+                .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session)));
     }
 
     @Override

@@ -162,13 +162,16 @@ class SessionRowLockOrderTest {
     // SSH storage adds same-name verify/1 and storageKey/2 references;
     // their SQL touches only storage ownership and migration history.
     // Its physicalKey/1 delegates to the pure local identity hash.
+    // The child Workspace row's snapshot/0 (#13753 I3) is a record accessor
+    // over its mode: it reaches no JDBC call and takes no lock.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
             Map.ofEntries(
                     Map.entry("ChildResultRelayStore.java",
                             Set.of("ChildResultRelayStore.readTree/1")),
                     Map.entry("ChildWorkspaceStore.java",
                             Set.of("ChildWorkspaceStore.find/3",
-                                    "ChildWorkspaceStore.row/2")),
+                                    "ChildWorkspaceStore.row/2",
+                                    "Row.snapshot/0")),
                     Map.entry("JdbcChannelRouteRepository.java",
                             Set.of("JdbcChannelRouteRepository.row/2")),
                     Map.entry("ManagedAgentDefinitionStore.java",

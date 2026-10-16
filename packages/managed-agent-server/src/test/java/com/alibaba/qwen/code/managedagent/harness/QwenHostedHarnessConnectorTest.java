@@ -321,7 +321,7 @@ class QwenHostedHarnessConnectorTest {
             assertThat(created).doesNotContainKey("suppressChildAgents");
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
-                .doesNotContainKeys("childWorkspaces", "captureBytes");
+                .doesNotContainKeys("childWorkspaces", "captureBytes", "childSnapshots");
         properties.getToolPublication().setExecutionBytes(2097152L);
         QwenHostedHarnessConnector restarted = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(restarted, "client", client);
@@ -425,7 +425,8 @@ class QwenHostedHarnessConnectorTest {
         Map<String, Object> created = ReflectionTestUtils.invokeMethod(create.getValue(), "toJson");
         assertThat(created)
                 .containsEntry("toolProfile", profile)
-                .containsEntry("approvalMode", approval);
+                .containsEntry("approvalMode", approval)
+                .doesNotContainKey("childSnapshots");
         if (remote) {
             assertThat(created).containsEntry("foregroundOnly", true).doesNotContainKey("childWorkspaces");
             if (profile.contains("shell")) {
@@ -441,7 +442,7 @@ class QwenHostedHarnessConnectorTest {
         }
         for (LoadHarnessSession request : load.getAllValues()) {
             Map<String, Object> wire = ReflectionTestUtils.invokeMethod(request, "toJson");
-            assertThat(wire).containsEntry("toolProfile", profile);
+            assertThat(wire).containsEntry("toolProfile", profile).doesNotContainKey("childSnapshots");
             if (remote) {
                 assertThat(wire).containsEntry("foregroundOnly", true).doesNotContainKey("childWorkspaces");
             } else {
@@ -455,6 +456,35 @@ class QwenHostedHarnessConnectorTest {
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getAllValues().get(2), "toJson"))
                 .containsEntry("lifecycleAuthority", Map.of("operationId", "close-1", "claimGeneration", 2L));
+
+        // #13753 I3: the snapshot switch adds its flag to the same requests.
+        properties.getRuntimeBroker().setChildSnapshotsEnabled(true);
+        org.mockito.Mockito.clearInvocations(client);
+        fresh.get().createOrLoad("tenant-a", SESSION_ID, false);
+        fresh.get().createOrLoad("tenant-a", SESSION_ID, true);
+        fresh.get().recoverManagedRuntime("tenant-a", SESSION_ID, false);
+        fresh.get().settleLifecycle(operation);
+        fresh.get().rename("tenant-a", SESSION_ID, "internal lead");
+        ReflectionTestUtils.invokeMethod(fresh.get(), "messageStopAttachment", "tenant-a", SESSION_ID);
+        ArgumentCaptor<CreateHarnessSession> snapshotCreate = ArgumentCaptor.forClass(CreateHarnessSession.class);
+        ArgumentCaptor<LoadHarnessSession> snapshotLoad = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).createSession(snapshotCreate.capture());
+        verify(client, times(5)).loadSession(snapshotLoad.capture());
+        Map<String, Object> snapshotCreated = ReflectionTestUtils.invokeMethod(snapshotCreate.getValue(), "toJson");
+        if (remote) {
+            assertThat(snapshotCreated).containsEntry("foregroundOnly", true)
+                    .doesNotContainKeys("childWorkspaces", "childSnapshots");
+        } else {
+            assertThat(snapshotCreated).containsEntry("childWorkspaces", true).containsEntry("childSnapshots", true);
+        }
+        for (LoadHarnessSession request : snapshotLoad.getAllValues()) {
+            Map<String, Object> wire = ReflectionTestUtils.invokeMethod(request, "toJson");
+            if (remote) {
+                assertThat(wire).containsEntry("foregroundOnly", true).doesNotContainKeys("childWorkspaces", "childSnapshots");
+            } else {
+                assertThat(wire).containsEntry("childWorkspaces", true).containsEntry("childSnapshots", true);
+            }
+        }
     }
 
     @ParameterizedTest
@@ -1160,6 +1190,9 @@ class QwenHostedHarnessConnectorTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        // #13753 I3: this load restates the host's capabilities too.
+        properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        properties.getRuntimeBroker().setChildSnapshotsEnabled(true);
         // The child's task Turn already ended, so there is no CANCELLING
         // Turn for a cancellation grant: the stop must not need one, nor
         // the mount a new-work grant verifies.
@@ -1179,6 +1212,8 @@ class QwenHostedHarnessConnectorTest {
                 .containsEntry("stopMessages", true)
                 .containsEntry("passiveManagedRuntimeRecovery", true)
                 .containsEntry("suppressChildAgents", true)
+                .containsEntry("childWorkspaces", true)
+                .containsEntry("childSnapshots", true)
                 .doesNotContainKey("driveRuntimeRecovery");
         verify(execution).authorizeCommittedStop(session);
         verify(execution, never()).authorize(session);
