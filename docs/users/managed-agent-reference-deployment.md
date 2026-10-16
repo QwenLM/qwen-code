@@ -114,7 +114,19 @@ qwen:
 
 Wrap every map key in `[ ... ]`. Spring's relaxed binder normalises plain keys — an ID such as `legacy/v1`, `legacy:v1` or `legacy v1` binds as `legacyv1` whether it is quoted in the YAML or not — so the ring then never matches the persisted key ID and rows written under that ID stay unreadable even though the key is configured. The bracket form preserves the exact ID.
 
-Restart the single Java control plane, verify that existing bindings load, and verify that new binding rows record `reference-v2`. New secrets use only the active key; old rows remain encrypted under their recorded key ID. Keep `reference-v1` configured until database evidence shows no persisted credential references it. The server does not re-encrypt old rows on read, and removing a still-referenced key makes those rows unreadable.
+Restart the single Java control plane, verify that existing bindings load, and verify that new binding rows record `reference-v2`. New secrets use only the active key; old rows remain encrypted under their recorded key ID. The server does not re-encrypt old rows on read, and removing a still-referenced key makes those rows unreadable.
+
+Retire `reference-v1` only when no persisted row references it. `ma_runtime_binding.credential_key_id` and `ma_runtime_binding.runtime_credential_key_id` are the only persisted references; both store UTF-8 bytes, so read them as text:
+
+```sql
+SELECT DISTINCT CONVERT(credential_key_id USING utf8mb4) AS key_id
+FROM ma_runtime_binding WHERE credential_key_id IS NOT NULL
+UNION
+SELECT DISTINCT CONVERT(runtime_credential_key_id USING utf8mb4) AS key_id
+FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL;
+```
+
+The result lists the key IDs that persisted rows still require: expect the active ID (`reference-v2`) only. While `reference-v1` appears, that key must stay configured.
 
 The key ring is a map and cannot be supplied through a `QWEN_MANAGED_AGENT_*` environment variable: relaxed binding silently resolves an env-var form to an empty or mis-keyed ring, with no startup error. Configure `previous-credential-keys` only in an overriding `application.yml`. A deployment that relies on environment variables alone starts with an empty ring, so rotating `credential-key-id` without configuration of the previous key makes rows written under it unreadable.
 

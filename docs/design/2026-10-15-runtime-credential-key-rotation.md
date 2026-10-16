@@ -42,7 +42,7 @@ Every configured key must decode to exactly 32 bytes. The active key ID must not
 1. Back up the database and the complete current key ring.
 2. Configure the new key as `credential-key-id` / `credential-key` and move the old active key into `previous-credential-keys` before starting the server.
 3. Verify that existing bindings load and that newly written rows carry the new key ID.
-4. Keep each previous key until operational evidence shows that no persisted row references it. Removing a still-referenced key intentionally makes those rows unreadable.
+4. Keep each previous key until the [deployment runbook](../users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key) retirement query returns no other key ID. Removing a still-referenced key intentionally makes those rows unreadable.
 
 The server does not rewrite old ciphertext during reads. This keeps reads side-effect free and avoids a partial fleet silently changing persisted credentials.
 

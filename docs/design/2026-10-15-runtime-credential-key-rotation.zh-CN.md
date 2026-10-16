@@ -42,7 +42,7 @@ qwen:
 1. 备份数据库和当前完整 key ring。
 2. 在启动服务器前，把新密钥配置为 `credential-key-id` / `credential-key`，并把旧 active key 移入 `previous-credential-keys`。
 3. 验证既有 binding 可以加载，且新写入记录携带新的 key ID。
-4. 在运维证据证明没有持久化记录再引用某把旧密钥之前，保留该 previous key。删除仍被引用的密钥会按设计使这些记录不可读。
+4. 在[部署运行手册](../users/managed-agent-reference-deployment.zh-CN.md#轮换-runtime-credential-key)的退场查询不再返回其他 key ID 之前，保留该 previous key。删除仍被引用的密钥会按设计使这些记录不可读。
 
 服务器不会在读取时改写旧密文。这样可以保持读取无副作用，并避免部分实例静默修改持久化凭据。
 

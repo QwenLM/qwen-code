@@ -114,7 +114,19 @@ qwen:
 
 请把每个映射键写成 `[ ... ]` 形式。Spring 的宽松绑定会规整普通键——`legacy/v1`、`legacy:v1` 或 `legacy v1` 这类 ID 无论 YAML 中是否加引号都会绑定为 `legacyv1`——导致 ring 永远无法匹配持久化的 key ID：即使密钥已配置，该 ID 下写入的记录仍不可读。方括号形式能按原样保留 key ID。
 
-重启单 Java control plane，验证既有 binding 可以加载，并确认新 binding 记录写入 `reference-v2`。新 secret 只使用 active key；旧记录继续由其已记录的 key ID 加密。在数据库证据证明没有持久化凭据再引用 `reference-v1` 之前，持续配置该密钥。服务器不会在读取时重加密旧记录，删除仍被引用的密钥会使这些记录不可读。
+重启单 Java control plane，验证既有 binding 可以加载，并确认新 binding 记录写入 `reference-v2`。新 secret 只使用 active key；旧记录继续由其已记录的 key ID 加密。服务器不会在读取时重加密旧记录，删除仍被引用的密钥会使这些记录不可读。
+
+只有在没有持久化记录再引用 `reference-v1` 之后，才能退场该密钥。`ma_runtime_binding` 的 `credential_key_id` 与 `runtime_credential_key_id` 是仅有的两处持久化引用；两列都以 UTF-8 字节存储，需要按文本读取：
+
+```sql
+SELECT DISTINCT CONVERT(credential_key_id USING utf8mb4) AS key_id
+FROM ma_runtime_binding WHERE credential_key_id IS NOT NULL
+UNION
+SELECT DISTINCT CONVERT(runtime_credential_key_id USING utf8mb4) AS key_id
+FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL;
+```
+
+查询结果列出持久化记录仍需要的 key ID：预期只剩 active ID（`reference-v2`）。只要结果中仍出现 `reference-v1`，就必须继续配置该密钥。
 
 该 key ring 是映射结构，无法通过 `QWEN_MANAGED_AGENT_*` 环境变量提供：宽松绑定会把环境变量形式静默解析为空 ring 或键名错误的 ring，且启动时不报错。`previous-credential-keys` 只能在覆盖的 `application.yml` 中配置。只依赖环境变量的部署会以空 ring 启动，因此在未配置旧密钥的情况下轮换 `credential-key-id` 会使旧密钥写入的记录不可读。
 
