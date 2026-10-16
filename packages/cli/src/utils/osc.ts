@@ -21,6 +21,8 @@ const SEP = ';';
 // ── OSC type codes ──────────────────────────────────────────────────
 
 export const OSC = {
+  /** Program Status Protocol */
+  PROGRAM_STATUS: 7501,
   /** iTerm2 notification / progress */
   ITERM2: 9,
   /** Kitty desktop notification protocol */

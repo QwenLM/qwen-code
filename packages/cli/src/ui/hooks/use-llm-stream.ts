@@ -599,6 +599,8 @@ export const useLlmStream = (
     onSubmissionSettled?: () => void;
   } | null>,
 ) => {
+  const [turnHasError, setTurnHasError] = useState(false);
+  const [turnCancellationRevision, setTurnCancellationRevision] = useState(0);
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeInteractionPromptIdRef = useRef<string | undefined>(undefined);
@@ -1263,6 +1265,7 @@ export const useLlmStream = (
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
 
   const onExec = useCallback(async (done: Promise<void>) => {
+    setTurnHasError(false);
     setIsResponding(true);
     await done;
     setIsResponding(false);
@@ -1375,6 +1378,7 @@ export const useLlmStream = (
     // would race with stream chunks that haven't re-rendered yet.
     const pendingItemAtCancel = pendingHistoryItemRef.current;
     turnCancelledRef.current = true;
+    setTurnCancellationRevision((revision) => revision + 1);
     submissionLeaseGenerationRef.current += 1;
     setSubmissionInFlight(false);
     const foregroundAbortController = abortControllerRef.current;
@@ -2239,6 +2243,7 @@ export const useLlmStream = (
         return;
       }
 
+      setTurnCancellationRevision((revision) => revision + 1);
       lastPromptErroredRef.current = false;
       // Persist any streamed reasoning (collapsed) above the cancelled answer.
       commitPendingThought(userMessageTimestamp);
@@ -2495,7 +2500,7 @@ export const useLlmStream = (
   );
 
   const handleSessionTokenLimitExceededEvent = useCallback(
-    (value: { currentTokens: number; limit: number; message: string }) =>
+    (value: { currentTokens: number; limit: number; message: string }) => {
       addItem(
         {
           type: 'error',
@@ -2507,7 +2512,8 @@ export const useLlmStream = (
             `   • Compress history: Use /compress command to compress history`,
         },
         Date.now(),
-      ),
+      );
+    },
     [addItem],
   );
 
@@ -2597,6 +2603,7 @@ export const useLlmStream = (
       userMessageTimestamp: number,
       signal: AbortSignal,
       submitType: SendMessageType,
+      ownsTurnStatus: () => boolean,
       turnAdmission?: GoalTurnAdmission,
       promptId?: string,
       trackInteractionOwner = true,
@@ -2859,6 +2866,7 @@ export const useLlmStream = (
               };
             case ServerLlmEventType.Error:
               flushBufferedStreamEvents();
+              if (ownsTurnStatus()) setTurnHasError(true);
               handleErrorEvent(event.value, userMessageTimestamp, submitType);
               break;
             case ServerLlmEventType.ChatCompressed:
@@ -2893,6 +2901,7 @@ export const useLlmStream = (
                 );
                 setPendingHistoryItem(null);
               }
+              if (ownsTurnStatus()) setTurnHasError(true);
               handleSessionTokenLimitExceededEvent(event.value);
               llmMessageBuffer = '';
               assistantOutputStarted = false;
@@ -3665,6 +3674,7 @@ export const useLlmStream = (
       // the trackers untouched — they're piggybacking on an in-flight
       // turn that already owns its own snapshot.
       if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
+        setTurnHasError(false);
         lastTurnUserItemRef.current = null;
         canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
@@ -3780,6 +3790,9 @@ export const useLlmStream = (
         allowConcurrentBtwDuringResponse || isDetachedToolContinuation
           ? undefined
           : abortController;
+      const ownsTurnStatus = () =>
+        foregroundAbortController !== undefined &&
+        abortControllerRef.current === foregroundAbortController;
       let keepToolContinuationAbortController = false;
       if (detachedAbortController) {
         detachedToolContinuationAbortControllersRef.current.add(
@@ -4114,6 +4127,7 @@ export const useLlmStream = (
             userMessageTimestamp,
             processingSignal,
             submitType,
+            ownsTurnStatus,
             turnAdmission,
             prompt_id,
             !allowConcurrentBtwDuringResponse,
@@ -4287,8 +4301,10 @@ export const useLlmStream = (
           cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
+            if (ownsTurnStatus()) setTurnHasError(true);
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
+            if (ownsTurnStatus()) setTurnHasError(true);
             if (submitType !== SendMessageType.Goal) {
               lastPromptErroredRef.current = true;
             }
@@ -5061,6 +5077,9 @@ export const useLlmStream = (
         completedAndReadyToSubmitTools.find(
           (toolCall) => !toolCall.request.isClientInitiated,
         );
+      const hadRecordedInteractionOwner = ownerToolCall
+        ? ownerForToolCall(ownerToolCall) !== undefined
+        : false;
       const interactionOwner = ownerToolCall
         ? liveOwnerForToolCall(ownerToolCall)
         : undefined;
@@ -5142,6 +5161,16 @@ export const useLlmStream = (
         errorMessage?: string,
         errorType?: string,
       ) => {
+        const ownsInteraction =
+          !!promptId &&
+          !!interactionOwner &&
+          getActiveInteractionSpan(promptId) === interactionOwner;
+        const ownsTurnStatus = continuationOwner?.foregroundAbortController
+          ? abortControllerRef.current ===
+            continuationOwner.foregroundAbortController
+          : !continuationOwner?.survivesGenerationChange &&
+            (!activeInteractionPromptIdRef.current ||
+              promptId === activeInteractionPromptIdRef.current);
         if (continuationOwner?.detachedAbortController) {
           detachedToolContinuationAbortControllersRef.current.delete(
             continuationOwner.detachedAbortController,
@@ -5155,12 +5184,13 @@ export const useLlmStream = (
           abortControllerRef.current = null;
         }
         if (
-          !promptId ||
-          !interactionOwner ||
-          getActiveInteractionSpan(promptId) !== interactionOwner
+          status === 'error' &&
+          ownsTurnStatus &&
+          (!hadRecordedInteractionOwner || ownsInteraction)
         ) {
-          return;
+          setTurnHasError(true);
         }
+        if (!ownsInteraction) return;
         endInteractionSpan(status, {
           promptId,
           ...(errorMessage ? { errorMessage } : {}),
@@ -5392,6 +5422,7 @@ export const useLlmStream = (
             (toolCall) => toolCall.status === 'cancelled',
           )
         ) {
+          setTurnCancellationRevision((revision) => revision + 1);
           endToolInteraction('cancelled');
         } else if (
           completedAndReadyToSubmitTools.some(
@@ -5494,6 +5525,7 @@ export const useLlmStream = (
       });
 
       if (continuationWasCancelled()) {
+        setTurnCancellationRevision((revision) => revision + 1);
         // This is the branch a cancelled Goal tool batch actually takes: the
         // controller retained across tool execution feeds the continuation
         // owner's signal, so pressing Esc while tools run aborts it here
@@ -5527,6 +5559,7 @@ export const useLlmStream = (
       );
 
       if (allToolsCancelled && pendingDuplicateResponses.length === 0) {
+        setTurnCancellationRevision((revision) => revision + 1);
         if (llmClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
@@ -5980,6 +6013,7 @@ export const useLlmStream = (
       // sends an unpaired call -- the same pairing the cancellation check
       // above owes its own batch.
       if (continuationWasCancelled()) {
+        setTurnCancellationRevision((revision) => revision + 1);
         drainedSteer?.restore();
         settleDrainedTeammates(false);
         if (toolGoalBinding) {
@@ -5999,6 +6033,7 @@ export const useLlmStream = (
         return;
       }
       if (toolGoalBinding?.controller.signal.aborted) {
+        setTurnCancellationRevision((revision) => revision + 1);
         drainedSteer?.restore();
         settleDrainedTeammates(false);
         if (llmClient) {
@@ -6797,6 +6832,8 @@ export const useLlmStream = (
 
   return {
     streamingState,
+    turnCancellationRevision,
+    turnHasError,
     submitQuery,
     initError,
     pendingHistoryItems,
