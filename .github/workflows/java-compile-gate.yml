@@ -16,20 +16,24 @@ name: 'Java Compile Gate'
 # checkstyle — at both places the breakage is created: the pull request and the
 # push to `main`. The MariaDB/MySQL integration lanes, RocketMQ gates, daemon
 # E2E and hosted fault gates stay on `sdk-java.yml`'s daily batch and manual
-# dispatch; this gate does not run the Java 11/17 matrix either.
+# dispatch; this gate does not run the Java 11/17 matrix either. The ACP SDK
+# client under `packages/sdk-java/client` is excluded the same way: no in-repo
+# build consumes it, and the path filter below matches the job's scope so a
+# client-only change does not collect a green verdict over sources no step
+# reads.
 
 on:
   pull_request:
     paths:
       - 'packages/managed-agent-server/**'
-      - 'packages/sdk-java/**'
+      - 'packages/sdk-java/qwencode/**'
       - '.github/workflows/java-compile-gate.yml'
   push:
     branches:
       - 'main'
     paths:
       - 'packages/managed-agent-server/**'
-      - 'packages/sdk-java/**'
+      - 'packages/sdk-java/qwencode/**'
       - '.github/workflows/java-compile-gate.yml'
   workflow_dispatch:
 
@@ -42,7 +46,12 @@ concurrency:
   # measurement behind that policy (67 of 100 push runs cancelled, 25
   # reported) applies to this lane too. A pull request still supersedes its own
   # older run.
-  group: 'java-compile-gate-${{ github.ref }}'
+  # The group carries the event name because GitHub replaces a group's PENDING
+  # run even with cancel-in-progress off: a manual dispatch of `main` would
+  # displace a queued push run, the push's cancelled conclusion files no
+  # issue, and the dispatch's own failure is outside the failure watcher's
+  # push-only filter — the regression would go unreported.
+  group: 'java-compile-gate-${{ github.event_name }}-${{ github.ref }}'
   cancel-in-progress: |-
     ${{ github.ref != 'refs/heads/main' }}
 
@@ -72,16 +81,22 @@ jobs:
             packages/managed-agent-server/pom.xml
 
       # The SDK installs first: the server resolves it from the local
-      # repository rather than from a released jar.
+      # repository rather than from a released jar. Checkstyle is skipped on
+      # this command because `install` passes through the verify phase the
+      # SDK's checkstyle execution binds to: a style break must fail the
+      # dedicated checkstyle step below — not a step named "Install" — and
+      # must not take the server compile verdict down with it.
       - name: 'Install the Java SDK'
         working-directory: 'packages/sdk-java/qwencode'
-        run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true clean install'
+        run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true clean install'
 
-      # `-DskipTests` still compiles the test sources, which is where the
-      # #14370 breakage landed.
+      # `test-compile` is the gate's stated scope: main and test sources, and
+      # the #14370 breakage landed in the test sources. Packaging stays on
+      # `release-managed-agent-reference.yml`, which builds the same tree per
+      # pull request — building the Spring Boot jars here would duplicate it.
       - name: 'Compile the Managed Agent Server'
         working-directory: 'packages/managed-agent-server'
-        run: 'mvn --batch-mode --no-transfer-progress -DskipTests clean package'
+        run: 'mvn --batch-mode --no-transfer-progress clean test-compile'
 
       - name: 'Run Java SDK Checkstyle'
         working-directory: 'packages/sdk-java/qwencode'

@@ -32,6 +32,12 @@ export const MAX_SEARCH_MARKERS = 5;
  * under GitHub's 65,536-character limit or `gh issue create` hard-fails. */
 export const MAX_BODY_TESTS = 20;
 
+/** Lanes whose failures never carry a test id — build-only gates and
+ * packaging checks — so the no-test-id fallback in analyzeLogs keys them on
+ * the job and step instead of the commit. Membership stays an explicit list:
+ * the fallback must never grow lane-agnostic. */
+const BUILD_ONLY_LANES = new Set(['Desktop Checks', 'Java Compile Gate']);
+
 // Vitest and pytest colourise their output and Actions stores the escapes
 // verbatim, so failure lines arrive wrapped in SGR sequences.
 // eslint-disable-next-line no-control-regex -- matches the ESC that opens one
@@ -259,13 +265,18 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
     }
   }
 
-  // Packaging and Cargo failures may report no test ID. Keep a standing
-  // Desktop failure on one issue while preserving its platform and step.
-  if (workflowName === 'Desktop Checks' && tests.length === 0) {
+  // Packaging and build-only lanes report no test ID: a compile or
+  // checkstyle break carries no `-- Time elapsed:` line, and a packaging
+  // failure names no test. Keep a standing failure of such a lane on one
+  // issue — keyed on the job and step, not the commit — so a stacked merge
+  // records a recurrence instead of opening a fresh issue per commit. The id
+  // derives from workflowName: a same-named job in two covered lanes must
+  // never hash to one key.
+  if (BUILD_ONLY_LANES.has(workflowName) && tests.length === 0) {
     const ids = new Set();
     for (const job of failedJobs) {
       for (const step of job.steps.length ? job.steps : ['']) {
-        ids.add(`Desktop Checks > ${job.name}${step ? ` > ${step}` : ''}`);
+        ids.add(`${workflowName} > ${job.name}${step ? ` > ${step}` : ''}`);
       }
     }
     for (const id of ids) tests.push({ id, key: testKey(id) });
