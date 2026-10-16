@@ -428,6 +428,58 @@ describe('useSlashCommandProcessor', () => {
 
   describe('Command Execution Logic', () => {
     it.each([
+      ['startup', 'Error'],
+      ['startup', 'string'],
+      ['command', 'Error'],
+      ['command', 'string'],
+    ])(
+      'sanitizes Mod %s errors thrown as %s before display and recording',
+      async (phase, errorType) => {
+        const message =
+          '\u001b[31mMod failed\u001b[0m\u0007\u0008\u007f\u009f\u202e\n\t检查配置 \u001b]8;;https://example.invalid\u0007details\u001b]8;;\u0007\u2066\u2069';
+        const error = errorType === 'Error' ? new Error(message) : message;
+        const action = vi.fn().mockRejectedValue(error);
+        const command = createTestCommand({ action }, CommandKind.FILE);
+        const result = setupProcessorHook([], [command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+        const ready =
+          phase === 'startup' ? Promise.reject(error) : Promise.resolve();
+        void ready.catch(() => {});
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+        try {
+          await act(async () => {
+            expect(await result.current.handleSlashCommand('/test')).toEqual({
+              type: 'handled',
+            });
+          });
+          expect(action).toHaveBeenCalledTimes(phase === 'startup' ? 0 : 1);
+          const expected = {
+            type: MessageType.ERROR,
+            text: 'Mod failed\n\t检查配置 details',
+          };
+          expect(mockAddItem).toHaveBeenCalledWith(
+            expected,
+            expect.any(Number),
+          );
+          expect(
+            mockConfig.getChatRecordingService()?.recordSlashCommand,
+          ).toHaveBeenCalledWith({
+            phase: 'result',
+            rawCommand: '/test',
+            outputHistoryItems: [expected],
+          });
+          expect(error instanceof Error ? error.message : error).toBe(message);
+        } finally {
+          owner.mockRestore();
+        }
+      },
+    );
+
+    it.each([
       ['/compress', 'compress', CommandKind.BUILT_IN],
       ['/summarize', 'compress', CommandKind.BUILT_IN],
       ['/btw question', 'btw', CommandKind.BUILT_IN],

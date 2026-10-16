@@ -82,6 +82,10 @@ import {
   SLASH_COMMANDS_SKIP_RECORDING,
 } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
+import {
+  sanitizeTerminalText,
+  stripUnsafeCharacters,
+} from '../utils/textUtils.js';
 import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import { quitCommand } from '../commands/quitCommand.js';
@@ -1576,7 +1580,9 @@ export const useSlashCommandProcessor = (
         addItemWithRecording(
           {
             type: MessageType.ERROR,
-            text: e instanceof Error ? e.message : String(e),
+            text: sanitizeTerminalText(
+              stripUnsafeCharacters(e instanceof Error ? e.message : String(e)),
+            ),
           },
           Date.now(),
         );

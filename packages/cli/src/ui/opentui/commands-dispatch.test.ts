@@ -235,6 +235,59 @@ async function dispatch(
 
 describe('guards (ink handleSlashCommand parity)', () => {
   it.each([
+    ['startup', 'Error'],
+    ['startup', 'string'],
+    ['command', 'Error'],
+    ['command', 'string'],
+  ])(
+    'sanitizes Mod %s errors thrown as %s before display and recording',
+    async (phase, errorType) => {
+      const message =
+        '\u001b[31mMod failed\u001b[0m\u0007\u0008\u007f\u009f\u202e\n\t检查配置 \u001b]8;;https://example.invalid\u0007details\u001b]8;;\u0007\u2066\u2069';
+      const error = errorType === 'Error' ? new Error(message) : message;
+      const recordSlashCommand = vi.fn();
+      const config = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        getChatRecordingService: () => ({ recordSlashCommand }),
+      } as unknown as Config;
+      const initialize = vi.fn().mockImplementation(async () => {
+        if (phase === 'startup') throw error;
+      });
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          initialize,
+        } as unknown as interactiveMods.InteractiveModSession);
+      const action = vi.fn().mockRejectedValue(error);
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [stub({ name: 'test', kind: CommandKind.FILE, action })],
+      );
+      try {
+        expect(await dispatcher.handle('/test')).toEqual({ kind: 'handled' });
+        expect(initialize).toHaveBeenCalledOnce();
+        expect(action).toHaveBeenCalledTimes(phase === 'startup' ? 0 : 1);
+        const expected = {
+          type: 'error',
+          text: 'Mod failed\n\t检查配置 details',
+        };
+        expect(host.items).toContainEqual(expect.objectContaining(expected));
+        expect(recordSlashCommand).toHaveBeenCalledWith({
+          phase: 'result',
+          rawCommand: '/test',
+          outputHistoryItems: [expected],
+        });
+        expect(error instanceof Error ? error.message : error).toBe(message);
+      } finally {
+        dispatcher.dispose();
+        owner.mockRestore();
+      }
+    },
+  );
+
+  it.each([
     ['/compress', 'compress', CommandKind.BUILT_IN, false],
     ['/summarize', 'compress', CommandKind.BUILT_IN, false],
     ['/help', 'help', CommandKind.FILE, false],

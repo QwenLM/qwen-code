@@ -58,6 +58,10 @@ import {
 } from '../utils/commandUtils.js';
 import { recordAutoSkillCommandUsage } from '../../services/SkillCommandLoader.js';
 import {
+  sanitizeTerminalText,
+  stripUnsafeCharacters,
+} from '../utils/textUtils.js';
+import {
   ExtensionRefreshState,
   EXTENSION_RELOAD_FAILED_REASON,
 } from '../../config/extension-refresh-state.js';
@@ -989,7 +993,9 @@ export class OpenTuiSlashDispatcher {
       addItemWithRecording(
         {
           type: MessageType.ERROR,
-          text: e instanceof Error ? e.message : String(e),
+          text: sanitizeTerminalText(
+            stripUnsafeCharacters(e instanceof Error ? e.message : String(e)),
+          ),
         },
         Date.now(),
       );
