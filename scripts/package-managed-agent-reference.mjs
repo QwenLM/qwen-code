@@ -104,14 +104,11 @@ function compareMigrationVersions(left, right) {
 }
 
 function migrationRange(root) {
-  const versions = ['runtime-broker', 'managed-agent-server'].flatMap(
-    (module) =>
-      LOCATIONS.flatMap(({ dir, suffix }) =>
-        migrationFiles(
-          path.join(root, 'packages/sdk-java', module, ...dir),
-          suffix,
-        ).map((file) => migrationVersion(path.basename(file))),
-      ),
+  const versions = LOCATIONS.flatMap(({ dir, suffix }) =>
+    migrationFiles(
+      path.join(root, 'packages/managed-agent-server', ...dir),
+      suffix,
+    ).map((file) => migrationVersion(path.basename(file))),
   );
   if (versions.length === 0) throw new Error('No Flyway migrations found.');
   versions.sort(compareMigrationVersions);
@@ -241,18 +238,10 @@ export async function createReferenceDistribution({
   ]);
   await mkdir(stage, { recursive: true });
 
-  const serverPom = path.join(
-    root,
-    'packages/sdk-java/managed-agent-server/pom.xml',
-  );
-  const brokerPom = path.join(root, 'packages/sdk-java/runtime-broker/pom.xml');
+  const serverPom = path.join(root, 'packages/managed-agent-server/pom.xml');
   const serverVersion = await pomVersion(
     serverPom,
     'qwen-managed-agent-server',
-  );
-  const brokerVersion = await pomVersion(
-    brokerPom,
-    'qwen-managed-runtime-broker',
   );
   const packageJson = JSON.parse(
     await readFile(path.join(root, 'package.json')),
@@ -277,7 +266,7 @@ export async function createReferenceDistribution({
   const applicationConfiguration = await readFile(
     path.join(
       root,
-      'packages/sdk-java/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/src/main/resources/application.yml',
     ),
     'utf8',
   );
@@ -306,28 +295,20 @@ export async function createReferenceDistribution({
 
   const serverJar = `qwen-managed-agent-server-${serverVersion}.jar`;
   const recoveryJar = `qwen-managed-agent-server-${serverVersion}-operator-recovery.jar`;
-  const brokerJar = `qwen-managed-runtime-broker-${brokerVersion}.jar`;
   const componentSources = [
     {
       name: 'qwen-managed-agent-server',
       version: serverVersion,
-      source: `packages/sdk-java/managed-agent-server/target/${serverJar}`,
+      source: `packages/managed-agent-server/target/${serverJar}`,
       destination: `lib/${serverJar}`,
       role: 'control-plane',
     },
     {
       name: 'qwen-managed-agent-operator-recovery',
       version: serverVersion,
-      source: `packages/sdk-java/managed-agent-server/target/${recoveryJar}`,
+      source: `packages/managed-agent-server/target/${recoveryJar}`,
       destination: `lib/${recoveryJar}`,
       role: 'operator-recovery',
-    },
-    {
-      name: 'qwen-managed-runtime-broker',
-      version: brokerVersion,
-      source: `packages/sdk-java/runtime-broker/target/${brokerJar}`,
-      destination: `lib/${brokerJar}`,
-      role: 'embedded-runtime-broker',
     },
   ];
 
@@ -340,10 +321,7 @@ export async function createReferenceDistribution({
       'docs/users/managed-agent-reference-deployment.zh-CN.md',
       'docs/deployment.zh-CN.md',
     ],
-    [
-      'packages/sdk-java/managed-agent-server/README.md',
-      'docs/server-reference.md',
-    ],
+    ['packages/managed-agent-server/README.md', 'docs/server-reference.md'],
     [
       'docs/users/hosted-workspace-recovery.md',
       'docs/hosted-workspace-recovery.md',
