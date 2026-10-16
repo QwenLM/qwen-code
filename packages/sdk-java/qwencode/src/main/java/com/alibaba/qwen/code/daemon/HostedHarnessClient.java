@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -66,6 +67,8 @@ public final class HostedHarnessClient implements AutoCloseable {
             Set.of("prepared", "executing", "cancel_requested", "settled",
                     "abandoned");
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
+    // Sessions whose terminal-event record is kept (see terminalPromptIds).
+    private static final int TERMINAL_RECORD_LIMIT = 4096;
 
     private final String baseUrl;
     private final String bearerToken;
@@ -86,10 +89,15 @@ public final class HostedHarnessClient implements AutoCloseable {
     // The promptId of each session's last observed terminal event: a
     // replay 202 answered from the route's journal for such a promptId owes
     // no future terminal event, so an owning retry must not keep the marker
-    // it just planted for it. Retired with the rest of a session
-    // incarnation's local state.
+    // it just planted for it. No teardown resets the durable journal those
+    // replays are answered from — a detach, a DELETE and a Harness restart
+    // all leave it for the next load — so none retires the record. The map
+    // is bounded instead: past TERMINAL_RECORD_LIMIT sessions the least
+    // recently used record is evicted, and an evicted session's journal
+    // replay plants a marker the busy-turn status probe clears on the next
+    // different prompt.
     private final Map<String, String> terminalPromptIds =
-            new ConcurrentHashMap<>();
+            Collections.synchronizedMap(new TerminalRecords());
     // Test seam: parks a getStatus snapshot between its two reads,
     // modelling an OS preemption at that point.
     volatile Runnable statusSnapshotProbe = () -> {};
@@ -1135,16 +1143,13 @@ public final class HostedHarnessClient implements AutoCloseable {
         // must not wipe the marker the session's current owner planted,
         // and retireLedger's re-read also retires a marker this same
         // identity replanted while the detach was in flight. A 204
-        // instead proves the session record is gone server-side — the
-        // same proof detachSession rides when it passes a null client id
-        // — so a marker an abandoned identity planted retires with the
-        // dead incarnation; a marker the current attachment's identity
-        // planted stays, because it may belong to a live admitted turn a
-        // re-load raced this detach to plant, and vetoing it fails
-        // closed.
+        // instead proves the incarnation this ref addressed is gone —
+        // the same proof detachSession's 204 rides — so a marker an
+        // abandoned identity planted retires with it, while one the
+        // current attachment's identity planted stays (see
+        // retireStaleLedger).
         if (deleted) {
-            retireStaleLedger(ref.getHarnessSessionId(),
-                    ref.getHarnessClientId());
+            retireStaleLedger(ref.getHarnessSessionId());
         } else {
             retireLedger(ref.getHarnessSessionId(),
                     ref.getHarnessClientId());
@@ -1162,28 +1167,16 @@ public final class HostedHarnessClient implements AutoCloseable {
             requireMutationStatus(response, 204, "POST /session/:id/detach");
         }
         // Both definitive answers of this headerless detach prove the
-        // session record gone — the 204 ran the route's delete, and its
-        // tolerated 404 carried no client id, so it can only mean absent
-        // — so the terminal-event record retires with the dead
-        // incarnation either way; an identity-scoped retirement could
-        // never run here because this overload sends no client id. The
-        // admission marker retires with it only when no re-load raced
-        // the round trip: the pre-request attachment still being current
-        // (or none having appeared) proves none did, while a swapped
-        // attachment means a newer incarnation registered here and its
-        // marker may belong to a live admitted turn that must keep
-        // vetoing. Same rule as the ref overload: the retirement does
-        // not depend on an attachment being present.
-        boolean unraced = state != null
-                ? attachments.remove(sessionId, state)
-                : attachments.get(sessionId) == null;
-        if (state != null && unraced) {
-            state.cancel();
-        }
-        terminalPromptIds.remove(sessionId);
-        if (unraced) {
-            activePrompts.remove(sessionId);
-        }
+        // incarnation gone — the 204 ran the route's close, and its
+        // tolerated 404 carried no client id, so it can only mean absent.
+        // Only the attachment observed before the request retires: a
+        // re-load that raced the round trip registered a newer one. The
+        // ledger retirement follows the ref overload's 204 rule and does
+        // not depend on an attachment being present; this overload holds
+        // no client id, so a marker retires exactly when no current
+        // attachment's identity planted it.
+        discardObservedAttachment(sessionId, state);
+        retireStaleLedger(sessionId);
     }
 
     public void detachSession(HarnessSessionRef session) {
@@ -1208,17 +1201,22 @@ public final class HostedHarnessClient implements AutoCloseable {
                         "POST /session/:id/detach");
             }
             removeAttachment(ref);
-            // A 204 proves the session record is gone server-side, so
-            // every marker for the id is stale regardless of the planting
-            // identity: nothing can clear it for a session that no longer
-            // exists, and it would veto every later identity after the
-            // supported load recovery re-opens this id. A tolerated 404
-            // instead collapses an absent session and a client-id mismatch
-            // into the same answer, so it stays identity-matched: a stale
-            // ref's tolerated 404 must not wipe the marker the session's
-            // current owner planted.
-            retireLedger(ref.getHarnessSessionId(),
-                    deleted ? null : ref.getHarnessClientId());
+            // A 204 proves the incarnation this ref addressed is gone, so
+            // a marker planted for it can never be cleared and would veto
+            // every later identity after the supported load recovery
+            // re-opens this id: it retires regardless of the planting
+            // identity, except one the current attachment's identity
+            // planted (see retireStaleLedger). A tolerated 404 instead
+            // collapses an absent session and a client-id mismatch into
+            // the same answer, so it stays identity-matched: a stale ref's
+            // tolerated 404 must not wipe the marker the session's current
+            // owner planted.
+            if (deleted) {
+                retireStaleLedger(ref.getHarnessSessionId());
+            } else {
+                retireLedger(ref.getHarnessSessionId(),
+                        ref.getHarnessClientId());
+            }
         } catch (DaemonHttpException | HostedHarnessGenerationException e) {
             // A definitive refusal retires the attachment but says nothing
             // about a turn detach leaves running server-side, so the
@@ -1288,12 +1286,15 @@ public final class HostedHarnessClient implements AutoCloseable {
                     ref.getHarnessClientId());
             removeAttachment(ref);
             if (deleted) {
-                // The 204 deleted the session outright — identity()
-                // answers the route only when the client id matches — so
-                // every marker for it is stale regardless of which
+                // The 204 deleted the incarnation this ref addressed —
+                // identity() answers the route only when the client id
+                // matches — so a marker planted for it is stale whichever
                 // identity planted it, including one a concurrent
-                // submission planted while the DELETE was in flight.
-                retireLedger(ref.getHarnessSessionId(), null);
+                // submission planted while the DELETE was in flight; only
+                // a marker the current attachment's identity planted, for
+                // a re-load that raced the DELETE, stays (see
+                // retireStaleLedger).
+                retireStaleLedger(ref.getHarnessSessionId());
             } else {
                 // Identity-matched retirement: a tolerated 404 answers an
                 // absent session and a stale ref's client-id mismatch
@@ -1333,15 +1334,17 @@ public final class HostedHarnessClient implements AutoCloseable {
         // incarnation whose heartbeats the peer still accepts; when it does
         // not, its heartbeat's definitive hosted_session_not_found 404
         // retires it (see scheduleHeartbeat), capping a stale task at one
-        // heartbeat interval. The ledger retirement on success stays
-        // unconditional: the headerless DELETE is answered with
-        // allowMissingClientId, so its success deleted the session outright
-        // and every marker for the id is stale regardless of identity.
+        // heartbeat interval. The headerless DELETE is answered with
+        // allowMissingClientId, so its success deleted the incarnation
+        // outright: the ledger retires with it regardless of the planting
+        // identity, except a marker the current attachment's identity
+        // planted for a re-load that raced the DELETE (see
+        // retireStaleLedger).
         AttachmentState observedAttachment = attachments.get(sessionId);
         try {
             closeSession(sessionId, null);
             discardObservedAttachment(sessionId, observedAttachment);
-            retireLedger(sessionId, null);
+            retireStaleLedger(sessionId);
         } catch (DaemonHttpException | HostedHarnessGenerationException e) {
             if (e instanceof HostedHarnessGenerationException) {
                 // Same proven-restart rule as the ref overload: retire
@@ -1362,7 +1365,6 @@ public final class HostedHarnessClient implements AutoCloseable {
     private void discardLocalSessionState(String sessionId) {
         discardObservedAttachment(sessionId, attachments.get(sessionId));
         removeObservedLedger(sessionId, activePrompts.get(sessionId));
-        terminalPromptIds.remove(sessionId);
     }
 
     private void discardObservedAttachment(String sessionId,
@@ -1373,52 +1375,47 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
-    // Retire the admission ledger entry a lifecycle teardown proved stale.
-    // A caller holding an identity retires only a marker that identity
-    // planted: the Harness answers an absent session and a client-id
-    // mismatch with the same 404, so a stale ref's tolerated 404 must not
-    // wipe the marker the session's current owner planted. A null
-    // clientId is the caller's proof the session was deleted outright —
-    // the id-only overload's headerless DELETE, or a ref close's 204 —
-    // so every marker for it is stale. The two-arg remove still leaves a
-    // marker a concurrent re-admission published after the read.
+    // Retire the admission ledger entry a tolerated-404 teardown proved
+    // stale. Only a marker the asking identity planted, and no other
+    // identity's retry joined, retires: the Harness answers an absent
+    // session and a client-id mismatch with the same 404, so a stale ref's
+    // tolerated 404 must not wipe a marker the session's current owner
+    // planted or joined. The decision runs under the marker's bin lock, so
+    // a join cannot land between it and the removal.
     private void retireLedger(String sessionId, String clientId) {
-        if (clientId == null) {
-            // A deletion proof retires the terminal-event record with the
-            // ledger: it spoke for the dead incarnation.
-            terminalPromptIds.remove(sessionId);
-        }
-        ActivePrompt marker = activePrompts.get(sessionId);
-        if (marker != null
-                && (clientId == null || clientId.equals(marker.clientId))) {
-            activePrompts.remove(sessionId, marker);
-        }
+        activePrompts.compute(sessionId, (id, marker) ->
+                marker != null && clientId.equals(marker.clientId)
+                        && marker.joinedClientId == null
+                        ? null : marker);
     }
 
-    // Retire the admission ledger entry a proven deletion made stale.
-    // The session record is gone server-side, so a marker the detaching
-    // identity planted — or one whose planting identity no longer owns
-    // the attachment here — can never be cleared and retires with the
-    // dead incarnation, the terminal-event record included. A marker
-    // the current attachment's identity planted stays: it may belong to
-    // a live admitted turn a re-load planted around the deletion, and
-    // vetoing it fails closed. The marker is read before the
-    // attachment: a re-load registers its attachment before it can
-    // plant, so a marker read that observes a racing re-load's plant is
-    // always paired with an attachment read that observes its
-    // registration, and the marker stays.
-    private void retireStaleLedger(String sessionId, String clientId) {
-        ActivePrompt marker = activePrompts.get(sessionId);
-        if (marker == null) {
-            return;
-        }
-        AttachmentState current = attachments.get(sessionId);
-        if (clientId.equals(marker.clientId) || current == null
-                || !marker.clientId.equals(
-                        current.session.getHarnessClientId())) {
-            terminalPromptIds.remove(sessionId);
-            activePrompts.remove(sessionId, marker);
-        }
+    // Retire the admission marker a deleting teardown — a detach's or a
+    // DELETE's 204, or a headerless tolerated 404 — made stale. The
+    // answer proves the incarnation it addressed is gone, and every
+    // caller has already retired that incarnation's attachment, so a
+    // marker no current attachment's identity planted or joined can never
+    // be cleared and retires. A marker the current attachment's identity
+    // planted, or joined with a same-identity retry, stays: a re-load may
+    // have raced the teardown to register that attachment and admit a
+    // live turn, and vetoing it fails closed. The decision runs under the
+    // marker's bin lock and reads the attachment there: a re-load
+    // registers its attachment before it can plant or join, so a plant or
+    // join the decision observes is always paired with an attachment read
+    // that observes the registration, and neither can land between the
+    // decision and the removal. The terminal-event record stays (see
+    // terminalPromptIds).
+    private void retireStaleLedger(String sessionId) {
+        activePrompts.compute(sessionId, (id, marker) -> {
+            if (marker == null) {
+                return null;
+            }
+            AttachmentState current = attachments.get(id);
+            String owner = current != null
+                    ? current.session.getHarnessClientId() : null;
+            return owner != null && (owner.equals(marker.clientId)
+                    || owner.equals(marker.joinedClientId))
+                    ? marker : null;
+        });
     }
 
     private void removeObservedLedger(String sessionId,
@@ -1438,6 +1435,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         return activePrompts.compute(sessionId, (id, existing) -> {
             if (existing != null && !existing.matches(candidate)) {
                 return existing;
+            }
+            if (existing != null
+                    && !existing.clientId.equals(candidate.clientId)) {
+                existing.joinedClientId = candidate.clientId;
             }
             ActivePrompt entry = existing != null ? existing : candidate;
             entry.beginSend();
@@ -2373,6 +2374,12 @@ public final class HostedHarnessClient implements AutoCloseable {
         // answers an absent session and a client-id mismatch with the same
         // 404.
         private final String clientId;
+        // The identity of the latest same-identity retry that joined this
+        // entry from a different client id (a re-load's dispatcher retrying
+        // the prompt): the entry then speaks for that identity's attempt
+        // too, so a teardown of the planting identity must not retire it.
+        // Written under the activePrompts bin lock.
+        private volatile String joinedClientId;
         // Per-attempt admission windows: every send attempt opens one and
         // its conclusion closes it, so a marker with no send in flight is
         // settled — a status answer received from then on postdates every
@@ -2428,6 +2435,22 @@ public final class HostedHarnessClient implements AutoCloseable {
         boolean matches(ActivePrompt other) {
             return promptId.equals(other.promptId)
                     && payloadDigest.equals(other.payloadDigest);
+        }
+    }
+
+    // The terminal-event records, least recently used first; callers wrap
+    // it in Collections.synchronizedMap.
+    private static final class TerminalRecords
+            extends LinkedHashMap<String, String> {
+        private static final long serialVersionUID = 1L;
+
+        TerminalRecords() {
+            super(16, 0.75f, true);
+        }
+
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
+            return size() > TERMINAL_RECORD_LIMIT;
         }
     }
 
