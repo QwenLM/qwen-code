@@ -16,20 +16,20 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import java.util.stream.Stream;
 
 class HostedHarnessClientTest {
     private static final String BOOT_ID =
@@ -184,7 +184,7 @@ class HostedHarnessClientTest {
                 // A completed old prompt permits the replacement's new prompt before the old detach returns.
                 server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
                     exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    sendJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID + "\",\"hasActivePrompt\":false}", false);
+                    sendJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID + "\",\"hasActivePrompt\":" + (calls.get() >= 2) + "}", false);
                 });
                 client.getStatus(next);
             }
@@ -239,6 +239,54 @@ class HostedHarnessClientTest {
             assertNull(detach.get());
             client.detachLifecycle(session, authority);
             assertEquals(Map.of("authority", authority), detach.get());
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
+    void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\"],"));
+        createSessionRoute();
+        AtomicInteger calls = new AtomicInteger();
+        AtomicBoolean wrongPhase = new AtomicBoolean();
+        server.createContext("/session/" + SESSION_ID + "/lifecycle", exchange -> {
+            calls.incrementAndGet();
+            var request = JsonSupport.parseObject(readBody(exchange), "lifecycle");
+            var receipt = new java.util.LinkedHashMap<>(request);
+            receipt.remove("authority");
+            receipt.put("operationId", "close-2");
+            if (wrongPhase.get()) receipt.put("phase", "other");
+            sendSessionJson(exchange, 200, JsonSupport.encode(receipt));
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            var request = Map.<String, Object>of("protocolVersion", 2, "phase", phase,
+                    "toolProfile", "hosted-workspace-shell/1", "kind", "close",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", SESSION_ID),
+                    "authority", Map.of("operationId", "close-2", "claimGeneration", 3));
+            assertEquals("close-2", client.settleLifecycle(session, request).get("operationId"));
+            wrongPhase.set(true);
+            // The Harness answered 200 with a mismatched receipt: a
+            // post-answer failure, not a pre-send protocol refusal.
+            assertThrows(HostedHarnessSettleAnsweredException.class, () -> client.settleLifecycle(session, request));
+            var unsupported = new java.util.LinkedHashMap<>(request);
+            unsupported.put("toolProfile", "hosted-workspace-shell/2");
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
+            unsupported.put("protocolVersion", 3);
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
+            assertEquals(2, calls.get());
+        }
+    }
+
+    @Test
+    void oldHarnessDoesNotAdvertiseLifecycleV2() {
+        createSessionRoute();
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            assertTrue(client.capabilities().getLifecycleV2Profiles().isEmpty());
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session,
+                    Map.of("protocolVersion", 2, "toolProfile", "hosted-workspace-shell/1")));
         }
     }
 
@@ -470,6 +518,12 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        // The busy-turn probe gets a real answer: the Harness reports the
+        // first prompt still running, so the second is refused.
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"sessionId\":\"" + SESSION_ID
+                                + "\",\"hasActivePrompt\":true}"));
         AtomicReference<String> lastEventId = new AtomicReference<>();
         AtomicReference<String> eventEpoch = new AtomicReference<>();
         server.createContext("/session/" + SESSION_ID + "/events",
@@ -565,6 +619,134 @@ class HostedHarnessClientTest {
         }
 
         assertEquals(2, promptCalls.get());
+    }
+
+    @Test
+    void releasesAnOutcomeUnknownPromptOnlyOnceTheHarnessReportsItIdle() {
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        AtomicBoolean harnessActive = new AtomicBoolean(true);
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    if (promptCalls.incrementAndGet() == 1) {
+                        sendSessionJson(exchange, 503,
+                                "{\"code\":\"temporarily_unavailable\"}");
+                        return;
+                    }
+                    sendSessionJson(exchange, 202,
+                            "{\"promptId\":\"" + SECOND_PROMPT_ID
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"sessionId\":\"" + SESSION_ID
+                                + "\",\"hasActivePrompt\":"
+                                + harnessActive.get() + "}"));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "retry");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(PromptAdmissionUnknownException.class,
+                    () -> client.submitTurn(requestForSession(block,
+                            session)));
+            SubmitHarnessTurn next = SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(SECOND_PROMPT_ID)
+                    .addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
+                            List.of(block)))
+                    .build();
+            // The Harness may still run the earlier prompt: refused.
+            assertThrows(DaemonException.class,
+                    () -> client.submitTurn(next));
+            assertEquals(1, promptCalls.get());
+            // Once the Harness reports nothing running, the stale entry no
+            // longer pins the Session.
+            harnessActive.set(false);
+            assertEquals(SECOND_PROMPT_ID,
+                    client.submitTurn(next).getPromptId());
+        }
+        assertEquals(2, promptCalls.get());
+    }
+
+    // A status probe the Harness refuses (the Session is gone there) must
+    // stay fail-closed: the pinned entry is kept, the next Turn is refused
+    // with the plain busy-turn DaemonException the dispatcher retries, and
+    // no second prompt is submitted. Letting the probe's
+    // DaemonHttpException escape would map to a terminal Turn failure for a
+    // prompt that was never submitted (review round 7, R7-2).
+    @Test
+    void aRefusedStatusProbeKeepsTheRetryableBusyTurnRefusal() {
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    promptCalls.incrementAndGet();
+                    sendSessionJson(exchange, 503,
+                            "{\"code\":\"temporarily_unavailable\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 404,
+                        "{\"code\":\"session_not_found\"}"));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "retry");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(PromptAdmissionUnknownException.class,
+                    () -> client.submitTurn(requestForSession(block,
+                            session)));
+            DaemonException refusal = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertFalse(refusal instanceof DaemonHttpException);
+            assertFalse(refusal instanceof DaemonProtocolException);
+        }
+        assertEquals(1, promptCalls.get());
+    }
+
+    // The same fail-closed shape for a probe that answers 200 without the
+    // hasActivePrompt field: the malformed read must surface as the
+    // retryable busy-turn refusal, not as a DaemonProtocolException.
+    @Test
+    void aShapelessStatusProbeKeepsTheRetryableBusyTurnRefusal() {
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    promptCalls.incrementAndGet();
+                    sendSessionJson(exchange, 503,
+                            "{\"code\":\"temporarily_unavailable\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "retry");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(PromptAdmissionUnknownException.class,
+                    () -> client.submitTurn(requestForSession(block,
+                            session)));
+            DaemonException refusal = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertFalse(refusal instanceof DaemonHttpException);
+            assertFalse(refusal instanceof DaemonProtocolException);
+        }
+        assertEquals(1, promptCalls.get());
     }
 
     @Test
@@ -711,6 +893,49 @@ class HostedHarnessClientTest {
         assertEquals(lifecycle.get("lifecycleAuthority"), reversed.get("lifecycleAuthority"));
     }
 
+    // #13753 I3: the snapshot capability rides beside the child Workspace
+    // one, through every copy, and never alone.
+    @Test
+    void carriesTheSnapshotCapabilityOnlyBesideChildWorkspaces() {
+        CreateHarnessSession.Builder create = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .approvalMode(DaemonApprovalMode.DEFAULT);
+        assertFalse(create.childSnapshots(true).build().toJson().containsKey("childSnapshots"));
+        Map<String, Object> both = create.childWorkspaces(true).childSnapshots(true).build().toJson();
+        assertEquals(Boolean.TRUE, both.get("childWorkspaces"));
+        assertEquals(Boolean.TRUE, both.get("childSnapshots"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID, null, true);
+        assertFalse(load.withChildWorkspaces(false, true).toJson().containsKey("childSnapshots"));
+        assertFalse(load.withChildWorkspaces(true).toJson().containsKey("childSnapshots"));
+        LoadHarnessSession enabled = load.withChildWorkspaces(true, true);
+        assertEquals(Boolean.TRUE, enabled.toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.forLifecycle("op-1", 3).toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.withStoppedMessages().toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, load.forLifecycle("op-1", 3).withChildWorkspaces(true, true)
+                .toJson().get("childSnapshots"));
+    }
+
+    @Test
+    void extensionPinsSurviveCreateAndEveryLoadCopy() {
+        var mcp = java.util.List.<Map<String, Object>>of(Map.of("serverId", "docs", "serverRevision", 1,
+                "definitionDigest", "a".repeat(64)));
+        Map<String, Object> hooks = Map.of("catalogId", "review", "catalogRevision", 1,
+                "definitionDigest", "b".repeat(64));
+        Map<String, Object> created = CreateHarnessSession.builder().harnessSessionId(SESSION_ID)
+                .mcpServers(mcp).hookCatalog(hooks).build().toJson();
+        assertEquals(mcp, created.get("mcpServers"));
+        assertEquals(hooks, created.get("hookCatalog"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID).withMcpServers(mcp).withHookCatalog(hooks);
+        for (LoadHarnessSession copy : java.util.List.of(load, load.withChildWorkspaces(true),
+                load.forLifecycle("op-1", 3, 2), load.withStoppedMessages(),
+                load.withStoppedMessages().forLifecycle("op-1", 3, 2).withChildWorkspaces(true))) {
+            assertEquals(mcp, copy.toJson().get("mcpServers"));
+            assertEquals(hooks, copy.toJson().get("hookCatalog"));
+        }
+        assertFalse(new LoadHarnessSession(SESSION_ID).toJson().containsKey("mcpServers"));
+        assertFalse(CreateHarnessSession.builder().harnessSessionId(SESSION_ID).build().toJson().containsKey("hookCatalog"));
+    }
+
     @Test
     void parsesAnAgentWaitRuntimeRecovery() {
         server.createContext("/session/" + SESSION_ID + "/load",
@@ -814,6 +1039,29 @@ class HostedHarnessClientTest {
             assertEquals(EVENT_EPOCH, receipt.getEventEpoch());
             assertTrue(continuationBody.get().contains(
                     "\"checkpointId\":\"checkpoint-2\""));
+        }
+    }
+
+    @Test
+    void parsesAnAbandonedRuntimeRecoveryAsCancellable() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithAbandonedRuntimeRecovery()));
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
+
+            // A terminally fenced record keeps its distinction: the report
+            // parses, and the coordinator may drive the cancellation over it.
+            assertNotNull(recovery);
+            assertEquals("await_runtime", recovery.getPhase());
+            assertFalse(recovery.hasUnknownOutcome());
+            assertTrue(recovery.isCancellationReady());
+            assertFalse(recovery.isContinuationReady());
+            assertEquals("abandoned", recovery.getExecutions().get(0)
+                    .getStatus().get("state"));
         }
     }
 
@@ -1063,7 +1311,7 @@ class HostedHarnessClientTest {
         server.removeContext("/capabilities");
         server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
                 capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                        "\"hostedHarness\":{\"titleProtocolVersion\":1,"), false));
+                        "\"hostedHarness\":{\"titleProtocolVersion\":1,\"features\":[\"hosted_approval_resume_v1\",\"hosted_model_round_recovery_v1\"],"), false));
         AtomicReference<String> body = new AtomicReference<>();
         server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
             body.set(readBody(exchange));
@@ -1071,6 +1319,9 @@ class HostedHarnessClientTest {
                     + "\",\"persisted\":true,\"managedRenameRevision\":\"7\"}");
         });
         try (HostedHarnessClient client = newClient()) {
+            assertEquals(1, client.capabilities().getTitleProtocolVersion());
+            assertEquals(List.of("hosted_approval_resume_v1", "hosted_model_round_recovery_v1"),
+                    client.capabilities().getFeatures());
             client.updateSessionTitle(createSession(client), "A", 7);
         }
         assertTrue(body.get().contains("\"managedRenameRevision\":\"7\""));
@@ -1115,6 +1366,38 @@ class HostedHarnessClientTest {
         }
 
         assertEquals(1, closes.get());
+    }
+
+    @ParameterizedTest
+    @MethodSource("captureByteBudgets")
+    void createCarriesOptionalCaptureByteBudget(Long budget) {
+        AtomicReference<Map<String, Object>> payload = new AtomicReference<>();
+        server.createContext("/session", exchange -> {
+            payload.set(JsonSupport.parseObject(readBody(exchange), "Capture create request"));
+            sendSessionJson(exchange, 200, sessionJson());
+        });
+        CreateHarnessSession.Builder request = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .toolProfile("hosted-workspace-shell/1");
+        if (budget != null) request.captureBytes(budget);
+        try (HostedHarnessClient client = newClient()) {
+            client.createSession(request.build());
+        }
+        if (budget == null) assertFalse(payload.get().containsKey("captureBytes"));
+        else assertEquals(budget.longValue(), ((Number) payload.get().get("captureBytes")).longValue());
+    }
+
+    private static Stream<Arguments> captureByteBudgets() {
+        return Stream.of(Arguments.of((Long) null), Arguments.of(1L),
+                Arguments.of(1048576L), Arguments.of(1L << 41));
+    }
+
+    @Test
+    void rejectsCaptureByteBudgetsOutsideTheHarnessContract() {
+        for (long value : new long[] {-1, 0, (1L << 41) + 1, Long.MAX_VALUE}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> CreateHarnessSession.builder().captureBytes(value));
+        }
     }
 
     @Test
@@ -1554,6 +1837,24 @@ class HostedHarnessClientTest {
                 + "\"progressCursor\":\"cursor-2\","
                 + "\"outcome\":\"known\","
                 + "\"status\":{\"state\":\"settled\"}}]}}}";
+    }
+
+    private static String sessionJsonWithAbandonedRuntimeRecovery() {
+        return "{\"sessionId\":\"" + SESSION_ID
+                + "\",\"workspaceCwd\":\"/control\","
+                + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
+                + "\",\"lastEventId\":0,\"eventEpoch\":\""
+                + EVENT_EPOCH
+                + "\",\"_meta\":{\"qwen.daemon.managedRuntimeRecovery\":{"
+                + "\"phase\":\"await_runtime\","
+                + "\"checkpointId\":\"checkpoint-1\","
+                + "\"activationId\":\"activation-1\",\"executions\":[{"
+                + "\"functionCallId\":\"function-1\","
+                + "\"toolName\":\"write_file\","
+                + "\"executionCallId\":\"execution-1\","
+                + "\"runtimeSessionId\":\"runtime-1\","
+                + "\"progressCursor\":null,\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"abandoned\"}}]}}}";
     }
 
     private static String terminalEvent(long id, String promptId) {

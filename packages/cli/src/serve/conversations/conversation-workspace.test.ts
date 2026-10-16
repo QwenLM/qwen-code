@@ -26,6 +26,7 @@ import {
   revalidateConversationRoot,
 } from './conversation-workspace.js';
 import { ConversationDirectoryIdentityError } from '../../utils/conversation-directory-identity.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const plantOnExpectedInspect = vi.hoisted(() => ({ armed: false }));
 const enoentOnInspect = vi.hoisted(() => ({ armed: false }));
@@ -358,34 +359,36 @@ describe('Live conversation workspace root', () => {
     }
   });
 
-  it('sanitizes standalone child filesystem errors', async () => {
-    if (process.platform === 'win32') return;
-    // Root bypasses the 0o000 chmod below via CAP_DAC_OVERRIDE, so the
-    // EACCES guard this test provokes never fires (e.g. CI in a container).
-    if (process.getuid && process.getuid() === 0) return;
-    const home = await tempHome();
-    const workspace = new ConversationWorkspace({ homeDir: home });
-    const prepared = await workspace.prepareStandaloneDirectory('standalone');
-    await chmod(prepared.identity.canonicalPath, 0o000);
-    try {
-      const error = await workspace
-        .prepareStandaloneDirectory('standalone')
-        .catch((cause: unknown) => cause);
-      expect(error).toMatchObject({
-        name: 'ConversationDirectoryIdentityError',
-        scope: 'child',
-        reason: 'io_error',
-      });
-      expect((error as Error).message).not.toContain(
-        prepared.identity.canonicalPath,
-      );
-      expect(JSON.stringify(error)).not.toContain(
-        prepared.identity.canonicalPath,
-      );
-    } finally {
-      await chmod(prepared.identity.canonicalPath, 0o700);
-    }
-  });
+  // Where permission bits do not bind (Windows, or root bypassing the
+  // 0o000 chmod below via CAP_DAC_OVERRIDE), the EACCES guard this test
+  // provokes never fires.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'sanitizes standalone child filesystem errors',
+    async () => {
+      const home = await tempHome();
+      const workspace = new ConversationWorkspace({ homeDir: home });
+      const prepared = await workspace.prepareStandaloneDirectory('standalone');
+      await chmod(prepared.identity.canonicalPath, 0o000);
+      try {
+        const error = await workspace
+          .prepareStandaloneDirectory('standalone')
+          .catch((cause: unknown) => cause);
+        expect(error).toMatchObject({
+          name: 'ConversationDirectoryIdentityError',
+          scope: 'child',
+          reason: 'io_error',
+        });
+        expect((error as Error).message).not.toContain(
+          prepared.identity.canonicalPath,
+        );
+        expect(JSON.stringify(error)).not.toContain(
+          prepared.identity.canonicalPath,
+        );
+      } finally {
+        await chmod(prepared.identity.canonicalPath, 0o700);
+      }
+    },
+  );
 
   it('inspects, creates, and rejects replaced standalone child identities', async () => {
     const home = await tempHome();

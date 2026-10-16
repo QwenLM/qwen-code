@@ -45,6 +45,7 @@ import {
   tmuxPadsWithCaptureN,
 } from './lib/tui-capture.js';
 import { validateAssetContent } from './lib/assets.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const tmuxVersionProbe = spawnSync('tmux', ['-V'], {
   encoding: 'utf8',
@@ -2313,7 +2314,9 @@ exit 0
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
+  // Where permission bits do not bind, the r-x directory still takes the
+  // link and the staging failure this test needs never happens.
+  it.skipIf(!arePermissionBitsEnforced())(
     'degrades rather than falsely claiming a swap when staging itself fails',
     async () => {
       // R20-2 set `ansLost` unconditionally in the staging catch, conflating
@@ -5477,7 +5480,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(stderr).not.toContain('may still be running');
   }, 15_000);
 
-  it.skipIf(process.getuid?.() === 0 || process.platform === 'win32')(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses a FAILED .ans write after capture — contract, not stack trace',
     async () => {
       // The capture window legally runs up to an hour; the disk can fill
@@ -6885,7 +6888,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBe(3);
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses an unwritable existing --out dir BEFORE the capture runs',
     async () => {
       // mkdirSync({recursive}) does no permission check on an existing dir:
@@ -6904,7 +6907,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     },
   );
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses a --cwd the process cannot ENTER, not just a missing one',
     async () => {
       // statSync alone passes a mode-644 directory; entering it needs +x —

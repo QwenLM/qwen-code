@@ -395,3 +395,131 @@ it('displays and copies a request execution ID', async () => {
   await click(container, 'Copy displayed content');
   expect(writeText.mock.lastCall?.[0]).toContain('Execution ID: execution-1');
 });
+
+it('shows execution status and outcome separately and copies metadata without output tabs', async () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  mounts.push(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <TrajectoryInspector
+          execution={{
+            key: 'execution',
+            name: 'shell',
+            status: 'success',
+            startedAt: 100,
+            endedAt: 500,
+            durationMs: 123,
+            entry: {
+              status: 'success',
+              conflicted: false,
+              event: {
+                v: 1,
+                kind: 'tool',
+                phase: 'ended',
+                executionId: 'execution',
+                sessionId: 's',
+                callId: 'call',
+                toolName: 'shell',
+                executionStatus: 'success',
+                outcome: 'cancelled',
+                startedAt: 100,
+                endedAt: 500,
+                executionDurationMs: 123,
+              },
+            },
+          }}
+          title="shell"
+          hiddenByRange={false}
+          hiddenByCollapse={false}
+          onReveal={() => {}}
+          onClearRange={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>,
+    ),
+  );
+  expect(container.textContent).toContain('Execution status');
+  expect(container.textContent).toContain('Final outcome');
+  expect(container.textContent).toContain('cancelled');
+  const buttons = Array.from(container.querySelectorAll('button')).map(
+    (button) => button.textContent,
+  );
+  expect(buttons).not.toContain('Input');
+  expect(buttons).not.toContain('Output');
+  await click(container, 'Copy displayed content');
+  expect(writeText).toHaveBeenCalledWith(
+    expect.stringContaining('Execution status: success'),
+  );
+  expect(writeText).toHaveBeenCalledWith(
+    expect.stringContaining('Final outcome: cancelled'),
+  );
+  await click(container, 'Metrics');
+  expect(container.textContent).toContain('123ms');
+});
+
+it.each(['en', 'zh-CN'] as const)(
+  'keeps execution status tones across success and error updates in %s',
+  async (language) => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounts.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    for (const status of ['success', 'error'] as const) {
+      await act(async () =>
+        root.render(
+          <I18nProvider language={language}>
+            <TrajectoryInspector
+              execution={{
+                key: 'same-execution',
+                name: 'model',
+                status,
+                entry: {
+                  status,
+                  conflicted: false,
+                  event: {
+                    v: 1,
+                    kind: 'request',
+                    phase: 'ended',
+                    executionId: 'same-execution',
+                    sessionId: 's',
+                    promptId: 'p',
+                    model: 'model',
+                    startedAt: 10,
+                    endedAt: 20,
+                    durationMs: 10,
+                    outcome: status,
+                  },
+                },
+              }}
+              hiddenByRange={false}
+              hiddenByCollapse={false}
+              onReveal={() => {}}
+              onClearRange={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      const value = container.querySelector(`[data-tone="${status}"] pre`);
+      const labels =
+        language === 'en'
+          ? { success: 'Succeeded', error: 'Failed' }
+          : { success: '成功', error: '失败' };
+      expect(value?.textContent).toBe(labels[status]);
+    }
+  },
+);

@@ -82,9 +82,18 @@ const proxy = createServer(async (req, res) => {
       : Object.fromEntries(route.searchParams);
     const operation =
       req.method === 'GET' ? 'status' : route.pathname.split(':').at(-1)!;
+    const harnessScoped =
+      req.method === 'POST' &&
+      [
+        '/internal/runtime-broker/v1/runtimes:warm',
+        '/internal/runtime-broker/v1/tool-sessions:active-holds',
+      ].includes(route.pathname);
     const executionCallId = route.pathname.match(/\/executions\/([^/:]+)/)?.[1];
     assert.equal(fields['harnessSessionId'], sessionId);
-    assert.equal(fields['runtimeSessionId'], promptId);
+    assert.equal(
+      fields['runtimeSessionId'],
+      harnessScoped ? undefined : promptId,
+    );
     if (fault === 'release-before-forward' && operation === 'release') {
       dropped++;
       exchanges.push({ operation, fields, reply: {} });
@@ -92,7 +101,8 @@ const proxy = createServer(async (req, res) => {
       return;
     }
     const { text, reply } = await upstream(req.url!, body);
-    exchanges.push({ operation, executionCallId, fields, reply });
+    if (!(harnessScoped && operation === 'active-holds'))
+      exchanges.push({ operation, executionCallId, fields, reply });
     if (fault === 'cancel' && operation === 'prepare')
       await json(`/session/${sessionId}/cancel`, {}, 204);
     const lose =
@@ -210,6 +220,7 @@ try {
       `${fault}: fault did not fire`,
     );
     const blocked = !['prepare', 'start'].includes(fault);
+    const retryRelease = ['release', 'release-before-forward'].includes(fault);
     assert.equal(
       (await json(`/session/${sessionId}/status`)).recoveryBlocked,
       blocked,
@@ -238,8 +249,13 @@ try {
     const terminals = events.filter(
       (event) => event.promptId === promptId && event.type.startsWith('turn_'),
     );
-    assert.equal(terminals.length, blocked ? 0 : 1, JSON.stringify(events));
-    if (!blocked) assert.equal(terminals[0].type, 'turn_complete');
+    assert.equal(
+      terminals.length,
+      blocked && !retryRelease ? 0 : 1,
+      JSON.stringify(events),
+    );
+    if (!blocked || retryRelease)
+      assert.equal(terminals[0].type, 'turn_complete');
     const results = events.filter(
       (event) => event.data.record?.type === 'tool_result',
     );
@@ -306,7 +322,6 @@ try {
     }
     const traffic = exchanges.length;
     const callsBeforeReload = modelCalls;
-    const retryRelease = ['release', 'release-before-forward'].includes(fault);
     const rejectLoad = blocked && !retryRelease;
     await json(`/session/${sessionId}/detach`, {}, 204);
     const loaded = await json(
@@ -342,7 +357,7 @@ try {
                 event.promptId === promptId && event.type.startsWith('turn_'),
             )
             .map((event) => event.type),
-          fault === 'release' ? ['turn_complete'] : [],
+          ['turn_complete'],
         );
         assert.equal(
           recoveredEvents.filter(
@@ -353,11 +368,23 @@ try {
       }
       await json(`/session/${sessionId}/detach`, {}, 204);
     }
-    assert.deepEqual(
-      exchanges.slice(traffic).map((entry) => entry.operation),
-      retryRelease ? ['release'] : [],
-      'Reload may only retry the original runtime release',
-    );
+    const cleanupRetries = exchanges.slice(traffic);
+    if (retryRelease) {
+      assert(cleanupRetries.length > 0, 'Original cleanup must be retried');
+      const original = exchanges.find((entry) => entry.operation === 'release');
+      assert(original);
+      for (const entry of cleanupRetries) {
+        assert.equal(
+          entry.operation,
+          'release',
+          'Reload may only retry the original runtime release',
+        );
+        assert.deepEqual(entry.fields, {
+          ...original.fields,
+          requestId: entry.fields['requestId'],
+        });
+      }
+    } else assert.deepEqual(cleanupRetries, []);
     assert.equal(
       modelCalls,
       callsBeforeReload,
