@@ -2206,6 +2206,8 @@ jobs:
           REQUESTY_API_KEY: ''
           XAI_API_KEY: ''
           ZAI_API_KEY: ''
+          QWENCLOUD_API_KEY: ''
+          QWENCLOUD_TOKEN_PLAN_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           mkdir -p "${HOME}" "${QWEN_HOME}"
