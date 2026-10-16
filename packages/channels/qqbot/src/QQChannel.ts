@@ -2126,6 +2126,10 @@ export class QQChannel extends ChannelBase {
             process.stderr.write(
               `[QQ:${this.name}] purgeSingleScopeOrphans rescue file ${unreadable}, quarantine failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
             );
+            // Fail closed: the ledger write below would overwrite the damaged
+            // copy this quarantine was meant to preserve, so nothing is
+            // recorded and nothing is deleted.
+            return;
           }
         }
         // Self-describing so an operator can restore a route by hand; there is
@@ -2174,9 +2178,24 @@ export class QQChannel extends ChannelBase {
         }
       }
       // Phase 2: perform the deletions exactly as before, one entry at a time.
+      // removeSessionId drops every key mapped to a sessionId — a restore's
+      // superseded-id redirect can point several keys at one — so a sessionId a
+      // non-doomed route still uses must be left alone: releasing it would tear
+      // down that live route and its daemon session with it.
+      const doomedKeys = new Set(doomed.map((entry) => entry.key));
+      const liveSessionIds = new Set<string>();
+      for (const entry of all) {
+        if (!doomedKeys.has(entry.key)) liveSessionIds.add(entry.sessionId);
+      }
       let singlePurged = 0;
       let userPurged = 0;
       for (const entry of doomed) {
+        if (liveSessionIds.has(entry.sessionId)) {
+          process.stderr.write(
+            `[QQ:${this.name}] purgeSingleScopeOrphans left orphan route ${sanitizeLogText(entry.key, 200)} in place: session ${sanitizeLogText(entry.sessionId, 200)} is still used by a live route\n`,
+          );
+          continue;
+        }
         // Release the daemon-side session too: restoreSessions() already
         // re-attached it via bridge.loadSession, so without this the orphan
         // stays alive in the daemon until the process ends. removeSessionId

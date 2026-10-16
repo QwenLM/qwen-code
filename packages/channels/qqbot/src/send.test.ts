@@ -1870,6 +1870,94 @@ describe('purgeSingleScopeOrphans', () => {
       false,
     );
   });
+
+  it('spares a live route whose sessionId a doomed route also uses', () => {
+    // removeSessionId drops every key mapped to a sessionId, so releasing one a
+    // live route still owns would tear that route (and its daemon session) down
+    // with the orphan. A restore's superseded-id redirect can share one id
+    // across keys.
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        // Doomed: this channel's legacy user-scope key under thread scope.
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'shared-sid',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // Live: a thread-scope key that happens to share the sessionId.
+        {
+          key: 'test-bot:g1',
+          sessionId: 'shared-sid',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'is still used by a live route',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('leaves everything in place when quarantining a damaged rescue file fails', () => {
+    // The ledger write would overwrite the damaged copy the quarantine was
+    // meant to preserve, so a failed quarantine must abort the purge.
+    const target = join(
+      '/tmp/test-qwen',
+      'channels',
+      'test-bot-sessions-purged.json',
+    );
+    const files = new Map<string, string>([[target, '{"truncated":']]);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    vi.mocked(writeFileSync).mockImplementation(((
+      path: unknown,
+      data: unknown,
+    ) => {
+      files.set(String(path), String(data));
+    }) as typeof writeFileSync);
+    vi.mocked(renameSync).mockImplementation(((from: unknown, to: unknown) => {
+      const source = String(from);
+      if (source === target && /\.corrupt-/.test(String(to))) {
+        throw new Error('quarantine refused');
+      }
+      files.set(String(to), files.get(source) as string);
+      files.delete(source);
+    }) as typeof renameSync);
+
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(files.get(target)).toBe('{"truncated":');
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'quarantine failed',
+    );
+    stderrSpy.mockRestore();
+  });
 });
 
 // Security model for group sender-name sanitization:
