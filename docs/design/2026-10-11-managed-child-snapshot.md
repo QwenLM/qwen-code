@@ -132,46 +132,52 @@ The facts below are from `main` at `415925cbda`, after the schema consolidation 
   - `QwenHostedHarnessConnector`: the flag;
   - `ChildResultRelay`: prepare for both modes, discard a snapshot, and give it no receipt member;
   - `ChildWorkspaceStore` and `ChildWorkspaceService`: the mode in the operation's request, and a merge ask on a snapshot row recorded as a discard;
-  - `ManagedAgentStore`: the read profile for a child bound to a snapshot row.
-- **Docs:** tests beside each, this design in both languages, and notes in the I1 and I2 designs.
+  - `ManagedAgentStore`: the read profile for a child bound to a snapshot row;
+  - `WorkspaceToolProfiles`: the `READ` constant, the Java copy of the profile vocabulary.
+- **Docs:** tests beside each, this design in both languages, and notes in the I1, I2 and G3 step-3 recovery designs.
 
 ## Validation
 
 - **Admission** (`managed-child-operations.test.ts`): `snapshot` admitted only with both host flags; either flag alone refuses it, and the snapshot flag changes nothing for `shared` or `worktree`.
-- **Agent tool** (`hosted-workspace-tool-turn.child-agent.test.ts`, 4 new cases, 1 updated; `hosted-workspace-tool-turn.team.test.ts`, 2 new cases):
-  - the snapshot declarations, plain and team, are the worktree ones plus `snapshot`, only a host with both flags sees them, and only the team's says a member cannot be one;
+- **Agent tool** (`hosted-workspace-tool-turn.child-agent.test.ts`, 6 new cases, 1 updated; `hosted-workspace-tool-turn.team.test.ts`, 2 new cases; `hosted-child-wait-recovery.test.ts`, 3 new parameter rows):
+  - the snapshot declarations, plain and team, are the worktree ones plus `snapshot`, only a host with both flags sees them (the snapshot flag alone leaves the team's plain), and only the team's says a member cannot be one;
   - a snapshot launch on a host without the snapshot flag, or without child Workspaces, is refused with its own sentence before any record, and neither sentence suggests a child that can write;
   - a launch on a capable host records `snapshot`; any other `isolation` is an argument error naming only what the host serves;
+  - a launch or a member naming no isolation still runs `shared` on a capable host;
   - a snapshot member is refused before anything commits while a plain snapshot child is admitted;
+  - a foreground snapshot answer, a started snapshot child's failure, and a snapshot orphan folded at recovery carry no `[child workspace]` line;
   - a completed snapshot child is continued as a snapshot through both forms of `send_message`, after a send to it while it ran was refused.
-- **Read profile** (`hosted-workspace-tool-turn.test.ts`, 7 new cases, 1 updated; `hosted-workspace-tool-turn.child-agent.test.ts`; `hosted-tool-approval.test.ts`):
+- **Read profile** (`hosted-workspace-tool-turn.test.ts`, 7 new cases, 1 updated; `hosted-workspace-tool-turn.child-agent.test.ts`; `hosted-tool-approval.test.ts`; `hosted-workspace-profiles.test.ts`):
   - it declares `read_file` and `glob` on any lane, and nothing else even on a turn with a Shell lane and depth-0 orchestration;
   - both tools dispatch to the Broker;
   - `write_file`, `edit`, `run_shell_command`, `monitor`, `agent` and `send_message` are each refused before the Broker is acquired;
-  - both read tools are pre-approved under `default` and `auto-edit`.
-- **Messages** (`hosted-session-message-session.test.ts`): a snapshot child is refused while it runs, before and after it attaches, with nothing committed, while a running worktree child still takes a message; once completed, a snapshot is continued only where snapshots are served, as a `snapshot` run.
+  - both read tools are pre-approved under `default` and `auto-edit`, and `glob` is pre-approved only on the `/2` and read profiles.
+- **Messages** (`hosted-session-message-session.test.ts`): a snapshot child is refused while it runs, before and after it attaches, with nothing committed, while a running worktree child still takes a message; once completed, a snapshot is continued only where snapshots are served, as a `snapshot` run; a closing Session's refusal promises no continuation.
 - **Host flag and recovery** (`hosted-harness-session.test.ts`, 2 new cases; `workspace-recovery-session.test.ts`): `snapshot` advertised only while a create or load restates both flags (not for the snapshot flag alone or for `"true"` as text); a read-profile Session is created and declares its two tools; recovery accepts the read profile and still refuses it with a capture size.
-- **Replaced Runtime** (`hosted-recovery.test.ts`, 2 new cases): after a read-profile child's `read_file` result commits and its Runtime is replaced, recovery takes the committed result without rerunning the tool or reacquiring the retired owner, releases the original owner, and refuses a new tool call in that Turn.
-- **Relay** (`ChildResultRelayTest`, 5 new cases):
+- **Replaced Runtime** (`hosted-recovery.test.ts`, 2 new cases): a read-profile child whose `read_file` result committed before its Runtime was replaced resumes the saved model request without rerunning the tool, releases the original owner, and refuses a new tool call in that Turn.
+- **Relay** (`ChildResultRelayTest`, 6 new cases):
   - a snapshot run prepares its copy with its own mode and creates its child isolated;
   - a completed snapshot commits at once with no `workspace` member and asks only its discard;
   - its completed task asks no merge while messages run;
   - the over-bound, stop and give-up arms settle it at once, asking the discard and never a merge;
-  - a mode the relay does not serve settles never started, creating nothing.
+  - a mode the relay does not serve settles never started, creating nothing, while a run naming `shared` creates its child shared.
 - **Child Workspace state machine** (`ChildWorkspaceServiceTest`, 3 new cases on H2 with real repositories):
   - the snapshot copy carries the parent's uncommitted and untracked files, not its ignored ones;
   - its child Session gets exactly `hosted-workspace-read/1` and the parent's approval mode;
   - a merge asked of it is recorded as a discard, a file written into the copy never reaches the parent, and the row ends `discarded` with no pins left;
   - a worktree's request names no mode, and its row reads as a worktree that merges and keeps its parent's profile;
   - a run's mode is fixed.
-- **Control-plane plumbing** (`ManagedAgentPropertiesTest`, `QwenHostedHarnessConnectorTest`, `HostedHarnessClientTest`): the switch is off by default and refused without child Workspaces; `childSnapshots` rides create, load, recovery, lifecycle settle and the message-stop load only with the switch on, through every request copy, and never without `childWorkspaces`.
+- **Control-plane plumbing** (`ManagedAgentPropertiesTest`, `QwenHostedHarnessConnectorTest`, `HostedHarnessClientTest`): the switch is off by default, refused without child Workspaces and boots beside a valid child-Workspaces configuration; `childSnapshots` rides create, load, recovery, lifecycle settle and the message-stop load only with the switch on, through every request copy, and never without `childWorkspaces`.
 - **Lanes**, on `main` at `415925cbda`:
   - the CI-identical MariaDB lane (`-Pmysql-integration clean verify checkstyle:check`, with CI's 64 MiB packet budget): 2762 unit and 548 integration tests, Checkstyle and SpotBugs clean, plus `qwencode`'s `HostedHarnessClientTest`;
   - TypeScript in a clean `pnpm` worktree: `tsc` for core and CLI, ESLint and Prettier on every touched file, the core `managed-runtime` suite (3402 tests) and the CLI `serve` suite (14828 tests).
   - The failures there are not this change's; each fails identically on `main` on the same host:
     - two Java classes, `WorkspaceCsiNativeActivationGateTest` (16) and `ManagedExtensionRecordStoreTest` (4);
     - three `serve` tests that expect a write to fail, which it does not as root.
-- **Mutation checks**: 47 mutants, each disabling one guard (24 Java, 23 TypeScript), all red. One more, dropping the snapshot flag from the team form of `send_message`, is equivalent (that form reaches only members, never snapshots) and is not counted.
+- **After merging `main` at `8bd79c9192`** (which moved the module to `packages/managed-agent-server`):
+  - the same lane ran 3870 unit and 673 integration tests, Checkstyle and SpotBugs clean. Its one failure, `SessionRowLockOrderTest` (the lock-order pin for `Row.snapshot/0`), is fixed here; with the fix, the unit suite runs 3871 tests and none fail;
+  - the CLI `serve` suite ran 15018 tests. One timing test in `managed-runtime-tool-executor.test.ts` failed under load and passed alone three times.
+- **Mutation checks**: 47 mutants, each disabling one guard (24 Java, 23 TypeScript), all red; the two review rounds added 6 and 11 more, also all red. One more, dropping the snapshot flag from the team form of `send_message`, is equivalent (that form reaches only members, never snapshots) and is not counted.
 
 ## Acceptance criteria
 

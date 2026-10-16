@@ -377,14 +377,18 @@ describe('send_message to a child task (H4d-b)', () => {
       workspaceMode: 'snapshot',
       executionCallId: 'run-1',
     });
-    const sendSnapshot = (call: string, childSnapshots: boolean) =>
+    const sendSnapshot = (
+      call: string,
+      childSnapshots: boolean,
+      closing = false,
+    ) =>
       parent.children.sendToChild({
         taskId: parent.children.taskIdOf('run-1'),
         text: 'now check the tests',
         messageId: `msg_${call}`,
         continuationRunId: `prompt:${call}`,
         executionCallId: `prompt:${call}`,
-        closing: false,
+        closing,
         childWorkspaces: true,
         childSnapshots,
       });
@@ -425,6 +429,15 @@ describe('send_message to a child task (H4d-b)', () => {
     expect(await sendSnapshot('call-2', true)).toMatchObject({
       kind: 'refused',
     });
+    expect(parent.children.messagesTo('run-1')).toHaveLength(0);
+    // A closing Session admits no continuation, so its refusal must not
+    // promise one.
+    const closing = await sendSnapshot('call-c', true, true);
+    expect(closing).toEqual({
+      kind: 'refused',
+      reason: 'This Session is closing and sends no more messages.',
+    });
+    expect(parent.messages.message('msg_call-c')).toBeUndefined();
     expect(parent.children.messagesTo('run-1')).toHaveLength(0);
     await complete(parent.children);
     expect(await sendSnapshot('call-3', false)).toMatchObject({

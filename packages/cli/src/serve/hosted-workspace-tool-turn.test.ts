@@ -1003,7 +1003,7 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob only under the /2 Workspace profiles', async () => {
+it('offers glob only under the /2 and the read Workspace profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (

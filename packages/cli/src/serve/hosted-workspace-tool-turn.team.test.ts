@@ -508,6 +508,12 @@ it('refuses a snapshot member and admits a plain snapshot child', async () => {
   expect(await capable.declarations(signal)).toContain(
     HOSTED_TEAM_AGENT_SNAPSHOT_TOOL,
   );
+  // The snapshot flag counts only beside child Workspaces.
+  const flagOnly = await createTurn({ childSnapshots: true }).declarations(
+    signal,
+  );
+  expect(flagOnly).toContain(HOSTED_TEAM_AGENT_TOOL);
+  expect(flagOnly).not.toContain(HOSTED_TEAM_AGENT_SNAPSHOT_TOOL);
   expect(HOSTED_TEAM_AGENT_SNAPSHOT_TOOL.description).toContain(
     'A team member (name) cannot run as a snapshot.',
   );
@@ -548,6 +554,15 @@ it('refuses a snapshot member and admits a plain snapshot child', async () => {
     workspaceMode: 'snapshot',
   });
   expect(roster()).toEqual([]);
+  // Serving snapshots changes no default: a member naming no isolation
+  // still joins, shared.
+  expect(await execute(capable, [member('carol', 'call-carol')])).toContain(
+    'joined team \\"review\\" as \\"carol\\"',
+  );
+  expect(children.record('prompt:call-carol')?.workspaceMode).toBe('shared');
+  expect(roster()).toEqual([
+    { name: 'carol', childRunId: 'prompt:call-carol', planModeRequired: false },
+  ]);
 });
 
 // #13753 I3: a send to a running snapshot child is refused, and one after

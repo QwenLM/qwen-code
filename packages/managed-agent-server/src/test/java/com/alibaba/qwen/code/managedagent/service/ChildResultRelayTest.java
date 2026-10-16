@@ -1823,6 +1823,26 @@ class ChildResultRelayTest {
                 anyString(), anyString());
     }
 
+    // Production writes the mode on every launch, so a shared run names
+    // it: that run creates its child shared, never fails closed.
+    @Test
+    void aRunNamingSharedCreatesItsChildShared() {
+        when(store.readResource(TENANT, PARENT, "resource-body")).thenReturn(
+                "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
+                        + "\"completion\":\"sent\","
+                        + "\"workspaceMode\":\"shared\"}");
+        when(sessions.createChildSession(TENANT, PARENT, RUN,
+                "audit the diff", "review", false)).thenReturn(
+                    new CommandAdmission(CHILD, null, "accepted", false));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(row.get().childSessionId()).isEqualTo(CHILD);
+        assertThat(harness.operations).noneSatisfy(operation ->
+                assertThat(operation).containsEntry("kind", "fail"));
+        verify(childWorkspaces, never()).request(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
     // A snapshot changed nothing: its result commits at once, with no
     // workspace member, and its copy is asked to discard, never to merge.
     @Test

@@ -56,6 +56,7 @@ export function hostedShellLaneAttachesChildAgents(
   return shellLane && !suppressChildAgents;
 }
 
+/** The `/2` profiles; the read profile is not one (see the glob predicate). */
 export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||

@@ -132,46 +132,52 @@ Issue #13753 对 I3 提出两点：
   - `QwenHostedHarnessConnector`：标志；
   - `ChildResultRelay`：为两种模式准备、丢弃快照、不给它回执成员；
   - `ChildWorkspaceStore` 与 `ChildWorkspaceService`：操作请求中的模式，以及把对快照行请求的合并记录为丢弃；
-  - `ManagedAgentStore`：绑定到快照行的 child 使用只读 profile。
-- **文档：** 各处的测试、本设计的两种语言版本，以及 I1 与 I2 设计中的说明。
+  - `ManagedAgentStore`：绑定到快照行的 child 使用只读 profile；
+  - `WorkspaceToolProfiles`：`READ` 常量，即 profile 词汇表的 Java 副本。
+- **文档：** 各处的测试、本设计的两种语言版本，以及 I1、I2 与 G3 第 3 步恢复设计中的说明。
 
 ## 验证
 
 - **准入**（`managed-child-operations.test.ts`）：只有同时具备两个主机标志时才放行 `snapshot`；只有其中一个时拒绝；snapshot 标志对 `shared` 与 `worktree` 毫无影响。
-- **Agent 工具**（`hosted-workspace-tool-turn.child-agent.test.ts`，新增 4 个用例、更新 1 个；`hosted-workspace-tool-turn.team.test.ts`，新增 2 个用例）：
-  - 快照声明（普通版与团队版）就是 worktree 声明再加 `snapshot`，只有同时具备两个标志的主机才看得到，且只有团队版说明成员不能作为快照；
+- **Agent 工具**（`hosted-workspace-tool-turn.child-agent.test.ts`，新增 6 个用例、更新 1 个；`hosted-workspace-tool-turn.team.test.ts`，新增 2 个用例；`hosted-child-wait-recovery.test.ts`，新增 3 组参数）：
+  - 快照声明（普通版与团队版）就是 worktree 声明再加 `snapshot`，只有同时具备两个标志的主机才看得到（只有 snapshot 标志时团队版仍是普通声明），且只有团队版说明成员不能作为快照；
   - 没有 snapshot 标志或没有 child Workspace 的主机，在任何记录之前以专门的说明拒绝快照 launch，两种说明都不会建议可写的 child；
   - 具备能力的主机上 launch 记录为 `snapshot`；任何其他 `isolation` 都是参数错误，且只列出主机提供的取值；
+  - 在具备能力的主机上，不指定 isolation 的 launch 或成员仍以 `shared` 运行；
   - 快照成员在任何提交之前被拒绝，而普通快照 child 会被准入；
+  - 前台快照的回答、已启动快照 child 的失败，以及恢复时折叠的快照孤儿，都不带 `[child workspace]` 行；
   - 运行中发给快照的消息被拒绝后，完成的快照 child 可以通过两种形式的 `send_message` 续跑为快照。
-- **只读 profile**（`hosted-workspace-tool-turn.test.ts`，新增 7 个用例、更新 1 个；`hosted-workspace-tool-turn.child-agent.test.ts`；`hosted-tool-approval.test.ts`）：
+- **只读 profile**（`hosted-workspace-tool-turn.test.ts`，新增 7 个用例、更新 1 个；`hosted-workspace-tool-turn.child-agent.test.ts`；`hosted-tool-approval.test.ts`；`hosted-workspace-profiles.test.ts`）：
   - 它在任何 lane 上都声明 `read_file` 与 `glob`，即使 turn 带有 Shell lane 与第 0 层的 child 编排，也不声明其他任何工具；
   - 两个工具都能派发到 Broker；
   - `write_file`、`edit`、`run_shell_command`、`monitor`、`agent` 与 `send_message` 都在获取 Broker 之前被拒绝；
-  - 两个读工具在 `default` 与 `auto-edit` 下都预先批准。
-- **消息**（`hosted-session-message-session.test.ts`）：snapshot child 运行期间（attach 前后）都会被拒绝，且不提交任何东西，而运行中的 worktree child 仍能收到消息；快照完成后，只有在提供快照的主机上才续跑，续跑为 `snapshot` run。
+  - 两个读工具在 `default` 与 `auto-edit` 下都预先批准，且 `glob` 只在 `/2` 与只读 profile 上预先批准。
+- **消息**（`hosted-session-message-session.test.ts`）：snapshot child 运行期间（attach 前后）都会被拒绝，且不提交任何东西，而运行中的 worktree child 仍能收到消息；快照完成后，只有在提供快照的主机上才续跑，续跑为 `snapshot` run；正在关闭的 Session 的拒绝不承诺续跑。
 - **主机标志与恢复**（`hosted-harness-session.test.ts`，新增 2 个用例；`workspace-recovery-session.test.ts`）：只有创建或加载重申了两个标志时才宣告 `snapshot`（只有 snapshot 标志或文本 `"true"` 都不算）；只读 profile 的 Session 可以创建，并声明它的两个工具；恢复接受只读 profile，带捕获容量时仍会拒绝。
-- **Runtime 被替换**（`hosted-recovery.test.ts`，新增 2 个用例）：只读 profile 的 child 在 `read_file` 结果提交后 Runtime 被替换，恢复时直接采用已提交的结果，不重跑工具、不重新 acquire 已退役的 owner，释放原 owner，并拒绝该 Turn 中的新工具调用。
-- **Relay**（`ChildResultRelayTest`，新增 5 个用例）：
+- **Runtime 被替换**（`hosted-recovery.test.ts`，新增 2 个用例）：只读 profile 的 child 在 `read_file` 结果提交后 Runtime 被替换，恢复已保存的模型请求而不重跑工具，释放原 owner，并拒绝该 Turn 中的新工具调用。
+- **Relay**（`ChildResultRelayTest`，新增 6 个用例）：
   - snapshot run 以自己的模式准备副本，并以隔离方式创建 child；
   - 完成的快照立即提交，回执不带 `workspace` 成员，只请求丢弃；
   - 消息仍在运行时，它已完成的任务不请求合并；
   - 超出上限、停止与放弃分支都立即结算它，请求丢弃，从不请求合并；
-  - relay 不支持的模式以从未启动结算，不创建任何东西。
+  - relay 不支持的模式以从未启动结算，不创建任何东西；而写明 `shared` 的 run 以共享方式创建 child。
 - **Child Workspace 状态机**（`ChildWorkspaceServiceTest`，新增 3 个用例，H2 加真实仓库）：
   - 快照副本包含父未提交与未跟踪的文件，不含被忽略的文件；
   - 它的 child Session 获得的正是 `hosted-workspace-read/1` 与父的审批模式；
   - 对它请求的合并被记录为丢弃，写进副本的文件永远不会到达父，行以 `discarded` 结束且不留 pin；
   - worktree 的请求不指名模式，其行读作 worktree，会合并，并保留父的 profile；
   - run 的模式是固定的。
-- **控制面接线**（`ManagedAgentPropertiesTest`、`QwenHostedHarnessConnectorTest`、`HostedHarnessClientTest`）：开关默认关闭，没有 child Workspace 时拒绝开启；只有开关开启时，`childSnapshots` 才随创建、加载、恢复、生命周期结算与消息停止加载发送，经过每一次请求复制都保留，且从不在没有 `childWorkspaces` 时出现。
+- **控制面接线**（`ManagedAgentPropertiesTest`、`QwenHostedHarnessConnectorTest`、`HostedHarnessClientTest`）：开关默认关闭，没有 child Workspace 时拒绝开启，在有效的 child Workspace 配置旁可以正常启动；只有开关开启时，`childSnapshots` 才随创建、加载、恢复、生命周期结算与消息停止加载发送，经过每一次请求复制都保留，且从不在没有 `childWorkspaces` 时出现。
 - **流水线**（基于 `main` 的 `415925cbda`）：
   - 与 CI 一致的 MariaDB 流水线（`-Pmysql-integration clean verify checkstyle:check`，使用 CI 的 64 MiB 包上限）：2762 个单元测试与 548 个集成测试，Checkstyle 与 SpotBugs 干净；另有 `qwencode` 的 `HostedHarnessClientTest`。
   - 干净 `pnpm` worktree 中的 TypeScript：core 与 CLI 的 `tsc`，所有改动文件的 ESLint 与 Prettier，core `managed-runtime` 套件（3402 个测试）与 CLI `serve` 套件（14828 个测试）。
   - 其中的失败都与本变更无关，每一个在同一主机的 `main` 上都同样失败：
     - 两个 Java 测试类：`WorkspaceCsiNativeActivationGateTest`（16 个）与 `ManagedExtensionRecordStoreTest`（4 个）；
     - 三个预期写入失败的 `serve` 测试（以 root 运行时写入不会失败）。
-- **变异检查**：47 个变异，每个关掉一处守卫（Java 24 个，TypeScript 23 个），全部变红。另有一个变异（从团队形式的 `send_message` 中去掉 snapshot 标志）是等价的（该形式只到达成员，而成员永远不是快照），不计入。
+- **合入 `main` 的 `8bd79c9192` 之后**（该提交把模块移到了 `packages/managed-agent-server`）：
+  - 同一流水线运行 3870 个单元测试与 673 个集成测试，Checkstyle 与 SpotBugs 干净。唯一的失败是 `SessionRowLockOrderTest`（`Row.snapshot/0` 的锁顺序固定项），已在本变更中修复；修复后单元套件运行 3871 个测试，无失败；
+  - CLI `serve` 套件运行 15018 个测试。`managed-runtime-tool-executor.test.ts` 中一个计时测试在高负载下失败，单独重跑三次均通过。
+- **变异检查**：47 个变异，每个关掉一处守卫（Java 24 个，TypeScript 23 个），全部变红；两轮评审又分别新增 6 个与 11 个，同样全部变红。另有一个变异（从团队形式的 `send_message` 中去掉 snapshot 标志）是等价的（该形式只到达成员，而成员永远不是快照），不计入。
 
 ## 验收标准
 

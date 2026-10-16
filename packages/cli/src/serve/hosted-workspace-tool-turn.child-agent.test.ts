@@ -555,21 +555,19 @@ it('refuses a snapshot launch on a host without snapshots before any record', as
 });
 
 it('records a snapshot launch on a host that serves snapshots', async () => {
+  const turn = snapshotCapableTurn();
   await executeAgent(
-    createTurn(
-      0,
-      undefined,
-      'prompt',
-      false,
-      true,
-      true,
-      undefined,
-      undefined,
-      true,
-    ),
+    turn,
     call({ description: 'reader', prompt: 'review', isolation: 'snapshot' }),
   );
   expect(children.record('prompt:call-1')?.workspaceMode).toBe('snapshot');
+  // Serving snapshots changes no default: a launch naming no isolation
+  // still runs shared.
+  await executeAgent(
+    turn,
+    call({ description: 'writer', prompt: 'fix it' }, 'call-2'),
+  );
+  expect(children.record('prompt:call-2')?.workspaceMode).toBe('shared');
 });
 
 it('records the launch isolation and replays it after the capability is gone', async () => {
@@ -596,11 +594,30 @@ it('records the launch isolation and replays it after the capability is gone', a
   );
 });
 
+/** A turn on a host that serves both worktrees and snapshots. */
+function snapshotCapableTurn(): HostedWorkspaceToolTurn {
+  return createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    true,
+    true,
+    undefined,
+    undefined,
+    true,
+  );
+}
+
 async function foregroundWorktreeAnswer(
   result: string,
   receipt: Buffer,
+  isolation: 'worktree' | 'snapshot' = 'worktree',
 ): Promise<string> {
-  const turn = createTurn(0, undefined, 'prompt', false, true);
+  const turn =
+    isolation === 'snapshot'
+      ? snapshotCapableTurn()
+      : createTurn(0, undefined, 'prompt', false, true);
   const childRunId = 'prompt:call-1';
   const driving = (async () => {
     for (;;) {
@@ -626,13 +643,13 @@ async function foregroundWorktreeAnswer(
           description: 'audit the diff',
           prompt: 'review the change',
           run_in_background: false,
-          isolation: 'worktree',
+          isolation,
         }),
       ),
       driving,
     ])
   )[0];
-  expect(children.record(childRunId)?.workspaceMode).toBe('worktree');
+  expect(children.record(childRunId)?.workspaceMode).toBe(isolation);
   return (
     (responses[0]?.functionResponse?.response as { output?: string })?.output ??
     JSON.stringify(responses)
@@ -675,11 +692,14 @@ it('ends a foreground worktree answer with its merge outcome', async () => {
 });
 
 async function foregroundFailure(
-  isolated: boolean,
+  isolation: 'worktree' | 'snapshot' | undefined,
   started: boolean,
   cancelled = false,
 ): Promise<string> {
-  const turn = createTurn(0, undefined, 'prompt', false, true);
+  const turn =
+    isolation === 'snapshot'
+      ? snapshotCapableTurn()
+      : createTurn(0, undefined, 'prompt', false, true);
   const childRunId = 'prompt:call-1';
   const driving = (async () => {
     for (;;) {
@@ -709,7 +729,7 @@ async function foregroundFailure(
           description: 'audit the diff',
           prompt: 'review the change',
           run_in_background: false,
-          ...(isolated ? { isolation: 'worktree' } : {}),
+          ...(isolation ? { isolation } : {}),
         }),
       ),
       driving,
@@ -723,7 +743,7 @@ async function foregroundFailure(
 // Workspace. The line covers a merge that conflicted or was pinned away
 // too: it must never say the work landed.
 it('ends a started worktree child failure with the workspace line', async () => {
-  const answer = await foregroundFailure(true, true);
+  const answer = await foregroundFailure('worktree', true);
   expect(answer).toContain('Child agent run failed (child_failed).');
   expect(answer).toContain(
     "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
@@ -732,7 +752,7 @@ it('ends a started worktree child failure with the workspace line', async () => 
 });
 
 it('ends a started worktree child cancellation with the workspace line', async () => {
-  const answer = await foregroundFailure(true, true, true);
+  const answer = await foregroundFailure('worktree', true, true);
   expect(answer).toContain('Child agent run cancelled (stop_requested).');
   expect(answer).toContain(
     "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
@@ -740,13 +760,40 @@ it('ends a started worktree child cancellation with the workspace line', async (
 });
 
 it('adds no workspace line to a worktree child that never started', async () => {
-  const answer = await foregroundFailure(true, false);
+  const answer = await foregroundFailure('worktree', false);
   expect(answer).toContain('Child agent run failed (creation_failed).');
   expect(answer).not.toContain('[child workspace]');
 });
 
 it('adds no workspace line to a failed shared child', async () => {
-  const answer = await foregroundFailure(false, true);
+  const answer = await foregroundFailure(undefined, true);
+  expect(answer).toContain('Child agent run failed (child_failed).');
+  expect(answer).not.toContain('[child workspace]');
+});
+
+// #13753 I3: a snapshot is always discarded and its receipt has no
+// workspace member, so a foreground snapshot answer, or a started
+// snapshot's failure, carries no workspace line.
+it('adds no workspace line to a foreground snapshot answer', async () => {
+  const answer = await foregroundWorktreeAnswer(
+    'child result',
+    Buffer.from(
+      JSON.stringify({
+        childSessionId: '550e8400-e29b-41d4-a716-446655440001',
+        turnId: 'turn-1',
+        status: 'completed',
+        completedAt: 1,
+      }),
+      'utf8',
+    ),
+    'snapshot',
+  );
+  expect(answer).toContain('child result');
+  expect(answer).not.toContain('[child workspace]');
+});
+
+it('adds no workspace line to a started snapshot child failure', async () => {
+  const answer = await foregroundFailure('snapshot', true);
   expect(answer).toContain('Child agent run failed (child_failed).');
   expect(answer).not.toContain('[child workspace]');
 });

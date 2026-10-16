@@ -864,19 +864,20 @@ export class HostedChildAgentSession {
                   : `Member "${member.name}" is being stopped and cannot receive messages.`,
           };
         }
-        // #13753 I3: a snapshot child has no message lane, so nothing may
-        // be committed that it could never receive; once it completes, a
-        // message continues it as a new snapshot run.
-        if (head.workspaceMode === 'snapshot') {
-          return {
-            kind: 'refused',
-            reason: `${subject} is a read-only snapshot and takes no messages while it runs. Wait for its result; a message sent after it completes continues it as a new snapshot.`,
-          };
-        }
         if (params.closing) {
           return {
             kind: 'refused',
             reason: 'This Session is closing and sends no more messages.',
+          };
+        }
+        // #13753 I3: a snapshot child has no message lane, so nothing may
+        // be committed that it could never receive; once it completes, a
+        // message continues it as a new snapshot run. It sits below the
+        // closing arm because a closing Session admits no continuation.
+        if (head.workspaceMode === 'snapshot') {
+          return {
+            kind: 'refused',
+            reason: `${subject} is a read-only snapshot and takes no messages while it runs. Wait for its result; a message sent after it completes continues it as a new snapshot.`,
           };
         }
         const sentBefore = this.messagesTo(head.childRunId);

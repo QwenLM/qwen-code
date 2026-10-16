@@ -574,10 +574,16 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
 ];
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
-// call it does not declare.
+// call it does not declare. A missing read_file stops the module loading:
+// spreading a failed lookup would silently declare a tool with no name.
+const HOSTED_READ_FILE_TOOL = HOSTED_WORKSPACE_FILE_TOOLS.find(
+  (tool) => tool.name === 'read_file',
+);
+if (HOSTED_READ_FILE_TOOL === undefined)
+  throw new Error('Hosted Workspace file tools no longer declare read_file.');
 export const HOSTED_WORKSPACE_READ_TOOLS: FunctionDeclaration[] = [
   {
-    ...HOSTED_WORKSPACE_FILE_TOOLS.find((tool) => tool.name === 'read_file')!,
+    ...HOSTED_READ_FILE_TOOL,
     description:
       "Read a file in this read-only snapshot of the parent's Workspace, taken when this child started. Files cannot be changed and commands cannot run here.",
   },

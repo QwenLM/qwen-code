@@ -968,6 +968,15 @@ class ManagedAgentPropertiesTest {
         properties.getRuntimeBroker().setChildSnapshotsEnabled(true);
         assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Child snapshots require child Workspaces");
+        // Beside a valid child-Workspaces configuration, the switch boots.
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/workspace")));
+        if (ManagedAgentProperties.childWorkspacesSupportedOn(System.getProperty("os.name"))
+                && ManagedAgentProperties.utf8FileNames(System.getProperty("sun.jnu.encoding"))) {
+            assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        }
     }
 
     @Test
