@@ -12,6 +12,7 @@ import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
@@ -2112,4 +2113,72 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       unmount();
     },
   );
+});
+
+/**
+ * Module-scope `t()` calls run during import, before `initializeI18n()` is
+ * awaited in the entry module, so they freeze whatever dictionary was loaded
+ * at import time. `/auth` therefore painted a mixed-language dialog: the
+ * sub-menu titles were translated (they call `t()` at render time) while the
+ * main view title stayed in the import-time locale.
+ *
+ * These pins are deliberately keystroke-free and ungated: the keystroke
+ * assertions elsewhere in this file sit behind `itWhenTuiInputReliable`, which
+ * skips under `CI=true`, so a gated pin would never run where it matters.
+ */
+describe('AuthDialog locale resolution', { timeout: 15000 }, () => {
+  const buildSettings = (): LoadedSettings =>
+    new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+  afterEach(async () => {
+    await setLanguageAsync('en');
+  });
+
+  it('resolves the main view title at render time, not at import time', async () => {
+    await setLanguageAsync('en');
+    const english = renderAuthDialog(buildSettings());
+    expect(english.lastFrame()).toContain('Connect a Provider');
+    english.unmount();
+
+    // The dialog is still open, only the locale changed: the title has to
+    // follow the locale in force when it renders.
+    await setLanguageAsync('zh');
+    const chinese = renderAuthDialog(buildSettings());
+    expect(chinese.lastFrame()).toContain('连接服务商');
+    chinese.unmount();
+  });
+
+  it('resolves the main menu entries at render time too', async () => {
+    await setLanguageAsync('zh');
+    const { lastFrame, unmount } = renderAuthDialog(buildSettings());
+    const frame = lastFrame();
+    // The zh dictionary translates 'Connect a Provider' but leaves the entry
+    // labels themselves in English, so the title is the observable probe.
+    expect(frame).toContain('连接服务商');
+    expect(frame).not.toContain('Connect a Provider');
+    unmount();
+  });
 });

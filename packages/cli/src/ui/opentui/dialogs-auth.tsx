@@ -119,7 +119,7 @@ interface RadioItem {
   value: string;
 }
 
-const MAIN_ITEMS: RadioItem[] = [
+const getMainItems = (): RadioItem[] => [
   {
     key: 'QWENCLOUD',
     label: t('QwenCloud'),
@@ -152,7 +152,7 @@ const MAIN_ITEMS: RadioItem[] = [
   },
 ];
 
-const PROTOCOL_ITEMS: RadioItem[] = [
+const getProtocolItems = (): RadioItem[] => [
   {
     key: AuthType.USE_OPENAI,
     label: t('OpenAI-compatible'),
@@ -173,12 +173,12 @@ const PROTOCOL_ITEMS: RadioItem[] = [
   },
 ];
 
-const VIEW_TITLES: Record<string, () => string> = {
-  main: () => t('Connect a Provider'),
-  'qwencloud-select': () => t('QwenCloud · Access Method'),
-  'alibaba-select': () => t('Alibaba ModelStudio · Access Method'),
-  'thirdparty-select': () => t('Third-party Providers · Provider'),
-};
+const getViewTitles = (): Record<string, string> => ({
+  main: t('Connect a Provider'),
+  'qwencloud-select': t('QwenCloud · Access Method'),
+  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': t('Third-party Providers · Provider'),
+});
 
 function providerToItem(config: ProviderConfig): RadioItem {
   return {
@@ -213,8 +213,9 @@ function resolveDocumentationUrl(
     : config.documentationUrl;
 }
 
-const NAV_HINT_SELECT = t('Enter to select, ↑↓ to navigate, Esc to go back');
-const NAV_HINT_INPUT = t('Enter to submit, Esc to go back');
+const navHintSelect = (): string =>
+  t('Enter to select, ↑↓ to navigate, Esc to go back');
+const navHintInput = (): string => t('Enter to submit, Esc to go back');
 
 // The model-IDs step's runs, hoisted so the region budget measures the same
 // strings the step paints.
@@ -450,7 +451,7 @@ function ProtocolStep({ flow, window }: StepWindowProps) {
   const provider = flow.state.provider!;
   const items = useMemo(() => {
     const protocolOpts = provider.protocolOptions ?? [provider.protocol];
-    return PROTOCOL_ITEMS.filter((p) =>
+    return getProtocolItems().filter((p) =>
       protocolOpts.includes(p.value as AuthType),
     );
   }, [provider]);
@@ -486,7 +487,7 @@ function ProtocolStep({ flow, window }: StepWindowProps) {
         maxItems={maxItems}
       />
       <box marginTop={1}>
-        <text fg={C.dim}>{NAV_HINT_SELECT}</text>
+        <text fg={C.dim}>{navHintSelect()}</text>
       </box>
     </>
   );
@@ -528,7 +529,7 @@ function ApiStep({ flow, window }: StepWindowProps) {
         maxItems={maxItems}
       />
       <box marginTop={1}>
-        <text fg={C.dim}>{NAV_HINT_SELECT}</text>
+        <text fg={C.dim}>{navHintSelect()}</text>
       </box>
     </>
   );
@@ -584,7 +585,7 @@ function BaseUrlSelectStep({
         maxItems={maxItems}
       />
       <box marginTop={1}>
-        <text fg={C.dim}>{NAV_HINT_SELECT}</text>
+        <text fg={C.dim}>{navHintSelect()}</text>
       </box>
     </>
   );
@@ -629,7 +630,7 @@ function BaseUrlInputStep({
         </box>
       )}
       <box marginTop={1}>
-        <text fg={C.dim}>{NAV_HINT_INPUT}</text>
+        <text fg={C.dim}>{navHintInput()}</text>
       </box>
     </box>
   );
@@ -670,7 +671,7 @@ function ApiKeyStep({
         </box>
       )}
       <box marginTop={1}>
-        <text fg={C.dim}>{NAV_HINT_INPUT}</text>
+        <text fg={C.dim}>{navHintInput()}</text>
       </box>
     </box>
   );
@@ -938,7 +939,7 @@ function ModelsStep({
           </box>
         )}
         <box marginTop={1}>
-          <text fg={C.dim}>{NAV_HINT_INPUT}</text>
+          <text fg={C.dim}>{navHintInput()}</text>
         </box>
       </box>
     );
@@ -1512,7 +1513,8 @@ function AuthDialogFlow({
   const contentWidth = dialogContentWidth(width);
   const viewTitle = useMemo(() => {
     if (viewLevel !== 'provider-setup') {
-      return (VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'])();
+      const titles = getViewTitles();
+      return titles[viewLevel] ?? titles['main'];
     }
     const p = setupFlow.state.provider;
     if (!p) return t('Provider Setup');
@@ -1535,7 +1537,7 @@ function AuthDialogFlow({
   // charged the rows it occupies; the main view also carries the clipped
   // rule and the terms runs.
   const shellChromeRows = shellBodyChromeRows(viewTitle, contentWidth);
-  const hintRows = 1 + wrappedRows(NAV_HINT_SELECT, contentWidth);
+  const hintRows = 1 + wrappedRows(navHintSelect(), contentWidth);
   const errorRows = errorMessage
     ? 1 + wrappedRows(errorMessage, contentWidth)
     : 0;
@@ -1553,8 +1555,12 @@ function AuthDialogFlow({
   // region pays for them), and the zero-row refusal below covers only what
   // even the shed chrome cannot pay.
   const shedMainFooter =
-    wizardListWindow(regionHeight, fullMainChromeRows, MAIN_ITEMS.length, 2) <
-    1;
+    wizardListWindow(
+      regionHeight,
+      fullMainChromeRows,
+      getMainItems().length,
+      2,
+    ) < 1;
   // Below even the shed chrome's first item the list's own margin row sheds
   // too: the frame must fit the region, and the alternative is a dead dialog
   // — a zero-row window refuses every list key while the must-connect gate
@@ -1564,7 +1570,7 @@ function AuthDialogFlow({
     wizardListWindow(
       regionHeight,
       shellChromeRows + errorRows,
-      MAIN_ITEMS.length,
+      getMainItems().length,
       2,
     ) < 1;
   const mainChromeRows =
@@ -1578,12 +1584,12 @@ function AuthDialogFlow({
   const mainWindow = wizardListWindow(
     regionHeight,
     mainChromeRows,
-    MAIN_ITEMS.length,
+    getMainItems().length,
     2,
   );
   const mainOffset = getSelectionScrollOffset(
     mainCursor,
-    MAIN_ITEMS.length,
+    getMainItems().length,
     mainWindow,
   );
   const subMenuItems = activeSubMenu ?? [];
@@ -1607,10 +1613,10 @@ function AuthDialogFlow({
       if (mainWindow < 1) return;
       if (o.name === 'up' || o.name === 'down') {
         moveMain(
-          findNextEnabledIndex(MAIN_ITEMS, mainCursorRef.current, o.name),
+          findNextEnabledIndex(getMainItems(), mainCursorRef.current, o.name),
         );
       } else if (o.name === 'return') {
-        const item = MAIN_ITEMS[mainCursorRef.current];
+        const item = getMainItems()[mainCursorRef.current];
         if (item) handleMainSelect(item.value as MainOption);
       }
       return;
@@ -1686,7 +1692,7 @@ function AuthDialogFlow({
       {viewLevel === 'main' && (
         <>
           <RadioList
-            items={MAIN_ITEMS}
+            items={getMainItems()}
             cursor={mainCursor}
             offset={mainOffset}
             maxItems={mainWindow}
@@ -1721,7 +1727,7 @@ function AuthDialogFlow({
             maxItems={subWindow}
           />
           <box marginTop={1}>
-            <text fg={C.dim}>{NAV_HINT_SELECT}</text>
+            <text fg={C.dim}>{navHintSelect()}</text>
           </box>
         </>
       )}
