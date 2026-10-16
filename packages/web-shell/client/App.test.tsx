@@ -42,6 +42,8 @@ import {
   type SessionSourcesResult,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
+import { PromptDispatchCancelledError } from './utils/promptAdmission';
+import type { McpAppPromptSubmission } from './hooks/useMcpAppMessages';
 import type { ArtifactPanel } from './components/artifacts/ArtifactPanel';
 import type { WebShellSettingsOptions } from './settings';
 import type { WebShellModelManagementOptions } from './modelManagement';
@@ -61,6 +63,59 @@ import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+
+vi.mock('./components/managed/ManagedSessionsPage', async () => {
+  const React = await import('react');
+  const { createPortal } = await import('react-dom');
+  return {
+    ManagedSessionsPage: (props: {
+      sessionId?: string;
+      onSelectSession: (id: string | undefined) => void;
+      navigationTarget?: HTMLElement | null;
+      interactive?: boolean;
+    }) => {
+      const [draft, setDraft] = React.useState('');
+      return (
+        <section
+          data-testid="managed-conversation"
+          data-session={props.sessionId ?? 'new'}
+          data-interactive={props.interactive}
+        >
+          <input
+            aria-label="Managed draft"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          {props.navigationTarget &&
+            createPortal(
+              <nav aria-label="Managed sessions">
+                <button
+                  onClick={() => props.onSelectSession('managed-history')}
+                >
+                  Managed history
+                </button>
+              </nav>,
+              props.navigationTarget,
+            )}
+        </section>
+      );
+    },
+  };
+});
+
+type McpAppMessageHost = Parameters<
+  typeof import('./hooks/useMcpAppMessages').useMcpAppMessages
+>[0];
+const mcpAppMessageHost = vi.hoisted(() => ({
+  current: undefined as McpAppMessageHost | undefined,
+}));
+vi.mock('./hooks/useMcpAppMessages', () => ({
+  useMcpAppMessages: (host: McpAppMessageHost) => {
+    mcpAppMessageHost.current = host;
+    return { context: undefined, review: null };
+  },
+}));
 
 type StreamingState = 'idle' | 'responding';
 
@@ -1581,6 +1636,8 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
 
 // Render DialogShell as an observable container so tests can detect an open
 // sub-dialog (model picker, approval-mode picker) via [data-testid="dialog-shell"].
+// It also carries the real component's [data-web-shell-dialog] marker, which
+// the drawer's touch-scroll blocker keys its dialog exemption off.
 vi.mock('./components/dialogs/DialogShell', async () => {
   const React = await import('react');
   return {
@@ -1592,6 +1649,7 @@ vi.mock('./components/dialogs/DialogShell', async () => {
         'div',
         {
           'data-testid': 'dialog-shell',
+          'data-web-shell-dialog': '',
           ...(typeof props.title === 'string'
             ? { 'data-dialog-title': props.title }
             : {}),
@@ -1646,6 +1704,8 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       projectFeaturesEnabled?: boolean;
       canOpenSessionsOverview?: boolean;
       canOpenSplitView?: boolean;
+      sessionContent?: ReactNode;
+      sessionHeader?: ReactNode;
     }) => {
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
@@ -1668,6 +1728,8 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           ),
           'data-can-open-split-view': String(Boolean(props.canOpenSplitView)),
         },
+        props.sessionHeader,
+        props.sessionContent,
         React.createElement(
           'button',
           {
@@ -2058,7 +2120,21 @@ vi.doMock('./components/panels/TodoPanel', async () => {
   };
 });
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
-mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
+vi.doMock('./components/dialogs/ApprovalModeDialog', async () => {
+  const React = await import('react');
+  return {
+    ApprovalModeDialog: (props: { onSelect: (mode: string) => void }) =>
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          'data-testid': 'select-local-approval-yolo',
+          onClick: () => props.onSelect('yolo'),
+        },
+        'select Local yolo',
+      ),
+  };
+});
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/tools/ToolsManagerPage', 'ToolsManagerPage');
@@ -11743,6 +11819,7 @@ function makePlanPermissionBlock() {
 }
 
 beforeEach(() => {
+  mcpAppMessageHost.current = undefined;
   testState.turnChoices = [];
   testState.turnLocations.clear();
   testState.provisionalTurns = [];
@@ -11776,6 +11853,7 @@ beforeEach(() => {
     })),
   });
   mockConnection.sessionId = 'session-1';
+  mockConnection.clientId = 'client-1';
   mockConnection.sessionContext = undefined;
   mockConnection.context = undefined;
   mockConnection.workspaceCwd = '/tmp/project';
@@ -16707,7 +16785,7 @@ describe('App session callbacks', () => {
     expect(container.textContent).not.toContain('qwen-plus::hybrid');
   });
 
-  it('wires the composer context ring from the connection and opens /context on click', async () => {
+  it('wires the composer context ring from the connection and opens the details panel on click', async () => {
     const usageConnection = mockConnection as typeof mockConnection & {
       tokenCount?: number;
       contextWindow?: number;
@@ -16715,6 +16793,10 @@ describe('App session callbacks', () => {
     usageConnection.tokenCount = 338;
     usageConnection.contextWindow = 1000;
 
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
     renderApp();
     await flush();
 
@@ -16723,15 +16805,45 @@ describe('App session callbacks', () => {
     );
     expect(testState.latestChatEditorProps?.tokenCount).toBe(338);
     expect(testState.latestChatEditorProps?.contextWindow).toBe(1000);
+    // The main composer always has a details panel, so its ring never falls
+    // back to posting a snapshot card into the transcript.
+    expect(testState.latestChatEditorProps?.onShowContextUsage).toBeUndefined();
 
     await act(async () => {
-      testState.latestChatEditorProps?.onShowContextUsage?.();
+      testState.latestChatEditorProps?.onOpenContextUsage?.();
     });
     await flush();
 
     expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
-      detail: false,
+      detail: true,
+      silent: true,
     });
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('opens the details panel from a transcript context card', async () => {
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
+    renderApp();
+    await flush();
+
+    const onShowContextDetail = (
+      testState.latestMessageListProps as unknown as {
+        onShowContextDetail?: () => void;
+      } | null
+    )?.onShowContextDetail;
+    expect(onShowContextDetail).toBeTypeOf('function');
+
+    await act(async () => onShowContextDetail!());
+    await flush();
+
+    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
   });
 
   it.each(['main', 'split'] as const)(
@@ -16766,7 +16878,7 @@ describe('App session callbacks', () => {
     },
   );
 
-  it('updates and removes the host context usage callback without changing snapshots', async () => {
+  it('updates and removes the host context usage callback', async () => {
     const onContextUsageOpen = vi.fn();
     const replacement = vi.fn();
     const { rerender } = renderApp({ onContextUsageOpen });
@@ -16778,12 +16890,7 @@ describe('App session callbacks', () => {
     );
     expect(replacement).toHaveBeenCalledExactlyOnceWith('session-1');
     expect(onContextUsageOpen).not.toHaveBeenCalled();
-    await act(async () =>
-      testState.latestChatEditorProps!.onShowContextUsage!(),
-    );
-    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
-      detail: false,
-    });
+    expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
     expect(replacement).toHaveBeenCalledTimes(1);
     mockSessionActions.getContextUsage.mockClear();
     rerender({});
@@ -16895,7 +17002,7 @@ describe('App session callbacks', () => {
       await flush();
       expect(testState.latestChatEditorProps?.tokenCount).toBe(23_000);
       expect(testState.latestChatEditorProps?.contextWindow).toBe(131_072);
-      expect(testState.latestChatEditorProps?.onShowContextUsage).toBeTypeOf(
+      expect(testState.latestChatEditorProps?.onOpenContextUsage).toBeTypeOf(
         'function',
       );
 
@@ -16906,7 +17013,7 @@ describe('App session callbacks', () => {
       expect(testState.latestChatEditorProps?.tokenCount).toBe(0);
       expect(testState.latestChatEditorProps?.contextWindow).toBe(0);
       expect(
-        testState.latestChatEditorProps?.onShowContextUsage,
+        testState.latestChatEditorProps?.onOpenContextUsage,
       ).toBeUndefined();
 
       mockConnection.status = 'connected';
@@ -16914,7 +17021,7 @@ describe('App session callbacks', () => {
       await flush();
       expect(testState.latestChatEditorProps?.tokenCount).toBe(23_000);
       expect(testState.latestChatEditorProps?.contextWindow).toBe(131_072);
-      expect(testState.latestChatEditorProps?.onShowContextUsage).toBeTypeOf(
+      expect(testState.latestChatEditorProps?.onOpenContextUsage).toBeTypeOf(
         'function',
       );
     } finally {
@@ -17014,6 +17121,716 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="chat-context-header"]'),
     ).toBeNull();
+  });
+
+  describe('new-task panel regression coverage', () => {
+    const storageKey = 'qwen-code-web-shell-right-panel-state';
+    const draftKey = 'draft\0/tmp/project';
+    const sessionKey = '/tmp/project\0session-1';
+    const filesTab = {
+      id: 'files:project',
+      kind: 'files',
+      title: 'Files',
+      workspaceCwd: '/tmp/project',
+    };
+    const terminalTab = {
+      id: 'terminal:stored',
+      kind: 'terminal',
+      title: 'Terminal',
+      workspaceCwd: '/tmp/project',
+    };
+    function setupDraft(twoWorkspaces = false) {
+      mockConnection.sessionId = undefined;
+      testState.messages = [];
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+          ...(twoWorkspaces
+            ? [
+                {
+                  id: 'other',
+                  cwd: '/tmp/other',
+                  primary: false,
+                  trusted: true,
+                },
+              ]
+            : []),
+        ],
+      } as typeof mockWorkspace.capabilities;
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-1';
+        return { sessionId: 'session-1' };
+      });
+    }
+    function seedDeferredDraft() {
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          v: 1,
+          [draftKey]: {
+            open: true,
+            activeTabId: terminalTab.id,
+            tabs: [filesTab, terminalTab],
+          },
+        }),
+      );
+    }
+    async function submitFirstPrompt() {
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit(
+          'hello',
+          undefined,
+          undefined,
+          editorCommit,
+        );
+        await Promise.resolve();
+      });
+      await flush();
+    }
+
+    it.each([false, true])(
+      'keeps the workspace icon when the composer does not report it (toolbar hidden=%s)',
+      async (hideToolbar) => {
+        setupDraft(hideToolbar);
+        const { container } = renderApp({
+          rightPanel: { items: ['files'] },
+          ...(hideToolbar
+            ? { composerToolbarActions: ['model'] as const }
+            : {}),
+        });
+        await flush();
+        expect(
+          container.querySelector('[data-testid="chat-header-workspace"]'),
+        ).not.toBeNull();
+      },
+    );
+
+    it('honors the host hiding the right-panel header item on the new-task page', async () => {
+      setupDraft();
+      const { container } = renderApp({
+        header: { items: ['title'] },
+        rightPanel: { items: ['files'] },
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="chat-context-header"]'),
+      ).toBeNull();
+    });
+
+    it('does not offer workspace panels until the new-task workspace resolves as trusted', async () => {
+      setupDraft();
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'project', cwd: '/tmp/project', primary: true, trusted: false },
+        ],
+        features: [],
+      } as typeof mockWorkspace.capabilities;
+      const { container, rerender } = renderApp({
+        rightPanel: { items: ['files', 'terminal', 'webPreview'] },
+      });
+      await flush();
+      expect(
+        container.querySelector('button[aria-label="Toggle right panel"]'),
+      ).toBeNull();
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        workspaces: mockWorkspace.capabilities.workspaces.map((entry) => ({
+          ...entry,
+          trusted: true,
+        })),
+      };
+      rerender();
+      await flush();
+      expect(
+        container.querySelector('button[aria-label="Toggle right panel"]'),
+      ).not.toBeNull();
+    });
+
+    it('preserves deferred draft tab order when the first prompt creates a session', async () => {
+      setupDraft();
+      seedDeferredDraft();
+      renderApp({ rightPanel: { items: ['files', 'terminal'] } });
+      await flush();
+      await flush();
+      await submitFirstPrompt();
+      const stored = JSON.parse(
+        window.localStorage.getItem(storageKey) ?? '{}',
+      );
+      expect(
+        stored[sessionKey]?.tabs.map((tab: { kind: string }) => tab.kind),
+      ).toEqual(['files', 'terminal']);
+      expect(stored[draftKey]).toBeUndefined();
+    });
+
+    it('hydrates a deferred terminal after the first prompt without switching sessions', async () => {
+      setupDraft();
+      seedDeferredDraft();
+      const { container, rerender } = renderApp({
+        rightPanel: { items: ['files', 'terminal'] },
+      });
+      await flush();
+      await flush();
+      expect(
+        container.querySelector('[data-terminal-id="terminal:stored"]'),
+      ).toBeNull();
+      await submitFirstPrompt();
+      mockConnection.capabilities.features = ['web_terminal'];
+      rerender();
+      await flush();
+      await flush();
+      expect(
+        container.querySelector('[data-terminal-id="terminal:stored"]'),
+      ).not.toBeNull();
+    });
+
+    it('keeps draft tabs and workspace owners separate when the pending workspace changes', async () => {
+      setupDraft(true);
+      mockConnection.capabilities.features = ['web_terminal'];
+      testState.captureArtifactPanelOnly = true;
+      const { container } = renderApp({
+        rightPanel: { items: ['files', 'terminal'] },
+      });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectWorkspace?.('/tmp/other'),
+      );
+      await flush();
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).toBeNull();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      act(() => testState.latestArtifactPanelProps?.onOpenTerminal?.());
+      await flush();
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'files',
+            workspaceCwd: '/tmp/other',
+          }),
+          expect.objectContaining({
+            kind: 'terminal',
+            workspaceCwd: '/tmp/other',
+          }),
+        ]),
+      );
+      const stored = JSON.parse(
+        window.localStorage.getItem(storageKey) ?? '{}',
+      );
+      expect(stored[draftKey]?.tabs).toContainEqual(
+        expect.objectContaining({
+          kind: 'files',
+          workspaceCwd: '/tmp/project',
+        }),
+      );
+      expect(stored['draft\0/tmp/other']?.tabs).toContainEqual(
+        expect.objectContaining({ kind: 'files', workspaceCwd: '/tmp/other' }),
+      );
+    });
+
+    it('retains twenty real session panel states while adding a workspace draft', async () => {
+      setupDraft();
+      const sessions = Object.fromEntries(
+        Array.from({ length: 20 }, (_, index) => [
+          `/tmp/project\0session-${index}`,
+          { open: true, activeTabId: filesTab.id, tabs: [filesTab] },
+        ]),
+      );
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({ v: 1, ...sessions }),
+      );
+      const { container } = renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      const stored = JSON.parse(
+        window.localStorage.getItem(storageKey) ?? '{}',
+      );
+      for (const key of Object.keys(sessions))
+        expect(stored[key]).toBeDefined();
+      expect(stored[draftKey]).toBeDefined();
+    });
+
+    it('retains session capacity across mixed-store reloads and evicts only the oldest draft', async () => {
+      setupDraft(true);
+      const sessions = Object.fromEntries(
+        Array.from({ length: 20 }, (_, index) => [
+          `/tmp/project\0session-${index}`,
+          { open: true, activeTabId: filesTab.id, tabs: [filesTab] },
+        ]),
+      );
+      const drafts = Object.fromEntries(
+        Array.from({ length: 19 }, (_, index) => [
+          `draft\0/tmp/draft-${index}`,
+          { open: false, activeTabId: null, tabs: [] },
+        ]),
+      );
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          v: 1,
+          ...sessions,
+          ...drafts,
+          [draftKey]: {
+            open: true,
+            activeTabId: filesTab.id,
+            tabs: [filesTab],
+          },
+        }),
+      );
+      const first = renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      first.unmount();
+      const { container } = renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).not.toBeNull();
+      for (const key of Object.keys(sessions))
+        expect(
+          JSON.parse(window.localStorage.getItem(storageKey) ?? '{}')[key],
+        ).toBeDefined();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectWorkspace?.('/tmp/other'),
+      );
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      const stored = JSON.parse(
+        window.localStorage.getItem(storageKey) ?? '{}',
+      );
+      for (const key of Object.keys(sessions))
+        expect(stored[key]).toBeDefined();
+      expect(
+        Object.keys(stored).filter((key) => key.startsWith('draft\0')),
+      ).toHaveLength(20);
+      expect(stored['draft\0/tmp/draft-0']).toBeUndefined();
+      expect(stored['draft\0/tmp/other']).toBeDefined();
+    });
+
+    it('does not consume a workspace draft when selecting an earlier standalone allocation', async () => {
+      setupDraft();
+      mockConnection.sessionContext = { kind: 'standalone' };
+      mockWorkspace.capabilities.features = ['standalone_sessions_v1'];
+      const { container, rerender } = renderApp({
+        rightPanel: { items: ['files'] },
+      });
+      await flush();
+      await submitFirstPrompt();
+      expect(mockConnection.sessionId).toBe('session-1');
+      mockConnection.sessionId = undefined;
+      mockConnection.sessionContext = undefined;
+      rerender();
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      expect(
+        JSON.parse(window.localStorage.getItem(storageKey) ?? '{}')[draftKey],
+      ).toBeDefined();
+      mockConnection.sessionId = 'session-1';
+      mockConnection.sessionContext = { kind: 'standalone' };
+      rerender();
+      await flush();
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).toBeNull();
+      expect(
+        JSON.parse(window.localStorage.getItem(storageKey) ?? '{}')[draftKey],
+      ).toBeDefined();
+    });
+
+    it('retains the Files panel width when the draft becomes the first session', async () => {
+      setupDraft();
+      testState.captureArtifactPanelOnly = true;
+      vi.spyOn(
+        HTMLElement.prototype,
+        'getBoundingClientRect',
+      ).mockImplementation(function () {
+        return this.dataset['testid'] === 'chat-pane-container'
+          ? new DOMRect(0, 0, 1200, 800)
+          : new DOMRect();
+      });
+      const { container } = renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      await flush();
+      const width = testState.latestArtifactPanelProps?.panelWidth;
+      expect(width).toBeGreaterThanOrEqual(740);
+      await submitFirstPrompt();
+      expect(testState.latestArtifactPanelProps?.panelWidth).toBe(width);
+    });
+
+    it('retains fullscreen when the draft becomes the first session', async () => {
+      setupDraft();
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          v: 1,
+          [draftKey]: {
+            open: true,
+            activeTabId: filesTab.id,
+            tabs: [filesTab],
+          },
+        }),
+      );
+      testState.captureArtifactPanelOnly = true;
+      renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      act(() => testState.latestArtifactPanelProps?.onToggleFullscreen?.());
+      expect(testState.latestArtifactPanelProps?.fullscreen).toBe(true);
+      await submitFirstPrompt();
+      expect(testState.latestArtifactPanelProps?.fullscreen).toBe(true);
+    });
+  });
+
+  it('shows a reduced chat header on the empty new-task page', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'other', cwd: '/tmp/other', primary: false, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp({
+      header: {
+        showMobileAccess: true,
+        items: [
+          'title',
+          'environment',
+          'rightPanel',
+          'tokenUsage',
+          'contextUsage',
+        ],
+      },
+      rightPanel: { items: ['files', 'terminal', 'webPreview'] },
+    });
+    await flush();
+
+    const header = container.querySelector(
+      '[data-testid="chat-context-header"]',
+    );
+    expect(header).not.toBeNull();
+    // The composer below already names the workspace, so the chip is hidden.
+    expect(
+      header?.querySelector('[data-testid="chat-header-workspace"]'),
+    ).toBeNull();
+    // Session-scoped entries stay hidden until a session exists.
+    expect(header?.textContent).not.toContain('New session');
+    expect(
+      header?.querySelector(
+        'button[aria-label="Toggle environment information"]',
+      ),
+    ).toBeNull();
+    expect(
+      header?.querySelector('button[aria-label="Session token usage"]'),
+    ).toBeNull();
+    expect(
+      header?.querySelector('button[aria-label="Context Usage"]'),
+    ).toBeNull();
+    // Daemon- and workspace-level entries remain.
+    expect(
+      header?.querySelector('[aria-label="Mobile access"]'),
+    ).not.toBeNull();
+    expect(
+      header?.querySelector('button[aria-label="Toggle right panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('hides the new-task header when nothing workspace-scoped is available', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]'),
+    ).toBeNull();
+  });
+
+  it('offers only workspace-scoped right panel entries on the empty new-task page', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockConnection.capabilities.features = ['web_terminal'];
+    const { container } = renderApp({
+      rightPanel: {
+        items: [
+          'files',
+          'review',
+          'sideTask',
+          'terminal',
+          'webPreview',
+          'trajectory',
+        ],
+      },
+    });
+    await flush();
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+
+    const actions = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    );
+    const labels = actions.map((button) => button.textContent ?? '');
+    expect(labels.some((text) => text.includes('Files'))).toBe(true);
+    expect(labels.some((text) => text.includes('Web preview'))).toBe(true);
+    expect(labels.some((text) => text.includes('Terminal'))).toBe(true);
+    // Session-scoped entries stay hidden on the new-task page.
+    expect(labels.some((text) => text.includes('Changes'))).toBe(false);
+    expect(actions).toHaveLength(3);
+  });
+
+  it('keeps the empty new-task page headerless for custom header hosts', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    const renderChatHeader = vi.fn(() => (
+      <header data-testid="custom-chat-header">Custom session header</header>
+    ));
+    const { container } = renderApp({ renderChatHeader });
+    await flush();
+
+    expect(renderChatHeader).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="custom-chat-header"]'),
+    ).toBeNull();
+  });
+
+  it('migrates the new-task panel into the session the first prompt creates', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'project-workspace',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-1';
+      return { sessionId: 'session-1' };
+    });
+    const { container } = renderApp({ rightPanel: { items: ['files'] } });
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      )
+        .find((button) => button.textContent?.includes('Files'))
+        ?.click();
+    });
+    expect(
+      testState.latestArtifactPanelProps?.tabs?.some(
+        (tab: { kind: string }) => tab.kind === 'files',
+      ),
+    ).toBe(true);
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        editorCommit,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    // The panel carries into the created session...
+    expect(
+      testState.latestArtifactPanelProps?.tabs?.some(
+        (tab: { kind: string }) => tab.kind === 'files',
+      ),
+    ).toBe(true);
+    // ...and the workspace's draft entry is gone from storage.
+    const stored = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    );
+    expect(Object.keys(stored).some((key) => key.startsWith('draft'))).toBe(
+      false,
+    );
+    expect(Object.keys(stored).some((key) => key.endsWith('session-1'))).toBe(
+      true,
+    );
+  });
+
+  it('restores the new-task panel across a reload', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'project-workspace',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const first = renderApp({ rightPanel: { items: ['files'] } });
+    await flush();
+
+    act(() => {
+      first.container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      Array.from(
+        first.container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      )
+        .find((button) => button.textContent?.includes('Files'))
+        ?.click();
+    });
+    await flush();
+    first.unmount();
+
+    const second = renderApp({ rightPanel: { items: ['files'] } });
+    await flush();
+    await flush();
+
+    expect(
+      second.container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.tabs).toContainEqual(
+      expect.objectContaining({ kind: 'files' }),
+    );
+  });
+
+  it('keeps the new-task panel across a switch to another session and back', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'project-workspace',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['files'] },
+    });
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      )
+        .find((button) => button.textContent?.includes('Files'))
+        ?.click();
+    });
+    await flush();
+
+    // Switching to an existing session is not a materialization: the session
+    // shows its own (empty) panel and the draft stays stored.
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).toBeNull();
+
+    mockConnection.sessionId = undefined;
+    rerender();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.tabs).toContainEqual(
+      expect.objectContaining({ kind: 'files' }),
+    );
   });
 
   it('opens environment information without restoring composer Git information', () => {
@@ -17196,7 +18013,7 @@ describe('App session callbacks', () => {
     expect(testState.latestArtifactPanelProps?.onReferenceFile).toBeUndefined();
   });
 
-  it('opens one files tab per workspace when configured', () => {
+  it('opens and selects one files tab from the header folder', () => {
     mockWorkspace.capabilities = {
       workspaceCwd: '/tmp/project',
       workspaces: [
@@ -17210,16 +18027,12 @@ describe('App session callbacks', () => {
     } as typeof mockWorkspace.capabilities;
     testState.captureArtifactPanelOnly = true;
     const { container } = renderApp({ rightPanel: { items: ['files'] } });
-    act(() =>
-      container
-        .querySelector<HTMLButtonElement>(
-          'button[aria-label="Toggle right panel"]',
-        )
-        ?.click(),
-    );
-    expect(testState.latestArtifactPanelProps?.onOpenFiles).toBeDefined();
-    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
-    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+    const folder = container.querySelector<HTMLButtonElement>(
+      'button[data-testid="chat-header-workspace"]',
+    )!;
+    expect(folder).not.toBeNull();
+    act(() => folder.click());
+    act(() => folder.click());
     expect(testState.latestArtifactPanelProps?.tabs).toEqual([
       expect.objectContaining({
         kind: 'files',
@@ -17248,6 +18061,21 @@ describe('App session callbacks', () => {
     ]);
     expect(testState.latestArtifactPanelProps?.tabs[1]).not.toHaveProperty(
       'previewContent',
+    );
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[1]?.id,
+    );
+    act(() => folder.click());
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[0]?.id,
+    );
+    act(() => testState.latestArtifactPanelProps?.onClose());
+    testState.latestArtifactPanelProps = null;
+    act(() => folder.click());
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[0]?.id,
     );
   });
 
@@ -17291,6 +18119,9 @@ describe('App session callbacks', () => {
       const { container } = renderApp({
         rightPanel: { items: reason === 'disabled' ? ['review'] : ['files'] },
       });
+      expect(
+        container.querySelector('button[data-testid="chat-header-workspace"]'),
+      ).toBeNull();
       act(() =>
         container
           .querySelector<HTMLButtonElement>(
@@ -25740,6 +26571,501 @@ describe('App session callbacks', () => {
     });
   });
 
+  describe('MCP App prompt admission', () => {
+    function submission(controller = new AbortController()) {
+      const owner = mcpAppMessageHost.current!.captureOwner();
+      return {
+        signal: controller.signal,
+        isCurrent: () => owner.isCurrent(),
+        onDispatched: vi.fn(),
+        onAdmitted: vi.fn(),
+      } satisfies McpAppPromptSubmission;
+    }
+
+    it('runs host preparation and passes the real receipt without waiting for the turn or touching the draft', async () => {
+      const turn = deferred<void>();
+      const prepareSubmit = vi.fn(async () => ({
+        prompt: 'prepared analysis',
+      }));
+      const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+      mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+        options.onAdmissionStarted();
+        options.beforeDispatch?.('client-1');
+        options.onAdmitted({ promptId: 'accepted-app-prompt' });
+        return turn.promise;
+      });
+      renderApp({ prepareSubmit, onSubmitBefore });
+      await flush();
+      const controller = new AbortController();
+      const request = submission(controller);
+      let result!: Promise<unknown>;
+      act(() => {
+        result = mcpAppMessageHost.current!.submit(
+          'Analyze selected failures',
+          request,
+        );
+      });
+      await flush();
+
+      expect(prepareSubmit).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        prompt: 'Analyze selected failures',
+        inputAnnotations: [],
+        source: 'mcp-app',
+      });
+      expect(onSubmitBefore).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        prompt: 'prepared analysis',
+        source: 'mcp-app',
+      });
+      expect(request.onDispatched).toHaveBeenCalledOnce();
+      expect(request.onAdmitted).toHaveBeenCalledWith({
+        promptId: 'accepted-app-prompt',
+      });
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+        'prepared analysis',
+        expect.objectContaining({
+          optimisticUserMessage: undefined,
+          source: 'mcp-app',
+        }),
+      );
+      expect(testState.prompt).toBe('hello');
+      expect(editorClear).not.toHaveBeenCalled();
+      expect(editorCommit).not.toHaveBeenCalled();
+      expect(mockFollowup.clear).not.toHaveBeenCalled();
+      controller.abort();
+      expect(mockSessionActions.cancel).not.toHaveBeenCalled();
+      await act(async () => {
+        turn.resolve();
+        await result;
+      });
+    });
+
+    it.each([
+      'abort',
+      'owner',
+      'recovery',
+      'client',
+      'session',
+      'write-block',
+    ] as const)(
+      'does not dispatch after %s invalidates an asynchronous preparation',
+      async (change) => {
+        const prepared = deferred<void>();
+        const prepareSubmit = vi.fn(() => prepared.promise);
+        const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+        const { rerender } = renderApp({ prepareSubmit, onSubmitBefore });
+        await flush();
+        const controller = new AbortController();
+        const request = submission(controller);
+        let result!: Promise<unknown>;
+        act(() => {
+          result = mcpAppMessageHost.current!.submit(
+            'Analyze failures',
+            request,
+          );
+        });
+        expect(prepareSubmit).toHaveBeenCalledOnce();
+        act(() => {
+          if (change === 'abort') controller.abort();
+          if (change === 'owner') testState.ownerVersion += 1;
+          if (change === 'recovery') testState.recoveryVersion += 1;
+          if (change === 'client') mockConnection.clientId = 'client-2';
+          if (change === 'session') mockConnection.sessionId = 'session-2';
+          if (change === 'write-block') mockConnection.loadingTranscript = true;
+          rerender({ prepareSubmit, onSubmitBefore });
+        });
+        if (change === 'write-block') {
+          act(() => {
+            mockConnection.loadingTranscript = false;
+            rerender({ prepareSubmit, onSubmitBefore });
+          });
+        }
+        await act(async () => {
+          prepared.resolve();
+          await result;
+        });
+
+        expect(onSubmitBefore).not.toHaveBeenCalled();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(request.onDispatched).not.toHaveBeenCalled();
+        expect(request.onAdmitted).not.toHaveBeenCalled();
+        expect(editorClear).not.toHaveBeenCalled();
+        expect(editorCommit).not.toHaveBeenCalled();
+        expect(mockFollowup.clear).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['abort', 'recovery', 'client'] as const)(
+      'checks %s again at the final transport boundary',
+      async (change) => {
+        const ready = deferred<void>();
+        const daemonDispatch = vi.fn();
+        mockSessionActions.sendPrompt.mockImplementationOnce(
+          async (_text, options) => {
+            await ready.promise;
+            options.onAdmissionStarted();
+            options.beforeDispatch?.('client-1');
+            daemonDispatch();
+          },
+        );
+        const { rerender } = renderApp();
+        await flush();
+        const controller = new AbortController();
+        const request = submission(controller);
+        let result!: Promise<unknown>;
+        act(() => {
+          result = mcpAppMessageHost.current!.submit(
+            'Analyze failures',
+            request,
+          );
+        });
+        await flush();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+        act(() => {
+          if (change === 'abort') controller.abort();
+          if (change === 'recovery') testState.recoveryVersion += 1;
+          if (change === 'client') mockConnection.clientId = 'client-2';
+          rerender();
+        });
+        await act(async () => {
+          ready.resolve();
+          await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+        });
+        expect(daemonDispatch).not.toHaveBeenCalled();
+        expect(request.onDispatched).not.toHaveBeenCalled();
+        expect(
+          sessionCatalogController.promptAdmissionUncertain,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['prepareSubmit', 'onSubmitBefore'] as const)(
+      'propagates %s rejection without dispatching or restoring App text into the draft',
+      async (hook) => {
+        const rejected = vi.fn().mockRejectedValue(new Error('Host refused'));
+        renderApp({ [hook]: rejected, onToast: vi.fn() });
+        await flush();
+        const request = submission();
+        await act(async () => {
+          await expect(
+            mcpAppMessageHost.current!.submit('Analyze failures', request),
+          ).rejects.toThrow('Host refused');
+        });
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(request.onDispatched).not.toHaveBeenCalled();
+        expect(request.onAdmitted).not.toHaveBeenCalled();
+        expect(testState.prompt).toBe('hello');
+        expect(editorClear).not.toHaveBeenCalled();
+        expect(editorCommit).not.toHaveBeenCalled();
+        expect(mockFollowup.clear).not.toHaveBeenCalled();
+      },
+    );
+
+    describe.each(['initial', 'retry'] as const)(
+      '%s SDK dispatch',
+      (attempt) => {
+        it.each(['sdk-client', 'rpc-cancel', 'owner-recovery'] as const)(
+          'refuses transport after %s changes beyond the admission-start notification',
+          async (change) => {
+            const ready = deferred<void>();
+            const daemonDispatch = vi.fn();
+            let dispatchClientId: string | undefined = 'client-1';
+            mockSessionActions.sendPrompt.mockImplementationOnce(
+              async (_text, options) => {
+                options.onAdmissionStarted();
+                if (attempt === 'retry') {
+                  options.beforeDispatch(dispatchClientId);
+                  daemonDispatch();
+                }
+                await ready.promise;
+                options.beforeDispatch(dispatchClientId);
+                daemonDispatch();
+                options.onAdmitted({ promptId: 'must-not-be-admitted' });
+              },
+            );
+            const { rerender } = renderApp();
+            await flush();
+            const controller = new AbortController();
+            const request = submission(controller);
+            let result!: Promise<unknown>;
+            act(() => {
+              result = mcpAppMessageHost.current!.submit(
+                'Analyze failures',
+                request,
+              );
+            });
+            await flush();
+            const sentAttempts = attempt === 'retry' ? 1 : 0;
+            expect(request.onDispatched).toHaveBeenCalledTimes(sentAttempts);
+            expect(daemonDispatch).toHaveBeenCalledTimes(sentAttempts);
+            act(() => {
+              if (change === 'sdk-client')
+                dispatchClientId = 'client-recovered';
+              if (change === 'rpc-cancel') controller.abort();
+              if (change === 'owner-recovery') testState.recoveryVersion += 1;
+              rerender();
+            });
+            expect(mockConnection.clientId).toBe('client-1');
+            await act(async () => {
+              ready.resolve();
+              await expect(result).rejects.toMatchObject({
+                name: 'AbortError',
+              });
+            });
+            expect(daemonDispatch).toHaveBeenCalledTimes(sentAttempts);
+            expect(request.onAdmitted).not.toHaveBeenCalled();
+            expect(
+              sessionCatalogController.promptAdmissionUncertain,
+            ).not.toHaveBeenCalled();
+            expect(testState.prompt).toBe('hello');
+          },
+        );
+      },
+    );
+
+    it('permits each SDK dispatch with the same live client and notifies each actual attempt', async () => {
+      const daemonDispatch = vi.fn();
+      mockSessionActions.sendPrompt.mockImplementationOnce(
+        async (_text, options) => {
+          options.onAdmissionStarted();
+          options.beforeDispatch('client-1');
+          daemonDispatch();
+          await Promise.resolve();
+          options.beforeDispatch('client-1');
+          daemonDispatch();
+          options.onAdmitted({ promptId: 'accepted-retry' });
+        },
+      );
+      renderApp();
+      await flush();
+      const request = submission();
+      await act(async () => {
+        await mcpAppMessageHost.current!.submit('Analyze failures', request);
+      });
+      expect(daemonDispatch).toHaveBeenCalledTimes(2);
+      expect(request.onDispatched).toHaveBeenCalledTimes(2);
+      expect(request.onAdmitted).toHaveBeenCalledWith({
+        promptId: 'accepted-retry',
+      });
+    });
+
+    it.each(['streaming', 'active', 'goal'] as const)(
+      'refuses a known %s session without enqueuing the App text',
+      async (busy) => {
+        if (busy === 'streaming') testState.streamingState = 'responding';
+        if (busy === 'active') testState.sessionHasActivePrompt = true;
+        if (busy === 'goal') mockConnection.goalState = activeGoalSnapshot();
+        const prepareSubmit = vi.fn();
+        renderApp({ prepareSubmit });
+        await flush();
+        await expect(
+          mcpAppMessageHost.current!.submit('Analyze failures', submission()),
+        ).rejects.toThrow();
+        expect(prepareSubmit).not.toHaveBeenCalled();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+        expect(testState.prompt).toBe('hello');
+      },
+    );
+
+    it('leaves dispatch without a receipt distinguishable from admission', async () => {
+      mockSessionActions.sendPrompt.mockImplementationOnce(
+        async (_text, options) => {
+          options.onAdmissionStarted();
+          options.beforeDispatch?.('client-1');
+          throw new TypeError('Lost response');
+        },
+      );
+      renderApp();
+      await flush();
+      const request = submission();
+      await act(async () => {
+        await expect(
+          mcpAppMessageHost.current!.submit('Analyze failures', request),
+        ).rejects.toThrow('Lost response');
+      });
+      expect(request.onDispatched).toHaveBeenCalledOnce();
+      expect(request.onAdmitted).not.toHaveBeenCalled();
+      expect(
+        sessionCatalogController.promptAdmissionUncertain,
+      ).toHaveBeenCalledWith('/tmp/project');
+      expect(testState.prompt).toBe('hello');
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+
+    it('does not take an accepted App prompt back into an empty composer on cancellation', async () => {
+      const turn = deferred<void>();
+      mockSessionActions.sendPrompt.mockImplementationOnce((text, options) => {
+        testState.blocks = [{ id: 'app-user', kind: 'user', text }];
+        options.onAdmissionStarted();
+        options.beforeDispatch?.('client-1');
+        options.onAdmitted({ promptId: 'app-prompt' });
+        return turn.promise;
+      });
+      mockSessionActions.cancel.mockImplementationOnce(async () =>
+        turn.resolve(),
+      );
+      testState.prompt = '';
+      renderApp();
+      await flush();
+      let result!: Promise<unknown>;
+      act(() => {
+        result = mcpAppMessageHost.current!.submit(
+          'Analyze failures',
+          submission(),
+        );
+      });
+      await flush();
+      await act(async () => {
+        testState.latestChatEditorProps!.onCancel!();
+        await result;
+        for (const listener of testState.promptSettledListeners) {
+          listener({
+            sessionId: 'session-1',
+            promptId: 'app-prompt',
+            outcome: 'cancelled',
+            originatorClientId: 'client-1',
+          });
+        }
+      });
+      await flush();
+      expect(testState.prompt).toBe('');
+      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+    });
+
+    it.each(['working_directory_missing', 'working_directory_compromised'])(
+      'refuses App messages in a session with %s',
+      async (errorCode) => {
+        const prepareSubmit = vi.fn();
+        mockConnection.standaloneSession = { errorCode };
+        renderApp({ prepareSubmit });
+        await flush();
+        await expect(
+          mcpAppMessageHost.current!.submit('Analyze failures', submission()),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+        expect(prepareSubmit).not.toHaveBeenCalled();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['veto', 'rejected'])(
+      'preserves the earlier composer retry after an App request is %s',
+      async (reason) => {
+        mockSessionActions.sendPrompt.mockImplementationOnce(
+          async (text, options) => {
+            testState.blocks = [{ id: 'composer-user', kind: 'user', text }];
+            options.onAdmissionStarted();
+            options.onAdmitted({ promptId: 'composer-prompt' });
+          },
+        );
+        const { rerender } = renderApp();
+        await flush();
+        const files = [
+          {
+            name: 'failure.log',
+            media_type: 'text/plain',
+            text: 'original evidence',
+          },
+        ];
+        await act(async () => {
+          testState.latestChatEditorProps!.onSubmit(
+            'original composer text',
+            undefined,
+            files,
+          );
+        });
+        await flush();
+        act(() => {
+          testState.blocks = [
+            ...testState.blocks,
+            {
+              id: 'composer-error',
+              kind: 'error',
+              source: 'turn_error',
+              message: 'Network error',
+            },
+          ];
+          rerender();
+        });
+        await flush();
+        mockSessionActions.sendPrompt.mockImplementationOnce(
+          async (_text, options) => {
+            options.onAdmissionStarted();
+            if (reason === 'veto')
+              throw new PromptDispatchCancelledError('Source changed');
+            options.beforeDispatch('client-1');
+            throw new DaemonHttpError(403, {}, 'Denied');
+          },
+        );
+        await act(async () => {
+          await expect(
+            mcpAppMessageHost.current!.submit('App analysis', submission()),
+          ).rejects.toThrow();
+        });
+        expect(
+          sessionCatalogController.promptAdmissionUncertain,
+        ).not.toHaveBeenCalled();
+        await act(async () => {
+          window.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'y', ctrlKey: true }),
+          );
+        });
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(3);
+        expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+          'original composer text',
+          expect.objectContaining({ files, retry: true }),
+        );
+      },
+    );
+
+    it('does not retry an earlier composer prompt for a later App turn error', async () => {
+      mockSessionActions.sendPrompt.mockImplementation(
+        async (text, options) => {
+          testState.blocks = [
+            ...testState.blocks,
+            { id: `user-${text}`, kind: 'user', text },
+          ];
+          options.onAdmissionStarted();
+          options.beforeDispatch?.('client-1');
+          options.onAdmitted({ promptId: `prompt-${text}` });
+        },
+      );
+      const { container, rerender } = renderApp();
+      await flush();
+      await clickSubmit(container);
+      await flush();
+      testState.prompt = 'unfinished draft';
+      await act(async () => {
+        await mcpAppMessageHost.current!.submit(
+          'Analyze failures',
+          submission(),
+        );
+      });
+      act(() => {
+        testState.blocks = [
+          ...testState.blocks,
+          {
+            kind: 'error',
+            source: 'turn_error',
+            id: 'app-error',
+            message: 'Network error',
+          },
+        ];
+        rerender();
+      });
+      await flush();
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'y', ctrlKey: true }),
+        );
+      });
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      expect(testState.prompt).toBe('unfinished draft');
+    });
+  });
+
   it('gates direct submissions and dispatches compatible submit events', async () => {
     const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
     const onSessionChange = vi.fn();
@@ -25758,6 +27084,12 @@ describe('App session callbacks', () => {
       'hello',
       expect.objectContaining({ retry: undefined }),
     );
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.at(-1)?.[1],
+    ).not.toHaveProperty('beforeDispatch');
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.at(-1)?.[1],
+    ).not.toHaveProperty('source');
     expect(editorCommit).toHaveBeenCalledTimes(1);
     expect(editorClear).not.toHaveBeenCalled();
     expect(onSessionChange).toHaveBeenCalledWith({
@@ -35898,6 +37230,51 @@ describe('App session callbacks', () => {
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
+  });
+
+  it('keeps a dialog opened over the drawer touch-scrollable', async () => {
+    // The drawer installs a document-level touchmove blocker whose allowlist
+    // used to cover only [data-sidebar-shell]. Dialogs portal outside that
+    // subtree, so on a phone every dialog opened from the drawer lost touch
+    // scrolling outright — Add Workspace included, which left its confirm
+    // buttons unreachable (#14184). Rotating to landscape closed the drawer
+    // and dropped the blocker, which is why scrolling appeared to come back.
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    const drawer = container.querySelector('[data-sidebar-shell]');
+    expect(drawer).not.toBeNull();
+    expect(document.body.style.overflow).toBe('hidden');
+
+    act(() => {
+      testState.latestChatEditorProps?.onToggleShortcuts?.();
+    });
+    await flush();
+
+    const dialog = container.querySelector('[data-web-shell-dialog]');
+    expect(dialog).not.toBeNull();
+
+    const swipe = (target: EventTarget | null) => {
+      const event = new Event('touchmove', { bubbles: true, cancelable: true });
+      target?.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    expect(swipe(dialog)).toBe(false);
+    // A real phone gesture starts on a descendant of the marker — the panel
+    // itself is not what scrolls — so pin the closest() walk, not just the
+    // marker element.
+    const dialogChild = dialog?.firstElementChild ?? null;
+    expect(dialogChild).not.toBeNull();
+    expect(swipe(dialogChild)).toBe(false);
+    expect(swipe(drawer)).toBe(false);
+    // The page behind the drawer must stay locked.
+    expect(swipe(document.body)).toBe(true);
   });
 
   it('starts a new session from the external shell ref and returns to chat', async () => {
@@ -46213,5 +47590,530 @@ describe('App sidebar toggle shortcut (#5074 rail follow-ups)', () => {
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
+  });
+});
+
+describe('Managed home integration', () => {
+  function autoApprovableLocalPermission() {
+    return makePendingPermissionBlock({
+      options: [
+        {
+          optionId: 'proceed_once',
+          label: 'Allow once',
+          raw: { kind: 'allow_once' },
+        },
+        { optionId: 'cancel', label: 'Reject', raw: { kind: 'reject_once' } },
+      ],
+    });
+  }
+
+  function managedProvider(): ManagedAgentProvider {
+    return {
+      kind: 'java',
+      storageKey: 'managed-test',
+      canCancel: true,
+      acceptsWorkspaceCwd: false,
+      listSessions: vi.fn(),
+      getSession: vi.fn(),
+      getTranscript: vi.fn(),
+      createSession: vi.fn(),
+      submitPrompt: vi.fn(),
+      cancel: vi.fn(),
+      async *subscribeEvents() {
+        yield* [];
+      },
+    };
+  }
+
+  async function chooseBackend(container: HTMLElement, label: string) {
+    const tab = [
+      ...container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((node) => node.textContent === label);
+    expect(tab).toBeTruthy();
+    await act(async () =>
+      tab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      ),
+    );
+    await flush();
+  }
+
+  it('keeps the Local approval-mode dialog usable in Local', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    testState.prompt = '/approval-mode';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).not.toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="select-local-approval-yolo"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: false,
+    });
+    expect(testState.latestChatEditorProps?.currentMode).toBe('yolo');
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+  });
+
+  it('does not restore a Local approval-mode dialog after visiting Managed', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    testState.prompt = '/approval-mode';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).not.toBeNull();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+
+    await chooseBackend(container, 'Managed');
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).toBeNull();
+    await chooseBackend(container, 'Local');
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).toBeNull();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+    expect(testState.blocks).toEqual([]);
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale Local approval-mode callback while Managed is active', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container, rerender } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    const staleModeSelect = testState.latestChatEditorProps?.onSelectMode;
+    expect(staleModeSelect).toBeTypeOf('function');
+    await chooseBackend(container, 'Managed');
+    const permission = autoApprovableLocalPermission();
+    await act(async () => {
+      testState.blocks = [permission];
+      rerender();
+    });
+    await act(async () => staleModeSelect?.('yolo'));
+    await flush();
+    expect({
+      modeCalls: mockSessionActions.setApprovalMode.mock.calls,
+      permissionCalls: mockSessionActions.submitPermission.mock.calls,
+    }).toEqual({ modeCalls: [], permissionCalls: [] });
+
+    await chooseBackend(container, 'Local');
+    expect(testState.blocks).toEqual([permission]);
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+    expect(testState.latestToolApprovalOnConfirm).toBeTypeOf('function');
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+  });
+
+  it('isolates a Local approval-mode dialog across a programmatic backend switch', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container, rerender } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    testState.prompt = '/approval-mode';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).not.toBeNull();
+    await chooseBackend(container, 'Managed');
+    const permission = autoApprovableLocalPermission();
+    await act(async () => {
+      testState.blocks = [permission];
+      rerender();
+    });
+    const select = container.querySelector<HTMLButtonElement>(
+      '[data-testid="select-local-approval-yolo"]',
+    );
+    await act(async () => select?.click());
+    await flush();
+    expect({
+      dialogRetained: select !== null,
+      modeCalls: mockSessionActions.setApprovalMode.mock.calls,
+      permissionCalls: mockSessionActions.submitPermission.mock.calls,
+    }).toEqual({ dialogRetained: false, modeCalls: [], permissionCalls: [] });
+
+    await chooseBackend(container, 'Local');
+    expect(testState.blocks).toEqual([permission]);
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+    expect(testState.latestToolApprovalOnConfirm).toBeTypeOf('function');
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+  });
+
+  it.each(['Local', 'Managed'])(
+    'keeps a Local approval-mode response scoped to the active %s backend',
+    async (backend) => {
+      window.history.replaceState(null, '', '/?managed=0');
+      const pendingMode = deferred<{ mode: string }>();
+      mockSessionActions.setApprovalMode.mockReturnValueOnce(
+        pendingMode.promise,
+      );
+      const { container, rerender } = renderApp({
+        managedAgentProvider: managedProvider(),
+        language: 'en',
+      });
+      await flush();
+      act(() => testState.latestChatEditorProps?.onSelectMode?.('yolo'));
+      expect(mockSessionActions.setApprovalMode).toHaveBeenCalledOnce();
+      if (backend === 'Managed') await chooseBackend(container, 'Managed');
+      const permission = autoApprovableLocalPermission();
+      await act(async () => {
+        testState.blocks = [permission];
+        rerender();
+      });
+      await act(async () => {
+        pendingMode.resolve({ mode: 'yolo' });
+        await pendingMode.promise;
+      });
+      await flush();
+      expect({
+        modeCalls: mockSessionActions.setApprovalMode.mock.calls,
+        permissionCalls: mockSessionActions.submitPermission.mock.calls,
+      }).toEqual({
+        modeCalls: [['yolo', { planMode: false }]],
+        permissionCalls: backend === 'Local' ? [['req-1', 'proceed_once']] : [],
+      });
+      expect(testState.latestChatEditorProps?.currentMode).toBe('yolo');
+
+      if (backend === 'Managed') {
+        await chooseBackend(container, 'Local');
+        expect(testState.latestChatEditorProps?.currentMode).toBe('yolo');
+        expect(testState.blocks).toEqual([permission]);
+        expect(
+          container.querySelector('[data-testid="approval-overlay"]'),
+        ).not.toBeNull();
+        expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+        expect(testState.latestToolApprovalOnConfirm).toBeTypeOf('function');
+        expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each([undefined, 'run_shell_command', 'ask_user_question'])(
+    'keeps Managed Settings open while Local approval is %s',
+    async (toolName) => {
+      window.history.replaceState(null, '', '/?managed=0');
+      testState.blocks = toolName
+        ? [makePendingPermissionBlock({ toolName })]
+        : [];
+      const { container } = renderApp({
+        managedAgentProvider: managedProvider(),
+        language: 'en',
+      });
+      await flush();
+      const keyboardActive = () =>
+        toolName === 'ask_user_question'
+          ? testState.latestAskUserQuestionKeyboardActive
+          : testState.latestToolApprovalKeyboardActive;
+      if (toolName) expect(keyboardActive()).toBe(true);
+
+      await chooseBackend(container, 'Managed');
+      expect(
+        container
+          .querySelector('[data-testid="managed-home"]')
+          ?.getAttribute('aria-hidden'),
+      ).toBeNull();
+      const hiddenApprovalKeyboardActive = keyboardActive();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sidebar-settings"]',
+          )!
+          .click(),
+      );
+      await flush();
+      expect(
+        container
+          .querySelector('[data-testid="inline-panel"]')
+          ?.getAttribute('aria-label'),
+      ).toBe('Settings');
+      expect(
+        container
+          .querySelector('[data-testid="managed-conversation"]')
+          ?.getAttribute('data-interactive'),
+      ).toBe('false');
+      if (toolName) expect(hiddenApprovalKeyboardActive).toBe(false);
+
+      await chooseBackend(container, 'Local');
+      if (toolName) {
+        expect(
+          container.querySelector('[data-testid="inline-panel"]'),
+        ).toBeNull();
+        expect(keyboardActive()).toBe(true);
+      } else {
+        expect(
+          container.querySelector('[data-testid="inline-panel"]'),
+        ).not.toBeNull();
+      }
+      expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+      expect(mockSessionActions.respondToPermission).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mockSessionActions.cancel).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves the Local new-task workspace header while hiding it in Managed', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      header: { items: ['rightPanel'] },
+      rightPanel: { items: ['files'] },
+      language: 'en',
+    });
+    await flush();
+    const workspacePanelToggle = () =>
+      container.querySelector(
+        '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+      );
+    expect(workspacePanelToggle()).toBeNull();
+    await chooseBackend(container, 'Local');
+    expect(workspacePanelToggle()).not.toBeNull();
+    await chooseBackend(container, 'Managed');
+    expect(workspacePanelToggle()).toBeNull();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('puts Managed history in the shell and routes New task without clearing or creating a daemon session', async () => {
+    window.history.replaceState(null, '', '/?managedProvider=java');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBeNull();
+    expect(
+      container.querySelector(
+        '[data-testid="sidebar"] nav[aria-label="Managed sessions"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="sidebar"] [role="tablist"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        '[data-testid="chat-pane-container"] [role="tablist"]',
+      ),
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Managed history')!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-session'),
+    ).toBe('managed-history');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sidebar-settings"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-interactive'),
+    ).toBe('false');
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Managed history')!
+        .click(),
+    );
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-session'),
+    ).toBe('new');
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('preserves a Managed draft and selected history while Local uses its own session actions', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=managed-history',
+    );
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    const input = container.querySelector<HTMLInputElement>(
+      '[aria-label="Managed draft"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Keep managed draft');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await chooseBackend(container, 'Local');
+    expect(
+      container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '0',
+    );
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-interactive'),
+    ).toBe('false');
+    expect(container.querySelector('[data-testid="sidebar"] nav')).toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click(),
+    );
+    await flush();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    await chooseBackend(container, 'Managed');
+    expect(container.querySelector('[aria-label="Managed draft"]')).toBe(input);
+    expect(input.value).toBe('Keep managed draft');
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-interactive'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-session'),
+    ).toBe('managed-history');
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '1',
+    );
+  });
+
+  it('keeps Managed keyboard input from mutating or cancelling the hidden Local session', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    testState.streamingState = 'responding';
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    const input = container.querySelector<HTMLInputElement>(
+      '[aria-label="Managed draft"]',
+    )!;
+    await act(async () => {
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'l',
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'y',
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(mockSessionActions.cancel).not.toHaveBeenCalled();
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps an explicit Local choice on remount and does not change ordinary URLs without a provider', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=0&managedSession=managed-history',
+    );
+    const view = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    expect(
+      view.container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    view.unmount();
+    window.history.replaceState(null, '', '/?host=ordinary');
+    const ordinary = renderApp();
+    await flush();
+    expect(
+      ordinary.container.querySelector('[data-testid="managed-home"]'),
+    ).toBeNull();
+    expect(window.location.search).toBe('?host=ordinary');
   });
 });

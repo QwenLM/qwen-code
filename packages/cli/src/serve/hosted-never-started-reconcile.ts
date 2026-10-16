@@ -46,7 +46,7 @@ type RouteResolution =
 // rejection's message embeds the request URL with its session ids (and a
 // mis-typed logger could leak the bearer token), so only the status/code
 // pair is ever interpolated.
-function rejectionDetail(cause: unknown): string {
+export function rejectionDetail(cause: unknown): string {
   const bag =
     cause !== null && typeof cause === 'object'
       ? (cause as Record<string, unknown>)

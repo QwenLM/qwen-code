@@ -146,7 +146,7 @@ export function useManagedSession(
   const retainSummary = useCallback((incoming: ManagedAgentSessionSummary) => {
     const previous = summaryRef.current;
     const workspace = previous?.workspace;
-    const next =
+    let next =
       previous?.sessionId === incoming.sessionId &&
       workspace &&
       incoming.workspace?.workspaceId === workspace.workspaceId &&
@@ -154,6 +154,17 @@ export function useManagedSession(
         (incoming.workspace.contextRevision ?? 0)
         ? { ...incoming, workspace }
         : incoming;
+    if (
+      previous?.sessionId === incoming.sessionId &&
+      (previous.modelSelection?.revision ?? 0) >
+        (incoming.modelSelection?.revision ?? 0)
+    ) {
+      next = {
+        ...next,
+        modelSelection: previous.modelSelection,
+        modelContext: previous.modelContext,
+      };
+    }
     summaryRef.current = next;
     return next;
   }, []);

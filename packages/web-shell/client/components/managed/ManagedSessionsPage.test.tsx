@@ -21,6 +21,9 @@ const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
   restoreEditorDraft: vi.fn<() => string>(),
   commitAccepted: vi.fn(),
+  editorProps: undefined as
+    | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
+    | undefined,
   client: {
     listSessions: vi.fn(),
     getSession: vi.fn(),
@@ -80,6 +83,7 @@ vi.mock('../ChatEditor', async () => {
       EditorHandle,
       ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
     >((props, ref) => {
+      mocks.editorProps = props;
       const [value, setValue] = useState(
         () => props.composerInput?.text ?? mocks.restoreEditorDraft(),
       );
@@ -123,6 +127,15 @@ vi.mock('../ChatEditor', async () => {
           >
             Send
           </button>
+          {props.isRunning && (
+            <button
+              type="button"
+              disabled={!props.onCancel || props.isPreparing}
+              onClick={props.onCancel}
+            >
+              Stop managed task
+            </button>
+          )}
         </form>
       );
     }),
@@ -252,6 +265,8 @@ describe('ManagedSessionsPage', () => {
     sessionId?: string,
     language: 'en' | 'zh-CN' = 'en',
     managedAgentProvider: ManagedAgentProvider | null = provider,
+    navigationTarget?: HTMLElement | null,
+    interactive = true,
   ) {
     await act(async () => {
       root.render(
@@ -261,12 +276,441 @@ describe('ManagedSessionsPage', () => {
             onSelectSession={onSelect}
             workspaceCwd="/workspace"
             managedAgentProvider={managedAgentProvider ?? undefined}
+            navigationTarget={navigationTarget}
+            interactive={interactive}
           />
         </I18nProvider>,
       );
       await flush();
     });
   }
+
+  it.each(['default', 'auto-edit', 'yolo'] as const)(
+    'shows persisted policy as fixed even on an unbound Session (%s)',
+    async (approvalMode) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', { approvalMode }),
+      );
+      await render('s1');
+      expect(mocks.editorProps?.currentMode).toBe(approvalMode);
+      expect(mocks.editorProps?.availableModes).toEqual([approvalMode]);
+      expect(mocks.editorProps?.modeControlsDisabled).toBe(true);
+      expect(mocks.editorProps?.onSelectMode).toBeUndefined();
+      expect(mocks.editorProps?.visibleToolbarActions).toEqual([
+        'approvalMode',
+        'contextUsage',
+      ]);
+      expect(container.textContent).toContain(
+        'Approval mode is fixed for this task',
+      );
+      await render('s1', 'en', provider, undefined, false);
+      expect(mocks.editorProps?.visibleToolbarActions).toEqual([]);
+    },
+  );
+
+  it('does not claim an approval policy when older Session metadata omits it', async () => {
+    await render('s1');
+    expect(mocks.editorProps?.currentMode).toBe('');
+    expect(mocks.editorProps?.availableModes).toEqual([]);
+    expect(mocks.editorProps?.visibleToolbarActions).toEqual(['contextUsage']);
+    expect(container.textContent).not.toContain(
+      'Approval mode is fixed for this task',
+    );
+  });
+
+  it('shows the actual model and context in the fixed composer and retains them after refresh', async () => {
+    const observation = {
+      modelId: 'actual-old-revision',
+      inputTokens: 250,
+      contextWindowSize: 1000,
+      observedAt: 12,
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { agentId: 'agent-a', modelContext: observation }),
+    );
+    await render('s1');
+    expect(mocks.editorProps?.currentModel).toBe('actual-old-revision');
+    expect(mocks.editorProps?.availableModels).toEqual([
+      { id: 'actual-old-revision', label: 'actual-old-revision' },
+    ]);
+    expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+    expect(mocks.editorProps?.onSelectModel).toBeUndefined();
+    expect(mocks.editorProps?.tokenCount).toBe(250);
+    expect(mocks.editorProps?.contextWindow).toBe(1000);
+    expect(mocks.editorProps?.contextUsageKnown).toBe(true);
+    expect(mocks.editorProps?.contextUsageAlwaysVisible).toBe(true);
+    expect(mocks.editorProps?.onOpenContextUsage).toBeUndefined();
+    expect(mocks.editorProps?.contextUsageControls).toBeUndefined();
+    expect(container.textContent).toContain('The model is fixed for this task');
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render('s1');
+    expect(mocks.editorProps?.currentModel).toBe('actual-old-revision');
+    expect(mocks.editorProps?.tokenCount).toBe(250);
+  });
+
+  it('uses Agent identity without claiming the current preset label is an older Session model', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      modelPresets: [{ agentId: 'agent-a', label: 'today-new-model' }],
+      list: vi.fn(),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { agentId: 'agent-a' }),
+    );
+    await render('s1');
+    expect(mocks.editorProps?.currentModel).toBe('agent-a');
+    expect(mocks.editorProps?.contextUsageKnown).toBe(false);
+    expect(mocks.editorProps?.tokenCount).toBe(0);
+    expect(container.textContent).not.toContain('today-new-model');
+  });
+
+  function switchableSession(extra: Partial<ManagedAgentSessionSummary> = {}) {
+    return summary('s1', {
+      agentId: 'agent-a',
+      workspace: {
+        workspaceId: 'ws',
+        cwdRelative: '.',
+        contextRevision: 1,
+        state: 'ready',
+      },
+      capabilities: {
+        canSend: true,
+        canCancel: false,
+        workspaceTurns: true,
+        modelChange: true,
+      },
+      modelContext: {
+        modelId: 'A',
+        inputTokens: 250,
+        contextWindowSize: 1000,
+        observedAt: 12,
+      },
+      ...extra,
+    });
+  }
+  function modelApi(current: () => ManagedAgentSessionSummary) {
+    provider.modelChange = {
+      queryOptions: vi.fn(async () => ({
+        supported: true,
+        modelSelection: current().modelSelection ?? { revision: 0 },
+        models: [
+          { modelId: 'A', label: 'Published A' },
+          { modelId: 'B', label: 'Published B' },
+        ],
+      })),
+      submit: vi.fn(),
+    };
+    mocks.client.getSession.mockImplementation(async () => current());
+  }
+
+  it('switches only after admission and readback, preserves the draft and blocks a same-frame send', async () => {
+    let session = switchableSession();
+    modelApi(() => session);
+    let acknowledge!: (value: {
+      sessionId: string;
+      modelSelection: { modelId: string; revision: number };
+      replayed: boolean;
+    }) => void;
+    vi.mocked(provider.modelChange!.submit).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    await render('s1');
+    await input('Keep my draft');
+    expect(mocks.editorProps?.modelControlsDisabled).toBe(false);
+    expect(mocks.editorProps?.availableModels).toEqual([
+      { id: 'A', label: 'Published A' },
+      { id: 'B', label: 'Published B' },
+    ]);
+    const submit = mocks.editorProps!.onSubmit;
+    await act(async () => {
+      mocks.editorProps!.onSelectModel!('B');
+      submit('Keep my draft', undefined, undefined, vi.fn());
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(mocks.editorProps?.currentModel).toBe('A');
+    expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+    session = {
+      ...session,
+      modelSelection: { modelId: 'B', revision: 1 },
+      modelContext: undefined,
+    };
+    await act(async () => {
+      acknowledge({
+        sessionId: 's1',
+        modelSelection: { modelId: 'B', revision: 1 },
+        replayed: false,
+      });
+      await flush();
+    });
+    expect(mocks.editorProps?.currentModel).toBe('B');
+    expect(mocks.editorProps?.contextUsageKnown).toBe(false);
+    expect(mocks.editorProps?.contextWindow).toBe(0);
+    expect(container.querySelector('textarea')?.value).toBe('Keep my draft');
+    expect(mocks.commitAccepted).not.toHaveBeenCalled();
+    expect(mocks.editorProps?.modelControlsDisabled).toBe(false);
+  });
+
+  it.each(['agent_running', 'cancelling'] as const)(
+    'locks model selection during a %s Turn including callback races',
+    async (phase) => {
+      const session = switchableSession({
+        phase,
+        capabilities: {
+          canSend: false,
+          canCancel: true,
+          workspaceTurns: true,
+          modelChange: true,
+        },
+      });
+      modelApi(() => session);
+      await render('s1');
+      expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+      await act(async () => {
+        mocks.editorProps?.onSelectModel?.('B');
+      });
+      expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+    },
+  );
+
+  it('blocks a model change when a prompt is admitted in the same frame', async () => {
+    const session = switchableSession();
+    modelApi(() => session);
+    let admit!: (value: { sessionId: string; turnId: string }) => void;
+    mocks.client.submitPrompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          admit = resolve;
+        }),
+    );
+    await render('s1');
+    await act(async () => {
+      mocks.editorProps!.onSubmit(
+        'Current draft',
+        undefined,
+        undefined,
+        vi.fn(),
+      );
+      mocks.editorProps!.onSelectModel!('B');
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
+    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+    await act(async () => {
+      admit({ sessionId: 's1', turnId: 'next' });
+      await flush();
+    });
+  });
+
+  it('locks model selection while an approval or prompt admission is unconfirmed', async () => {
+    const session = switchableSession();
+    modelApi(() => session);
+    provider.actions = {
+      listPending: vi.fn().mockResolvedValue([pendingAction]),
+      respond: vi.fn(),
+    };
+    mocks.client.getSession.mockResolvedValue({
+      ...session,
+      capabilities: { ...session.capabilities, actions: true },
+    });
+    await render('s1');
+    expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+    await act(async () => {
+      mocks.editorProps?.onSelectModel?.('B');
+    });
+    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+  });
+
+  it('holds a lost switch response for exact-key confirmation and hides old usage under another selected model', async () => {
+    let session = switchableSession({
+      modelSelection: { modelId: 'B', revision: 1 },
+    });
+    modelApi(() => session);
+    vi.mocked(provider.modelChange!.submit)
+      .mockRejectedValueOnce(new TypeError('lost ACK'))
+      .mockImplementation(async () => {
+        session = {
+          ...session,
+          modelSelection: { modelId: 'A', revision: 2 },
+          modelContext: undefined,
+        };
+        return {
+          sessionId: 's1',
+          modelSelection: session.modelSelection!,
+          replayed: true,
+        };
+      });
+    await render('s1');
+    expect(mocks.editorProps?.currentModel).toBe('B');
+    expect(mocks.editorProps?.contextUsageKnown).toBe(false);
+    await act(async () => {
+      mocks.editorProps?.onSelectModel?.('A');
+      await flush();
+    });
+    expect(container.textContent).toContain(
+      'The model change is not confirmed',
+    );
+    expect(mocks.editorProps?.disabled).toBe(true);
+    session = {
+      ...session,
+      capabilities: { ...session.capabilities, modelChange: false },
+    };
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render('s1');
+    const confirm = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Continue confirming',
+    )!;
+    await act(async () => {
+      confirm.click();
+      await flush();
+    });
+    const calls = vi.mocked(provider.modelChange!.submit).mock.calls;
+    expect(calls[1][1]).toEqual(calls[0][1]);
+    expect(calls[1][2].idempotencyKey).toBe(calls[0][2].idempotencyKey);
+    expect(mocks.editorProps?.currentModel).toBe('A');
+    expect(mocks.editorProps?.contextUsageKnown).toBe(false);
+    expect(mocks.editorProps?.disabled).toBe(false);
+  });
+
+  it('never exposes server model choices or mutates an existing Session while Managed is hidden', async () => {
+    const session = switchableSession();
+    modelApi(() => session);
+    await render('s1', 'en', provider, undefined, false);
+    expect(provider.modelChange!.queryOptions).not.toHaveBeenCalled();
+    expect(mocks.editorProps?.visibleToolbarActions).toEqual([]);
+    expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+    await act(async () => {
+      mocks.editorProps?.onSelectModel?.('B');
+    });
+    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+  });
+
+  it('keeps observed zero distinct from unknown and never carries an observation into another Session', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        agentId: `agent-${id}`,
+        ...(id === 's1'
+          ? {
+              modelContext: {
+                modelId: 'first-model',
+                inputTokens: 0,
+                contextWindowSize: 1000,
+                observedAt: 12,
+              },
+            }
+          : {}),
+      }),
+    );
+    await render('s1');
+    expect(mocks.editorProps?.contextUsageKnown).toBe(true);
+    expect(mocks.editorProps?.tokenCount).toBe(0);
+    await render('s2');
+    expect(mocks.editorProps?.currentModel).toBe('agent-s2');
+    expect(mocks.editorProps?.contextUsageKnown).toBe(false);
+    expect(mocks.editorProps?.contextWindow).toBe(0);
+    await render('s2', 'en', provider, undefined, false);
+    expect(mocks.editorProps?.visibleToolbarActions).toEqual([]);
+  });
+
+  it('moves history into the shell slot without remounting conversation or losing its draft when the slot disappears', async () => {
+    const slot = document.createElement('aside');
+    document.body.appendChild(slot);
+    try {
+      await render('s1', 'en', provider, slot);
+      expect(
+        slot.querySelector('nav[aria-label="Managed sessions"]'),
+      ).not.toBeNull();
+      expect(container.querySelector('nav')).toBeNull();
+      expect(container.textContent).not.toContain('New managed task');
+      expect(container.textContent).toContain('Persisted answer');
+      const input = container.querySelector('textarea')!;
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!;
+        setter.call(input, 'Managed draft');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await render('s1', 'en', provider, null, false);
+      expect(input.disabled).toBe(true);
+      expect(input.value).toBe('Managed draft');
+      await render('s1', 'en', provider, slot);
+      expect(input.disabled).toBe(false);
+      expect(container.querySelector('textarea')).toBe(input);
+      expect(input.value).toBe('Managed draft');
+      expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
+      expect(mocks.client.getTranscript).toHaveBeenCalledTimes(1);
+      expect(slot.textContent).toContain('Task s1');
+    } finally {
+      slot.remove();
+    }
+  });
+
+  it('uses the standard composer stop action with Managed cancel authority', async () => {
+    mocks.client.getSession.mockImplementation(async () =>
+      summary('s1', {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true },
+      }),
+    );
+    await render('s1', 'en', provider, null);
+    const stop = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Stop managed task',
+    );
+    expect(stop?.disabled).toBe(false);
+    await act(async () => {
+      stop!.click();
+      await flush();
+    });
+    expect(mocks.client.cancel).toHaveBeenCalledWith(
+      's1',
+      'p1',
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('handles Escape only for the visible Managed conversation after composition and other controls', async () => {
+    mocks.client.getSession.mockImplementation(async () =>
+      summary('s1', {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true },
+      }),
+    );
+    await render('s1', 'en', provider, null);
+    const input = container.querySelector('textarea')!;
+    const escape = async (
+      options: KeyboardEventInit = {},
+      target: HTMLElement = input,
+    ) =>
+      act(async () => {
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+            ...options,
+          }),
+        );
+        await flush();
+      });
+    await escape({ isComposing: true });
+    expect(mocks.client.cancel).not.toHaveBeenCalled();
+    await render('s1', 'en', provider, null, false);
+    await escape({}, document.body);
+    expect(mocks.client.cancel).not.toHaveBeenCalled();
+    await render('s1', 'en', provider, null);
+    await escape({}, document.body);
+    expect(mocks.client.cancel).toHaveBeenCalledOnce();
+  });
 
   it('opens child tasks without losing drafts or history and leaves sending available during uncertain cancellation', async () => {
     mocks.client.getSession.mockImplementation(async () =>
@@ -306,6 +750,12 @@ describe('ManagedSessionsPage', () => {
           .click();
       });
     await click('Child Agent tasks');
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    await render('s1', 'en', provider, undefined, false);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(composer.value).toBe('draft remains');
+    await render('s1');
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
     await click('Request cancellation');
     await click('Confirm cancellation');
     expect(document.body.textContent).toContain(

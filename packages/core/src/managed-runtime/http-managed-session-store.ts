@@ -344,6 +344,8 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     appendTransaction: rejectWrite,
     blockRecovery: rejectWrite,
     seal: rejectWrite,
+    // A snapshot-inspection handle has no open writer; nothing can append.
+    writerSealed: true,
     abort: rejectWrite,
   };
   const resourceStore: ManagedSessionResourceStore = {
@@ -420,6 +422,10 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
 
   seal(): Promise<void> {
     return this.client.seal();
+  }
+
+  get writerSealed(): boolean {
+    return this.client.writerSealed;
   }
 
   abort(): Promise<void> {
@@ -604,6 +610,10 @@ class ManagedSessionStoreHttpClient {
   private renewTimer: NodeJS.Timeout | undefined;
   private sealed = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
+
+  get writerSealed(): boolean {
+    return this.sealed;
+  }
 
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void {
     this.lifecycleAuthority = authority;
@@ -1806,9 +1816,49 @@ export function collectNestedResourceRefs(
   if (ref.kind === MANAGED_MESSAGE_CHUNKS_KIND) {
     return managedMessageChunkParts(ref.kind, bytes);
   }
+  if (ref.kind === 'managed-tool-outcome-chunks') {
+    const manifest = asRecord(
+      JSON.parse(bytes.toString('utf8')),
+      'outcome chunks',
+    );
+    if (Object.keys(manifest).length !== 1 || !('parts' in manifest)) {
+      throw corrupt('outcome chunk manifest fields conflict.');
+    }
+    const parts = asArray(manifest['parts'], 'outcome parts');
+    if (parts.length < 2 || parts.length > 69) {
+      throw corrupt('outcome chunk count exceeds its bounds.');
+    }
+    return parts.map((part) => {
+      const checked = assertManagedSessionDurableRef(
+        part as ManagedSessionJsonValue,
+        'outcome chunk part',
+      );
+      if (checked.kind !== 'managed-tool-outcome-part') {
+        throw corrupt('outcome chunks must reference outcome parts.');
+      }
+      return checked;
+    });
+  }
   if (ref.kind === 'managed-checkpoint') {
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
+  }
+  if (ref.kind === 'managed-file_history') {
+    const record = asRecord(
+      parseManagedSessionRecordJson(
+        bytes.toString('utf8'),
+        MANAGED_SESSION_LIMITS.maxEventBytes,
+      ),
+      'file history',
+    );
+    // Only `preparation` is walked: a bind/result record's previousRecordRef
+    // belongs to its original journal transaction, while a prepared record
+    // re-admits its predecessor through preparation.intentRef, which SQL's
+    // activation proof reads from this transaction.
+    return record['schemaVersion'] === 2 &&
+      record['profile'] === 'csi-files-retirement/1'
+      ? collectRefs([record['preparation']])
+      : [];
   }
   if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
     return hostedRecoveryReferences(parseHostedRecoveryResource(bytes));
@@ -1867,11 +1917,14 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-definition',
       'managed-checkpoint',
+      'managed-file_history',
       'managed-action-options',
       'managed-hook-plan',
       'managed-hook-message-chunks',
       MANAGED_MESSAGE_CHUNKS_KIND,
+      'managed-tool-outcome-chunks',
     ].includes(kind)
   );
 }

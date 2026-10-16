@@ -135,9 +135,9 @@ forbids: Runtime binding ID, generation, Runtime endpoint, Pod, absolute path,
 raw PID, SecretHandle and local sidecar.
 
 The list is ordered newest first by `created_at`, then by `id`, both
-descending. That is the order of the Session list in the API contract, with
-creation time instead of update time, so a task that changes state does not
-move between pages.
+descending. That is the order of the Session list in the API contract —
+both order by immutable creation time, so an item whose state changes does
+not move between pages.
 
 These invariants are schema conditionals:
 
