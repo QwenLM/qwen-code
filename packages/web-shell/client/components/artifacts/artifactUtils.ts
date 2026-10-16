@@ -1,3 +1,4 @@
+import { saveBlob } from '../../utils/saveBlob.js';
 import type {
   DaemonSessionArtifact,
   DaemonWorkspaceFileBytes,
@@ -266,10 +267,21 @@ export async function readWorkspaceFileAsBlob(
 ): Promise<Blob> {
   const chunks: Uint8Array[] = [];
   const maxBytes = options.maxBytes ?? MAX_WORKSPACE_FILE_BLOB_BYTES;
+  const checkCurrent = () => {
+    if (options.isCancelled?.()) {
+      throw new Error('File loading was cancelled.');
+    }
+  };
   const initialStat = await options.statFile(filePath);
-  if (options.isCancelled?.()) {
-    throw new Error('File loading was cancelled.');
-  }
+  const checkUnchanged = (sizeBytes: number, modifiedMs: number) => {
+    if (
+      sizeBytes !== initialStat.sizeBytes ||
+      modifiedMs !== initialStat.modifiedMs
+    ) {
+      throw new Error('File changed while loading. Please retry.');
+    }
+  };
+  checkCurrent();
   if (initialStat.type === 'directory') {
     throw new Error('Directories cannot be opened or downloaded as artifacts.');
   }
@@ -278,19 +290,13 @@ export async function readWorkspaceFileAsBlob(
   }
   let offset = 0;
   while (true) {
-    if (options.isCancelled?.()) {
-      throw new Error('File loading was cancelled.');
-    }
+    checkCurrent();
     const file = await readFileBytes(filePath, {
       offset,
       maxBytes: WORKSPACE_FILE_BLOB_CHUNK_BYTES,
     });
-    if (options.isCancelled?.()) {
-      throw new Error('File loading was cancelled.');
-    }
-    if (file.sizeBytes !== initialStat.sizeBytes) {
-      throw new Error('File changed while loading. Please retry.');
-    }
+    checkCurrent();
+    checkUnchanged(file.sizeBytes, initialStat.modifiedMs);
     if (file.returnedBytes <= 0 && offset < initialStat.sizeBytes) {
       throw new Error('File loading made no progress.');
     }
@@ -303,15 +309,8 @@ export async function readWorkspaceFileAsBlob(
     offset = file.offset + file.returnedBytes;
     if (offset >= initialStat.sizeBytes) {
       const finalStat = await options.statFile(filePath);
-      if (options.isCancelled?.()) {
-        throw new Error('File loading was cancelled.');
-      }
-      if (
-        finalStat.sizeBytes !== initialStat.sizeBytes ||
-        finalStat.modifiedMs !== initialStat.modifiedMs
-      ) {
-        throw new Error('File changed while loading. Please retry.');
-      }
+      checkCurrent();
+      checkUnchanged(finalStat.sizeBytes, finalStat.modifiedMs);
       return new Blob(chunks, { type: mimeType });
     }
   }
@@ -332,19 +331,11 @@ export async function downloadWorkspaceFile(
       isCancelled,
     },
   );
-  const url = URL.createObjectURL(blob);
-  try {
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = workspaceFileName(workspacePath) ?? workspacePath;
-    // Prevent embedding hosts from replacing the native download with navigation.
-    link.addEventListener('click', (event) => event.stopPropagation());
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
+  await saveBlob(
+    blob,
+    workspaceFileName(workspacePath) ?? workspacePath,
+    isCancelled,
+  );
 }
 
 export function getArtifactLocation(artifact: DaemonSessionArtifact): string {
