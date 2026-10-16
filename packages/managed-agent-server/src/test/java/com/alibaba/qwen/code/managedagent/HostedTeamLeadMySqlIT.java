@@ -195,8 +195,8 @@ class HostedTeamLeadMySqlIT {
 
     /**
      * Closing the lead cancels its running member through the H4b cascade.
-     * The close cancels the member's Turn in flight, leaves the team's
-     * records as they were and never revives the lead.
+     * The close cancels the member's Turn while its model response is held,
+     * leaves the team's records as they were and never revives the lead.
      */
     @Test
     @Timeout(80)
@@ -248,8 +248,8 @@ class HostedTeamLeadMySqlIT {
             assertThat(run.path("stopReason").asText()).isEqualTo("stop_requested");
             assertThat(sessionStatus(child)).isEqualTo("CLOSED");
         });
-        assertThat(releases.get("carol").getCount()).isEqualTo(1);
         assertThat(childTurnStatus(child)).isEqualTo("CANCELLED");
+        assertThat(releases.get("carol").getCount()).as("member response is still held").isEqualTo(1);
         releases.get("carol").countDown();
         assertThat(revision(lead, "team_state")).isEqualTo(stateRevision);
         assertThat(team(lead).path("lifecycle").asText()).isEqualTo("active");

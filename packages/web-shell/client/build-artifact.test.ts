@@ -638,6 +638,11 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(interactive).toContain('浏览器（Chrome');
   });
 
+  it('keeps remote Workspace registration copy in the interactive entry', () => {
+    expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
+    expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');
+  });
+
   it('carries no settings strings and looks none up', () => {
     // Same contract as the Live Voice stub above, for
     // client/settings/messages.ts: a settings.* lookup here would render as

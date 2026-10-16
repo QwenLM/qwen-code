@@ -43,6 +43,7 @@ import type {
 } from './managed-agent-provider';
 import { isManagedApprovalMode } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
+import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
 
 interface PendingCreation {
   agentId: string;
@@ -75,7 +76,10 @@ function readPendingWorkspace(key: string): PendingWorkspace | undefined {
       validWorkspaceName(item['displayName']) &&
       typeof item['idempotencyKey'] === 'string' &&
       item['idempotencyKey'].length > 0 &&
-      item['idempotencyKey'].length <= 128
+      item['idempotencyKey'].length <= 128 &&
+      !('nodeId' in item) &&
+      !('path' in item) &&
+      !('operationId' in item)
     ) {
       return {
         displayName: item['displayName'],
@@ -195,6 +199,8 @@ export function WorkspaceBindingCreator({
   const [error, setError] = useState<string>();
   const [pathError, setPathError] = useState<string>();
   const [switchTo, setSwitchTo] = useState<string>();
+  const [registrationAvailable, setRegistrationAvailable] = useState(false);
+  const [registrationOpen, setRegistrationOpen] = useState(false);
   const editor = useRef<EditorHandle | null>(null);
   const acceptedCommit = useRef<ComposerSubmitCommit | undefined>(undefined);
   const lifetime = useRef<AbortController | undefined>(undefined);
@@ -835,6 +841,16 @@ export function WorkspaceBindingCreator({
               ))}
             </SelectContent>
           </Select>
+          {registrationAvailable && binding.registration && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() => setRegistrationOpen(true)}
+            >
+              {t('managed.remoteWorkspaceAdd')}
+            </Button>
+          )}
           {workspaceCreationSupported && (
             <Button
               type="button"
@@ -926,6 +942,12 @@ export function WorkspaceBindingCreator({
               disableLegacyHistoryFallback
               shellModeEnabled={false}
               workspaceFeaturesEnabled={false}
+              existingFolderWorkspaceSupported={
+                registrationAvailable && Boolean(binding.registration)
+              }
+              onOpenExistingWorkspace={() => {
+                if (!busy && !pendingRef.current) setRegistrationOpen(true);
+              }}
               attachmentsEnabled={false}
               visibleToolbarActions={
                 interactive
@@ -990,7 +1012,9 @@ export function WorkspaceBindingCreator({
                 interactive && workspaceCreationSupported
               }
               onCreateScratchWorkspace={() => setWorkspaceDialogOpen(true)}
-              workspaceMutationBusy={workspaceCreating}
+              workspaceMutationBusy={
+                busy || workspaceCreating || Boolean(pending)
+              }
               workspaceSelectionDisabled={
                 !interactive ||
                 !supported ||
@@ -1013,7 +1037,9 @@ export function WorkspaceBindingCreator({
                 Boolean(pending) ||
                 !approvalReady
               }
-              dialogOpen={!interactive || workspaceDialogOpen}
+              dialogOpen={
+                !interactive || workspaceDialogOpen || registrationOpen
+              }
               isPreparing={busy || loading || optionsLoading}
               placeholderText={t('managed.prompt')}
               onSubmit={(text, _images, _files, commit) => {
@@ -1061,6 +1087,28 @@ export function WorkspaceBindingCreator({
             </details>
           </div>
         </div>
+      )}
+      {interactive && binding.registration && (
+        <RemoteWorkspaceRegistration
+          key={provider.storageKey}
+          provider={provider}
+          clientId={clientId}
+          open={registrationOpen}
+          onOpenChange={setRegistrationOpen}
+          onAvailable={setRegistrationAvailable}
+          onRegistered={(workspace) => {
+            setItems((current) => [
+              ...current.filter(
+                (item) => item.workspaceId !== workspace.workspaceId,
+              ),
+              workspace,
+            ]);
+            setSelected(workspace.workspaceId);
+            setCwdRelative('.');
+            setError(undefined);
+            setPathError(undefined);
+          }}
+        />
       )}
       <Dialog
         open={interactive && workspaceDialogOpen}

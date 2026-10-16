@@ -474,6 +474,10 @@ class HostedShellLifecycleRecoveryIT {
             var properties = new LinkedHashMap<String, Object>();
             properties.put("server.address", "127.0.0.1");
             properties.put("server.port", springPort);
+            properties.put("spring.mvc.log-request-details", false);
+            properties.put("logging.level.org.springframework.web.servlet.DispatcherServlet", "DEBUG");
+            properties.put("logging.level.org.springframework.web.servlet.mvc.method.annotation."
+                    + "ExceptionHandlerExceptionResolver", "DEBUG");
             properties.put("spring.datasource.url", required("mysql.url"));
             properties.put("spring.datasource.driver-class-name", "com.mysql.cj.jdbc.Driver");
             properties.put("spring.datasource.username", required("mysql.user"));
