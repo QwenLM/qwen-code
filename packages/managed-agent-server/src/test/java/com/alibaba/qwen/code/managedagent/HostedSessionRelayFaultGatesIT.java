@@ -300,7 +300,15 @@ class HostedSessionRelayFaultGatesIT {
                 matchCommitOperation("sendSessionMessage", 2),
                 "carol-mint", 2));
         openSend();
-        awaitDeliveryAttempt(lead, "cmd_", 1);
+        // Witness the hold before anything is released: attempt_count
+        // also counts the handover/attachment failures that can precede
+        // the held mint, so an attempt-only gate can fire early —
+        // release("carol-mint") then lands as "(nothing held)", the
+        // signal is lost, and bob/carol open before the real send can
+        // reach them.
+        awaitHolding("carol-mint");
+        int before = attemptCount(lead, "cmd_");
+        awaitDeliveryAttempt(lead, "cmd_", before + 1);
         storeProxy.release("carol-mint");
         releases.get("bob").countDown();
         releases.get("carol").countDown();
@@ -314,7 +322,8 @@ class HostedSessionRelayFaultGatesIT {
                 .contains("- carol: sent.");
         assertThat(countOps(storeProxy, "holding carol-mint"))
                 .isEqualTo(1);
-        assertThat(attemptCount(lead, "cmd_")).isGreaterThanOrEqualTo(1);
+        assertThat(attemptCount(lead, "cmd_"))
+                .isGreaterThanOrEqualTo(before + 1);
         settleAndCheckDelivered(lead);
     }
 
@@ -443,6 +452,7 @@ class HostedSessionRelayFaultGatesIT {
         waiting().atMost(Duration.ofSeconds(120))
                 .pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
                     assertNoModelFailure();
+                    // No row still owed work may remain.
                     assertThat(jdbc.queryForList(
                             "SELECT transport_state FROM ma_delivery"
                                     + " WHERE tenant_id = ? AND"
@@ -450,6 +460,35 @@ class HostedSessionRelayFaultGatesIT {
                                     + " AND transport_state NOT IN"
                                     + " ('done', 'orphaned', 'unknown')",
                             tenant)).isEmpty();
+                    // A terminal-lost row cannot stand in for receipt at
+                    // an expected delivered position either: 'unknown'
+                    // and 'orphaned' mean the relay never delivered.
+                    assertThat(jdbc.queryForList(
+                            "SELECT transport_state FROM ma_delivery"
+                                    + " WHERE tenant_id = ? AND"
+                                    + " delivery_kind = 'SESSION_MESSAGE'"
+                                    + " AND transport_state IN"
+                                    + " ('unknown', 'orphaned')",
+                            tenant)).isEmpty();
+                    // Per-position promise: every minted msgc_ owns exactly
+                    // one ledger row proven done/accepted/consumed — a
+                    // missing, duplicated, or unproven row fails honestly.
+                    for (String minted : msgcRows(lead)) {
+                        Long proven = jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM ma_delivery"
+                                        + " WHERE tenant_id = ? AND"
+                                        + " delivery_kind = 'SESSION_MESSAGE'"
+                                        + " AND delivery_id = ? AND"
+                                        + " transport_state = 'done' AND"
+                                        + " reception_state = 'accepted'"
+                                        + " AND consumption_state ="
+                                        + " 'consumed'",
+                                Long.class, tenant, minted);
+                        assertThat(proven)
+                                .as("accepted/consumed proof for %s",
+                                        minted)
+                                .isEqualTo(1L);
+                    }
                 });
     }
 
@@ -514,6 +553,16 @@ class HostedSessionRelayFaultGatesIT {
                 .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
                         assertThat(attemptCount(lead, prefix))
                                 .isGreaterThanOrEqualTo(attempts));
+    }
+
+    /** Witness the proxy holding the named rule before anything is
+     * released: an early release only logs "(nothing held)" and loses the
+     * signal, so the hold must be observed first. */
+    private void awaitHolding(String ruleName) {
+        waiting().atMost(Duration.ofSeconds(60))
+                .pollInterval(Duration.ofMillis(200)).untilAsserted(() ->
+                        assertThat(countOps(storeProxy, "holding "
+                                + ruleName)).isGreaterThanOrEqualTo(1));
     }
 
     /** A peer send to a finished member is refused before any mint lands,
