@@ -139,4 +139,20 @@ source reactor 完成 SDK 249 例 unit（跳过 9 例）、Broker 1,005 例（�
 
 修复后的树通过八例聚焦重编译回归及完整 2,944 例服务端 unit/H2，其中七例为原有跳过。真实 MySQL 8.4.11 上的九项独立实际 store 检查通过，覆盖批量读取、准入顺序、缺失事件、较旧 Turn 迟到事件、tenant 隔离，以及 Unicode 和大小写敏感身份。完整 MySQL profile 通过全部 76 例 Broker 测试；服务端共执行 611 例，在使用两秒 claim 的既有 publication fixture 中出现一项错误，因此整轮验证失败。该未修改方法的聚焦验证续跑通过，包括 Checkstyle 和 SpotBugs。这不构成完整 611 例通过；原失败与较小范围的成功复验分别保留记录。
 
+### 合并后的服务端模块验证，2026-10-16
+
+合入 #14277 后，Broker、Server 及 SSH 新增实现统一位于 `packages/managed-agent-server`，Java SDK 仍位于 `packages/sdk-java/qwencode`。SSH 迁移仍为 V4，公开 API 仍为 1.48.0，基于 main 的 V1–V3 / 1.47.0。测试冲突处理保留规范数据库毫秒时钟，并要求父 Session 关闭先取消子 Turn，再释放被阻塞的模型响应；断言完成后释放 latch 做清理。SSH lifecycle-v2 的严格退役证明要求与 main 的旧版 held-Runtime 清单机制分别保留。
+
+前一 head `7521696` 的 Linux CI 通过全部 56 例 O4 集成测试，无跳过，包含容量探针。其 Hosted 进程 profile 仍有 46 例中的一项错误：`resident-expiry` fixture 的首个 Turn 在 Harness 记录阻塞恢复的 HTTP 非法参数响应后保持 RUNNING，尚未进入删除故障点。现有 artifact 无法识别被拒绝的路由或字段。没有将其归类为基础设施偶发问题，加长等待或自动重试也不能证明修复。仅此合成 Linux fixture 启用两个窄范围 Spring DEBUG logger，并保持请求详情遮蔽，以便后续失败产物记录请求路径、状态和异常。独立真实 DispatcherServlet 探针已验证配置有效，且未暴露其 header/body/parameter 哨兵值；原始 query 和异常 message 仍可见，因此这不是生产日志配置。
+
+合并后的 source reactor 通过全部 77 例所选 SDK 测试、3,956 例合并模块 unit/H2（16 例原有或按需启用的跳过），以及 148 例所选 MySQL 8.4.11 测试（无跳过，其中 Broker 76 例、SSH/Workspace 72 例）。Checkstyle 和 SpotBugs 通过，九项独立实际 store 的 MySQL 检查也通过。
+
+较宽范围的工作流/脚本测试完成 1,284 例通过、27 例跳过，并有一例 autofix 超时交接失败；随后原有 600ms 测试在不改代码的单例聚焦运行中通过。原整套失败记录仍保留，不将其描述为整套全绿。
+
+按需启用的 SSH 进程 fixture 需要修正两处相对路径以适应新模块位置。独立运行先复现了启动 SSH 前的 setup 失败；修正仓库根目录后六例通过，第七例暴露 publication fixture 路径。修正第二处路径后，全部七例真实原生 macOS loopback SSH 测试通过，无跳过，包含 deferred no-start ACK 退役，后续 Checkstyle 和 SpotBugs 也通过。最终聚焦验证重新编译了全部测试源码；此前失败的一轮分别保留。
+
+合并后的树还通过完整根目录 build、typecheck 和 bundle，所选 Harness、tool-turn、Broker、原生 bootstrap 及 Workspace binding 五组 CLI 测试共 1,024 例，以及全部 34 例 WebShell 构建产物测试。从新的服务端目录重新生成公开 API 类型，产物逐字节一致。这些组件检查不能替代尚未完成的 Linux/实际部署验收。
+
+原有 durable local-process 主机身份门槛拒绝原生 macOS。该阻塞 fixture 不计为本地已验证，没有伪装 OS 或关闭能力门槛。Hosted HTTP 失败仍等待 Linux 上进一步诊断。
+
 尚未执行 Linux 上的 SSH Runtime 验收和跨物理机器验收，也未运行完整部署的 WebShell → Java → MySQL → 远端 Shell publication 链路；各组件已分别验证。没有配置或修改生产节点。这些缺口意味着当前不能宣称已通过生产验收。
