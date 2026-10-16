@@ -63,6 +63,46 @@ import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+
+vi.mock('./components/managed/ManagedSessionsPage', async () => {
+  const React = await import('react');
+  const { createPortal } = await import('react-dom');
+  return {
+    ManagedSessionsPage: (props: {
+      sessionId?: string;
+      onSelectSession: (id: string | undefined) => void;
+      navigationTarget?: HTMLElement | null;
+      interactive?: boolean;
+    }) => {
+      const [draft, setDraft] = React.useState('');
+      return (
+        <section
+          data-testid="managed-conversation"
+          data-session={props.sessionId ?? 'new'}
+          data-interactive={props.interactive}
+        >
+          <input
+            aria-label="Managed draft"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          {props.navigationTarget &&
+            createPortal(
+              <nav aria-label="Managed sessions">
+                <button
+                  onClick={() => props.onSelectSession('managed-history')}
+                >
+                  Managed history
+                </button>
+              </nav>,
+              props.navigationTarget,
+            )}
+        </section>
+      );
+    },
+  };
+});
 
 type McpAppMessageHost = Parameters<
   typeof import('./hooks/useMcpAppMessages').useMcpAppMessages
@@ -1596,6 +1636,8 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
 
 // Render DialogShell as an observable container so tests can detect an open
 // sub-dialog (model picker, approval-mode picker) via [data-testid="dialog-shell"].
+// It also carries the real component's [data-web-shell-dialog] marker, which
+// the drawer's touch-scroll blocker keys its dialog exemption off.
 vi.mock('./components/dialogs/DialogShell', async () => {
   const React = await import('react');
   return {
@@ -1607,6 +1649,7 @@ vi.mock('./components/dialogs/DialogShell', async () => {
         'div',
         {
           'data-testid': 'dialog-shell',
+          'data-web-shell-dialog': '',
           ...(typeof props.title === 'string'
             ? { 'data-dialog-title': props.title }
             : {}),
@@ -1661,6 +1704,8 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       projectFeaturesEnabled?: boolean;
       canOpenSessionsOverview?: boolean;
       canOpenSplitView?: boolean;
+      sessionContent?: ReactNode;
+      sessionHeader?: ReactNode;
     }) => {
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
@@ -1683,6 +1728,8 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           ),
           'data-can-open-split-view': String(Boolean(props.canOpenSplitView)),
         },
+        props.sessionHeader,
+        props.sessionContent,
         React.createElement(
           'button',
           {
@@ -2073,7 +2120,21 @@ vi.doMock('./components/panels/TodoPanel', async () => {
   };
 });
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
-mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
+vi.doMock('./components/dialogs/ApprovalModeDialog', async () => {
+  const React = await import('react');
+  return {
+    ApprovalModeDialog: (props: { onSelect: (mode: string) => void }) =>
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          'data-testid': 'select-local-approval-yolo',
+          onClick: () => props.onSelect('yolo'),
+        },
+        'select Local yolo',
+      ),
+  };
+});
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/tools/ToolsManagerPage', 'ToolsManagerPage');
@@ -17952,7 +18013,7 @@ describe('App session callbacks', () => {
     expect(testState.latestArtifactPanelProps?.onReferenceFile).toBeUndefined();
   });
 
-  it('opens one files tab per workspace when configured', () => {
+  it('opens and selects one files tab from the header folder', () => {
     mockWorkspace.capabilities = {
       workspaceCwd: '/tmp/project',
       workspaces: [
@@ -17966,16 +18027,12 @@ describe('App session callbacks', () => {
     } as typeof mockWorkspace.capabilities;
     testState.captureArtifactPanelOnly = true;
     const { container } = renderApp({ rightPanel: { items: ['files'] } });
-    act(() =>
-      container
-        .querySelector<HTMLButtonElement>(
-          'button[aria-label="Toggle right panel"]',
-        )
-        ?.click(),
-    );
-    expect(testState.latestArtifactPanelProps?.onOpenFiles).toBeDefined();
-    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
-    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+    const folder = container.querySelector<HTMLButtonElement>(
+      'button[data-testid="chat-header-workspace"]',
+    )!;
+    expect(folder).not.toBeNull();
+    act(() => folder.click());
+    act(() => folder.click());
     expect(testState.latestArtifactPanelProps?.tabs).toEqual([
       expect.objectContaining({
         kind: 'files',
@@ -18004,6 +18061,21 @@ describe('App session callbacks', () => {
     ]);
     expect(testState.latestArtifactPanelProps?.tabs[1]).not.toHaveProperty(
       'previewContent',
+    );
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[1]?.id,
+    );
+    act(() => folder.click());
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[0]?.id,
+    );
+    act(() => testState.latestArtifactPanelProps?.onClose());
+    testState.latestArtifactPanelProps = null;
+    act(() => folder.click());
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[0]?.id,
     );
   });
 
@@ -18047,6 +18119,9 @@ describe('App session callbacks', () => {
       const { container } = renderApp({
         rightPanel: { items: reason === 'disabled' ? ['review'] : ['files'] },
       });
+      expect(
+        container.querySelector('button[data-testid="chat-header-workspace"]'),
+      ).toBeNull();
       act(() =>
         container
           .querySelector<HTMLButtonElement>(
@@ -37157,6 +37232,51 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('keeps a dialog opened over the drawer touch-scrollable', async () => {
+    // The drawer installs a document-level touchmove blocker whose allowlist
+    // used to cover only [data-sidebar-shell]. Dialogs portal outside that
+    // subtree, so on a phone every dialog opened from the drawer lost touch
+    // scrolling outright — Add Workspace included, which left its confirm
+    // buttons unreachable (#14184). Rotating to landscape closed the drawer
+    // and dropped the blocker, which is why scrolling appeared to come back.
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    const drawer = container.querySelector('[data-sidebar-shell]');
+    expect(drawer).not.toBeNull();
+    expect(document.body.style.overflow).toBe('hidden');
+
+    act(() => {
+      testState.latestChatEditorProps?.onToggleShortcuts?.();
+    });
+    await flush();
+
+    const dialog = container.querySelector('[data-web-shell-dialog]');
+    expect(dialog).not.toBeNull();
+
+    const swipe = (target: EventTarget | null) => {
+      const event = new Event('touchmove', { bubbles: true, cancelable: true });
+      target?.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    expect(swipe(dialog)).toBe(false);
+    // A real phone gesture starts on a descendant of the marker — the panel
+    // itself is not what scrolls — so pin the closest() walk, not just the
+    // marker element.
+    const dialogChild = dialog?.firstElementChild ?? null;
+    expect(dialogChild).not.toBeNull();
+    expect(swipe(dialogChild)).toBe(false);
+    expect(swipe(drawer)).toBe(false);
+    // The page behind the drawer must stay locked.
+    expect(swipe(document.body)).toBe(true);
+  });
+
   it('starts a new session from the external shell ref and returns to chat', async () => {
     const shellRef = createRef<WebShellApi>();
     const { container } = renderApp({ sidebar: true, shellRef });
@@ -47470,5 +47590,530 @@ describe('App sidebar toggle shortcut (#5074 rail follow-ups)', () => {
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
+  });
+});
+
+describe('Managed home integration', () => {
+  function autoApprovableLocalPermission() {
+    return makePendingPermissionBlock({
+      options: [
+        {
+          optionId: 'proceed_once',
+          label: 'Allow once',
+          raw: { kind: 'allow_once' },
+        },
+        { optionId: 'cancel', label: 'Reject', raw: { kind: 'reject_once' } },
+      ],
+    });
+  }
+
+  function managedProvider(): ManagedAgentProvider {
+    return {
+      kind: 'java',
+      storageKey: 'managed-test',
+      canCancel: true,
+      acceptsWorkspaceCwd: false,
+      listSessions: vi.fn(),
+      getSession: vi.fn(),
+      getTranscript: vi.fn(),
+      createSession: vi.fn(),
+      submitPrompt: vi.fn(),
+      cancel: vi.fn(),
+      async *subscribeEvents() {
+        yield* [];
+      },
+    };
+  }
+
+  async function chooseBackend(container: HTMLElement, label: string) {
+    const tab = [
+      ...container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((node) => node.textContent === label);
+    expect(tab).toBeTruthy();
+    await act(async () =>
+      tab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      ),
+    );
+    await flush();
+  }
+
+  it('keeps the Local approval-mode dialog usable in Local', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    testState.prompt = '/approval-mode';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).not.toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="select-local-approval-yolo"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: false,
+    });
+    expect(testState.latestChatEditorProps?.currentMode).toBe('yolo');
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+  });
+
+  it('does not restore a Local approval-mode dialog after visiting Managed', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    testState.prompt = '/approval-mode';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).not.toBeNull();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+
+    await chooseBackend(container, 'Managed');
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).toBeNull();
+    await chooseBackend(container, 'Local');
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).toBeNull();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+    expect(testState.blocks).toEqual([]);
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale Local approval-mode callback while Managed is active', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container, rerender } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    const staleModeSelect = testState.latestChatEditorProps?.onSelectMode;
+    expect(staleModeSelect).toBeTypeOf('function');
+    await chooseBackend(container, 'Managed');
+    const permission = autoApprovableLocalPermission();
+    await act(async () => {
+      testState.blocks = [permission];
+      rerender();
+    });
+    await act(async () => staleModeSelect?.('yolo'));
+    await flush();
+    expect({
+      modeCalls: mockSessionActions.setApprovalMode.mock.calls,
+      permissionCalls: mockSessionActions.submitPermission.mock.calls,
+    }).toEqual({ modeCalls: [], permissionCalls: [] });
+
+    await chooseBackend(container, 'Local');
+    expect(testState.blocks).toEqual([permission]);
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+    expect(testState.latestToolApprovalOnConfirm).toBeTypeOf('function');
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+  });
+
+  it('isolates a Local approval-mode dialog across a programmatic backend switch', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container, rerender } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    testState.prompt = '/approval-mode';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="select-local-approval-yolo"]'),
+    ).not.toBeNull();
+    await chooseBackend(container, 'Managed');
+    const permission = autoApprovableLocalPermission();
+    await act(async () => {
+      testState.blocks = [permission];
+      rerender();
+    });
+    const select = container.querySelector<HTMLButtonElement>(
+      '[data-testid="select-local-approval-yolo"]',
+    );
+    await act(async () => select?.click());
+    await flush();
+    expect({
+      dialogRetained: select !== null,
+      modeCalls: mockSessionActions.setApprovalMode.mock.calls,
+      permissionCalls: mockSessionActions.submitPermission.mock.calls,
+    }).toEqual({ dialogRetained: false, modeCalls: [], permissionCalls: [] });
+
+    await chooseBackend(container, 'Local');
+    expect(testState.blocks).toEqual([permission]);
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+    expect(testState.latestToolApprovalOnConfirm).toBeTypeOf('function');
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+  });
+
+  it.each(['Local', 'Managed'])(
+    'keeps a Local approval-mode response scoped to the active %s backend',
+    async (backend) => {
+      window.history.replaceState(null, '', '/?managed=0');
+      const pendingMode = deferred<{ mode: string }>();
+      mockSessionActions.setApprovalMode.mockReturnValueOnce(
+        pendingMode.promise,
+      );
+      const { container, rerender } = renderApp({
+        managedAgentProvider: managedProvider(),
+        language: 'en',
+      });
+      await flush();
+      act(() => testState.latestChatEditorProps?.onSelectMode?.('yolo'));
+      expect(mockSessionActions.setApprovalMode).toHaveBeenCalledOnce();
+      if (backend === 'Managed') await chooseBackend(container, 'Managed');
+      const permission = autoApprovableLocalPermission();
+      await act(async () => {
+        testState.blocks = [permission];
+        rerender();
+      });
+      await act(async () => {
+        pendingMode.resolve({ mode: 'yolo' });
+        await pendingMode.promise;
+      });
+      await flush();
+      expect({
+        modeCalls: mockSessionActions.setApprovalMode.mock.calls,
+        permissionCalls: mockSessionActions.submitPermission.mock.calls,
+      }).toEqual({
+        modeCalls: [['yolo', { planMode: false }]],
+        permissionCalls: backend === 'Local' ? [['req-1', 'proceed_once']] : [],
+      });
+      expect(testState.latestChatEditorProps?.currentMode).toBe('yolo');
+
+      if (backend === 'Managed') {
+        await chooseBackend(container, 'Local');
+        expect(testState.latestChatEditorProps?.currentMode).toBe('yolo');
+        expect(testState.blocks).toEqual([permission]);
+        expect(
+          container.querySelector('[data-testid="approval-overlay"]'),
+        ).not.toBeNull();
+        expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+        expect(testState.latestToolApprovalOnConfirm).toBeTypeOf('function');
+        expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each([undefined, 'run_shell_command', 'ask_user_question'])(
+    'keeps Managed Settings open while Local approval is %s',
+    async (toolName) => {
+      window.history.replaceState(null, '', '/?managed=0');
+      testState.blocks = toolName
+        ? [makePendingPermissionBlock({ toolName })]
+        : [];
+      const { container } = renderApp({
+        managedAgentProvider: managedProvider(),
+        language: 'en',
+      });
+      await flush();
+      const keyboardActive = () =>
+        toolName === 'ask_user_question'
+          ? testState.latestAskUserQuestionKeyboardActive
+          : testState.latestToolApprovalKeyboardActive;
+      if (toolName) expect(keyboardActive()).toBe(true);
+
+      await chooseBackend(container, 'Managed');
+      expect(
+        container
+          .querySelector('[data-testid="managed-home"]')
+          ?.getAttribute('aria-hidden'),
+      ).toBeNull();
+      const hiddenApprovalKeyboardActive = keyboardActive();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sidebar-settings"]',
+          )!
+          .click(),
+      );
+      await flush();
+      expect(
+        container
+          .querySelector('[data-testid="inline-panel"]')
+          ?.getAttribute('aria-label'),
+      ).toBe('Settings');
+      expect(
+        container
+          .querySelector('[data-testid="managed-conversation"]')
+          ?.getAttribute('data-interactive'),
+      ).toBe('false');
+      if (toolName) expect(hiddenApprovalKeyboardActive).toBe(false);
+
+      await chooseBackend(container, 'Local');
+      if (toolName) {
+        expect(
+          container.querySelector('[data-testid="inline-panel"]'),
+        ).toBeNull();
+        expect(keyboardActive()).toBe(true);
+      } else {
+        expect(
+          container.querySelector('[data-testid="inline-panel"]'),
+        ).not.toBeNull();
+      }
+      expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+      expect(mockSessionActions.respondToPermission).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mockSessionActions.cancel).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves the Local new-task workspace header while hiding it in Managed', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      header: { items: ['rightPanel'] },
+      rightPanel: { items: ['files'] },
+      language: 'en',
+    });
+    await flush();
+    const workspacePanelToggle = () =>
+      container.querySelector(
+        '[data-testid="chat-context-header"] button[aria-label="Toggle right panel"]',
+      );
+    expect(workspacePanelToggle()).toBeNull();
+    await chooseBackend(container, 'Local');
+    expect(workspacePanelToggle()).not.toBeNull();
+    await chooseBackend(container, 'Managed');
+    expect(workspacePanelToggle()).toBeNull();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('puts Managed history in the shell and routes New task without clearing or creating a daemon session', async () => {
+    window.history.replaceState(null, '', '/?managedProvider=java');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBeNull();
+    expect(
+      container.querySelector(
+        '[data-testid="sidebar"] nav[aria-label="Managed sessions"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="sidebar"] [role="tablist"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        '[data-testid="chat-pane-container"] [role="tablist"]',
+      ),
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Managed history')!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-session'),
+    ).toBe('managed-history');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sidebar-settings"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-interactive'),
+    ).toBe('false');
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Managed history')!
+        .click(),
+    );
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-session'),
+    ).toBe('new');
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('preserves a Managed draft and selected history while Local uses its own session actions', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=managed-history',
+    );
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    const input = container.querySelector<HTMLInputElement>(
+      '[aria-label="Managed draft"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Keep managed draft');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await chooseBackend(container, 'Local');
+    expect(
+      container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '0',
+    );
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-interactive'),
+    ).toBe('false');
+    expect(container.querySelector('[data-testid="sidebar"] nav')).toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click(),
+    );
+    await flush();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    await chooseBackend(container, 'Managed');
+    expect(container.querySelector('[aria-label="Managed draft"]')).toBe(input);
+    expect(input.value).toBe('Keep managed draft');
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-interactive'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-session'),
+    ).toBe('managed-history');
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '1',
+    );
+  });
+
+  it('keeps Managed keyboard input from mutating or cancelling the hidden Local session', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    testState.streamingState = 'responding';
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    const input = container.querySelector<HTMLInputElement>(
+      '[aria-label="Managed draft"]',
+    )!;
+    await act(async () => {
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'l',
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'y',
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(mockSessionActions.cancel).not.toHaveBeenCalled();
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps an explicit Local choice on remount and does not change ordinary URLs without a provider', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=0&managedSession=managed-history',
+    );
+    const view = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    expect(
+      view.container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    view.unmount();
+    window.history.replaceState(null, '', '/?host=ordinary');
+    const ordinary = renderApp();
+    await flush();
+    expect(
+      ordinary.container.querySelector('[data-testid="managed-home"]'),
+    ).toBeNull();
+    expect(window.location.search).toBe('?host=ordinary');
   });
 });

@@ -83,6 +83,8 @@ CREATE TABLE ma_turn (
     FOREIGN KEY (tenant_id, session_id)
         REFERENCES ma_session (tenant_id, session_id),
     retry_count INT NOT NULL DEFAULT 0,
+    consecutive_failures INT NOT NULL DEFAULT 0,
+    budget_exempt_failures INT NOT NULL DEFAULT 0,
     retry_after BIGINT UNSIGNED
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
@@ -580,6 +582,7 @@ CREATE TABLE ma_operation (
     claim_until BIGINT UNSIGNED,
     available_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
     attempt_count INT NOT NULL DEFAULT 0,
+    budget_exempt_attempt INT NOT NULL DEFAULT 0,
     deadline BIGINT UNSIGNED,
     recovery_deadline BIGINT UNSIGNED,
     execution_mode VARCHAR(16) NOT NULL DEFAULT 'SYNC',
