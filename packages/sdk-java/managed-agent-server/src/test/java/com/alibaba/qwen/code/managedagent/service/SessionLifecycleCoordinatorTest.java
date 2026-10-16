@@ -1168,7 +1168,7 @@ class SessionLifecycleCoordinatorTest {
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
-                        + " created_at, updated_at, version)"
+                        + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', '" + initialTurnStatus + "', TRUE, 1, 2, 1)",
                 world.child);
@@ -1254,7 +1254,7 @@ class SessionLifecycleCoordinatorTest {
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
-                        + " created_at, updated_at, version)"
+                        + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
                 world.child);
@@ -1327,7 +1327,7 @@ class SessionLifecycleCoordinatorTest {
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
-                        + " created_at, updated_at, version)"
+                        + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
                 world.child);
@@ -1389,7 +1389,7 @@ class SessionLifecycleCoordinatorTest {
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
-                        + " created_at, updated_at, version)"
+                        + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
                 world.child);
@@ -1436,7 +1436,7 @@ class SessionLifecycleCoordinatorTest {
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
-                        + " created_at, updated_at, version)"
+                        + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
                 world.child);
@@ -1504,7 +1504,7 @@ class SessionLifecycleCoordinatorTest {
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
-                        + " created_at, updated_at, version)"
+                        + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
                 world.child);
@@ -1568,7 +1568,7 @@ class SessionLifecycleCoordinatorTest {
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " created_at)"
+                        + " gmt_create)"
                         + " VALUES (?, ?, 'tenant', 'workspace', ?,"
                         + " 'session_message', 'msg_1:message', 'h', 1,"
                         + " 'res-msg-1', 1)",
@@ -1588,10 +1588,9 @@ class SessionLifecycleCoordinatorTest {
                         + " last_sequence, event_count, writer_generation,"
                         + " writer_id, writer_token_hash, activation_epoch,"
                         + " record_encoding, record_bytes, byte_length,"
-                        + " record_digest, created_at) VALUES ('tenant',"
+                        + " record_digest, gmt_create) VALUES ('tenant',"
                         + " 'workspace', ?, 1, ?, 'tx', 'op', 'command', ?,"
-                        + " 1, 1, 1, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?,"
-                        + " CURRENT_TIMESTAMP)",
+                        + " 1, 1, 1, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?, 1)",
                 world.child, "e".repeat(64), "c".repeat(64), "t".repeat(64),
                 journal, journal.length, "d".repeat(64));
     }

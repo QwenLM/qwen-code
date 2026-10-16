@@ -138,7 +138,7 @@ class ManagedTurnQueryTest {
         var latest = store.findLatestTurns(tenant, List.of(sessionId));
         assertThat(latest).containsKey(sessionId);
         var freshSession = new FreshSessionBeforeExecute(
-                jdbc.getDataSource(), "(session_id, turn_id) IN");
+                jdbc.getDataSource(), "environment.turn_id) IN (");
         var recompiling = new ManagedAgentStore(
                 new ManagedSchemaJdbcTemplate(freshSession),
                 objectMapper, Clock.systemUTC(), ignored -> {}, registry, new ManagedAgentProperties());
