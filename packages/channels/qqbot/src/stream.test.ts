@@ -1464,3 +1464,66 @@ describe('flush marker ownership', () => {
     expect(flushingSessions.get('sess-1')).toBe(successorMarker);
   });
 });
+
+describe('seal state through the hook teardown', () => {
+  it("drops a dead session's stashed head with an observable log", () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stash = chp['streamOrphanBuffer'] as Map<string, unknown>;
+    stash.set('sess-1', { turn: 1, text: 'orphan-head' });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    (ch as unknown as { onSessionDied: (s: string) => void }).onSessionDied(
+      'sess-1',
+    );
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      calls.some((c) => c.includes('dropping 11 chars of superseded turn 1')),
+    ).toBe(true);
+    expect(stash.has('sess-1')).toBe(false);
+    stderrSpy.mockRestore();
+  });
+
+  it("delivers a cancelled turn's stashed head on prompt end", async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stash = chp['streamOrphanBuffer'] as Map<string, unknown>;
+    (chp['pendingStreamDelete'] as Set<string>).add('sess-1');
+    stash.set('sess-1', { turn: 0, text: 'stashed-head' });
+
+    (
+      ch as unknown as { onPromptEnd: (c: string, s: string) => void }
+    ).onPromptEnd('test-chat', 'sess-1');
+    await drain();
+
+    const contents = mockSendQQMessage.mock.calls.map(
+      (c) =>
+        ((c[3] as Record<string, unknown>).markdown as Record<string, string>)
+          .content,
+    );
+    expect(contents).toContain('stashed-head');
+    expect(stash.has('sess-1')).toBe(false);
+  });
+
+  it("prepends a live turn's stashed head on completion", async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['streamOrphanBuffer'] as Map<string, unknown>).set('sess-1', {
+      turn: 0,
+      text: 'HEAD',
+      pre: 'PRE-',
+    });
+
+    await onResponseComplete(ch, 'test-chat', 'BODY', 'sess-1');
+
+    const contents = mockSendQQMessage.mock.calls.map(
+      (c) =>
+        ((c[3] as Record<string, unknown>).markdown as Record<string, string>)
+          .content,
+    );
+    expect(contents).toContain('PRE-BODY');
+  });
+});
