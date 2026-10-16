@@ -106,7 +106,7 @@ export interface CommandContext {
     /** Ref to whether the agent stream is currently idle (no model turn in flight). */
     isIdleRef: MutableRefObject<boolean>;
     /** Reads the current blocker, including work that emits no UI updates. */
-    getSessionBusyReason?: () => string | null;
+    readSessionBusyReason?: () => string | null;
     /**
      * Loads a new set of history items, replacing the current history.
      *

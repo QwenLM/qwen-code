@@ -2138,7 +2138,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       clearPendingState: () => clearPendingStateRef.current(),
-      getSessionBusyReason: () => sessionBusyReasonRef.current(),
+      readSessionBusyReason: () => sessionBusyReasonRef.current(),
     }),
     [
       openAuthDialog,
@@ -2513,13 +2513,11 @@ export const AppContainer = (props: AppContainerProps) => {
   isIdleRef.current = streamingState === StreamingState.Idle;
   sessionBusyReasonRef.current = () => {
     const client = config.getLlmClient();
-    if (client.isInitialized() && client.getChat().isCompressing()) {
-      return t('context compaction is in progress. Wait for it to finish.');
-    }
     return getSessionBusyReason(
       streamingState,
       pendingToolCalls ?? [],
       isReceivingContent,
+      client.isInitialized() && client.getChat().isCompressing(),
     );
   };
 

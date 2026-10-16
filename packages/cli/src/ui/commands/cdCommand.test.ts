@@ -183,7 +183,7 @@ describe('cdCommand', () => {
   });
 
   it('reports the live blocker without relocating the session', async () => {
-    context.ui.getSessionBusyReason = () =>
+    context.ui.readSessionBusyReason = () =>
       'tool "run_shell_command" is executing. Wait for it to finish.';
     const result = await cdCommand.action!(context, nextDir);
     expect(result).toMatchObject({

@@ -282,7 +282,7 @@ describe('useSlashCommandProcessor', () => {
     it('exposes a live session busy reader to commands', async () => {
       let reason: string | null = 'context compaction is in progress.';
       const actions = createMockActions();
-      actions.getSessionBusyReason = () => reason;
+      actions.readSessionBusyReason = () => reason;
       const result = setupProcessorHook(
         [],
         [],
@@ -295,7 +295,7 @@ describe('useSlashCommandProcessor', () => {
         actions,
       );
       await waitFor(() => expect(result.current.slashCommands).toBeDefined());
-      const readReason = result.current.commandContext.ui.getSessionBusyReason;
+      const readReason = result.current.commandContext.ui.readSessionBusyReason;
       expect(readReason?.()).toContain('compaction');
       reason = null;
       expect(readReason?.()).toBeNull();

@@ -349,6 +349,7 @@ function OpenTuiEntryApp({
       updateNotice={updateNotice}
       exitHint={exitHint}
       streaming={live.streaming}
+      readSessionBusyReason={live.readSessionBusyReason}
       streamingCharsRef={live.streamingCharsRef}
       isReceivingContent={live.isReceivingContent}
       onInterrupt={interrupt}

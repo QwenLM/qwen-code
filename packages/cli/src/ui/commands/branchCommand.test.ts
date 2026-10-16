@@ -63,7 +63,7 @@ describe('branchCommand', () => {
 
   it('reports the live blocker before reading session records', async () => {
     const context = makeCtx({ isIdle: false });
-    context.ui.getSessionBusyReason = () =>
+    context.ui.readSessionBusyReason = () =>
       'tool "run_shell_command" is awaiting approval. Resolve the pending approval.';
     const result = await branchCommand.action!(context, '');
     expect(result).toMatchObject({

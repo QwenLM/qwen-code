@@ -19,6 +19,27 @@ function tool(status: TrackedToolCall['status'], submitted = false) {
 }
 
 describe('session busy diagnostics', () => {
+  it('prioritizes compaction consistently over approvals', () => {
+    const reason = getSessionBusyReason(
+      StreamingState.WaitingForConfirmation,
+      [tool('awaiting_approval')],
+      false,
+      true,
+    );
+    expect(reason).toBe(
+      'context compaction is in progress. Wait for it to finish.',
+    );
+    const context = createMockCommandContext({
+      ui: {
+        readSessionBusyReason: () => 'a subagent is awaiting approval.',
+        pendingItem: { type: 'compression', compression: { isPending: true } },
+      },
+    });
+    expect(getSessionBusyMessage(context, 'fork')).toBe(
+      `Cannot fork: ${reason}`,
+    );
+  });
+
   it('names the tool awaiting approval ahead of other activity', () => {
     expect(
       getSessionBusyReason(
@@ -75,7 +96,7 @@ describe('session busy diagnostics', () => {
   it('reads the live reason each time', () => {
     let reason: string | null = 'context compaction is in progress.';
     const context = createMockCommandContext({
-      ui: { getSessionBusyReason: () => reason },
+      ui: { readSessionBusyReason: () => reason },
     });
     expect(getSessionBusyMessage(context, 'branch')).toContain('compaction');
     reason = null;

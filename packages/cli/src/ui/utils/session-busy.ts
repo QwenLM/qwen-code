@@ -9,11 +9,23 @@ import type { TrackedToolCall } from '../hooks/useReactToolScheduler.js';
 import { StreamingState } from '../types.js';
 import { t } from '../../i18n/index.js';
 
+export type SessionBusyToolCall = {
+  request: { name: string };
+  status: TrackedToolCall['status'];
+  responseSubmittedToLlm?: boolean;
+};
+
+function getCompactionBusyReason(): string {
+  return t('context compaction is in progress. Wait for it to finish.');
+}
+
 export function getSessionBusyReason(
   streamingState: StreamingState,
-  toolCalls: readonly TrackedToolCall[],
+  toolCalls: readonly SessionBusyToolCall[],
   isReceivingContent: boolean,
+  isCompacting = false,
 ): string | null {
+  if (isCompacting) return getCompactionBusyReason();
   const approval = toolCalls.find((tc) => tc.status === 'awaiting_approval');
   if (approval) {
     return t(
@@ -33,9 +45,18 @@ export function getSessionBusyReason(
       tc.status === 'validating',
   );
   if (active) {
-    return t('tool "{{tool}}" is {{status}}. Wait for it to finish.', {
+    if (active.status === 'executing') {
+      return t('tool "{{tool}}" is executing. Wait for it to finish.', {
+        tool: active.request.name,
+      });
+    }
+    if (active.status === 'scheduled') {
+      return t('tool "{{tool}}" is scheduled. Wait for it to finish.', {
+        tool: active.request.name,
+      });
+    }
+    return t('tool "{{tool}}" is validating. Wait for it to finish.', {
       tool: active.request.name,
-      status: t(active.status),
     });
   }
   const unsubmitted = toolCalls.find(
@@ -66,12 +87,12 @@ export function getSessionBusyMessage(
   operation: 'branch' | 'fork' | 'change directory',
 ): string | null {
   const { ui } = context;
-  let reason = ui.getSessionBusyReason?.();
+  let reason = ui.readSessionBusyReason?.();
   if (
     ui.pendingItem?.type === 'compression' &&
     ui.pendingItem.compression.isPending
   ) {
-    reason = t('context compaction is in progress. Wait for it to finish.');
+    reason = getCompactionBusyReason();
   } else if (
     ui.pendingItem &&
     ui.pendingItem.type !== 'compression' &&

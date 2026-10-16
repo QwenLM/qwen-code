@@ -34,7 +34,15 @@ generic busy fallback. Every rejection names the requested operation and gives
 a matching wait, approval, or cancellation action. Messages expose tool names,
 never tool arguments.
 
-Affected areas are the chat compression service boundary, the interactive app,
+The OpenTUI live-turn driver supplies the same reader through its stable host
+and command context. It reads current scheduler calls and clears them before
+a model continuation, on completion, and on transcript reset; stale turn
+callbacks cannot overwrite the next turn. Both renderers use the same
+compaction-first classifier and complete sentence translation keys. All built-in
+locales translate the operation prefixes and reasons, enforced by the
+must-translate list.
+
+Affected areas are the chat compression service boundary, the interactive apps,
 the slash-command action/context bridge, the three command guards, the shared
 reason helper, translations, and focused regression tests.
 
@@ -48,7 +56,7 @@ compaction even when the model stream is idle.
 
 Core consumers of the compression method (automatic pre-send/reactive recovery
 and manual compression via the client) keep their existing behavior. The only
-consumer of the new activity accessor is the interactive reason reader.
+consumers of the new activity accessor are the Ink and OpenTUI reason readers.
 
 ## Validation and acceptance
 

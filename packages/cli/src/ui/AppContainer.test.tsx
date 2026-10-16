@@ -934,7 +934,7 @@ describe('AppContainer State Management', () => {
         />,
       );
       const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)![12];
-      const readReason = actions.getSessionBusyReason!;
+      const readReason = actions.readSessionBusyReason!;
       let compressing = true;
       vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
         ...mockConfig.getLlmClient(),

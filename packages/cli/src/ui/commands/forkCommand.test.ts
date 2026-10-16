@@ -118,7 +118,7 @@ describe('forkCommand', () => {
   });
 
   it('reports the live blocker without launching an agent', async () => {
-    mockContext.ui.getSessionBusyReason = () =>
+    mockContext.ui.readSessionBusyReason = () =>
       'context compaction is in progress. Wait for it to finish.';
     const result = await forkCommand.action!(mockContext, 'do something');
     expect(result).toMatchObject({

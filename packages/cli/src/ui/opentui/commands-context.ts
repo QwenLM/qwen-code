@@ -71,6 +71,7 @@ export interface OpenTuiCommandHost {
   isIdle(): boolean;
   /** A model turn is streaming; ignores slash-command processing. */
   isStreaming(): boolean;
+  readSessionBusyReason?(): string | null;
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
   dispatchExtensionStateUpdate(action: ExtensionUpdateAction): void;
   addConfirmUpdateExtensionRequest(value: ConfirmationRequest): void;
@@ -165,6 +166,7 @@ export function createOpenTuiCommandContext(
           return dispatch.wasIdleBeforeDispatch && !host.isStreaming();
         },
       },
+      readSessionBusyReason: () => host.readSessionBusyReason?.() ?? null,
       toggleVimEnabled: () => host.toggleVimEnabled(),
       setMemoryFileCount: (count) => host.setMemoryFileCount(count),
       reloadCommands: () => host.reloadCommands(),
