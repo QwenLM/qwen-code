@@ -741,10 +741,26 @@ class ChildWorktreeGitTest {
     }
 
     @Test
-    void aDeletionLandsWhereTheParentKeepsTheContentElsewhere() throws Exception {
-        // Staged, never committed: the parent's index keeps it.
+    void aChildDeletingAFileTheParentOnlyStagedIsAConflict() throws Exception {
+        // The index alone does not keep it: the parent's next `git add -A`
+        // would stage the deletion and drop the only entry.
         write(project, "staged.txt", "staged\n");
         plain(project, "add", "staged.txt");
+        var repository = git.open(root, "project");
+        String base = git.snapshot(root, repository, project, null);
+        git.create(root, repository, "c1", base);
+        Path child = root.resolve(ChildWorktreeGit.CONTAINER + "/c1");
+        Files.delete(child.resolve("staged.txt"));
+
+        var merge = git.merge(root, repository, base, git.result(root, repository, "c1", base));
+
+        assertThat(merge.clean()).isFalse();
+        assertThat(merge.conflicts()).containsExactly("staged.txt");
+        assertThat(project.resolve("staged.txt")).hasContent("staged");
+    }
+
+    @Test
+    void aDeletionLandsWhereTheParentKeepsTheContentElsewhere() throws Exception {
         // Taken out of the index, still committed: HEAD keeps it.
         plain(project, "rm", "-q", "--cached", "keep.txt");
         // Never tracked, moved by the child: the merge writes it back.
@@ -753,7 +769,6 @@ class ChildWorktreeGitTest {
         String base = git.snapshot(root, repository, project, null);
         git.create(root, repository, "c1", base);
         Path child = root.resolve(ChildWorktreeGit.CONTAINER + "/c1");
-        Files.delete(child.resolve("staged.txt"));
         Files.delete(child.resolve("keep.txt"));
         write(child, "docs/notes.txt", "notes\n");
         Files.delete(child.resolve("notes.txt"));
@@ -762,8 +777,6 @@ class ChildWorktreeGitTest {
 
         assertThat(merge.clean()).isTrue();
         git.apply(root, repository, merge.parentTree(), merge.mergedTree());
-        assertThat(project.resolve("staged.txt")).doesNotExist();
-        assertThat(plain(project, "show", ":staged.txt")).isEqualTo("staged");
         assertThat(project.resolve("keep.txt")).doesNotExist();
         assertThat(plain(project, "show", "HEAD:keep.txt")).isEqualTo("keep");
         assertThat(project.resolve("notes.txt")).doesNotExist();

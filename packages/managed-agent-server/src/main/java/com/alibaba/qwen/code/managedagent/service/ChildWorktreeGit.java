@@ -535,10 +535,10 @@ public final class ChildWorktreeGit {
     /**
      * The paths of a clean merge that cannot be written into the parent's
      * working tree, which decision 5 reports as conflicts: a submodule
-     * pointer the merge moves (a patch cannot move one), a path the
+     * pointer the merge moves (a patch cannot move one); a path the
      * merge adds where the parent holds content its snapshot does not
      * carry: an ignored file or directory at the path, or an ignored file
-     * or link where one of its directories must be, and a path the merge
+     * or link where one of its directories must be; and a path the merge
      * deletes whose content the parent keeps nowhere else (see
      * {@link #unkept}).
      */
@@ -560,13 +560,14 @@ public final class ChildWorktreeGit {
 
     /**
      * The paths the merge deletes whose content the parent keeps nowhere
-     * else: neither its index nor its HEAD holds that content at the path,
-     * and the merge writes it at no other path. Such content was the
-     * working tree's alone (a child that untracks a file the parent never
-     * committed, for one: the snapshot the child started from committed
-     * it as its own, so removing it there says nothing about the parent's
-     * copy), and its only other copy is the base snapshot, whose pin goes
-     * when the row ends.
+     * else: its HEAD does not hold that content at the path, and the merge
+     * writes it at no other path. Such content was the working tree's
+     * alone (a child that untracks a file the parent never committed, for
+     * one: the snapshot the child started from committed it as its own, so
+     * removing it there says nothing about the parent's copy), and its only
+     * other copy is the base snapshot, whose pin goes when the row ends.
+     * The index does not count: the parent's next {@code git add -A}
+     * stages the written deletion and drops an entry no commit holds.
      */
     private Set<String> unkept(Path root, Repository repository, String parentTree, Map<String, Change> changes) {
         Set<String> written = new HashSet<>();
@@ -582,12 +583,11 @@ public final class ChildWorktreeGit {
         if (deleted.isEmpty()) {
             return deleted;
         }
-        Map<String, Change> staged = diff(root, repository, List.of("diff-index", "--cached", "-z",
-                "--no-renames", "--no-ext-diff", "--no-textconv", parentTree));
         String head = head(root, repository.top());
-        Map<String, Change> committed = head == null ? null : diffTree(root, repository, parentTree, head);
-        deleted.removeIf(path -> keeps(staged, path, changes.get(path).fromObjectId())
-                || committed != null && keeps(committed, path, changes.get(path).fromObjectId()));
+        if (head != null) {
+            Map<String, Change> committed = diffTree(root, repository, parentTree, head);
+            deleted.removeIf(path -> keeps(committed, path, changes.get(path).fromObjectId()));
+        }
         return deleted;
     }
 
@@ -999,19 +999,14 @@ public final class ChildWorktreeGit {
 
     /** Every path that differs between two trees, gitlinks included. */
     private Map<String, Change> diffTree(Path root, Repository repository, String from, String to) {
-        return diff(root, repository, List.of("diff-tree", "-r", "-z",
-                "--no-renames", "--no-ext-diff", "--no-textconv", from, to));
-    }
-
-    /** The records of a raw, NUL-separated diff command. */
-    private Map<String, Change> diff(Path root, Repository repository, List<String> args) {
-        List<String> tokens = tokens(git(repository.top(), root, null, args));
+        List<String> tokens = tokens(git(repository.top(), root, null, List.of("diff-tree", "-r", "-z",
+                "--no-renames", "--no-ext-diff", "--no-textconv", from, to)));
         Map<String, Change> changes = new LinkedHashMap<>();
         for (int index = 0; index + 1 < tokens.size(); index += 2) {
             String[] fields = tokens.get(index).split(" ");
             if (fields.length != 5 || !fields[0].startsWith(":")) {
                 throw new ChildWorkspaceException(ChildWorkspaceException.GIT, false,
-                        args.getFirst() + " answered an unexpected record");
+                        "diff-tree answered an unexpected record");
             }
             changes.put(tokens.get(index + 1), new Change(fields[0].substring(1), fields[1], fields[2], fields[3]));
         }
