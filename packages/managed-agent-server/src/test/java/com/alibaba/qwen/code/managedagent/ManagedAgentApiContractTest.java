@@ -1790,6 +1790,14 @@ class ManagedAgentApiContractTest {
                  "permission_policy":{"mode":"default"},
                  "metadata":{"team":"contract"}}
                 """;
+        ObjectNode configured = (ObjectNode) objectMapper.readTree(body);
+        configured.putArray("skills").addObject().put("name", "评审:review").put("description", "Review changes")
+                .put("body", "Read the diff.").put("base_directory", ".qwen/skills/review");
+        configured.putArray("mcp_servers").addObject().put("server_id", "docs").put("server_revision", 1)
+                .put("definition_digest", "a".repeat(64));
+        configured.putObject("hook_catalog").put("catalog_id", "review").put("catalog_revision", 2)
+                .put("definition_digest", "b".repeat(64));
+        body = configured.toString();
         JsonNode created = json(exchange(drift, "createAgent", 202,
                 post("/v1/agents").header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "agent-create"), body));
