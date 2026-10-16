@@ -477,6 +477,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/message-groups',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/message-groups',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/messages/delete',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/messages/delete',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/rewind/snapshots',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/rewind/snapshots',

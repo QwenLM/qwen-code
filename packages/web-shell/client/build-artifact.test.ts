@@ -511,13 +511,15 @@ describe('build artifact — transcript entry (#11031)', () => {
     // both locales; its parser, worker and markup stay inside the lazily
     // imported SpreadsheetPreview chunk, so only the copy enters this graph.
     // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
-    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
+    // Grouped deletion adds shared action rendering and bilingual copy;
+    // at 6c367751 the remainder measures 1,341,055. The 1,343,000 ceiling
+    // leaves 1,945 units of margin; the deletion hook stays interactive-only.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_331_500);
+    expect(js.length).toBeLessThan(1_343_000);
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {

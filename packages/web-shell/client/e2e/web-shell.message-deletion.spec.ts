@@ -274,7 +274,7 @@ test('linked group selection, earlier non-contiguous deletion and reload @smoke'
   });
 });
 
-test('only group can be deleted at mobile width, leaving the session open', async ({
+test('only group can be deleted at mobile width, leaving the session open @smoke', async ({
   page,
 }, info) => {
   await page.setViewportSize({ width: 390, height: 850 });
@@ -309,7 +309,7 @@ test('only group can be deleted at mobile width, leaving the session open', asyn
   await expect(page.locator('[data-web-shell-composer-editor]')).toBeVisible();
 });
 
-test('later groups are disabled, cancel preserves history, conflict allows fresh selection', async ({
+test('later groups are disabled, cancel preserves history, conflict allows fresh selection @smoke', async ({
   page,
 }, info) => {
   const { deletions, setFail, setSnapshot } = await setup(
@@ -373,7 +373,7 @@ test('later groups are disabled, cancel preserves history, conflict allows fresh
   ]);
 });
 
-test('committed 503 reconciles the originator and explains reopening', async ({
+test('committed 503 reconciles the originator and explains reopening @smoke', async ({
   page,
 }, info) => {
   const { setCommittedFailure } = await setup(
@@ -400,7 +400,7 @@ test('committed 503 reconciles the originator and explains reopening', async ({
   ).toContainText('Reopen this session');
 });
 
-test('server busy preserves selection for an explicit retry', async ({
+test('server busy preserves selection for an explicit retry @smoke', async ({
   page,
 }, info) => {
   const { setBusy, deletions } = await setup(
@@ -437,7 +437,7 @@ test('server busy preserves selection for an explicit retry', async ({
   await expect(page.getByText('Question 3', { exact: true })).toHaveCount(0);
 });
 
-test('frontend command echo and result delete together without a history mutation', async ({
+test('frontend command echo and result delete together without a history mutation @smoke', async ({
   page,
 }, info) => {
   const { deletions } = await setup(page, String(info.project.use.baseURL));
@@ -470,7 +470,7 @@ test('frontend command echo and result delete together without a history mutatio
   expect(deletions).toEqual([]);
 });
 
-test('peer invalidation clears an empty transcript and preserves local command records', async ({
+test('peer invalidation clears an empty transcript and preserves local command records @smoke', async ({
   page,
 }, info) => {
   const { daemon, scenario } = await setup(
@@ -499,7 +499,7 @@ test('peer invalidation clears an empty transcript and preserves local command r
   await expect(page.getByText('/tools', { exact: true })).toBeVisible();
 });
 
-test('an executing frontend command disables deletion until its result arrives', async ({
+test('an executing frontend command disables deletion until its result arrives @smoke', async ({
   page,
 }, info) => {
   await setup(page, String(info.project.use.baseURL));
@@ -534,7 +534,7 @@ test('an executing frontend command disables deletion until its result arrives',
   ).toHaveCount(5);
 });
 
-test('newly admitted optimistic user prompt can be deleted without refreshing', async ({
+test('newly admitted optimistic user prompt can be deleted without refreshing @smoke', async ({
   page,
 }, info) => {
   const { daemon, scenario } = await setup(
@@ -584,7 +584,7 @@ test('newly admitted optimistic user prompt can be deleted without refreshing', 
 });
 
 for (const count of [1, 105]) {
-  test(`reply checkbox stays on Processed through expansion (${count === 1 ? 'ordinary' : 'virtual'} list)`, async ({
+  test(`reply checkbox stays on Processed through expansion (${count === 1 ? 'ordinary' : 'virtual'} list) @smoke`, async ({
     page,
   }, info) => {
     await page.setViewportSize({ width: 1200, height: 900 });
@@ -645,7 +645,7 @@ for (const count of [1, 105]) {
   });
 }
 
-test('message actions use a hoverable menu that also supports click and keyboard', async ({
+test('message actions use a hoverable menu that also supports click and keyboard @smoke', async ({
   page,
 }, info) => {
   await setup(page, String(info.project.use.baseURL), 1);
@@ -730,7 +730,7 @@ test('message actions use a hoverable menu that also supports click and keyboard
   ).toBeFocused();
 });
 
-test('touch users can tap the message action menu and delete entry', async ({
+test('touch users can tap the message action menu and delete entry @smoke', async ({
   browser,
 }, info) => {
   const context = await browser.newContext({
@@ -761,7 +761,7 @@ test('touch users can tap the message action menu and delete entry', async ({
   }
 });
 
-test('a Chinese snapshot conflict clears selection with a localized explanation', async ({
+test('a Chinese snapshot conflict clears selection with a localized explanation @smoke', async ({
   page,
 }, info) => {
   const { setFail, deletions } = await setup(
@@ -786,7 +786,7 @@ test('a Chinese snapshot conflict clears selection with a localized explanation'
   expect(deletions).toHaveLength(1);
 });
 
-test('unselected local commands retain position and identity across deletion reload', async ({
+test('unselected local commands retain position and identity across deletion reload @smoke', async ({
   page,
 }, info) => {
   const { daemon, scenario, groups } = await setup(
@@ -856,7 +856,7 @@ test('unselected local commands retain position and identity across deletion rel
   ).toBe(key);
 });
 
-test('unselected local echo and result survive failed reload and later peer recovery', async ({
+test('unselected local echo and result survive failed reload and later peer recovery @smoke', async ({
   page,
 }, info) => {
   const { daemon, scenario } = await setup(

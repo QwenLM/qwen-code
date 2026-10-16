@@ -3420,8 +3420,10 @@ export class ChatRecordingService {
       }
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
-    this.lastRecordUuid = messages.at(-1)?.uuid ?? null;
-    this.lastPersistedRecordUuid = this.lastRecordUuid;
+    if (messages.length > 0) {
+      this.lastRecordUuid = messages[messages.length - 1].uuid;
+      this.lastPersistedRecordUuid = this.lastRecordUuid;
+    }
   }
 
   /**

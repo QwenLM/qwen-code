@@ -837,6 +837,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&
       f !== 'session_language' &&
+      f !== 'session_message_deletion' &&
       f !== 'session_rewind' &&
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
@@ -891,6 +892,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'non_blocking_prompt',
   'session_language',
   'user_language_sync',
+  'session_message_deletion',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
