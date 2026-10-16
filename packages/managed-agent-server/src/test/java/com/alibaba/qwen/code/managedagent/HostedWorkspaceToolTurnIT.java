@@ -201,11 +201,13 @@ class HostedWorkspaceToolTurnIT {
             @Override
             public InputStream open(String key) {
                 byte[] bytes = objects.get(key);
-                if (bytes == null) throw new IllegalStateException("Missing fixture object");
+                if (bytes == null) {
+                    throw new IllegalStateException("Missing fixture object");
+                }
                 return new ByteArrayInputStream(bytes);
             }
             @Override
-            public void requireUnversioned() {}
+            public void validateConfiguration() {}
         });
         context.registerBean("unicodeGrants", ToolPublicationStore.class, () -> new ToolPublicationStore(
                 context.getBean(JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
@@ -468,7 +470,9 @@ class HostedWorkspaceToolTurnIT {
                                     assertThat(publication.get("state")).isIn("OPEN", "FENCED");
                                     assertThat(publication.get("producer_phase")).isEqualTo("REFERENCED");
                                     assertThat(((Number) publication.get("complete")).intValue()).isEqualTo(1);
-                                } else assertThat(publications).isEmpty();
+                                } else {
+                                    assertThat(publications).isEmpty();
+                                }
                                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
                                         + " WHERE harness_session_id = ?", Integer.class, sessionId)).isEqualTo(1);
                                 var execution = jdbc.queryForMap("SELECT dispatch_generation, execution_state, execution_status"
