@@ -119,4 +119,27 @@ describe('interactions while a worker response is pending', () => {
     expect(h.content.getElementById('answer')!.textContent).toBe('100');
     expect(h.content.getElementById('eventValue')!.textContent).toBe('50');
   });
+
+  it('discards all outputs derived from a value superseded by a queued edit', async () => {
+    const h = await harness(`
+      function calculate() { ui.text('answer', String(Number(ui.input('rate').value) * 2)); }
+      ui.on('resetButton', 'click', () => {
+        ui.value('rate', '10');
+        calculate();
+        ui.html('eventValue', '<strong>Reset to 10</strong>');
+      });
+      ui.on('calculate', 'click', calculate);
+      calculate();
+    `);
+    h.click('resetButton');
+    h.enter('7');
+    h.deliver();
+    h.deliver();
+    expect(h.input.value).toBe('7');
+    expect(h.content.getElementById('answer')!.textContent).toBe('40');
+    expect(h.content.getElementById('eventValue')!.textContent).toBe('');
+    h.click('calculate');
+    h.deliver();
+    expect(h.content.getElementById('answer')!.textContent).toBe('14');
+  });
 });

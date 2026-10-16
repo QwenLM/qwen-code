@@ -36,7 +36,9 @@ ui.value('control-id', '42');
 
 Only `input`, `change`, and `click` events are supported. Pass strings to text/HTML/value operations. Prefer `ui.text` for user-controlled values. `ui.value` also updates the current input snapshot, so a subsequent `ui.input` in the same handler sees that value. Register handlers once at initialization, with at most 192 distinct element/event pairs; registering the same pair replaces its handler. Replacing content with `ui.html` does not create a script execution channel.
 
-Handlers run in order using the currently displayed inputs, and rapid input events may be combined. An older `ui.value` response cannot overwrite a newer queued user edit. Do not rely on receiving every intermediate slider position.
+`ui.html` replaces children with a sanitized body-level fragment, not a fragment parsed in the target's context. Standalone table rows, cells and captions lose their tags: replace a container with a complete `<table>`, or update identified cells with `ui.text`. Lists and option fragments are supported. Use `ui.value` for a control's current value. Text/HTML updates that indirectly change control or option values still obey the input limits. An invalid patch batch changes none of the displayed document and ends the activation with an error.
+
+Handlers run in order using the currently displayed inputs, and rapid input events may be combined. If an older round's `ui.value` conflicts with a newer queued edit, the entire patch batch is discarded, including its derived text/HTML. Register input/change handlers to recalculate from current values; button-only views need another Calculate click. Do not rely on receiving every intermediate slider position.
 
 JavaScript runs in an isolated QuickJS Worker, not in the document. There is no `document`, `window`, `fetch`, `require`, module import, timer, filesystem, MCP tool or host-message API. Do not use `querySelector`, `addEventListener`, `setTimeout`, browser events, a CDN, a charting-library import or hidden inline scripts. Use a small local calculation and update existing elements through `ui`.
 

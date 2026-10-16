@@ -73,17 +73,16 @@ export class ViewController {
             this.fail(response.error);
             return;
           }
-          // An older calculation must not overwrite a newer queued user edit.
+          // A superseded value and the outputs derived from it belong to one round.
           const edited = new Set(
             this.queue
               .filter((event) => event.type !== 'click')
               .map((event) => event.id),
           );
-          this.surface.apply(
-            response.patches.filter(
-              (patch) => patch.kind !== 'value' || !edited.has(patch.id),
-            ),
+          const superseded = response.patches.some(
+            (patch) => patch.kind === 'value' && edited.has(patch.id),
           );
+          this.surface.apply(superseded ? [] : response.patches);
           clearTimeout(this.timer);
           this.pending = false;
           this.onStatus('ready', 'Interactive view ready');

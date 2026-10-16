@@ -66,15 +66,6 @@ const controller = new ViewController(
 );
 
 app.addEventListener('toolresult', (result) => {
-  const data = result.structuredContent;
-  if (
-    title.textContent === 'Interactive view' &&
-    typeof data?.['title'] === 'string' &&
-    typeof data?.['summary'] === 'string'
-  ) {
-    title.textContent = data['title'].slice(0, 120);
-    summary.textContent = data['summary'].slice(0, 2_000);
-  }
   void controller.receive(result);
 });
 app.addEventListener('toolcancelled', () => controller.stop());

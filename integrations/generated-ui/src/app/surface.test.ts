@@ -125,6 +125,196 @@ describe('generated markup display', () => {
     expect(() => h.surface.inputs()).toThrow(/too long/);
   });
 
+  it('delegates an ID-less button click to its identified container', () => {
+    const h = harness(
+      '<div id="actions"><button><span>Go</span></button></div>',
+    );
+    h.content
+      .querySelector('span')!
+      .dispatchEvent(new Event('click', { bubbles: true }));
+    expect(h.onEvent).toHaveBeenCalledWith({
+      id: 'actions',
+      type: 'click',
+      value: '',
+      checked: false,
+    });
+  });
+
+  it.each([
+    ['text', (value: string) => `<input id="field" value="${value}">`, 'x'],
+    [
+      'textarea',
+      (value: string) => `<textarea id="field">${value}</textarea>`,
+      'x',
+    ],
+    [
+      'number',
+      (value: string) => `<input id="field" type="number" value="${value}">`,
+      'number',
+    ],
+    [
+      'select',
+      (value: string) =>
+        `<select id="field"><option value="${value}">Choice</option></select>`,
+      'x',
+    ],
+  ])('validates %s values when accepting markup', (_kind, markup, format) => {
+    const value = (length: number) =>
+      format === 'number' ? `0.${'0'.repeat(length - 3)}1` : 'x'.repeat(length);
+    const h = harness(markup(value(2048)));
+    expect(h.surface.inputs()['field'].value).toHaveLength(2048);
+    expect(() => harness(markup(value(2049)))).toThrow(/too long/);
+  });
+
+  it('rejects oversized values in unselected options', () => {
+    expect(() =>
+      harness(
+        `<select id="field"><option value="ok">Initial</option><option value="${'x'.repeat(2049)}">Later</option></select>`,
+      ),
+    ).toThrow(/too long/);
+  });
+
+  it('rejects combined input snapshots over the byte budget', () => {
+    expect(() =>
+      harness(
+        `<div>${Array.from({ length: 9 }, (_, i) => `<input id="field${i}" value="${'界'.repeat(650)}">`).join('')}</div>`,
+      ),
+    ).toThrow(/input limit/);
+  });
+
+  it.each([
+    ['duplicate ID', '<div id="view">Duplicate</div>', /unique/],
+    ['invalid ID', '<div id="1bad"></div>', /unique/],
+    ['unsupported input', '<input id="upload" type="file">', /input type/],
+    [
+      'input count',
+      Array.from({ length: 65 }, (_, i) => `<input id="field${i}">`).join(''),
+      /too many inputs/,
+    ],
+    [
+      'long number',
+      `<input id="number" type="number" value="0.${'0'.repeat(2046)}1">`,
+      /too long/,
+    ],
+  ])(
+    'keeps the whole batch unchanged when rejecting %s',
+    (_name, html, error) => {
+      const h = harness(
+        '<div id="view">Original</div><div id="other"></div><input id="rate" value="3"><button id="go">Go</button>',
+      );
+      const input = h.content.getElementById('rate') as HTMLInputElement;
+      input.value = '7';
+      expect(() =>
+        h.surface.apply([
+          { kind: 'value', id: 'rate', value: '10' },
+          { kind: 'text', id: 'view', value: 'Changed' },
+          { kind: 'html', id: 'other', value: html },
+        ]),
+      ).toThrow(error);
+      expect(h.content.getElementById('view')?.textContent).toBe('Original');
+      expect(h.content.getElementById('other')?.childElementCount).toBe(0);
+      expect(h.content.getElementById('rate')).toBe(input);
+      expect(h.surface.inputs()['rate'].value).toBe('7');
+      h.content
+        .getElementById('go')!
+        .dispatchEvent(new Event('click', { bubbles: true }));
+      expect(h.onEvent.mock.lastCall?.[0].id).toBe('go');
+      expect(h.onError).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects oversized text on a textarea without corrupting live input state', () => {
+    const h = harness(
+      '<textarea id="notes">Original</textarea><output id="out">Original</output>',
+    );
+    expect(() =>
+      h.surface.apply([
+        { kind: 'text', id: 'out', value: 'Changed' },
+        { kind: 'text', id: 'notes', value: 'x'.repeat(3000) },
+      ]),
+    ).toThrow(/too long/);
+    expect(h.surface.inputs()['notes'].value).toBe('Original');
+    expect(h.content.getElementById('out')?.textContent).toBe('Original');
+  });
+
+  it('validates implicit option values while allowing ordinary label and dropdown updates', () => {
+    const h = harness(
+      '<select id="choices"><option id="first">First</option></select><p id="out"></p>',
+    );
+    expect(() =>
+      h.surface.apply([{ kind: 'text', id: 'first', value: 'x'.repeat(2049) }]),
+    ).toThrow(/too long/);
+    expect(h.surface.inputs()['choices'].value).toBe('First');
+    h.surface.apply([
+      { kind: 'text', id: 'first', value: 'Renamed' },
+      { kind: 'text', id: 'out', value: 'x'.repeat(5000) },
+    ]);
+    expect(h.surface.inputs()['choices'].value).toBe('Renamed');
+    expect(h.content.getElementById('out')?.textContent).toHaveLength(5000);
+    h.surface.apply([
+      {
+        kind: 'html',
+        id: 'choices',
+        value: '<option value="next">Next</option>',
+      },
+    ]);
+    expect(h.surface.inputs()['choices'].value).toBe('next');
+    h.surface.apply([{ kind: 'html', id: 'choices', value: '' }]);
+    expect(h.content.querySelectorAll('option')).toHaveLength(0);
+    expect(h.surface.inputs()['choices'].value).toBe('');
+  });
+
+  it('retains live control values, selected options and focus after a valid batch', () => {
+    const h = harness(
+      '<input id="rate" value="3"><input id="check" type="checkbox"><textarea id="notes">Initial</textarea><select id="choice"><option value="a">A</option><option value="b">B</option></select><select id="multi" multiple><option value="a">A</option><option value="b">B</option></select><output id="out"></output>',
+    );
+    const input = h.content.getElementById('rate') as HTMLInputElement;
+    const check = h.content.getElementById('check') as HTMLInputElement;
+    const notes = h.content.getElementById('notes') as HTMLTextAreaElement;
+    const choice = h.content.getElementById('choice') as HTMLSelectElement;
+    const multi = h.content.getElementById('multi') as HTMLSelectElement;
+    input.value = '7';
+    input.focus();
+    check.checked = true;
+    notes.value = 'Edited';
+    choice.selectedIndex = 1;
+    multi.options[0].selected = true;
+    multi.options[1].selected = true;
+    h.surface.apply([{ kind: 'text', id: 'out', value: 'Updated' }]);
+    expect(h.content.getElementById('rate')).toBe(input);
+    expect(h.content.activeElement).toBe(input);
+    expect(h.surface.inputs()).toEqual({
+      rate: { value: '7', checked: false },
+      check: { value: 'on', checked: true },
+      notes: { value: 'Edited', checked: false },
+      choice: { value: 'b', checked: false },
+      multi: { value: 'a', checked: false },
+    });
+    expect(Array.from(multi.options, (option) => option.selected)).toEqual([
+      true,
+      true,
+    ]);
+    expect(h.content.getElementById('out')?.textContent).toBe('Updated');
+  });
+
+  it('updates elements created earlier in a valid batch and preserves table wrappers', () => {
+    const h = harness('<div id="view"></div>');
+    h.surface.apply([
+      {
+        kind: 'html',
+        id: 'view',
+        value:
+          '<input id="rate" value="3"><table><tbody><tr><td id="score">Initial</td></tr></tbody></table>',
+      },
+      { kind: 'value', id: 'rate', value: '7' },
+      { kind: 'text', id: 'score', value: '14' },
+    ]);
+    expect(h.surface.inputs()['rate'].value).toBe('7');
+    expect(
+      h.content.querySelector('table > tbody > tr > td')?.textContent,
+    ).toBe('14');
+  });
+
   it('rejects updates outside the generated body, oversized batches and accumulated node growth', () => {
     const h = harness('<div id="view"></div><div id="other"></div>');
     h.content.head.id = 'outside';

@@ -83,14 +83,14 @@ export class ViewSurface {
     style.textContent = css;
     doc.head.append(style);
     doc.body.replaceChildren(this.markup(html));
-    this.validate();
+    this.validate(doc.body);
     const listener = (event: Event) => {
       if (this.stopped) return;
       try {
         const target = event.target as Element | null;
         if (!target || target.nodeType !== 1) return;
         const control =
-          (event.type === 'click' ? target.closest('button') : null) ??
+          (event.type === 'click' ? target.closest('button[id]') : null) ??
           target.closest('[id]');
         if (!control?.id || !doc.body.contains(control)) return;
         const inputs = this.inputs();
@@ -133,19 +133,16 @@ export class ViewSurface {
     return fragment;
   }
 
-  private validate(): void {
-    const doc = this.content!;
-    if (doc.body.querySelectorAll('*').length > MAX_NODES)
+  private validate(body: HTMLElement): void {
+    if (body.querySelectorAll('*').length > MAX_NODES)
       throw new Error('The view contains too many elements.');
     const ids = new Set<string>();
-    for (const element of doc.body.querySelectorAll('[id]')) {
+    for (const element of body.querySelectorAll('[id]')) {
       if (!ID.test(element.id) || ids.has(element.id))
         throw new Error('Use unique element IDs starting with a letter.');
       ids.add(element.id);
     }
-    const controls = doc.body.querySelectorAll<Control>(
-      'input,select,textarea',
-    );
+    const controls = body.querySelectorAll<Control>('input,select,textarea');
     if (controls.length > MAX_INPUTS)
       throw new Error('The view contains too many inputs.');
     for (const control of controls) {
@@ -160,12 +157,21 @@ export class ViewSurface {
         (control as HTMLInputElement | HTMLTextAreaElement).maxLength = 2048;
       }
     }
+    for (const option of body.querySelectorAll('option')) {
+      if (option.value.length > 2048)
+        throw new Error('An input value is too long.');
+    }
+    this.readInputs(body);
   }
 
   inputs(): InputValues {
+    return this.readInputs(this.content!.body);
+  }
+
+  private readInputs(body: HTMLElement): InputValues {
     const inputs = Object.fromEntries(
       Array.from(
-        this.content!.body.querySelectorAll<Control>('input,select,textarea'),
+        body.querySelectorAll<Control>('input,select,textarea'),
         (control) => {
           if (control.value.length > 2048)
             throw new Error('An input value is too long.');
@@ -199,6 +205,24 @@ export class ViewSurface {
     ) {
       throw new Error('The view exceeded its output limit.');
     }
+    const body = this.content!.body;
+    const projected = body.cloneNode(true) as HTMLElement;
+    // Input/textarea cloning preserves live state; option selection needs copying.
+    for (const select of body.querySelectorAll('select')) {
+      const copy = projected.querySelector<HTMLSelectElement>(
+        `[id="${select.id}"]`,
+      )!;
+      for (let index = 0; index < select.options.length; index++) {
+        copy.options[index].selected = select.options[index].selected;
+      }
+      if (select.selectedIndex === -1) copy.selectedIndex = -1;
+    }
+    // Validate the whole round before changing live nodes, preserving input focus.
+    this.applyTo(projected, patches);
+    this.applyTo(body, patches);
+  }
+
+  private applyTo(body: HTMLElement, patches: UiPatch[]): void {
     for (const patch of patches) {
       if (
         !patch ||
@@ -208,8 +232,8 @@ export class ViewSurface {
       ) {
         throw new Error('Invalid view update.');
       }
-      const element = this.content?.getElementById(patch.id);
-      if (!element || !this.content!.body.contains(element))
+      const element = body.querySelector<HTMLElement>(`[id="${patch.id}"]`);
+      if (!element)
         throw new Error('A view update referenced a missing element.');
       switch (patch.kind) {
         case 'text':
@@ -218,7 +242,7 @@ export class ViewSurface {
         case 'html': {
           const fragment = this.markup(patch.value);
           const nextCount =
-            this.content!.body.querySelectorAll('*').length -
+            body.querySelectorAll('*').length -
             element.querySelectorAll('*').length +
             fragment.querySelectorAll('*').length;
           if (nextCount > MAX_NODES)
@@ -234,7 +258,7 @@ export class ViewSurface {
         default:
           throw new Error('Unsupported view update.');
       }
-      this.validate();
+      this.validate(body);
     }
   }
 
