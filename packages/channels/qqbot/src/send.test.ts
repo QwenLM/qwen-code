@@ -446,6 +446,24 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
     expect(capturedStderr()).not.toContain('WARNING');
   });
 
+  it('declares thread as defaultSessionScope, so zero-config defaults get per-group shared context', async () => {
+    const { plugin } = await import('./index.js');
+    expect(plugin.defaultSessionScope).toBe('thread');
+  });
+
+  it('emits NO warning for groupAllPolicy=all when sessionScope is the CLI-filled default (thread)', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { plugin } = await import('./index.js');
+    // Simulate parseChannelConfig (packages/cli/src/commands/channel/
+    // config-utils.ts): when the config omits sessionScope, the plugin's
+    // defaultSessionScope becomes the effective scope before construction.
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: plugin.defaultSessionScope as 'thread',
+    });
+    expect(channelConfig(ch)['sessionScope']).toBe('thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
 });
 
 describe('shared-session operator warning', () => {
