@@ -9,7 +9,7 @@ import {
   reconcileHostedTurnCleanup,
   confirmReplacedHostedTurnOwner,
 } from './hosted-turn-cleanup.js';
-import { rejectionDetail } from './hosted-never-started-reconcile.js';
+import { probeNeverStarted } from './hosted-never-started-reconcile.js';
 
 import {
   readHostedFileHistory,
@@ -1587,6 +1587,7 @@ export class HostedWorkspaceToolTurn {
   private readonly hooks?: HostedHookSession;
   private readonly profile?: string;
   private readonly context?: HostedWorkspaceContextSlot;
+  private readonly foregroundOnly: boolean;
   private readonly childRuns?: HostedChildRunSession;
   private readonly monitors?: HostedMonitorSession;
   private readonly backgroundLane?: HostedShellTurnOptions;
@@ -1644,6 +1645,7 @@ export class HostedWorkspaceToolTurn {
       hooks?: HostedHookSession;
       profile?: string;
       context?: HostedWorkspaceContextSlot;
+      foregroundOnly?: boolean;
       childRuns?: HostedChildRunSession;
       monitors?: HostedMonitorSession;
       backgroundLane?: HostedShellTurnOptions;
@@ -1667,23 +1669,28 @@ export class HostedWorkspaceToolTurn {
       memberPlanMode?: boolean;
     },
   ) {
-    this.mcp = extras?.mcp;
-    this.hooks = extras?.hooks;
+    this.foregroundOnly = extras?.foregroundOnly === true;
+    this.mcp = this.foregroundOnly ? undefined : extras?.mcp;
+    this.hooks = this.foregroundOnly ? undefined : extras?.hooks;
     this.profile = extras?.profile;
     this.context = extras?.context;
-    this.childRuns = extras?.childRuns;
-    this.monitors = extras?.monitors;
-    this.backgroundLane = extras?.backgroundLane;
-    this.childAgents = extras?.childAgents?.funnel;
+    this.childRuns = this.foregroundOnly ? undefined : extras?.childRuns;
+    this.monitors = this.foregroundOnly ? undefined : extras?.monitors;
+    this.backgroundLane = this.foregroundOnly
+      ? undefined
+      : extras?.backgroundLane;
+    this.childAgents = this.foregroundOnly
+      ? undefined
+      : extras?.childAgents?.funnel;
     this.childDepth = extras?.childAgents?.depth ?? 0;
     this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
     this.childSnapshots =
       this.childWorkspaces && extras?.childAgents?.childSnapshots === true;
     this.childConsumption =
       extras?.childAgents?.queueConsumption ?? (() => undefined);
-    this.messages = extras?.messages;
-    this.teams = extras?.teams;
-    this.commands = extras?.commands;
+    this.messages = this.foregroundOnly ? undefined : extras?.messages;
+    this.teams = this.foregroundOnly ? undefined : extras?.teams;
+    this.commands = this.foregroundOnly ? undefined : extras?.commands;
     this.skills = extras?.skills;
     this.memberPlanMode = extras?.memberPlanMode === true;
     this.publication =
@@ -1758,18 +1765,32 @@ export class HostedWorkspaceToolTurn {
         : search
           ? HOSTED_WORKSPACE_FILE_TOOLS_V2
           : HOSTED_WORKSPACE_FILE_TOOLS
-      ).map((tool) =>
-        ['write_file', 'edit'].includes(tool.name ?? '')
-          ? {
+      )
+        .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
+        .map((tool) => {
+          if (this.foregroundOnly && tool.name === 'run_shell_command') {
+            const schema = structuredClone(tool.parametersJsonSchema) as {
+              properties?: Record<string, unknown>;
+            };
+            delete schema.properties?.['is_background'];
+            return {
               ...tool,
               description:
-                tool.description +
-                (this.mcp
-                  ? ' This MCP profile provides no file backups or undo for Write/Edit.'
-                  : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
-            }
-          : tool,
-      ),
+                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms.',
+              parametersJsonSchema: schema,
+            };
+          }
+          return ['write_file', 'edit'].includes(tool.name ?? '')
+            ? {
+                ...tool,
+                description:
+                  tool.description +
+                  (this.mcp
+                    ? ' This MCP profile provides no file backups or undo for Write/Edit.'
+                    : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
+              }
+            : tool;
+        }),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
@@ -4660,13 +4681,53 @@ export class HostedWorkspaceToolTurn {
         if (result.status === 'fulfilled')
           cancellationBarriers.add(reservedIds[index]!);
       });
+      const probeBindings: Array<{
+        readonly executionCallId: string;
+        readonly request: (typeof requests)[number] | undefined;
+      }> = [];
+      const settleNeverStarted = async (
+        executionCallId: string,
+        request: (typeof requests)[number] | undefined,
+        processProven: boolean,
+      ) => {
+        if (request?.background) {
+          try {
+            if (this.childRuns !== undefined) {
+              await this.childRuns.settleFailed(executionCallId, {
+                stopReason: 'start_failed',
+                started: false,
+              });
+              if (processProven)
+                writeStderrLineSafe(
+                  `qwen serve: Settled never-started background child run ${executionCallId} from durable process-ledger absence.`,
+                );
+            }
+          } catch (settleCause) {
+            writeStderrLineSafe(
+              'qwen serve: Unstarted child run record was not settled: ' +
+                String(settleCause),
+            );
+          }
+        }
+        if (request?.monitoring)
+          await this.monitors
+            ?.settleFailed(executionCallId, {
+              stopReason: 'start_failed',
+              started: false,
+            })
+            .catch((settleCause: unknown) =>
+              writeStderrLineSafe(
+                'qwen serve: Unstarted monitor run record was not settled: ' +
+                  String(settleCause),
+              ),
+            );
+      };
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
         const request = requests.find(
           (_, index) => reserved.get(index) === executionCallId,
         );
-        let proven = false;
         let grantOwnerState: unknown;
         try {
           const owner = this.publication!.owner;
@@ -4685,57 +4746,39 @@ export class HostedWorkspaceToolTurn {
             grantOwnerState = (closed as Record<string, unknown>)['state'];
           if (grantOwnerState !== 'NOT_STARTED')
             throw new Error('Original execution was not proven unstarted.');
-          proven = true;
         } catch (closeCause) {
           writeStderrLineSafe(
             'qwen serve: Tool publication close was not confirmed: ' +
               String(closeCause),
           );
         }
-        if (
-          !proven &&
-          grantOwnerState === undefined &&
-          request?.background &&
-          cancellationBarriers.has(executionCallId)
-        ) {
-          try {
-            proven =
-              (await this.broker.backgroundProcessStatus(executionCallId)) ===
-              undefined;
-          } catch (cause) {
-            writeStderrLineSafe(
-              `qwen serve: Background process absence could not be confirmed for ${executionCallId} (${rejectionDetail(cause)}).`,
-            );
-          }
+        if (grantOwnerState === 'NOT_STARTED') {
+          await settleNeverStarted(executionCallId, request, false);
+          continue;
         }
-        if (!proven) continue;
-        // The grant owner proved a Shell or Monitor start never happened,
-        // or the original process ledger proved it for a background Shell.
-        // Publication absence alone proves nothing.
-        if (request?.background)
-          await this.childRuns
-            ?.settleFailed(executionCallId, {
-              stopReason: 'start_failed',
-              started: false,
-            })
-            .catch((settleCause: unknown) =>
-              writeStderrLineSafe(
-                'qwen serve: Unstarted child run record was not settled: ' +
-                  String(settleCause),
-              ),
-            );
-        if (request?.monitoring)
-          await this.monitors
-            ?.settleFailed(executionCallId, {
-              stopReason: 'start_failed',
-              started: false,
-            })
-            .catch((settleCause: unknown) =>
-              writeStderrLineSafe(
-                'qwen serve: Unstarted monitor run record was not settled: ' +
-                  String(settleCause),
-              ),
-            );
+        if (
+          grantOwnerState === undefined &&
+          request?.background === true &&
+          cancellationBarriers.has(executionCallId)
+        )
+          probeBindings.push({ executionCallId, request });
+      }
+      const probeOutcomes = await Promise.all(
+        probeBindings.map(async (binding) => ({
+          ...binding,
+          probe: await probeNeverStarted(this.broker, binding.executionCallId),
+        })),
+      );
+      for (const { executionCallId, request, probe } of probeOutcomes) {
+        if (!probe.proven) {
+          writeStderrLineSafe(
+            `qwen serve: Background process absence could not be confirmed for ${executionCallId} (${probe.cause}).`,
+          );
+          continue;
+        }
+        // The original process ledger proved the background Shell never
+        // started. Publication absence alone proves nothing.
+        await settleNeverStarted(executionCallId, request, true);
       }
       throw new HostedToolRecoveryRequiredError(cause);
     } finally {

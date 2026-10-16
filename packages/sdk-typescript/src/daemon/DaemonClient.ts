@@ -6681,7 +6681,9 @@ export class DaemonClient {
 
   async archiveSessionsData(
     sessionIds: string[],
-    clientIdOrOptions?: string | { resolveConflicts?: boolean },
+    clientIdOrOptions?:
+      | string
+      | { resolveConflicts?: boolean; requireIdle?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
     const options =
@@ -6698,6 +6700,9 @@ export class DaemonClient {
           sessionIds,
           ...(options?.resolveConflicts !== undefined
             ? { resolveConflicts: options.resolveConflicts }
+            : {}),
+          ...(options?.requireIdle !== undefined
+            ? { requireIdle: options.requireIdle }
             : {}),
         }),
       },
@@ -8388,7 +8393,9 @@ export class WorkspaceDaemonClient {
 
   archiveSessionsData(
     sessionIds: string[],
-    clientIdOrOptions?: string | { resolveConflicts?: boolean },
+    clientIdOrOptions?:
+      | string
+      | { resolveConflicts?: boolean; requireIdle?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
     const options =
@@ -8400,6 +8407,9 @@ export class WorkspaceDaemonClient {
         sessionIds,
         ...(options?.resolveConflicts !== undefined
           ? { resolveConflicts: options.resolveConflicts }
+          : {}),
+        ...(options?.requireIdle !== undefined
+          ? { requireIdle: options.requireIdle }
           : {}),
       },
       typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,

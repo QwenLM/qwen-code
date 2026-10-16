@@ -2685,6 +2685,20 @@ export function registerSessionRoutes(
     return undefined;
   };
 
+  const parseRequireIdle = (
+    req: Request,
+    res: Response,
+  ): boolean | undefined => {
+    const value: unknown = safeBody(req)['requireIdle'];
+    if (value === undefined) return false;
+    if (typeof value === 'boolean') return value;
+    res.status(400).json({
+      error: '`requireIdle` must be a boolean',
+      code: 'invalid_request',
+    });
+    return undefined;
+  };
+
   // Mirrors the bridge's displayName control-character rule (ESLint forbids
   // control-char regexes).
   const hasControlCharacter = (value: string): boolean =>
@@ -2835,6 +2849,7 @@ export function registerSessionRoutes(
     route: string,
     sessionIds: string[],
     resolveConflicts = false,
+    requireIdle = false,
   ) => {
     const run = async (
       runtime: WorkspaceRuntime,
@@ -2857,6 +2872,7 @@ export function registerSessionRoutes(
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
               resolveConflicts,
+              requireIdle,
               assertCanMutate,
             }),
           ),
@@ -8473,6 +8489,8 @@ export function registerSessionRoutes(
     if (uniqueIds === undefined) return;
     const resolveConflicts = parseResolveConflicts(req, res);
     if (resolveConflicts === undefined) return;
+    const requireIdle = parseRequireIdle(req, res);
+    if (requireIdle === undefined) return;
     if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     try {
@@ -8482,6 +8500,7 @@ export function registerSessionRoutes(
         'POST /sessions/archive',
         uniqueIds,
         resolveConflicts,
+        requireIdle,
       );
       if (!operation) return;
       const { result } = operation;
@@ -8563,6 +8582,8 @@ export function registerSessionRoutes(
       if (uniqueIds === undefined) return;
       const resolveConflicts = parseResolveConflicts(req, res);
       if (resolveConflicts === undefined) return;
+      const requireIdle = parseRequireIdle(req, res);
+      if (requireIdle === undefined) return;
       if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const operation = await archiveSessions(
@@ -8571,6 +8592,7 @@ export function registerSessionRoutes(
           route,
           uniqueIds,
           resolveConflicts,
+          requireIdle,
         );
         if (!operation) return;
         const { result } = operation;

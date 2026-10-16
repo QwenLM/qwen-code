@@ -677,6 +677,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_status',
   'session_close',
   'session_archive',
+  'session_archive_idle_guard',
   'session_storage_conflict_repair',
   'session_metadata',
   'session_organization',
@@ -34362,6 +34363,34 @@ describe('createServeApp', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('validates and forwards the idle-only archive guard', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeed';
+      await writeSession(sid);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createArchiveApp(bridge);
+
+      const invalid = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], requireIdle: 'yes' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_request');
+
+      const archived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], requireIdle: true });
+      expect(archived.status).toBe(200);
+      expect(bridge.closeCalls[0]?.closeOpts).toMatchObject({
+        requireAgentClose: true,
+        requireIdle: true,
+      });
+    });
+
     it('requires an explicit boolean to repair active/archive conflicts', async () => {
       const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeea';
       await writeSession(sid);
@@ -34656,7 +34685,7 @@ describe('createServeApp', () => {
         {
           sessionId: sid,
           clientId: undefined,
-          closeOpts: { requireAgentClose: true },
+          closeOpts: { requireAgentClose: true, requireIdle: false },
         },
       ]);
     });
