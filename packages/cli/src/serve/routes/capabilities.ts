@@ -6,7 +6,10 @@
 
 import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import { getServeProtocolVersions } from '../capabilities.js';
+import {
+  getServeProtocolVersions,
+  hostedPersonaServeFeatures,
+} from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
 import {
@@ -16,6 +19,7 @@ import {
 import {
   CAPABILITIES_SCHEMA_VERSION,
   type CapabilitiesEnvelope,
+  type HostedHarnessCapabilities,
   type ServeOptions,
 } from '../types.js';
 import type {
@@ -38,13 +42,20 @@ interface RegisterCapabilitiesRoutesDeps {
   sessionRestoreTimeoutMs: number;
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
+  agentCollaborationEnabledFor?: (workspaceCwd: string) => boolean;
+  hostedHarness?: HostedHarnessCapabilities;
 }
 
 function workflowsEnabledForRuntime(
   runtime: WorkspaceRuntime | undefined,
   daemonEnv: Readonly<NodeJS.ProcessEnv>,
 ): boolean {
-  if (!runtime || !runtime.trusted) return false;
+  if (
+    !runtime ||
+    !runtime.trusted ||
+    runtime.routeFileSystemFactory.sshWorkspace
+  )
+    return false;
   const env =
     runtime.env.mode === 'runtime-overlay'
       ? (runtime.env.effectiveEnv ?? {})
@@ -81,10 +92,13 @@ export function registerCapabilitiesRoutes(
       (entry) => entry.primary && entry.state === 'active',
     )?.current?.runtime;
     const multipleAdmissionPools = entries.length > 1;
-    const features = deps.currentServeFeatures();
+    const features = deps.hostedHarness
+      ? hostedPersonaServeFeatures()
+      : deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
+      ...(deps.hostedHarness ? { hostedHarness: deps.hostedHarness } : {}),
       protocolVersions: getServeProtocolVersions(),
       ...(deps.qwenCodeVersion
         ? { qwenCodeVersion: deps.qwenCodeVersion }
@@ -133,12 +147,24 @@ export function registerCapabilitiesRoutes(
       workspaces: entries.map((entry) => ({
         id: entry.workspaceId,
         cwd: entry.workspaceCwd,
+        ...(entry.current?.runtime.routeFileSystemFactory.sshWorkspace
+          ? { ssh: entry.current.runtime.routeFileSystemFactory.sshWorkspace }
+          : {}),
         ...(entry.displayName !== undefined
           ? { displayName: entry.displayName }
           : {}),
         primary: entry.primary,
         trusted:
           entry.state === 'active' && entry.current?.runtime.trusted === true,
+        ...(features.includes('agent_collaboration_v1')
+          ? {
+              agentCollaborationEnabled:
+                entry.state === 'active' &&
+                entry.current?.runtime.trusted === true &&
+                deps.agentCollaborationEnabledFor?.(entry.workspaceCwd) ===
+                  true,
+            }
+          : {}),
         workflowsEnabled: workflowsEnabledForRuntime(
           entry.state === 'active' ? entry.current?.runtime : undefined,
           deps.daemonEnv,

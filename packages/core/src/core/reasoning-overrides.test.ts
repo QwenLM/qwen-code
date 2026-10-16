@@ -264,6 +264,70 @@ describe('reasoning declarations', () => {
       ),
     ).toBeUndefined();
   });
+
+  it.each([
+    [
+      'maas.qianwenaiapi.com',
+      'https://maas.qianwenaiapi.com/compatible-mode/v1',
+    ],
+    [
+      'maas.qwencloudapi.com',
+      'https://maas.qwencloudapi.com/compatible-mode/v1',
+    ],
+    [
+      'token-plan.maas.qianwenaiapi.com',
+      'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+    ],
+    [
+      'token-plan.maas.qwencloudapi.com',
+      'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
+    ],
+  ])(
+    'inherits DashScope capabilities for QwenCloud host %s',
+    (_host, baseUrl) => {
+      // The declaration must omit `thinking` and `profile`: either one returns
+      // from validateReasoningDeclaration before `route.baseUrl` is parsed, so
+      // the host regex is never reached. qwen3.8-max carries disableField
+      // 'reasoning_effort' in both presets, leaving the host match as the only
+      // thing selecting 'dashscope-effort' over 'qwen-chat-template'.
+      const resolved = resolveReasoningCapabilities(
+        { ...route, model: 'qwen3.8-max', baseUrl },
+        { canDisable: false },
+      );
+      expect(resolved).toBeDefined();
+      expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
+    },
+  );
+
+  // A lookalike host matches no preset, so resolution returns at the
+  // `!inherited && !gpt && !claude && !input.profile` guard before parsing
+  // `route.baseUrl`: these pin "unregistered host resolves to nothing", while
+  // the positive cases above are what pin the anchored regex.
+  it.each([
+    [
+      'maas.qianwenaiapi.com.evil.com',
+      'https://maas.qianwenaiapi.com.evil.com/compatible-mode/v1',
+    ],
+    [
+      'maas.qwencloudapi.com.evil.com',
+      'https://maas.qwencloudapi.com.evil.com/compatible-mode/v1',
+    ],
+    [
+      'notmaas.qianwenaiapi.com',
+      'https://notmaas.qianwenaiapi.com/compatible-mode/v1',
+    ],
+    [
+      'notmaas.qwencloudapi.com',
+      'https://notmaas.qwencloudapi.com/compatible-mode/v1',
+    ],
+  ])('rejects lookalike QwenCloud host %s', (_host, baseUrl) => {
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'qwen3.8-max', baseUrl },
+        { defaultEffort: 'medium' },
+      ),
+    ).toBeUndefined();
+  });
 });
 
 describe('prompt reasoning snapshots', () => {

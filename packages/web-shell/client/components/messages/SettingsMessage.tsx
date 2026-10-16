@@ -74,8 +74,8 @@ import { Switch } from '../ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 
 import {
-  isItemExcluded,
-  isSettingExcluded,
+  isItemVisible,
+  isSettingVisible,
   type WebShellSettingsOptions,
 } from '../../settings';
 
@@ -90,7 +90,7 @@ interface SettingsMessageProps {
   chatWidthMode: ChatWidthMode;
   onChatWidthModeChange: (mode: ChatWidthMode) => void;
   /** Model list/add/delete/select, rendered inside the Model category. */
-  modelManagement?: ModelManagementProps;
+  modelManagementSectionProps?: ModelManagementProps;
   /** Browser-local remote computer catalog and connection controls. */
   connections?: ReactNode;
   embedded?: boolean;
@@ -436,7 +436,7 @@ export function SettingsMessage({
   onThemeChange,
   chatWidthMode,
   onChatWidthModeChange,
-  modelManagement,
+  modelManagementSectionProps,
   connections,
   embedded = false,
   initialCategory,
@@ -523,7 +523,7 @@ export function SettingsMessage({
         items: [{ type: 'local-control' }],
       });
     }
-    if (modelManagement && !showInitialLoading) {
+    if (modelManagementSectionProps && !showInitialLoading) {
       const model = groups.find((group) => group.id === 'Model');
       if (model) model.items.push({ type: 'model-management' });
       else
@@ -545,7 +545,7 @@ export function SettingsMessage({
         ...group,
         items: group.items.filter((item) => {
           if (item.type === 'setting') {
-            return !isSettingExcluded(item.setting.key, presentation);
+            return isSettingVisible(item.setting.key, presentation);
           }
           const id =
             item.type === 'local'
@@ -559,7 +559,7 @@ export function SettingsMessage({
                   : item.type === 'connections'
                     ? 'builtin:connections'
                     : 'builtin:model-management';
-          return !isItemExcluded(id, presentation);
+          return isItemVisible(id, presentation);
         }),
       }))
       .filter((group) => group.items.length > 0);
@@ -568,7 +568,7 @@ export function SettingsMessage({
     settings,
     t,
     hasNotifications,
-    modelManagement,
+    modelManagementSectionProps,
     connections,
     presentation,
     showInitialLoading,
@@ -1067,9 +1067,9 @@ export function SettingsMessage({
                     </CardContent>
                   </Card>
                 )}
-                {showModelManagement && modelManagement && (
+                {showModelManagement && modelManagementSectionProps && (
                   <div className={activeRows.length > 0 ? 'mt-4' : undefined}>
-                    <ModelManagementSection {...modelManagement} />
+                    <ModelManagementSection {...modelManagementSectionProps} />
                   </div>
                 )}
                 {showConnections && connections}

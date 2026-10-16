@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+
+import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
   BackgroundTaskStatus,
   ConcurrencyBatch,
@@ -19,6 +22,7 @@ import type {
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
   ServerLlmStreamEvent,
+  UserPromptAdmission,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
@@ -58,6 +62,7 @@ import {
   recordHandledToolCall,
   isToolCallConcurrencySafe,
   canonicalToolName,
+  Kind,
   parsePositiveIntegerEnv,
   partitionByConcurrencySafety,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
@@ -90,6 +95,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
+import { ModSession } from './services/mod-session.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -450,6 +456,7 @@ async function emitNonInteractiveFinalMessage(params: {
  * @param controlService - Optional control service for future permission handling.
  */
 export interface RunNonInteractiveOptions {
+  modSession?: ModSession;
   abortController?: AbortController;
   adapter?: JsonOutputAdapterInterface;
   userMessage?: CLIUserMessage;
@@ -491,21 +498,77 @@ export interface RunNonInteractiveOptions {
  * under the tool's canonical name (via `canonicalToolName`, as execution and
  * the interactive scheduler do) so a legacy alias — e.g. `search_file_content`
  * for `grep` — classifies with the same safety and doesn't parallelize
- * differently from the TUI. An unregistered tool resolves to `undefined`,
+ * differently from the TUI. A valid ToolCall envelope uses its hidden target's
+ * identity for the same reason. An unregistered tool resolves to `undefined`,
  * which {@link isToolCallConcurrencySafe} treats as unsafe.
  */
 function partitionHeadlessToolCalls(
   requests: ToolCallRequestInfo[],
   config: Config,
 ): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
+  // A PreToolUse or PermissionRequest hook can replace a read-only command
+  // after this check, so such a shell call runs alone. A skill earlier in
+  // the batch may register those hooks before the call runs.
+  let skillBefore = false;
+  return partitionByConcurrencySafety(requests, (request) => {
+    const executionRequest = getHeadlessExecutionRequest(request, config);
+    const canonicalName = canonicalToolName(executionRequest.name);
+    const kind = config.getToolRegistry().getTool(canonicalName)?.kind;
+    const inputMayChange =
+      kind === Kind.Execute &&
+      (skillBefore ||
+        (!config.getDisableAllHooks() &&
+          (config.hasHooksForEvent('PreToolUse') ||
+            config.hasHooksForEvent('PermissionRequest'))));
+    skillBefore ||= canonicalName === ToolNames.SKILL;
+    return (
+      !inputMayChange &&
+      isToolCallConcurrencySafe(
+        executionRequest.name,
+        kind,
+        executionRequest.args,
+      )
+    );
+  });
+}
+
+function getHeadlessExecutionRequest(
+  request: ToolCallRequestInfo,
+  config: Config,
+): ToolCallRequestInfo {
+  if (canonicalToolName(request.name) !== ToolNames.TOOL_CALL) {
+    return request;
+  }
+
+  const targetName = request.args['name'];
+  let targetArgs = request.args['arguments'];
+  if (typeof targetArgs === 'string') {
+    try {
+      targetArgs = JSON.parse(targetArgs) as unknown;
+    } catch {
+      return request;
+    }
+  }
+  if (
+    typeof targetName !== 'string' ||
+    typeof targetArgs !== 'object' ||
+    targetArgs === null ||
+    Array.isArray(targetArgs)
+  ) {
+    return request;
+  }
+
   const registry = config.getToolRegistry();
-  return partitionByConcurrencySafety(requests, (request) =>
-    isToolCallConcurrencySafe(
-      request.name,
-      registry.getTool(canonicalToolName(request.name))?.kind,
-      request.args,
-    ),
-  );
+  const target = registry.getTool(canonicalToolName(targetName));
+  if (!target || !registry.isDeferredAndHidden(target.name)) {
+    return request;
+  }
+
+  return {
+    ...request,
+    name: target.name,
+    args: targetArgs as Record<string, unknown>,
+  };
 }
 
 /**
@@ -534,14 +597,19 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    const modSession =
+      options.modSession ?? ModSession.create(config, settings, adapter);
+    const ownsModSession = options.modSession === undefined;
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
     let chatRecordingSettlement: Promise<void> | undefined;
     const settleBeforeTerminalOutput = (): Promise<void> => {
-      chatRecordingSettlement ??= settleChatRecording(config, {
-        finalize: ownsAdapter,
-      }).then(() => undefined);
+      chatRecordingSettlement ??= (async () => {
+        if (ownsModSession) await modSession?.close();
+        modSession?.flushLogs();
+        await settleChatRecording(config, { finalize: ownsAdapter });
+      })();
       return chatRecordingSettlement;
     };
     const emitResult = async (
@@ -554,18 +622,22 @@ export async function runNonInteractive(
       // the error still surfaces instead of losing both result and error.
       adapter.emitResult(result);
       options.onResultEmitted?.();
+      await modSession?.flushOutput();
     };
 
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
     const permissionMode = config.getApprovalMode() as PermissionMode;
-    const cleanupReviewWorktrees = (gitTimeout?: number) =>
+    const cleanupReviewWorktrees = (gitTimeout?: number) => {
+      // Review leases live in the tool-writable workspace in this mode.
+      if (config.getShellExecutionSandbox?.()) return;
       cleanupReviewWorktreeLeases({
         sessionId,
         promptId: prompt_id,
         repositoryRoot: config.getProjectRoot(),
         gitTimeout,
       });
+    };
     const unregisterReviewWorktreeCleanup = registerCleanup(() =>
       cleanupReviewWorktrees(1_000),
     );
@@ -1058,6 +1130,16 @@ export async function runNonInteractive(
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
 
+      try {
+        await modSession?.initialize(abortController.signal);
+      } catch (error) {
+        adapter.emitMessage(
+          await buildSystemMessage(config, sessionId, permissionMode, settings),
+        );
+        modSession?.flushLogs();
+        throw error;
+      }
+
       if (options.controlService) {
         config
           .getWorkflowRunRegistry()
@@ -1088,8 +1170,10 @@ export async function runNonInteractive(
         sessionId,
         permissionMode,
         settings,
+        modSession,
       );
       adapter.emitMessage(systemMessage);
+      modSession?.flushLogs();
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
@@ -1119,15 +1203,21 @@ export async function runNonInteractive(
       // slash command; seeds the loop-scoped `modelOverride` below so the
       // submitted prompt runs on the chosen model without a session switch.
       let inlineModelOverride: string | undefined;
+      let promptAdmission: UserPromptAdmission | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
         // client.ts strips the ENTIRE trailing user run, so detection must
         // re-submit exactly that run or the oldest orphans get dropped. This
         // runs once per (rare) continue request, so the full clone is fine.
+        const history = llmClient.getChat().getHistory();
+        const cancellation = getLastApiPromptCancellation(
+          llmClient.getChat().getHistoryShallow(),
+          await config.getChatRecordingService()!.readActiveTranscriptChain(),
+        );
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: llmClient.getChat().getHistory(),
+          apiHistory: cancellation ? [] : history,
           completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
@@ -1177,6 +1267,27 @@ export async function runNonInteractive(
             abortController,
             config,
             settings,
+            undefined,
+            undefined,
+            modSession,
+            // Core runs no UserPromptSubmit for a notification batch.
+            (options.sendMessageType ?? SendMessageType.UserQuery) ===
+              SendMessageType.UserQuery
+              ? async () => {
+                  if (abortController.signal.aborted) await routeAbort();
+                  promptAdmission = await llmClient.admitUserPrompt(
+                    input,
+                    prompt_id,
+                  );
+                  if (abortController.signal.aborted) await routeAbort();
+                  return !promptAdmission.blocked;
+                }
+              : undefined,
+          );
+          await modSession?.syncSession(
+            slashCommandResult.resolvedCommand?.name === 'clear'
+              ? 'clear'
+              : 'resume',
           );
           switch (slashCommandResult.type) {
             case 'submit_prompt':
@@ -1258,7 +1369,10 @@ export async function runNonInteractive(
                 );
               }
               markGoalTurnDelivered(activeGoalTurn);
-              initialPartList = buildGoalContinuationParts(activeGoalTurn);
+              initialPartList = buildGoalContinuationParts(
+                activeGoalTurn,
+                config.getToolRegistry?.(),
+              );
               slashHandled = true;
               break;
             }
@@ -1358,7 +1472,11 @@ export async function runNonInteractive(
           const sessionPath = config
             .getSessionService()
             .getWorktreeSessionPath(sessionId);
-          const restored = await restoreWorktreeContext(sessionPath);
+          const restored = await restoreWorktreeContext(
+            sessionPath,
+            (error) => debugLogger.warn('worktree restore warning:', error),
+            sessionId,
+          );
           if (restored.contextMessage) {
             initialPartList = withReminder(
               initialPartList,
@@ -1836,6 +1954,10 @@ export async function runNonInteractive(
           ToolCallResponseInfo,
           'success' | 'error' | 'cancelled'
         >();
+        const executionRequestByResponse = new Map<
+          ToolCallResponseInfo,
+          ToolCallRequestInfo
+        >();
         const structuredOutputActive =
           config.getJsonSchema() &&
           batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
@@ -1976,10 +2098,12 @@ export async function runNonInteractive(
         // finalised (emitted, recorded, appended to `toolResponseParts`)
         // strictly in original request order, so the model and the event
         // log always see a deterministic sequence.
-        const toolBatches = partitionHeadlessToolCalls(
-          requestsToExecute,
-          config,
-        );
+        const toolBatches = modSession?.hasToolHooks
+          ? requestsToExecute.map((request) => ({
+              concurrent: false,
+              calls: [request],
+            }))
+          : partitionHeadlessToolCalls(requestsToExecute, config);
 
         // Tick BEFORE the call so that --max-tool-calls=N caps the run
         // at exactly N executions: the (N+1)th tick aborts before the
@@ -2022,8 +2146,12 @@ export async function runNonInteractive(
         const launchToolCall = async (
           requestInfo: ToolCallRequestInfo,
         ): Promise<ToolCallResponseInfo> => {
+          const executionRequest = getHeadlessExecutionRequest(
+            requestInfo,
+            config,
+          );
           debugLogger.debug(
-            `[runNonInteractive] launching tool call ${requestInfo.callId} (${requestInfo.name})`,
+            `[runNonInteractive] launching tool call ${requestInfo.callId} (${executionRequest.name})`,
           );
           const inputFormat =
             typeof config.getInputFormat === 'function'
@@ -2038,14 +2166,14 @@ export async function runNonInteractive(
           // has its own complex handler (subagent messages). All other
           // tools with canUpdateOutput=true (e.g., MCP tools) get a
           // generic handler that emits progress via the adapter.
-          const isAgentTool = requestInfo.name === 'agent';
+          const isAgentTool = executionRequest.name === ToolNames.AGENT;
           const { handler: outputUpdateHandler } = isAgentTool
             ? createAgentToolProgressHandler(
                 config,
                 requestInfo.callId,
                 adapter,
               )
-            : createToolProgressHandler(requestInfo, adapter);
+            : createToolProgressHandler(executionRequest, adapter);
 
           const response = await executeToolCall(
             config,
@@ -2058,6 +2186,9 @@ export async function runNonInteractive(
               : abortController.signal,
             {
               recordToolResult: false,
+              modToolCall: modSession?.toolCall(() =>
+                budgetEnforcer.tickToolCall(),
+              ),
               onToolResultFullTurnModel: (model) => {
                 if (inlineModelOverrideActive) return false;
                 return setModelOverride(model);
@@ -2066,6 +2197,7 @@ export async function runNonInteractive(
               onAllToolCallsComplete: async (completedCalls) => {
                 for (const call of completedCalls) {
                   statusByResponse.set(call.response, call.status);
+                  executionRequestByResponse.set(call.response, call.request);
                 }
               },
               runtimeView,
@@ -2075,7 +2207,7 @@ export async function runNonInteractive(
             },
           );
           debugLogger.debug(
-            `[runNonInteractive] tool call ${requestInfo.callId} (${requestInfo.name}) settled${
+            `[runNonInteractive] tool call ${requestInfo.callId} (${executionRequest.name}) settled${
               response.error ? ' with error' : ''
             }`,
           );
@@ -2089,6 +2221,9 @@ export async function runNonInteractive(
           requestInfo: ToolCallRequestInfo,
           toolResponse: ToolCallResponseInfo,
         ): boolean => {
+          const executionRequest =
+            executionRequestByResponse.get(toolResponse) ??
+            getHeadlessExecutionRequest(requestInfo, config);
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
             // formatted as tool_result blocks. handleToolError detects
@@ -2096,25 +2231,23 @@ export async function runNonInteractive(
             // the LLM can decide what to do next. In text mode, we
             // still log the error.
             handleToolError(
-              requestInfo.name,
+              executionRequest.name,
               toolResponse.error,
               config,
               toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
-              typeof toolResponse.resultDisplay === 'string'
-                ? toolResponse.resultDisplay
-                : undefined,
+              shellResultText(toolResponse.resultDisplay),
               { approvalRequired: toolResponse.approvalRequired === true },
             );
           }
 
-          adapter.emitToolResult(requestInfo, toolResponse);
+          adapter.emitToolResult(executionRequest, toolResponse);
           responseByRequest.set(requestInfo, toolResponse);
           terminateTurn ||= toolResponse.terminateTurn === true;
           config
             .getLlmClient()
             .recordCompletedToolCall(
-              requestInfo.name,
-              requestInfo.args as Record<string, unknown>,
+              executionRequest.name,
+              executionRequest.args as Record<string, unknown>,
             );
 
           // Capture model override from skill tool results.
@@ -2344,11 +2477,20 @@ export async function runNonInteractive(
           const response = responseByRequest.get(request);
           return response ? [{ request, response }] : [];
         });
+        const resolvedResponses = orderedResponses.map(
+          ({ request, response }) => ({
+            request,
+            response,
+            executionRequest:
+              executionRequestByResponse.get(response) ??
+              getHeadlessExecutionRequest(request, config),
+          }),
+        );
         const finalized = await finalizeToolResponses(
           config,
-          orderedResponses.map(({ request, response }) => ({
+          resolvedResponses.map(({ request, response, executionRequest }) => ({
             callId: request.callId,
-            toolName: request.name,
+            toolName: executionRequest.name,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
             artifacts: response.artifacts,
@@ -2363,11 +2505,15 @@ export async function runNonInteractive(
 
         const chatRecordingService = config.getChatRecordingService?.();
         const toolResponseParts: Part[] = [];
-        for (let index = 0; index < orderedResponses.length; index++) {
-          const { request, response } = orderedResponses[index];
+        for (let index = 0; index < resolvedResponses.length; index++) {
+          const { request, response, executionRequest } =
+            resolvedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          const goalProvenance = goalToolResultProvenance(request);
+          const goalProvenance = goalToolResultProvenance(
+            executionRequest,
+            finalizedParts,
+          );
           chatRecordingService?.recordToolResult?.(
             finalizedParts,
             {
@@ -2473,6 +2619,7 @@ export async function runNonInteractive(
               sendType === SendMessageType.UserQuery &&
               !options.continueInterrupted &&
               submittedPrompt.trim().length > 0 && { submittedPrompt }),
+            ...(isFirstTurn && promptAdmission && { promptAdmission }),
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
@@ -2649,7 +2796,10 @@ export async function runNonInteractive(
               currentMessages = [
                 {
                   role: 'user',
-                  parts: buildGoalContinuationParts(nextGoalTurn),
+                  parts: buildGoalContinuationParts(
+                    nextGoalTurn,
+                    config.getToolRegistry?.(),
+                  ),
                 },
               ];
               hasUnsentToolResponse = false;
@@ -2680,7 +2830,10 @@ export async function runNonInteractive(
               currentMessages = [
                 {
                   role: 'user',
-                  parts: buildGoalContinuationParts(nextGoalTurn),
+                  parts: buildGoalContinuationParts(
+                    nextGoalTurn,
+                    config.getToolRegistry?.(),
+                  ),
                 },
               ];
               hasUnsentToolResponse = false;
@@ -3311,6 +3464,8 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      if (ownsModSession) await modSession?.close();
+      await modSession?.flushOutput();
       await failClosedActiveGoalTurn(
         'Headless Goal host stopped before its permit was released',
       );

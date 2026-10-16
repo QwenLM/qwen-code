@@ -106,6 +106,24 @@ describe('GET /goals', () => {
     expect(res.body).toEqual({ v: 1, goals: [], droppedCount: 0 });
   });
 
+  it('does not probe or expose the hidden agent host', async () => {
+    const getSessionGoal = vi.fn(async () => noGoal);
+    const app = makeApp({
+      listWorkspaceSessions: () => [
+        summary('visible'),
+        summary('agent-host', { sourceType: 'agent-host' }),
+      ],
+      getSessionGoal,
+    });
+
+    const res = await request(app).get('/goals');
+
+    expect(res.status).toBe(200);
+    expect(getSessionGoal).toHaveBeenCalledOnce();
+    expect(getSessionGoal).toHaveBeenCalledWith('visible');
+    expect(res.body).toEqual({ v: 1, goals: [], droppedCount: 0 });
+  });
+
   it('rejects reads when the live primary workspace is untrusted', async () => {
     const listWorkspaceSessions = vi.fn(() => []);
     const app = makeApp(

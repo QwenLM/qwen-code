@@ -42,7 +42,11 @@ import { BtwMessage } from './messages/BtwMessage';
 import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
-import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
+import type {
+  AttachmentPreviewRequest,
+  DaemonAssistantMessage,
+} from '../adapters/messageTypes';
+import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
 
 interface MessageItemProps {
   message: Message;
@@ -54,6 +58,7 @@ interface MessageItemProps {
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
   showRetryHint?: boolean;
@@ -101,6 +106,7 @@ export const MessageItem = memo(function MessageItem({
   onImagePreview,
   onAttachmentPreview,
   onTurnOutputOpen,
+  onToolResultOpen,
   onInsightReportOpen,
   workspaceCwd,
   showRetryHint = false,
@@ -189,6 +195,7 @@ export const MessageItem = memo(function MessageItem({
     message.role === 'user' ||
     (message.role === 'system' &&
       message.source === 'mid_turn_message_injected');
+  const openTurnCalls = useOpenTurnCalls();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -207,12 +214,15 @@ export const MessageItem = memo(function MessageItem({
             onEditCancel={closeUserMessageEditor}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
+            author={message.author}
           />
         );
       case 'assistant':
         return (
           <AssistantMessage
             content={message.content}
+            author={message.author}
+            agentMessage={message.agentMessage}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             onBranchSession={boundBranchSession}
@@ -231,6 +241,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <ThinkingMessage
             content={message.content}
+            author={message.author}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
@@ -260,6 +271,7 @@ export const MessageItem = memo(function MessageItem({
           <ToolGroup
             tools={message.tools}
             onTurnOutputOpen={onTurnOutputOpen}
+            onToolResultOpen={onToolResultOpen}
             thoughts={message.thoughts}
             compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
@@ -388,6 +400,14 @@ export const MessageItem = memo(function MessageItem({
     return selectableSafeBody;
   }
 
+  // A turn's identity is its leading user message's id, so the entry is
+  // available as soon as the turn exists — including while it is still running.
+  const turnCallsTurnId =
+    openTurnCalls &&
+    message.role === 'user' &&
+    isTurnCallsPrompt(message.source, message.content)
+      ? message.id
+      : undefined;
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
@@ -408,6 +428,12 @@ export const MessageItem = memo(function MessageItem({
           : undefined
       }
       editTitle={t('userMessage.edit')}
+      onOpenTurnCalls={
+        openTurnCalls && turnCallsTurnId
+          ? () => openTurnCalls(turnCallsTurnId)
+          : undefined
+      }
+      turnCallsTitle={t('turnCalls.open')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
@@ -452,6 +478,7 @@ function areMessageItemPropsEqual(
   if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
   if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
+  if (prev.onToolResultOpen !== next.onToolResultOpen) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
@@ -506,22 +533,52 @@ function areAssistantTurnFooterInfosEqual(
   );
 }
 
+/** Re-parsed on every projection, so compared by what renders. */
+function agentMessagesEqual(
+  prev: DaemonAssistantMessage['agentMessage'],
+  next: DaemonAssistantMessage['agentMessage'],
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return (
+    prev.status === next.status &&
+    prev.error === next.error &&
+    prev.totalTokens === next.totalTokens &&
+    prev.squadOutcome === next.squadOutcome &&
+    prev.author?.squadName === next.author?.squadName &&
+    prev.author?.memberSquadName === next.author?.memberSquadName &&
+    (prev.steps ?? []).length === (next.steps ?? []).length &&
+    (prev.steps ?? []).every(
+      (step, index) =>
+        step.title === next.steps?.[index]?.title &&
+        step.status === next.steps?.[index]?.status,
+    )
+  );
+}
+
 function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
   if (prev.timestamp !== next.timestamp) return false;
+  if (
+    prev.author?.name !== next.author?.name ||
+    prev.author?.color !== next.author?.color
+  )
+    return false;
   switch (prev.role) {
     case 'user':
       return (
         next.role === 'user' &&
         prev.content === next.content &&
+        prev.source === next.source &&
         stableImagesEqual(prev.images, next.images)
       );
     case 'assistant':
       return (
         next.role === 'assistant' &&
         prev.content === next.content &&
-        prev.isStreaming === next.isStreaming
+        prev.isStreaming === next.isStreaming &&
+        agentMessagesEqual(prev.agentMessage, next.agentMessage)
       );
     case 'thinking':
       return (
@@ -613,6 +670,8 @@ function areToolCallsEqual(
     prev.subContent === next.subContent &&
     stableJson(prev.args) === stableJson(next.args) &&
     stableJson(prev.rawOutput) === stableJson(next.rawOutput) &&
+    stableJson(prev.toolResult) === stableJson(next.toolResult) &&
+    prev.wasCancelled === next.wasCancelled &&
     stableJson(prev.locations) === stableJson(next.locations) &&
     stableJson(prev.content) === stableJson(next.content) &&
     areToolListsEqual(prev.subTools, next.subTools)

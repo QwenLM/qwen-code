@@ -62,6 +62,17 @@ function prNode(
   };
 }
 
+// gh's stdout for a GraphQL answer; `errors` is present only when given.
+const ghOutput = (repository: unknown, errors?: unknown[]) =>
+  JSON.stringify({ data: { repository }, ...(errors ? { errors } : {}) });
+
+// A parsed closing issue as the module reports it.
+const parsedIssue = (number: number, state: string) => ({
+  number,
+  url: `https://github.com/o/r/issues/${number}`,
+  state,
+});
+
 describe('buildPullRequestIssuesQuery', () => {
   it('aliases one pullRequest lookup per number with a capped closing list', () => {
     const query = buildPullRequestIssuesQuery([42, 7]);
@@ -82,36 +93,34 @@ describe('buildPullRequestIssuesQuery', () => {
 
 describe('parsePullRequestIssuesResponse', () => {
   it('maps GitHub issue states, dropping unresolved aliases and malformed nodes', () => {
-    const payload = {
-      data: {
-        repository: {
-          p1: prNode(1, [
-            { number: 10, state: 'OPEN' },
-            { number: 11, state: 'CLOSED', stateReason: 'COMPLETED' },
-            { number: 12, state: 'CLOSED', stateReason: 'NOT_PLANNED' },
-            { number: 13, state: 'CLOSED', stateReason: 'DUPLICATE' },
-            // Legacy closed issues carry no reason at all.
-            { number: 14, state: 'CLOSED' },
-          ]),
-          p2: {
-            number: 2,
-            url: 'https://github.com/o/r/pull/2',
-            closingIssuesReferences: {
-              nodes: [
-                { number: 'x', url: 'https://github.com/o/r/issues/9' },
-                { number: 0, url: 'https://github.com/o/r/issues/0' },
-                { number: 1.5, url: 'https://github.com/o/r/issues/1' },
-                { number: 3 },
-              ],
-            },
+    const output = ghOutput(
+      {
+        p1: prNode(1, [
+          { number: 10, state: 'OPEN' },
+          { number: 11, state: 'CLOSED', stateReason: 'COMPLETED' },
+          { number: 12, state: 'CLOSED', stateReason: 'NOT_PLANNED' },
+          { number: 13, state: 'CLOSED', stateReason: 'DUPLICATE' },
+          // Legacy closed issues carry no reason at all.
+          { number: 14, state: 'CLOSED' },
+        ]),
+        p2: {
+          number: 2,
+          url: 'https://github.com/o/r/pull/2',
+          closingIssuesReferences: {
+            nodes: [
+              { number: 'x', url: 'https://github.com/o/r/issues/9' },
+              { number: 0, url: 'https://github.com/o/r/issues/0' },
+              { number: 1.5, url: 'https://github.com/o/r/issues/1' },
+              { number: 3 },
+            ],
           },
-          p3: null,
         },
+        p3: null,
       },
-      errors: [{ type: 'NOT_FOUND', path: ['repository', 'p3'] }],
-    };
+      [{ type: 'NOT_FOUND', path: ['repository', 'p3'] }],
+    );
 
-    const result = parsePullRequestIssuesResponse(JSON.stringify(payload));
+    const result = parsePullRequestIssuesResponse(output);
 
     expect([...result.keys()]).toEqual([1, 2]);
     expect(result.get(1)?.issues.map((issue) => issue.state)).toEqual([
@@ -121,11 +130,7 @@ describe('parsePullRequestIssuesResponse', () => {
       'not_planned',
       'completed',
     ]);
-    expect(result.get(1)?.issues[0]).toEqual({
-      number: 10,
-      url: 'https://github.com/o/r/issues/10',
-      state: 'open',
-    });
+    expect(result.get(1)?.issues[0]).toEqual(parsedIssue(10, 'open'));
     expect(result.get(2)).toEqual({
       url: 'https://github.com/o/r/pull/2',
       issues: [],
@@ -136,34 +141,27 @@ describe('parsePullRequestIssuesResponse', () => {
     // Absence must mean "no such PR": a server error nulling one alias, or
     // a sub-field error nulling a resolved PR's closing references, would
     // otherwise retire a merged binding with a false empty snapshot.
-    const withError = (error: unknown) =>
-      JSON.stringify({
-        data: { repository: { p1: prNode(1, []), p2: null } },
-        errors: [error],
-      });
-    expect(() =>
+    const parseWithError = (error: unknown) =>
       parsePullRequestIssuesResponse(
-        withError({
-          type: 'INTERNAL_SERVER_ERROR',
-          path: ['repository', 'p2'],
-        }),
-      ),
+        ghOutput({ p1: prNode(1, []), p2: null }, [error]),
+      );
+    expect(() =>
+      parseWithError({
+        type: 'INTERNAL_SERVER_ERROR',
+        path: ['repository', 'p2'],
+      }),
     ).toThrow(/partial error/);
     expect(() =>
-      parsePullRequestIssuesResponse(
-        withError({
-          type: 'NOT_FOUND',
-          path: ['repository', 'p1', 'closingIssuesReferences'],
-        }),
-      ),
+      parseWithError({
+        type: 'NOT_FOUND',
+        path: ['repository', 'p1', 'closingIssuesReferences'],
+      }),
     ).toThrow(/partial error/);
-    expect(() =>
-      parsePullRequestIssuesResponse(withError({ message: 'no type at all' })),
-    ).toThrow(/partial error/);
+    expect(() => parseWithError({ message: 'no type at all' })).toThrow(
+      /partial error/,
+    );
     expect(
-      parsePullRequestIssuesResponse(
-        withError({ type: 'NOT_FOUND', path: ['repository', 'p2'] }),
-      ).size,
+      parseWithError({ type: 'NOT_FOUND', path: ['repository', 'p2'] }).size,
     ).toBe(1);
   });
 
@@ -171,11 +169,9 @@ describe('parsePullRequestIssuesResponse', () => {
     expect(() =>
       parsePullRequestIssuesResponse(JSON.stringify({ message: 'bad' })),
     ).toThrow(/repository data/);
-    expect(() =>
-      parsePullRequestIssuesResponse(
-        JSON.stringify({ data: { repository: null } }),
-      ),
-    ).toThrow(/repository data/);
+    expect(() => parsePullRequestIssuesResponse(ghOutput(null))).toThrow(
+      /repository data/,
+    );
   });
 });
 
@@ -191,10 +187,22 @@ describe('fetchGitHubPullRequestIssues', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  const fetchIssues = (numbers: number[]) =>
+    fetchGitHubPullRequestIssues(dir, undefined, numbers);
+  const failed = (message: unknown) => ({
+    kind: 'failed',
+    message,
+    gitRoot: dir,
+  });
+  // 1..BATCH_SIZE+1: one number more than a single gh call carries.
+  const overOneBatch = () =>
+    Array.from(
+      { length: GITHUB_PR_ISSUES_BATCH_SIZE + 1 },
+      (_, index) => index + 1,
+    );
+
   it('returns not_a_repo outside a git repository and never spawns gh', async () => {
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
-      kind: 'not_a_repo',
-    });
+    expect(await fetchIssues([1])).toEqual({ kind: 'not_a_repo' });
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
@@ -203,11 +211,7 @@ describe('fetchGitHubPullRequestIssues', () => {
     const nested = path.join(dir, 'sub');
     fs.mkdirSync(nested);
     mockGh(() => ({
-      stdout: JSON.stringify({
-        data: {
-          repository: { p42: prNode(42, [{ number: 7, state: 'OPEN' }]) },
-        },
-      }),
+      stdout: ghOutput({ p42: prNode(42, [{ number: 7, state: 'OPEN' }]) }),
     }));
 
     const result = await fetchGitHubPullRequestIssues(
@@ -225,13 +229,7 @@ describe('fetchGitHubPullRequestIssues', () => {
           42,
           {
             url: 'https://github.com/o/r/pull/42',
-            issues: [
-              {
-                number: 7,
-                url: 'https://github.com/o/r/issues/7',
-                state: 'open',
-              },
-            ],
+            issues: [parsedIssue(7, 'open')],
           },
         ],
       ]),
@@ -264,6 +262,37 @@ describe('fetchGitHubPullRequestIssues', () => {
       expect.any(Function),
     );
   });
+  it('derives GH_CONFIG_DIR from XDG_CONFIG_HOME without exposing it', async () => {
+    // gh's credentials live at $XDG_CONFIG_HOME/gh; the scrubbed env must
+    // re-derive GH_CONFIG_DIR (as github-prs does) or gh falls back to
+    // ~/.config/gh and silently loses the operator's login.
+    fs.mkdirSync(path.join(dir, '.git'));
+    let seenEnv: Record<string, string | undefined> | undefined;
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
+        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
+        (cb as ExecCallback)(
+          null,
+          JSON.stringify({ data: { repository: { p42: prNode(42, []) } } }),
+          '',
+        );
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    const result = await fetchGitHubPullRequestIssues(
+      dir,
+      { XDG_CONFIG_HOME: '/tmp/gh-user-config', GIT_DIR: '/tmp/decoy/.git' },
+      [42],
+    );
+
+    expect(result.kind).toBe('ok');
+    expect(seenEnv?.['GH_CONFIG_DIR']).toBe(
+      path.join('/tmp/gh-user-config', 'gh'),
+    );
+    expect(seenEnv).not.toHaveProperty('XDG_CONFIG_HOME');
+    expect(seenEnv).not.toHaveProperty('GIT_DIR');
+  });
 
   it('keeps the resolved aliases when gh exits non-zero over a NOT_FOUND number', async () => {
     // A binding to another repository's same-numbered PR does not resolve
@@ -273,13 +302,12 @@ describe('fetchGitHubPullRequestIssues', () => {
     mockGh(() => ({
       error: new Error('gh: Could not resolve'),
       stderr: 'gh: Could not resolve to a PullRequest',
-      stdout: JSON.stringify({
-        data: { repository: { p1: prNode(1, []), p2: null } },
-        errors: [{ type: 'NOT_FOUND', path: ['repository', 'p2'] }],
-      }),
+      stdout: ghOutput({ p1: prNode(1, []), p2: null }, [
+        { type: 'NOT_FOUND', path: ['repository', 'p2'] },
+      ]),
     }));
 
-    const result = await fetchGitHubPullRequestIssues(dir, undefined, [1, 2]);
+    const result = await fetchIssues([1, 2]);
 
     expect(result.kind).toBe('ok');
     expect([
@@ -294,11 +322,9 @@ describe('fetchGitHubPullRequestIssues', () => {
       stdout: '{"data":{"repository":{"p1":{"number":1,"url":"https://gi',
     }));
 
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
-      kind: 'failed',
-      message: 'gh api graphql timed out after 10s',
-      gitRoot: dir,
-    });
+    expect(await fetchIssues([1])).toEqual(
+      failed('gh api graphql timed out after 10s'),
+    );
   });
 
   it('fails the call on a partial error that is not an alias-level NOT_FOUND', async () => {
@@ -306,17 +332,14 @@ describe('fetchGitHubPullRequestIssues', () => {
     mockGh(() => ({
       error: new Error('exit 1'),
       stderr: 'gh: server error',
-      stdout: JSON.stringify({
-        data: { repository: { p1: prNode(1, []), p2: null } },
-        errors: [{ type: 'INTERNAL_SERVER_ERROR', path: ['repository', 'p2'] }],
-      }),
+      stdout: ghOutput({ p1: prNode(1, []), p2: null }, [
+        { type: 'INTERNAL_SERVER_ERROR', path: ['repository', 'p2'] },
+      ]),
     }));
 
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1, 2])).toEqual({
-      kind: 'failed',
-      message: expect.stringContaining('partial error'),
-      gitRoot: dir,
-    });
+    expect(await fetchIssues([1, 2])).toEqual(
+      failed(expect.stringContaining('partial error')),
+    );
   });
 
   it('maps a repository gh cannot resolve to repo_unresolved', async () => {
@@ -329,9 +352,7 @@ describe('fetchGitHubPullRequestIssues', () => {
       'none of the git remotes configured for this repository point to a known GitHub host',
     ]) {
       mockGh(() => ({ error: new Error('exit 1'), stderr }));
-      expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
-        kind: 'repo_unresolved',
-      });
+      expect(await fetchIssues([1])).toEqual({ kind: 'repo_unresolved' });
     }
     // A GH_HOST pointing at another host is an environment problem: gh's
     // own message says unsetting the variable fixes it, so it must stay a
@@ -341,11 +362,9 @@ describe('fetchGitHubPullRequestIssues', () => {
       stderr:
         'error parsing "owner" value: none of the git remotes configured for this repository correspond to the GH_HOST environment variable. Try adding a matching remote or unsetting the variable.',
     }));
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
-      kind: 'failed',
-      message: expect.stringContaining('GH_HOST'),
-      gitRoot: dir,
-    });
+    expect(await fetchIssues([1])).toEqual(
+      failed(expect.stringContaining('GH_HOST')),
+    );
   });
 
   it('maps a repository GitHub no longer serves to repo_unresolved', async () => {
@@ -356,15 +375,10 @@ describe('fetchGitHubPullRequestIssues', () => {
     mockGh(() => ({
       error: new Error('exit 1'),
       stderr: 'gh: Could not resolve to a Repository',
-      stdout: JSON.stringify({
-        data: { repository: null },
-        errors: [{ type: 'NOT_FOUND', path: ['repository'] }],
-      }),
+      stdout: ghOutput(null, [{ type: 'NOT_FOUND', path: ['repository'] }]),
     }));
 
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
-      kind: 'repo_unresolved',
-    });
+    expect(await fetchIssues([1])).toEqual({ kind: 'repo_unresolved' });
   });
 
   it('maps a missing gh binary to cli_unavailable', async () => {
@@ -373,9 +387,7 @@ describe('fetchGitHubPullRequestIssues', () => {
       error: Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }),
     }));
 
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
-      kind: 'cli_unavailable',
-    });
+    expect(await fetchIssues([1])).toEqual({ kind: 'cli_unavailable' });
   });
 
   it('reports a failure without output and a payload without data', async () => {
@@ -384,18 +396,12 @@ describe('fetchGitHubPullRequestIssues', () => {
       error: new Error('exit 1'),
       stderr: 'HTTP 401: Bad credentials',
     }));
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
-      kind: 'failed',
-      message: 'HTTP 401: Bad credentials',
-      gitRoot: dir,
-    });
+    expect(await fetchIssues([1])).toEqual(failed('HTTP 401: Bad credentials'));
 
     mockGh(() => ({ stdout: JSON.stringify({ message: 'Server Error' }) }));
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
-      kind: 'failed',
-      message: expect.stringContaining('repository data'),
-      gitRoot: dir,
-    });
+    expect(await fetchIssues([1])).toEqual(
+      failed(expect.stringContaining('repository data')),
+    );
   });
 
   it('chunks large number lists, deduping and dropping invalid numbers', async () => {
@@ -408,27 +414,15 @@ describe('fetchGitHubPullRequestIssues', () => {
         (match) => Number(match[1]),
       );
       return {
-        stdout: JSON.stringify({
-          data: {
-            repository: Object.fromEntries(
-              numbers.map((number) => [`p${number}`, prNode(number, [])]),
-            ),
-          },
-        }),
+        stdout: ghOutput(
+          Object.fromEntries(
+            numbers.map((number) => [`p${number}`, prNode(number, [])]),
+          ),
+        ),
       };
     });
-    const numbers = Array.from(
-      { length: GITHUB_PR_ISSUES_BATCH_SIZE + 1 },
-      (_, index) => index + 1,
-    );
 
-    const result = await fetchGitHubPullRequestIssues(dir, undefined, [
-      ...numbers,
-      1,
-      0,
-      -3,
-      2.5,
-    ]);
+    const result = await fetchIssues([...overOneBatch(), 1, 0, -3, 2.5]);
 
     expect(result.kind).toBe('ok');
     expect(result.kind === 'ok' ? result.pullRequests.size : 0).toBe(
@@ -449,18 +443,10 @@ describe('fetchGitHubPullRequestIssues', () => {
     let query = '';
     mockGh((args) => {
       query = args[args.length - 1]!;
-      return {
-        stdout: JSON.stringify({
-          data: { repository: { p7: prNode(7, []) } },
-        }),
-      };
+      return { stdout: ghOutput({ p7: prNode(7, []) }) };
     });
 
-    const result = await fetchGitHubPullRequestIssues(dir, undefined, [
-      1e21,
-      Number.MAX_SAFE_INTEGER + 2,
-      7,
-    ]);
+    const result = await fetchIssues([1e21, Number.MAX_SAFE_INTEGER + 2, 7]);
 
     expect(result.kind).toBe('ok');
     expect(query).toContain('p7: pullRequest(number: 7)');
@@ -474,24 +460,10 @@ describe('fetchGitHubPullRequestIssues', () => {
     mockGh(() => {
       calls += 1;
       return calls === 1
-        ? {
-            stdout: JSON.stringify({
-              data: { repository: { p1: prNode(1, []) } },
-            }),
-          }
+        ? { stdout: ghOutput({ p1: prNode(1, []) }) }
         : { error: new Error('boom'), stderr: 'timeout' };
     });
-    const numbers = Array.from(
-      { length: GITHUB_PR_ISSUES_BATCH_SIZE + 1 },
-      (_, index) => index + 1,
-    );
 
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, numbers)).toEqual(
-      {
-        kind: 'failed',
-        message: 'timeout',
-        gitRoot: dir,
-      },
-    );
+    expect(await fetchIssues(overOneBatch())).toEqual(failed('timeout'));
   });
 });

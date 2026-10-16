@@ -76,12 +76,22 @@ describe('formatInterruptedWorkflowRunsNotice', () => {
     ).not.toContain('resume:');
   });
 
-  it('asks for the original args when they could not be kept', () => {
-    expect(
-      formatInterruptedWorkflowRunsNotice([run({ argsOmitted: true })]),
-    ).toContain(
+  // Nothing on this path refuses a resume the way the daemon refuses a
+  // history retry, so the note is all that stands between a run whose args
+  // its history cannot name and a full re-dispatch with none.
+  it.each([
+    ['they could not be kept', { argsOmitted: true } as const],
+    ['its history cannot say what they were', {}],
+  ])('asks for the original args when %s', (_case, fields) => {
+    expect(formatInterruptedWorkflowRunsNotice([run(fields)])).toContain(
       'resumeFromRunId: "wf_0123abcd" }) (pass its original args too)',
     );
+  });
+
+  it('asks for nothing extra when the run is on record as having had none', () => {
+    expect(
+      formatInterruptedWorkflowRunsNotice([run({ argsRecorded: true })]),
+    ).not.toContain('pass its original args too');
   });
 
   it('lists the first runs and counts the rest', () => {

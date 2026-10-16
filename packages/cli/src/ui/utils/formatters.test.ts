@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   contextUsageLabel,
+  formatClockTime,
   formatDuration,
   formatMemoryUsage,
   formatPercentageUsed,
@@ -241,6 +242,37 @@ describe('formatters', () => {
     it('drops "context" below 100 columns', () => {
       expect(contextUsageLabel(99)).toBe('% used');
       expect(contextUsageLabel(40)).toBe('% used');
+    });
+  });
+
+  describe('formatClockTime', () => {
+    // The label is built from the host locale clock, so pin the zone: without
+    // this the same instant renders differently on a contributor's machine and
+    // on CI.
+    const originalTz = process.env['TZ'];
+
+    beforeEach(() => {
+      process.env['TZ'] = 'UTC';
+    });
+
+    afterEach(() => {
+      if (originalTz === undefined) delete process.env['TZ'];
+      else process.env['TZ'] = originalTz;
+    });
+
+    it('renders a zero-padded 24-hour [HH:MM:SS] label', () => {
+      expect(formatClockTime(Date.UTC(2026, 8, 18, 7, 5, 9))).toBe(
+        '[07:05:09]',
+      );
+    });
+
+    it('keeps 24-hour numbering instead of a 12-hour clock', () => {
+      expect(formatClockTime(Date.UTC(2026, 8, 18, 23, 0, 0))).toBe(
+        '[23:00:00]',
+      );
+      expect(formatClockTime(Date.UTC(2026, 8, 18, 0, 0, 0))).toBe(
+        '[00:00:00]',
+      );
     });
   });
 });

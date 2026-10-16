@@ -8,8 +8,8 @@ import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 import { copyBrowserUseAssets } from '../copy-browser-use-assets.js';
 import { copyBundleAssets } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
@@ -219,14 +219,17 @@ describe('browser-use builtin resources', () => {
     );
   });
 
-  it('builds browser-use before core in the root build', () => {
-    const script = fs.readFileSync(
-      fileURLToPath(new URL('../build.js', import.meta.url)),
-      'utf8',
+  it('declares the browser-use build dependency for recursive scheduling', () => {
+    const core = JSON.parse(
+      fs.readFileSync(
+        new URL('../../packages/core/package.json', import.meta.url),
+        'utf8',
+      ),
     );
-    const browserUseIndex = script.indexOf("'packages/browser-use'");
-    expect(browserUseIndex).toBeGreaterThan(0);
-    expect(browserUseIndex).toBeLessThan(script.indexOf("'packages/core'"));
+    expect(
+      core.devDependencies?.['@qwen-code/browser-use'] ??
+        core.dependencies?.['@qwen-code/browser-use'],
+    ).toBe('file:../browser-use');
   });
 
   it('builds browser-use before core when publishing Live Host', () => {
@@ -256,22 +259,20 @@ describe('browser-use builtin resources', () => {
         'utf8',
       ),
     );
-    const lock = JSON.parse(
-      fs.readFileSync(
-        new URL('../../package-lock.json', import.meta.url),
-        'utf8',
-      ),
+    const lock = parse(
+      fs.readFileSync(new URL('../../pnpm-lock.yaml', import.meta.url), 'utf8'),
     );
-    const workspace = lock.packages['packages/browser-use'];
     const playwright =
-      lock.packages['packages/browser-use/node_modules/playwright-core'];
+      lock.importers['packages/browser-use'].dependencies['playwright-core'];
 
     expect(manifest.dependencies['playwright-core']).toMatch(/^\d+\.\d+\.\d+$/);
     expect(manifest.bundledDependencies).toBeUndefined();
     expect(manifest.bundleDependencies).toBeUndefined();
-    expect(workspace.bundleDependencies).toBeUndefined();
-    expect(playwright.inBundle).not.toBe(true);
+    expect(playwright.specifier).toBe(manifest.dependencies['playwright-core']);
     expect(playwright.version).toBe(manifest.dependencies['playwright-core']);
+    expect(
+      lock.packages[`playwright-core@${playwright.version}`],
+    ).toBeDefined();
   });
 
   function write(relativePath, contents) {

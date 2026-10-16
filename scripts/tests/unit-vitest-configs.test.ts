@@ -8,6 +8,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 
 import externalContextConfig from '../../integrations/external-context/vitest.config.js';
 import externalContextMem0Config from '../../integrations/external-context-mem0/vitest.config.js';
@@ -17,6 +18,7 @@ import browserUseConfig from '../../packages/browser-use/vitest.config.js';
 import channelsBaseConfig from '../../packages/channels/base/vitest.config.js';
 import dingtalkConfig from '../../packages/channels/dingtalk/vitest.config.js';
 import dwsConfig from '../../packages/channels/dws/vitest.config.js';
+import emailConfig from '../../packages/channels/email/vitest.config.js';
 import feishuConfig from '../../packages/channels/feishu/vitest.config.js';
 import githubConfig from '../../packages/channels/github/vitest.config.js';
 import gitlabConfig from '../../packages/channels/gitlab/vitest.config.js';
@@ -59,6 +61,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/channels/base': channelsBaseConfig,
   'packages/channels/dingtalk': dingtalkConfig,
   'packages/channels/dws': dwsConfig,
+  'packages/channels/email': emailConfig,
   'packages/channels/feishu': feishuConfig,
   'packages/channels/github': githubConfig,
   'packages/channels/gitlab': gitlabConfig,
@@ -107,6 +110,8 @@ const configModules: Record<
     import('../../integrations/external-context/vitest.config.js'),
   'integrations/external-context-mem0': () =>
     import('../../integrations/external-context-mem0/vitest.config.js'),
+  'integrations/test-failure-explorer': () =>
+    import('../../integrations/test-failure-explorer/vitest.config.js'),
   'packages/acp-bridge': () =>
     import('../../packages/acp-bridge/vitest.config.js'),
   'packages/audio-capture': () =>
@@ -119,6 +124,8 @@ const configModules: Record<
     import('../../packages/channels/dingtalk/vitest.config.js'),
   'packages/channels/dws': () =>
     import('../../packages/channels/dws/vitest.config.js'),
+  'packages/channels/email': () =>
+    import('../../packages/channels/email/vitest.config.js'),
   'packages/channels/feishu': () =>
     import('../../packages/channels/feishu/vitest.config.js'),
   'packages/channels/github': () =>
@@ -198,12 +205,14 @@ describe('shared-pool test timeout', () => {
   const OFF_POOL_DEFAULT = [
     'integrations/external-context',
     'integrations/external-context-mem0',
+    'integrations/test-failure-explorer',
     'packages/acp-bridge',
     'packages/audio-capture',
     'packages/browser-use',
     'packages/channels/base',
     'packages/channels/dingtalk',
     'packages/channels/dws',
+    'packages/channels/email',
     'packages/channels/feishu',
     'packages/channels/github',
     'packages/channels/gitlab',
@@ -402,26 +411,33 @@ describe('autofix gate load clamps', () => {
     // that cap is the shield keeping a 1.x workspace's legs alive under
     // the clamps — pin it here so removing it fails the suite instead of
     // crashing every gate leg for the workspace.
-    const lock = JSON.parse(
+    type ImporterDeps = Record<string, { version?: string }> | undefined;
+    const lock = parse(
       readFileSync(
-        fileURLToPath(new URL('../../package-lock.json', import.meta.url)),
+        fileURLToPath(new URL('../../pnpm-lock.yaml', import.meta.url)),
         'utf8',
       ),
-    ) as { packages: Record<string, { version?: string }> };
-    const hoisted = lock.packages['node_modules/vitest']?.version ?? '';
-    // Nested lockfile copies under workspace dirs are exactly the
-    // workspaces whose pinned vitest differs from the hoisted one; if the
-    // hoisted copy itself were 1.x this filter would go blind, so pin the
-    // premise.
-    expect(Number(hoisted.split('.')[0])).toBeGreaterThanOrEqual(2);
-    const legacyWorkspaces = Object.entries(lock.packages)
-      .filter(
-        ([path, entry]) =>
-          path.endsWith('/node_modules/vitest') &&
-          (path.startsWith('packages/') || path.startsWith('integrations/')) &&
-          Number(entry.version?.split('.')[0] ?? 99) < 2,
-      )
-      .map(([path]) => path.slice(0, -'/node_modules/vitest'.length));
+    ) as {
+      importers: Record<
+        string,
+        { dependencies?: ImporterDeps; devDependencies?: ImporterDeps }
+      >;
+    };
+    // Each importer records the vitest it resolves (with a peer suffix
+    // after the version), so a workspace pinning 1.x shows up directly.
+    const vitestVersion = (importer: string) =>
+      lock.importers[importer]?.devDependencies?.['vitest']?.version ??
+      lock.importers[importer]?.dependencies?.['vitest']?.version ??
+      '';
+    // The shield only matters beside a 2.x+ root; if the root itself were
+    // 1.x the premise of this test would be gone, so pin it.
+    expect(Number(vitestVersion('.').split('.')[0])).toBeGreaterThanOrEqual(2);
+    const legacyWorkspaces = Object.keys(lock.importers).filter(
+      (path) =>
+        (path.startsWith('packages/') || path.startsWith('integrations/')) &&
+        vitestVersion(path) !== '' &&
+        Number(vitestVersion(path).split('.')[0]) < 2,
+    );
     for (const workspace of legacyWorkspaces) {
       if (!(workspace in configs)) {
         throw new Error(

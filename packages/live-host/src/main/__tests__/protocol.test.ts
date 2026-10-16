@@ -100,7 +100,8 @@ const PROTOCOL_TYPE_PARITY: {
   >;
   daemonMessageNames: IsEqual<
     Exclude<MessageType<HostDaemonMessage>, 'host.subagents'>,
-    MessageType<DaemonMessage>
+    // Screen feed state is sent exclusively to browser Hosts.
+    Exclude<MessageType<DaemonMessage>, 'host.screen_feed_state'>
   >;
 } = {
   helloAssignable: true,

@@ -437,6 +437,24 @@ describe('WorkspaceSessionProvider targets', () => {
     });
   });
 
+  it('recovers from an unavailable URL workspace to an empty chat', async () => {
+    window.history.replaceState(null, '', '/session/missing?workspace=missing');
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider urlNavigation={{}} webShellProps={{}} />,
+      );
+    });
+    expect(location.pathname).toBe('/session/missing');
+    const startFresh = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'New session',
+    );
+    expect(startFresh).toBeDefined();
+    await act(async () => startFresh!.click());
+    expect(location.pathname).toBe('/');
+    expect(location.search).toBe('');
+    expect(mocks.providerProps.at(-1)).toMatchObject({ sessionId: undefined });
+  });
+
   it('drops an unavailable explicit context for a primary new session', async () => {
     await act(async () => {
       root.render(

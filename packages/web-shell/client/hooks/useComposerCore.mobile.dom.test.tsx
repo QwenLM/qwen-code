@@ -45,16 +45,22 @@ function mockTouchDevice() {
 
 function Harness({
   composerInput,
+  composerInputVersion,
   onSubmit,
   onInputTextChange,
   sessionId,
   atWorkspaceCwd,
+  expanded = false,
+  shellModeEnabled,
 }: {
   composerInput?: WebShellComposerInput;
+  composerInputVersion?: number;
   onSubmit: ReturnType<typeof vi.fn>;
   onInputTextChange?: (text: string) => void;
   sessionId?: string;
   atWorkspaceCwd?: string;
+  expanded?: boolean;
+  shellModeEnabled?: boolean;
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -62,9 +68,10 @@ function Harness({
     commands: [],
     editorTheme: {},
     composerInput,
-    composerInputVersion: composerInput ? 1 : undefined,
+    composerInputVersion,
     sessionId,
     atWorkspaceCwd,
+    shellModeEnabled,
   });
   latest = composer;
 
@@ -85,6 +92,18 @@ function Harness({
       ) : (
         <div ref={composer.containerRef} data-web-shell-composer-editor />
       )}
+      {expanded && composer.mobileComposer && (
+        <textarea
+          ref={composer.mobileComposer.expandedTextareaRef}
+          value={composer.mobileComposer.value}
+          onChange={composer.mobileComposer.onChange}
+          onPasteCapture={composer.imageTransferHandlers.onPasteCapture}
+          data-expanded
+        />
+      )}
+      {composer.searchState.searchMode && (
+        <input ref={composer.searchState.searchInputRef} data-history-search />
+      )}
     </div>
   );
 }
@@ -95,32 +114,67 @@ async function mount({
   onInputTextChange,
   sessionId,
   atWorkspaceCwd,
+  expanded = false,
+  shellModeEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
   onInputTextChange?: (text: string) => void;
   sessionId?: string;
   atWorkspaceCwd?: string;
+  expanded?: boolean;
+  shellModeEnabled?: boolean;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
-  await act(async () => {
+  let currentSessionId = sessionId;
+  let currentWorkspaceCwd = atWorkspaceCwd;
+  let currentComposerInput = composerInput;
+  let currentComposerInputVersion = composerInput ? 1 : 0;
+  const render = () => {
     root!.render(
       <WebShellPortalRootContext.Provider value={null}>
         <I18nProvider language="en">
           <Harness
-            composerInput={composerInput}
+            composerInput={currentComposerInput}
+            composerInputVersion={
+              currentComposerInput ? currentComposerInputVersion : undefined
+            }
             onSubmit={onSubmit}
             onInputTextChange={onInputTextChange}
-            sessionId={sessionId}
-            atWorkspaceCwd={atWorkspaceCwd}
+            sessionId={currentSessionId}
+            atWorkspaceCwd={currentWorkspaceCwd}
+            expanded={expanded}
+            shellModeEnabled={shellModeEnabled}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
     );
+  };
+  await act(async () => {
+    render();
   });
-  return { onSubmit };
+  return {
+    onSubmit,
+    setComposerInput(next: WebShellComposerInput) {
+      currentComposerInput = next;
+      currentComposerInputVersion += 1;
+      act(() => render());
+    },
+    switchSession(
+      nextSessionId: string | undefined,
+      nextWorkspaceCwd: string | undefined,
+    ) {
+      currentSessionId = nextSessionId;
+      currentWorkspaceCwd = nextWorkspaceCwd;
+      act(() => render());
+    },
+  };
+}
+
+function getSessionDraftKey(sessionId: string): string {
+  return `qwen-web-shell-session-draft:${encodeURIComponent(sessionId)}`;
 }
 
 function typeText(text: string) {
@@ -321,6 +375,36 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.searchState.searchMatches).toContain('first message');
   });
 
+  it('recalls submitted slash commands through history search', async () => {
+    // The touch textarea has no slash completion menu, so the history panel
+    // is the only touch path that can recall a submitted slash command.
+    mockTouchDevice();
+    await mount();
+    typeText('/theme dark');
+    act(() => latest!.submitText());
+    act(() => latest!.searchState.openHistorySearch());
+    expect(latest!.searchState.searchMode).toBe(true);
+    expect(latest!.searchState.searchMatches).toContain('/theme dark');
+  });
+
+  it('focuses history search when timers run before the input mounts', async () => {
+    mockTouchDevice();
+    await mount();
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        latest!.searchState.openHistorySearch();
+        vi.runOnlyPendingTimers();
+        expect(container!.querySelector('[data-history-search]')).toBeNull();
+      });
+      const search = container!.querySelector('[data-history-search]');
+      expect(search).not.toBeNull();
+      expect(document.activeElement).toBe(search);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('submits a selected history-search match through the pipeline', async () => {
     mockTouchDevice();
     const { onSubmit } = await mount();
@@ -482,6 +566,73 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.pastedFiles[0].text).toBe(text);
   });
 
+  it('inserts into the expanded caret and restores its caret without replacing the collapsed selection', async () => {
+    mockTouchDevice();
+    await mount({ expanded: true });
+    typeText('hello world');
+    const collapsed = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    const expanded =
+      container!.querySelector<HTMLTextAreaElement>('[data-expanded]')!;
+    act(() => {
+      collapsed.setSelectionRange(3, 5);
+      expanded.focus();
+      expanded.setSelectionRange(11, 11);
+      latest!.insertText(' dictated words ');
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(expanded.value).toBe('hello world dictated words ');
+    expect(document.activeElement).toBe(expanded);
+    expect([expanded.selectionStart, expanded.selectionEnd]).toEqual([27, 27]);
+    act(() => {
+      expanded.setSelectionRange(0, 5);
+      latest!.insertText('Hi');
+      latest!.focus();
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(expanded.value).toBe('Hi world dictated words ');
+    expect([expanded.selectionStart, expanded.selectionEnd]).toEqual([2, 2]);
+    expect(document.activeElement).toBe(expanded);
+  });
+
+  it('uses the expanded selection for long paste exemptions and folds only once', async () => {
+    mockTouchDevice();
+    await mount({ expanded: true });
+    typeText('draft');
+    const expanded =
+      container!.querySelector<HTMLTextAreaElement>('[data-expanded]')!;
+    const collapsed = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    const paste = () => {
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [],
+          items: [],
+          types: ['text/plain'],
+          getData: () => 'line\n'.repeat(250),
+        },
+      });
+      act(() => expanded.dispatchEvent(event));
+      return event;
+    };
+    expanded.setSelectionRange(0, 5);
+    collapsed.setSelectionRange(0, 0);
+    expect(paste().defaultPrevented).toBe(false);
+    expect(latest!.pastedFiles).toHaveLength(0);
+    expanded.setSelectionRange(0, 0);
+    collapsed.setSelectionRange(0, 5);
+    expect(paste().defaultPrevented).toBe(true);
+    expect(latest!.pastedFiles).toHaveLength(1);
+    expect(expanded.value).toBe('draft');
+  });
+
   it('moves a folded paste into the touch textarea on request', async () => {
     mockTouchDevice();
     await mount();
@@ -508,6 +659,199 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.mobileComposer!.value).toBe(text);
   });
 
+  it('keeps the stored draft when a history recall is followed by a session switch', async () => {
+    mockTouchDevice();
+    const mounted = await mount({ sessionId: 'session-a' });
+    typeText('older saved input');
+    act(() => latest!.submitText());
+    typeText('my draft');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    act(() => latest!.searchState.closeSearch(false));
+    expect(latest!.mobileComposer!.value).toBe('older saved input');
+
+    mounted.switchSession('session-b', undefined);
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    mounted.switchSession('session-a', undefined);
+    expect(latest!.mobileComposer!.value).toBe('my draft');
+  });
+
+  it('re-arms draft persistence when a genuine edit follows a history recall', async () => {
+    mockTouchDevice();
+    await mount({ sessionId: 'session-a' });
+    typeText('older saved input');
+    act(() => latest!.submitText());
+    typeText('my draft');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    // Close before editing: saveCurrentDraft also refuses while searchMode
+    // is set, so an open panel would mask the history-browse flag clear.
+    act(() => latest!.searchState.closeSearch(false));
+
+    typeText('my draft edited');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft edited',
+    );
+  });
+
+  it('re-arms draft persistence when a programmatic insert follows a history recall', async () => {
+    mockTouchDevice();
+    const mounted = await mount({ sessionId: 'session-a' });
+    typeText('older saved input');
+    act(() => latest!.submitText());
+    typeText('my draft');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    act(() => latest!.searchState.closeSearch(false));
+
+    // No soft-keyboard keystroke: voice, skill and followup inserts reach
+    // setMobileText through insertText and must re-arm persistence too.
+    const textarea = container!.querySelector('textarea')!;
+    textarea.selectionStart = textarea.value.length;
+    textarea.selectionEnd = textarea.value.length;
+    act(() => latest!.insertText('/skill '));
+    expect(latest!.mobileComposer!.value).toBe('older saved input/skill ');
+    act(() => {
+      textarea.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'older saved input/skill ',
+    );
+
+    mounted.switchSession('session-b', undefined);
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'older saved input/skill ',
+    );
+  });
+
+  it('re-arms draft persistence when a programmatic setText follows a history recall', async () => {
+    mockTouchDevice();
+    await mount({ sessionId: 'session-a' });
+    typeText('older saved input');
+    act(() => latest!.submitText());
+    typeText('my draft');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    act(() => latest!.searchState.closeSearch(false));
+
+    act(() => latest!.setText('composed by command'));
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'composed by command',
+    );
+  });
+
+  it('re-arms draft persistence when a seeded composerInput follows a history recall', async () => {
+    mockTouchDevice();
+    const mounted = await mount({ sessionId: 'session-a' });
+    typeText('older saved input');
+    act(() => latest!.submitText());
+    typeText('my draft');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    act(() => latest!.searchState.closeSearch(false));
+
+    mounted.setComposerInput({ text: 'seeded command text' });
+    expect(latest!.mobileComposer!.value).toBe('seeded command text');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'seeded command text',
+    );
+  });
+
+  it('re-arms draft persistence when a rejected shell submit restores the entry', async () => {
+    mockTouchDevice();
+    localStorage.setItem(
+      'qwen-web-shell-command-history',
+      JSON.stringify(['ls -la']),
+    );
+    const onSubmit = vi.fn(() => false);
+    await mount({ sessionId: 'session-a', shellModeEnabled: true, onSubmit });
+    typeText('my draft');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.setShellMode(true));
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.submitSearchMatch('ls -la'));
+    expect(latest!.mobileComposer!.value).toBe('ls -la');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'ls -la',
+    );
+  });
+
   it('saves the draft immediately on blur before the debounce timer fires', async () => {
     mockTouchDevice();
     vi.useFakeTimers();
@@ -517,9 +861,7 @@ describe('useComposerCore mobile textarea backend', () => {
     });
     typeText('mobile draft text');
     expect(
-      localStorage.getItem(
-        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
-      ),
+      localStorage.getItem(getSessionDraftKey('mobile-session')),
     ).toBeNull();
 
     act(() => {
@@ -527,56 +869,9 @@ describe('useComposerCore mobile textarea backend', () => {
         .querySelector('textarea')!
         .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
     });
-    expect(
-      localStorage.getItem(
-        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
-      ),
-    ).toBe('mobile draft text');
+    expect(localStorage.getItem(getSessionDraftKey('mobile-session'))).toBe(
+      'mobile draft text',
+    );
     vi.useRealTimers();
-  });
-
-  it('walks prompt history from navigatePrevHistory/navigateNextHistory', async () => {
-    mockTouchDevice();
-    await mount();
-    typeText('first message');
-    act(() => latest!.submitText());
-    typeText('second message');
-    act(() => latest!.submitText());
-    typeText('working draft');
-    expect(latest!.mobileComposer!.value).toBe('working draft');
-
-    act(() => latest!.navigatePrevHistory());
-    expect(latest!.mobileComposer!.value).toBe('second message');
-    act(() => latest!.navigatePrevHistory());
-    expect(latest!.mobileComposer!.value).toBe('first message');
-    act(() => latest!.navigateNextHistory());
-    expect(latest!.mobileComposer!.value).toBe('second message');
-    act(() => latest!.navigateNextHistory());
-    expect(latest!.mobileComposer!.value).toBe('working draft');
-  });
-
-  it('persists the draft again once the user edits after a history walk', async () => {
-    mockTouchDevice();
-    await mount({
-      sessionId: 'mobile-session',
-      atWorkspaceCwd: '/workspace/mobile',
-    });
-    typeText('first message');
-    act(() => latest!.submitText());
-    typeText('draft text');
-    act(() => latest!.navigatePrevHistory());
-    expect(latest!.mobileComposer!.value).toBe('first message');
-
-    typeText('edited after walk');
-    act(() => {
-      container!
-        .querySelector('textarea')!
-        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
-    });
-    expect(
-      localStorage.getItem(
-        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
-      ),
-    ).toBe('edited after walk');
   });
 });

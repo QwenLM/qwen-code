@@ -83,8 +83,10 @@ import {
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   type BackgroundNotificationKind,
   renderGoalContinuationTurn,
+  getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
   HistoryItem,
   HistoryItemWithoutId,
@@ -109,7 +111,7 @@ import {
   findLastSafeSplitPoint,
   splitFencedMarkdown,
   getEnclosingFenceInfo,
-} from '../utils/markdownUtilities.js';
+} from '../utils/markdown-utilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
@@ -558,6 +560,10 @@ export const useLlmStream = (
   onDebugMessage: (message: string) => void,
   handleSlashCommand: (
     cmd: PartListUnion,
+    oneTimeShellAllowlist?: Set<string>,
+    overwriteConfirmed?: boolean,
+    existingInvocationItemId?: number,
+    invocationPromptId?: string,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -1583,6 +1589,7 @@ export const useLlmStream = (
       submitType: SendMessageType,
       submittedPrompt: string | undefined,
       preserveTurnOwnership: boolean,
+      shellModeIntent?: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -1641,7 +1648,13 @@ export const useLlmStream = (
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)
-          ? await handleSlashCommand(trimmedQuery)
+          ? await handleSlashCommand(
+              trimmedQuery,
+              undefined,
+              undefined,
+              undefined,
+              submitType === SendMessageType.UserQuery ? prompt_id : undefined,
+            )
           : false;
 
         if (slashCommandResult) {
@@ -1730,7 +1743,12 @@ export const useLlmStream = (
           }
         }
 
-        if (shellModeActive && handleShellCommand(trimmedQuery, abortSignal)) {
+        // A queued submission carries the shell intent recorded when the
+        // user submitted it; the live flag may have flipped while the
+        // entry waited in the queue (#11626). Other producers record no
+        // intent and route on the live flag, as before.
+        const routeToShell = shellModeIntent ?? shellModeActive;
+        if (routeToShell && handleShellCommand(trimmedQuery, abortSignal)) {
           return { queryToSend: null, shouldProceed: false };
         }
 
@@ -3206,6 +3224,16 @@ export const useLlmStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
+          // The scheduler may complete a fast tool before this stream's caller
+          // regains control. Seal streamed assistant text first so the tool
+          // group cannot enter static history ahead of it.
+          if (pendingHistoryItemRef.current) {
+            commitItemInOrder(
+              pendingHistoryItemRef.current,
+              userMessageTimestamp,
+            );
+            setPendingHistoryItem(null);
+          }
           if (toolContinuationOwner) {
             for (const request of executableToolCallRequests) {
               continuationOwnersByToolCallIdRef.current.set(
@@ -3540,6 +3568,13 @@ export const useLlmStream = (
         onRequestStarted?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
+        /**
+         * Shell intent recorded when the user submitted this query
+         * (queued submissions carry it from the message queue). When set,
+         * it overrides the live `shellModeActive` flag for shell routing,
+         * so a flip after enqueue cannot misroute the entry (#11626).
+         */
+        shellMode?: boolean;
         goal?: QueuedGoalTurn;
         claimGoalTurn?: () => QueuedGoalTurn | undefined;
         userAdmission?: DirectUserAdmission;
@@ -3547,6 +3582,29 @@ export const useLlmStream = (
         toolContinuationOwner?: ToolContinuationOwner;
       },
     ) => {
+      const mods = getInteractiveModSession(config);
+      const dispatchesSlashCommand =
+        (submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron) &&
+        typeof query === 'string' &&
+        isSlashCommand(query.trim());
+      if (mods && !dispatchesSlashCommand) {
+        try {
+          await mods.ready;
+        } catch {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: 'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.',
+            },
+            Date.now(),
+          );
+          await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+          metadata?.onAdmissionFailed?.();
+          metadata?.onDeliveryFailed?.();
+          return;
+        }
+      }
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
         streamingState === StreamingState.Responding &&
@@ -3797,7 +3855,10 @@ export const useLlmStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: renderGoalContinuationTurn(queuedGoal),
+                    queryToSend: renderGoalContinuationTurn(
+                      queuedGoal,
+                      config.getToolRegistry?.(),
+                    ),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }
@@ -3812,6 +3873,7 @@ export const useLlmStream = (
                     submittedPrompt,
                     allowConcurrentBtwDuringResponse ||
                       isDetachedToolContinuation,
+                    metadata?.shellMode,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -4156,7 +4218,10 @@ export const useLlmStream = (
                     errorType: response.errorType,
                     executionStatus: response.executionStatus,
                   },
-                  goalToolResultProvenance(request),
+                  goalToolResultProvenance(
+                    request,
+                    finalized[index].responseParts,
+                  ),
                 );
               },
             );
@@ -4266,7 +4331,7 @@ export const useLlmStream = (
             });
           }
         } finally {
-          if (cleanupReviewLease) {
+          if (cleanupReviewLease && !config.getShellExecutionSandbox?.()) {
             cleanupReviewWorktreeLeases({
               sessionId: config.getSessionId(),
               promptId: prompt_id!,
@@ -5445,7 +5510,10 @@ export const useLlmStream = (
             errorType: response.errorType,
             executionStatus: response.executionStatus,
           },
-          goalToolResultProvenance(request),
+          goalToolResultProvenance(
+            request,
+            finalizedResponses[index].responseParts,
+          ),
         );
       });
 
@@ -6025,10 +6093,10 @@ export const useLlmStream = (
         // Reasoning renders above the streaming answer.
         pendingThoughtItem,
         ...pendingAssistantItems,
+        pendingToolCallGroupDisplay,
         pendingHistoryItem,
         pendingRetryErrorItem,
         pendingRetryCountdownItem,
-        pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
     [
       pendingThoughtItem,
@@ -6090,6 +6158,11 @@ export const useLlmStream = (
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
             const clientHistory = llmClient?.getHistoryShallow();
+            // JSON.stringify drops the Symbol-keyed prompt identity, so
+            // persist it as a parallel array for /restore to re-mark against.
+            const promptIds = clientHistory?.map(
+              (content) => getApiHistoryPromptId(content) ?? null,
+            );
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,
@@ -6101,6 +6174,7 @@ export const useLlmStream = (
                 {
                   history,
                   clientHistory,
+                  ...(promptIds?.some(Boolean) ? { promptIds } : {}),
                   toolCall: {
                     name: toolCall.request.name,
                     args: toolCall.request.args,
@@ -6373,11 +6447,17 @@ export const useLlmStream = (
     };
   }, [admitNotification, config]);
 
-  // Register background workflow completions onto the shared queue. The
-  // registry keeps this separate from its terminal-bell subscriber.
+  // Register background and client-started foreground workflow completions.
+  // The registry keeps this separate from its terminal-bell subscriber.
   useEffect(() => {
     const registry = config.getWorkflowRunRegistry();
     registry.setCompletionCallback((displayText, modelText, meta) => {
+      // The result must remain visible even if the model request is delayed
+      // or fails. Background notifications retain their existing drain timing.
+      const displayed = meta.isBackgrounded === false;
+      if (displayed) {
+        addItem({ type: 'notification', text: displayText }, Date.now());
+      }
       admitNotification({
         displayText,
         modelText,
@@ -6385,12 +6465,13 @@ export const useLlmStream = (
         kind: 'workflow',
         taskId: meta.runId,
         todoWorkChainId: meta.todoWorkChainId,
+        displayed,
       });
     });
     return () => {
       registry.setCompletionCallback(undefined);
     };
-  }, [admitNotification, config]);
+  }, [addItem, admitNotification, config]);
 
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {

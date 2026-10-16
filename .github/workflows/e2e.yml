@@ -58,9 +58,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -69,12 +72,38 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # A bare `corepack pnpm install` has no retry: run 34700339334's
+      # build leg died at this step before any test ran, on a tree whose
+      # install reproduces clean, and every leg behind `needs: [build]`
+      # went down with it. The bounded
+      # retry is the recipe repo-hygiene.yml and qwen-autofix.yml already wrap
+      # their installs in (registry blips; ETXTBSY when an install script
+      # execs a binary pnpm has not finished writing). A deterministically
+      # broken tree fails all three attempts and stays red. A recovered
+      # attempt annotates a ::warning:: so the absorbed transient stays
+      # countable even though the job concludes green — the same rule the
+      # upload-artifact retry below states verbatim.
+      # web-shell-browser-regression is the one site where this loop wraps
+      # more than an install: that job has no build step of its own, so
+      # prepare's build+bundle runs inside the retry, and a deterministically
+      # broken tree there reddens only after three full builds.
       - name: 'Install dependencies'
         env:
           # The install must not build; the two steps below do it explicitly.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Build project'
         run: |-
@@ -230,9 +259,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '${{ matrix.node-version }}'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -254,6 +286,16 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # Fail fast on a saturated pool host instead of dying on ENOSPC
+      # mid-job (#10035): run 36241138248 lost this leg with no failed step
+      # and no test result when the runner's own worker died writing its
+      # diag log on a full disk (#12764). ci.yml and the release lane already
+      # gate on this script; a gate failure is a clear, retryable signal and
+      # a re-run lands on a host with headroom.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Install dependencies'
         env:
           # `npm ci` runs the `prepare` script, which builds and bundles the
@@ -262,7 +304,18 @@ jobs:
           # so it keeps building during install.)
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       # One bounded retry, same transient runner-to-blobstore contract as
@@ -280,6 +333,16 @@ jobs:
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
 
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
@@ -385,9 +448,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -402,7 +468,18 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       # One bounded retry, same transient runner-to-blobstore contract as
@@ -420,6 +497,16 @@ jobs:
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
 
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
@@ -464,9 +551,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       # The opentui renderer leg runs the CLI bundle under bun: the locked
       # @opentui/core loads its native renderer through bun:ffi, and the CI
@@ -495,7 +585,18 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       # One bounded retry, same transient runner-to-blobstore contract as
@@ -513,6 +614,16 @@ jobs:
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
 
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
@@ -566,9 +677,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -583,7 +697,18 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       # One bounded retry, same transient runner-to-blobstore contract as
@@ -603,6 +728,16 @@ jobs:
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
 
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
@@ -644,9 +779,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -655,16 +793,31 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # No QWEN_SKIP_PREPARE here on purpose (the job has no build step of
+      # its own), so this loop retries prepare's build+bundle too — the
+      # widened cost and failure class are recorded at the build job's
+      # install step.
       - name: 'Install dependencies'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
-      - name: 'Install Playwright Chromium'
+      - name: 'Install Playwright Chromium and WebKit'
         run: |-
-          node node_modules/playwright/cli.js install --with-deps chromium
+          node node_modules/playwright/cli.js install --with-deps chromium webkit
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium
+            node "${nested_cli}" install chromium webkit
           fi
 
       - name: 'Run transcript document browser gate'

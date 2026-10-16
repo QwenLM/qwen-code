@@ -357,7 +357,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: 'Install dependencies'
-        run: 'npm install --ignore-scripts'
+        run: 'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only'
 
       - name: 'Build dependency chain (browser-use → core → acp-bridge → sdk → qwen-live)'
         run: |-

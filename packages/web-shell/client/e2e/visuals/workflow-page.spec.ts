@@ -187,6 +187,16 @@ for (const theme of [
     const scenario = createWebShellDaemonScenario({
       supportedCommands: {
         workflowsEnabled: true,
+        // What a current daemon reports. Without it the history tab hides
+        // the restart controls, the way it does against an older one.
+        workflowToolFeatures: {
+          sourceRef: true,
+          agentStepId: true,
+          workflowStepId: true,
+          runSavedArgs: true,
+          runScript: true,
+          retryHistorical: true,
+        },
         savedWorkflows: [
           { name: 'review-changes', source: 'project' },
           { name: 'release-readiness', source: 'project' },

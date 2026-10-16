@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay, mapShellResultText } from './shell-result.js';
 import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
@@ -591,7 +592,7 @@ function compactMcpAppResultDisplay(
   // it to the recorder, so those transcripts still carry blanks.
   //
   // `html` is retained whole: the producer rejects any resource over
-  // MCP_APP_RESOURCE_MAX_BYTES (1 MiB, tools/mcp-tool.ts), and a document
+  // the configured App limit (default 1 MiB, tools/mcp-tool.ts), and a document
   // truncated mid-markup would not render either, so `''` -- which degrades to
   // `fallbackText` -- is the only useful over-budget value.
   //
@@ -648,6 +649,12 @@ function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
   resultDisplay: T,
   purpose: CompactionPurpose,
 ): T {
+  if (isShellResultDisplay(resultDisplay)) {
+    return mapShellResultText(resultDisplay, (value) =>
+      compactString(value, purpose),
+    ) as T;
+  }
+
   if (typeof resultDisplay === 'string') {
     return compactString(resultDisplay, purpose) as T;
   }

@@ -1,3 +1,4 @@
+import type { ArtifactFilter } from './components/artifacts/TurnOutputs';
 import {
   createContext,
   useContext,
@@ -27,6 +28,12 @@ export type MarkdownContentSource = 'assistant' | 'thinking';
 
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
+  /**
+   * 当前消息的生成态；历史或静态内容为 false。所属 MessageList 空闲
+   * （isResponding=false）时，恢复 replay 中残留的 streaming 标记也会被
+   * 收口为 false，且已收口的行在会话重新响应时、内容不变的前提下保持收口。
+   */
+  isStreaming: boolean;
 }
 
 export interface WebShellCodeBlockRenderInfo {
@@ -187,15 +194,19 @@ export type WebShellChatHeaderItem =
   | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
+  /** Show the mobile-access QR entry in chat headers. Defaults to false. */
+  showMobileAccess?: boolean;
   /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
 export type WebShellRightPanelItem =
+  | 'files'
   | 'review'
   | 'sideTask'
   | 'terminal'
-  | 'webPreview';
+  | 'webPreview'
+  | 'trajectory';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
@@ -274,6 +285,7 @@ export interface WebShellSubmitSnapshot {
   sessionId?: string;
   prompt: string;
   inputAnnotations: readonly DaemonInputAnnotation[];
+  source?: 'mcp-app';
 }
 
 export type UserMessageContentRenderer = (
@@ -482,6 +494,11 @@ export interface WebShellAtItem {
   iconTooltip?: string;
   insertText?: string;
   composerTag?: WebShellComposerTag;
+  /**
+   * Makes the item an action instead of a reference: choosing it removes the
+   * typed `@query` and calls this, inserting nothing.
+   */
+  onSelect?: () => void;
 }
 
 export type WebShellBuiltinAtProviderId =
@@ -523,6 +540,11 @@ export interface WebShellAtProvider {
   order?: number;
   tabs?: readonly WebShellAtProviderTab[];
   renderItem?: WebShellAtItemRenderer;
+  /**
+   * Claims a typed `@query` that names no category, so it searches this
+   * provider instead of falling back to files.
+   */
+  claimsTypedQuery?(query: string): boolean;
   search(params: {
     query: string;
     signal: AbortSignal;
@@ -683,6 +705,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  filterArtifact?: ArtifactFilter;
   artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
@@ -728,8 +751,8 @@ export interface WebShellCustomization {
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
   /**
-   * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Controls composer uploads (drag-and-drop and the @ panel upload item)
+   * and Files tree drag-and-drop uploads. Does not disable attachments.
    * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: setting `false`
    * force-disables upload even when the daemon advertises the capability,
@@ -742,13 +765,14 @@ export interface WebShellCustomization {
    */
   fileDropAction?: 'upload' | 'attach';
   /**
-   * Directory that drag-and-dropped files upload into, **relative to the
+   * Directory that composer-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
    * `'uploads'`, `'uploads/images'`, or omit it to upload into the
    * workspace root (the default). A leading-slash path like `'/uploads'`
    * is rejected by the daemon as outside the workspace. The directory
    * (including intermediate components) is created automatically on upload
-   * when it does not exist.
+   * when it does not exist. Files tree drops use the explicit tree destination
+   * instead of this setting.
    */
   fileUploadDirectory?: string;
 }

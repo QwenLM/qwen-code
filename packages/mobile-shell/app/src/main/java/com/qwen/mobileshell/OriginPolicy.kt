@@ -2,6 +2,7 @@ package com.qwen.mobileshell
 
 import java.net.URI
 import java.net.URISyntaxException
+import java.util.Locale
 
 internal object OriginPolicy {
     private fun parseHttp(value: String): URI? = try {
@@ -18,6 +19,14 @@ internal object OriginPolicy {
         (it.rawPath.isNullOrEmpty() || it.rawPath == "/") &&
             it.rawQuery == null && it.rawFragment == null
     } ?: false
+
+    fun canonicalRoot(value: String): String? {
+        if (!isDaemonRoot(value)) return null
+        val uri = parseHttp(value) ?: return null
+        val scheme = uri.scheme.lowercase(Locale.ROOT)
+        val port = if ((scheme == "https" && uri.port == 443) || (scheme == "http" && uri.port == 80)) -1 else uri.port
+        return URI(scheme, null, uri.host.lowercase(Locale.ROOT), port, "/", null, null).toASCIIString()
+    }
 
     fun isSameOrigin(origin: String, target: String): Boolean {
         val left = parseHttp(origin) ?: return false

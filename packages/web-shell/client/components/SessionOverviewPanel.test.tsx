@@ -2623,6 +2623,34 @@ describe('SessionOverviewPanel', () => {
     expect(container!.textContent).not.toContain('Failed to archive session');
   });
 
+  it('splits archive batches at the route limit when more than 100 sessions are selected', async () => {
+    const many = Array.from({ length: 101 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    render();
+    await flushAsync();
+
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Archive')!));
+    expect(document.body.textContent).toContain('Archive 101 sessions?');
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.archiveSessionsData).toHaveBeenCalledTimes(2);
+    expect(workspaceClient.archiveSessionsData).toHaveBeenNthCalledWith(
+      1,
+      many.slice(0, 100).map((item) => item.sessionId),
+    );
+    expect(workspaceClient.archiveSessionsData).toHaveBeenNthCalledWith(
+      2,
+      many.slice(100).map((item) => item.sessionId),
+    );
+  });
+
   it('disables row actions while a batch mutation is running', async () => {
     connectionState.sessionId = 's1';
     connectionState.capabilities = {
@@ -3225,6 +3253,28 @@ describe('SessionOverviewPanel polling', () => {
     };
     sessionsState.sessions = [session('s')];
     render();
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    expect(scopedSessionsOptions.pollIntervalMs).toBe(3000);
+    expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });
+  });
+
+  it('keeps polling when a Live workspace has no session live-state route', async () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        {
+          id: 'live',
+          cwd: '/conversations/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+    render();
+    await flushAsync();
     expect(workspaceLiveStateOptions.enabled).toBe(false);
     expect(scopedSessionsOptions.pollIntervalMs).toBe(3000);
     expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });

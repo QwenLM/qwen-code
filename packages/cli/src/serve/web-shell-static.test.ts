@@ -12,10 +12,12 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   mountWebShellAssets,
+  mountWebShellSpaFallback,
   buildWebShellCsp,
   buildWebShellPermissionsPolicy,
   remoteDaemonConnectOrigins,
   requestedDaemonParam,
+  requestedFanoutParams,
 } from './web-shell-static.js';
 
 const stderr = vi.hoisted(() => ({ writeStderrLine: vi.fn() }));
@@ -30,8 +32,10 @@ describe('Web Shell sandbox framing', () => {
     expect(csp).toContain("media-src 'self' data:");
     expect(csp).toContain("base-uri 'none'");
     expect(csp).toContain(
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data:;",
     );
+    expect(csp).toContain("style-src 'self' 'unsafe-inline' data:;");
+    expect(csp).toContain("connect-src 'self' https://unpkg.com/@qwen-code/");
     expect(csp).not.toContain('frame-src *');
   });
 
@@ -129,6 +133,43 @@ describe('Web Shell sandbox framing', () => {
     );
   });
 
+  it('widens connect-src for every validated repeated fanout param', () => {
+    // Multi-daemon (#13727): the page connects to the `daemon` host plus
+    // every `fanout` host at once; each value passes the same validation as
+    // `daemon` and repeats dedupe.
+    const url =
+      '/?daemon=https%3A%2F%2Ffocus.example.com' +
+      '&fanout=https%3A%2F%2Falpha.example.com%3A4170' +
+      '&fanout=http%3A%2F%2F10.0.0.2%3A4170' +
+      '&fanout=https%3A%2F%2Falpha.example.com%3A4170' +
+      '&fanout=https%3A%2F%2Fdaemon.example.com%2Fpath' +
+      '&fanout=file%3A%2F%2F%2Ftmp';
+    expect(requestedFanoutParams(url)).toEqual([
+      'https://alpha.example.com:4170',
+      'http://10.0.0.2:4170',
+      'https://daemon.example.com/path',
+      'file:///tmp',
+    ]);
+    const origins = [
+      ...remoteDaemonConnectOrigins(requestedDaemonParam(url)),
+      ...requestedFanoutParams(url).flatMap(remoteDaemonConnectOrigins),
+    ];
+    expect(origins).toEqual([
+      'https://focus.example.com',
+      'wss://focus.example.com',
+      'https://alpha.example.com:4170',
+      'wss://alpha.example.com:4170',
+      'http://10.0.0.2:4170',
+      'ws://10.0.0.2:4170',
+    ]);
+    const csp = buildWebShellCsp([], origins);
+    expect(csp).toContain('https://focus.example.com');
+    expect(csp).toContain('https://alpha.example.com:4170');
+    expect(csp).toContain('ws://10.0.0.2:4170');
+    expect(csp).not.toContain('daemon.example.com');
+    expect(requestedFanoutParams('/')).toEqual([]);
+  });
+
   it('never widens connect-src for a key the client parser does not report', () => {
     // `requestedDaemonParam` must agree with the client's
     // `URLSearchParams.get('daemon')` on every shape, so the emitted header can
@@ -220,6 +261,10 @@ describe('public PWA HTTP routes', () => {
     await writeFile(path.join(directory, 'assets', 'icon-192.png'), 'icon');
     await writeFile(path.join(directory, 'assets', 'icon.svg'), '<svg/>');
     await writeFile(path.join(directory, 'assets', 'future-config.json'), '{}');
+    await writeFile(
+      path.join(directory, 'index.html'),
+      '<!doctype html><title>Shell</title>',
+    );
     app = express();
     mountWebShellAssets(app, directory);
     app.use((_req, res) => {
@@ -242,6 +287,32 @@ describe('public PWA HTTP routes', () => {
     stderr.writeStderrLine.mockReset();
     await rm(directory, { recursive: true, force: true });
   });
+
+  it.each([false, true])(
+    'limits desktop relay CSP to the opt-in endpoint (enabled=%s)',
+    async (enabled) => {
+      const shell = express();
+      mountWebShellAssets(shell, directory, [], enabled);
+      mountWebShellSpaFallback(shell, directory, [], enabled);
+      for (const route of ['/', '/session/test', '/unknown-page']) {
+        const response = await request(shell)
+          .get(route)
+          .set('Accept', 'text/html')
+          .expect(200);
+        const directives =
+          response.headers['content-security-policy'].split('; ');
+        expect(
+          directives.find((directive: string) =>
+            directive.startsWith('connect-src '),
+          ),
+        ).toBe(
+          enabled
+            ? "connect-src 'self' http://127.0.0.1:47821 https://unpkg.com/@qwen-code/"
+            : "connect-src 'self' https://unpkg.com/@qwen-code/",
+        );
+      }
+    },
+  );
 
   it.each(['/manifest.webmanifest', '/MANIFEST.WEBMANIFEST/'])(
     'serves %s without a token and permits revalidation',
@@ -327,6 +398,37 @@ describe('public PWA HTTP routes', () => {
       expect.stringContaining('EACCES: permission denied'),
     );
   });
+
+  it.each([
+    '/plugins',
+    '/channels',
+    '/live',
+    '/scheduled-tasks',
+    '/goals',
+    '/settings',
+  ])(
+    'serves public document %s but leaves API requests protected',
+    async (route) => {
+      await request(app)
+        .get(route)
+        .set('Accept', 'text/html')
+        .expect(200)
+        .expect(/<title>Shell/);
+      await request(app)
+        .head(`${route}/`)
+        .set('Accept', 'text/html')
+        .expect(200);
+      await request(app)
+        .get(route)
+        .set('Accept', 'application/json')
+        .expect(401);
+      await request(app).post(route).set('Accept', 'text/html').expect(401);
+      await request(app)
+        .get(`${route}/data`)
+        .set('Accept', 'text/html')
+        .expect(401);
+    },
+  );
 
   it('retains authentication for API requests and writes', async () => {
     await request(app).get('/capabilities').expect(401);
