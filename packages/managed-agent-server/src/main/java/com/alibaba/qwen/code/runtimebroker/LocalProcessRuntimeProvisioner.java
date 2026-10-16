@@ -316,7 +316,8 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
         if (store == null || !binding.isDrainRequested() || !binding.getRequest().isManagedContext()
-                || !WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
+                || !(WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
+                        || HarnessOwnership.sharesRuntimeSessions(binding.getRequest()))
                 || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(binding.getRequest().getScope().getCapabilityDigest())
                 || binding.getProvisionSeed() == null) {
             return RuntimeProvisioner.super.stopDrained(binding);

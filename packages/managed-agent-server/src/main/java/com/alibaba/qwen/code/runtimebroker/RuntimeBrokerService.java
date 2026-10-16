@@ -4131,6 +4131,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return recoverBinding(bindingId, expectedGeneration, false);
     }
 
+    /**
+     * Close owns retirement after journal settlement. Observing its retired
+     * registration as journal loss would erase the clean-stop boundary. One
+     * Session's close never retires a shared binding; only storage retirement does.
+     */
+    private boolean retirementOwns(RuntimeBindingRecord binding) {
+        RuntimeProvisionRequest request = binding.getRequest();
+        String tenantId = request.getScope().getTenantId();
+        if (HarnessOwnership.sharesRuntimeSessions(request)) {
+            return request.getStorageId() != null
+                    && bindingRepository.isStorageFenced(tenantId, request.getStorageId(), null);
+        }
+        return "session".equals(request.getScope().getIsolationClass())
+                && (bindingRepository.isHarnessAdmissionClosed(tenantId, request.getIsolationKey())
+                        || request.getStorageId() != null
+                        && bindingRepository.isStorageFenced(tenantId, request.getStorageId(), null));
+    }
+
     private CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration, boolean lookupOnly) {
         requireOpen();
         RuntimeBindingRecord record = bindingRepository.findById(bindingId);
@@ -4138,14 +4156,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 || !provisioner.supportsKind(record.getRequest().getProvisionerKind())) {
             return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
         }
-        // Close owns retirement after journal settlement. Observing its retired
-        // registration as journal loss would erase the clean-stop boundary.
-        if (!lookupOnly && record.getState() != RuntimeBindingRecord.State.LOST
-                && "session".equals(record.getRequest().getScope().getIsolationClass())
-                && (bindingRepository.isHarnessAdmissionClosed(record.getRequest().getScope().getTenantId(),
-                        record.getRequest().getIsolationKey()) || record.getRequest().getStorageId() != null
-                        && bindingRepository.isStorageFenced(record.getRequest().getScope().getTenantId(),
-                                record.getRequest().getStorageId(), null))) {
+        if (!lookupOnly && record.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(record)) {
             return CompletableFuture.completedFuture(record);
         }
         if (!provisioner.supportsStartupRecovery(record.getResourceHandle())) {
@@ -4171,12 +4182,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (claimed == null || claimed.getGeneration() != expectedGeneration) {
                 return failed(unavailable("runtime_reconcile_in_progress", "Another Broker owns Runtime recovery"));
             }
-            if (!lookupOnly && claimed.getState() != RuntimeBindingRecord.State.LOST
-                    && "session".equals(claimed.getRequest().getScope().getIsolationClass())
-                    && (bindingRepository.isHarnessAdmissionClosed(claimed.getRequest().getScope().getTenantId(),
-                            claimed.getRequest().getIsolationKey()) || claimed.getRequest().getStorageId() != null
-                            && bindingRepository.isStorageFenced(claimed.getRequest().getScope().getTenantId(),
-                                    claimed.getRequest().getStorageId(), null))) {
+            if (!lookupOnly && claimed.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(claimed)) {
                 return CompletableFuture.completedFuture(claimed);
             }
             if (claimed.getState() == RuntimeBindingRecord.State.LOST) {
