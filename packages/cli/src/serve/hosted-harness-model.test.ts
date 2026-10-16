@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import { HostedModelUnavailableError } from './hosted-agent-definition.js';
+import { HostedSkillCatalog } from './hosted-skill-catalog.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 
@@ -1718,4 +1719,25 @@ it('keeps agent instructions ahead of refreshed project context', async () => {
   expect(mocks.setUserMemory).toHaveBeenLastCalledWith(
     '# Agent instructions\n\nAGENT_SECTION\n\nPROJECT_SECTION',
   );
+});
+
+it('advertises only the published Skill catalog while keeping host Skill discovery disabled', async () => {
+  const mocks = config([{ type: LlmEventType.Finished }]);
+  await runHostedHarnessTextTurn({
+    ...input,
+    skills: new HostedSkillCatalog([
+      { name: 'published', description: 'PUBLISHED_DESCRIPTION', body: 'BODY' },
+    ]),
+    workspaceContext: { read: () => 'PROJECT_SECTION' },
+  });
+  expect(mocks.initialize).toHaveBeenCalledWith(
+    expect.objectContaining({ skipSkillManager: true }),
+  );
+  expect(mocks.setUserMemory).toHaveBeenLastCalledWith(
+    expect.stringContaining('PUBLISHED_DESCRIPTION'),
+  );
+  expect(mocks.setUserMemory.mock.calls.at(-1)?.[0]).toContain(
+    'PROJECT_SECTION',
+  );
+  expect(mocks.refreshSystemInstruction).toHaveBeenCalled();
 });
