@@ -49,7 +49,7 @@
   - 二者唯一的调用方是 `SessionLifecycleCoordinator` 中的关闭级联，它会等待 child 的活跃 Turn 自行结束。
   - child 结果中继盯着 child 的 Turn；Turn 为 `CANCELLED`/`FAILED` 时，run 以 `child_failed` 结算为 `failed`。
 - **其余任务类型。**
-  - `background_shell` 与 `monitor` 被 H3 验收门禁（#13532/#13533）挡住，仍未启用。Shell 发布器在 `stopRequested` 之后仍结算为 `exited`，`monitor_run` 没有停止标志。
+  - 撰写本文档时 `background_shell` 与 `monitor` 被 H3 验收门禁（#13532/#13533）挡住、未启用；自 #13856/#13889 启用后，Shell 发布器把被停 run 经 `settleStopRequested` 结算为 `cancelled` / `stop_requested`，绝不 `exited`。`monitor_run` 没有停止标志。
   - `workflow` 没有运行时（H4c 只登记了禁用的类型）。
   - `automation_run` 根本没有停止请求。
 - **channel 投递。** `channel_delivery` 不投影任务，所以一次投递不是任务。H5 的公开 channel 路由只读；变更路由（重发）被推迟，Hosted 的 `cancel_delivery` 动词只在内部使用。
