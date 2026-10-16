@@ -2905,7 +2905,7 @@ export class QQChannel extends ChannelBase {
                 );
               }
             }
-          } else if (state.msgId !== undefined) {
+          } else {
             // The entry was destroyed while this send was in flight (session
             // death or a successor turn). Nothing will settle for this state,
             // so release its anchor here — expectedMsgId keeps a successor's
@@ -2913,7 +2913,18 @@ export class QQChannel extends ChannelBase {
             // ownership passes on by the retryScheduled check at the end of
             // this arm, whose predicate is "no retry armed for this state",
             // not "msgId present".
-            this.releaseSessionReplyAnchor(sessionId, state.msgId);
+            // The payload has no entry left to re-buffer into and no retry can
+            // carry it, so it is abandoned here (a superseded turn's payload is
+            // never re-sealed into a successor). Report the loss like the
+            // permanent arm does instead of letting it vanish with the entry.
+            if (buffer) {
+              process.stderr.write(
+                `[QQ:${this.name}] ${logLabel} dropped ${buffer.length} chars of an abandoned turn for ${sanitizeLogText(sessionId, 64)}\n`,
+              );
+            }
+            if (state.msgId !== undefined) {
+              this.releaseSessionReplyAnchor(sessionId, state.msgId);
+            }
           }
         }
         // No branch above armed a retry for this state, so this chain

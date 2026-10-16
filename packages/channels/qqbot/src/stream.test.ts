@@ -513,6 +513,45 @@ describe('onResponseChunk', () => {
     // the live flush marker).
     expect(seqMap.has('msg-1')).toBe(false);
   });
+
+  it('reports the payload a superseded in-flight send drops on a transient failure', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // Turn 1's idle flush captures 'turn-1-buffer' and stays in flight.
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-1');
+    onResponseChunk(ch, 'test-chat', 'turn-1-buffer', 'sess-1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(streamState(ch).get('sess-1')!.buffer).toBe('');
+
+    // Turn 1's completion deferred to the in-flight chain; turn 2 then starts
+    // and its first chunk drops the stale entry (no residual), clearing the
+    // park flag so turn 2 is not short-circuited.
+    pendingStreamDelete.add('sess-1');
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-2');
+    onResponseChunk(ch, 'test-chat', 'turn-2-chunk', 'sess-1');
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+
+    // The superseded send fails transiently with no entry left to re-buffer
+    // into: its payload is abandoned (a superseded turn's payload is never
+    // re-sealed into a successor), and that loss must be observable.
+    rejectSend(new DeliveryError('RATE_LIMITED', 'rate limited'));
+    await drain();
+
+    expect(capturedStderr()).toContain('dropped 13 chars of an abandoned turn');
+    stderrSpy.mockRestore();
+  });
 });
 
 describe('idle-flush timer', () => {
