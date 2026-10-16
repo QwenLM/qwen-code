@@ -3645,10 +3645,15 @@ export function App({
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
       const el = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      // [data-web-shell-dialog] joins this allowlist because DialogShell
+      // portals outside the drawer subtree but stacks above it — without the
+      // exemption, a dialog opened over the drawer loses all touch scrolling
+      // on a phone. The exemption covers DialogShell only, not other
+      // portaled overlays.
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
         )
       ) {
         return;
@@ -5146,6 +5151,7 @@ export function App({
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
   const artifactPanelTriggerRef = useRef<HTMLElement | null>(null);
+  const focusComposerAfterArtifactPanelCloseRef = useRef(false);
   const rememberArtifactPanelTrigger = useCallback(() => {
     if (
       !artifactPanelOpenRef.current &&
@@ -9243,6 +9249,9 @@ export function App({
   const showFallbacksDialogRef = useRef(showFallbacksDialog);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
+  useEffect(() => {
+    if (managedMode && showApprovalModeDialog) setShowApprovalModeDialog(false);
+  }, [managedMode, showApprovalModeDialog]);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
@@ -13540,6 +13549,7 @@ export function App({
 
   const setComposerMode = useCallback(
     async (modeId: string, planMode: boolean): Promise<boolean> => {
+      if (managedModeRef.current) return false;
       if (modeTransitionRef.current?.owner.isCurrent()) return false;
       if (sessionWriteBlocked) return false;
       if (!isDaemonApprovalMode(modeId) || modeId === 'plan') {
@@ -13569,6 +13579,7 @@ export function App({
         setPlanExecutionMode(executionModeRef.current);
         const approval = pendingApprovalRef.current;
         if (
+          !managedModeRef.current &&
           !planMode &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
@@ -20468,6 +20479,7 @@ export function App({
             );
             if (!tag) return;
             if (useFloatingArtifactPanel) {
+              focusComposerAfterArtifactPanelCloseRef.current = true;
               closeArtifactPanel();
             } else {
               setArtifactPanelFullscreen(false);
@@ -20663,7 +20675,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {showApprovalModeDialog && (
+          {!managedMode && showApprovalModeDialog && (
             <DialogShell
               title={t('mode.select')}
               size="sm"
@@ -21516,6 +21528,11 @@ export function App({
                         (!isChatEmptyState ||
                           (Boolean(activeWorkspaceCwd) &&
                             emptyStateRightPanelItems.length > 0))
+                      }
+                      onOpenFiles={
+                        mainView === 'chat' && filesAvailable
+                          ? openFilesPanel
+                          : undefined
                       }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
@@ -23627,6 +23644,12 @@ export function App({
                   onCloseAutoFocus={(event) => {
                     const trigger = artifactPanelTriggerRef.current;
                     artifactPanelTriggerRef.current = null;
+                    if (focusComposerAfterArtifactPanelCloseRef.current) {
+                      focusComposerAfterArtifactPanelCloseRef.current = false;
+                      event.preventDefault();
+                      editorRef.current?.focus();
+                      return;
+                    }
                     if (!trigger?.isConnected) return;
                     event.preventDefault();
                     trigger.focus();

@@ -5,6 +5,11 @@ public final class WorkspaceToolProfiles {
     public static final String MCP = "hosted-workspace-mcp/1";
     public static final String SHELL = "hosted-workspace-shell/1";
     public static final String INTERNAL_TEAM_LEAD = "hosted-workspace-team-lead/1";
+    /**
+     * The profile of a child bound to a snapshot child Workspace (#13753 I3):
+     * `read_file` and `glob` only, so the child cannot write.
+     */
+    public static final String READ = "hosted-workspace-read/1";
 
     private WorkspaceToolProfiles() {
     }

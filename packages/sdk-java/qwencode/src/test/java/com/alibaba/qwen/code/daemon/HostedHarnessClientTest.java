@@ -893,6 +893,28 @@ class HostedHarnessClientTest {
         assertEquals(lifecycle.get("lifecycleAuthority"), reversed.get("lifecycleAuthority"));
     }
 
+    // #13753 I3: the snapshot capability rides beside the child Workspace
+    // one, through every copy, and never alone.
+    @Test
+    void carriesTheSnapshotCapabilityOnlyBesideChildWorkspaces() {
+        CreateHarnessSession.Builder create = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .approvalMode(DaemonApprovalMode.DEFAULT);
+        assertFalse(create.childSnapshots(true).build().toJson().containsKey("childSnapshots"));
+        Map<String, Object> both = create.childWorkspaces(true).childSnapshots(true).build().toJson();
+        assertEquals(Boolean.TRUE, both.get("childWorkspaces"));
+        assertEquals(Boolean.TRUE, both.get("childSnapshots"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID, null, true);
+        assertFalse(load.withChildWorkspaces(false, true).toJson().containsKey("childSnapshots"));
+        assertFalse(load.withChildWorkspaces(true).toJson().containsKey("childSnapshots"));
+        LoadHarnessSession enabled = load.withChildWorkspaces(true, true);
+        assertEquals(Boolean.TRUE, enabled.toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.forLifecycle("op-1", 3).toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.withStoppedMessages().toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, load.forLifecycle("op-1", 3).withChildWorkspaces(true, true)
+                .toJson().get("childSnapshots"));
+    }
+
     @Test
     void extensionPinsSurviveCreateAndEveryLoadCopy() {
         var mcp = java.util.List.<Map<String, Object>>of(Map.of("serverId", "docs", "serverRevision", 1,
