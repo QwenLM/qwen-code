@@ -3632,10 +3632,15 @@ export function App({
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
       const el = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      // [data-web-shell-dialog] joins this allowlist because DialogShell
+      // portals outside the drawer subtree but stacks above it — without the
+      // exemption, a dialog opened over the drawer loses all touch scrolling
+      // on a phone. The exemption covers DialogShell only, not other
+      // portaled overlays.
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
         )
       ) {
         return;
@@ -5133,6 +5138,7 @@ export function App({
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
   const artifactPanelTriggerRef = useRef<HTMLElement | null>(null);
+  const focusComposerAfterArtifactPanelCloseRef = useRef(false);
   const rememberArtifactPanelTrigger = useCallback(() => {
     if (
       !artifactPanelOpenRef.current &&
@@ -7324,11 +7330,11 @@ export function App({
     [getDefaultReviewPanelWidth, rememberArtifactPanelTrigger, t],
   );
   const openSubagentPanel = useCallback(
-    (tool: ACPToolCall) => {
-      if (!connection.sessionId) return;
+    (tool: ACPToolCall, parentSessionId = connection.sessionId) => {
+      if (!parentSessionId) return;
       openSubagentPanelForSession(
         tool,
-        connection.sessionId,
+        parentSessionId,
         connection.workspaceCwd,
       );
     },
@@ -20427,6 +20433,7 @@ export function App({
             );
             if (!tag) return;
             if (useFloatingArtifactPanel) {
+              focusComposerAfterArtifactPanelCloseRef.current = true;
               closeArtifactPanel();
             } else {
               setArtifactPanelFullscreen(false);
@@ -20708,9 +20715,9 @@ export function App({
                 agentTools={
                   sessionWorkflowEnabled ? tasksDialogAgentTools : []
                 }
-                onOpenSubagent={(tool) => {
+                onOpenSubagent={(tool, parentSessionId) => {
                   setTasksDialogMessage(null);
-                  openSubagentPanel(tool);
+                  openSubagentPanel(tool, parentSessionId);
                 }}
                 onOpenMonitor={handleOpenMonitorDetails}
               />
@@ -21413,6 +21420,11 @@ export function App({
                           (Boolean(activeWorkspaceCwd) &&
                             emptyStateRightPanelItems.length > 0))
                       }
+                      onOpenFiles={
+                        mainView === 'chat' && filesAvailable
+                          ? openFilesPanel
+                          : undefined
+                      }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
                           !environmentPanelVisible,
@@ -22016,6 +22028,7 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <WorkflowRunsPage
+                      onOpenSubagent={openSubagentPanel}
                       onWorkflowRunStarted={() =>
                         setBackgroundTasksRefreshTrigger((value) => value + 1)
                       }
@@ -23511,6 +23524,12 @@ export function App({
                   onCloseAutoFocus={(event) => {
                     const trigger = artifactPanelTriggerRef.current;
                     artifactPanelTriggerRef.current = null;
+                    if (focusComposerAfterArtifactPanelCloseRef.current) {
+                      focusComposerAfterArtifactPanelCloseRef.current = false;
+                      event.preventDefault();
+                      editorRef.current?.focus();
+                      return;
+                    }
                     if (!trigger?.isConnected) return;
                     event.preventDefault();
                     trigger.focus();

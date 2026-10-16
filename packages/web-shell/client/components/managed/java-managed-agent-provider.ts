@@ -253,14 +253,19 @@ export function createJavaManagedAgentProvider(
           command.signal,
         );
         // A cancelled or recovery-blocked operation did not apply the answer,
-        // so the card must stay rather than hide as if it had.
+        // so the card must stay rather than hide as if it had. The failure
+        // code rides the error so the hook can tell an ended Action (no
+        // retry can succeed) from a delivery failure worth retrying.
         if (
           result.status === 'failed' ||
           result.status === 'cancelled' ||
           result.status === 'recovery_blocked'
         ) {
-          throw new Error(
-            `Managed Agent approval answer ${result.status} (${result.failureCode ?? 'unknown'})`,
+          throw Object.assign(
+            new Error(
+              `Managed Agent approval answer ${result.status} (${result.failureCode ?? 'unknown'})`,
+            ),
+            { code: result.failureCode ?? 'unknown' },
           );
         }
       },
@@ -543,7 +548,14 @@ function toPhase(
 }
 
 function titleFor(text: string): string {
-  const title = text.trim().replace(/\s+/g, ' ');
+  // The server refuses C0 control characters and DEL in a title; pasted
+  // terminal output carries ANSI escapes verbatim, so fold them to spaces
+  // beside the whitespace collapse instead of failing the Session create.
+  const title = text
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
   return title.length <= 80 ? title : `${title.slice(0, 77)}...`;
 }
 

@@ -90,7 +90,7 @@ import {
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
 // contracts/managed-extension-projection-v1.fixtures.json pin it, and
-// ManagedExtensionProjection in packages/sdk-java/managed-agent-server
+// ManagedExtensionProjection in packages/managed-agent-server
 // replays the same cases.
 
 export const MANAGED_TASK_KINDS = [

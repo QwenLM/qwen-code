@@ -593,6 +593,37 @@ describe('createJavaManagedAgentProvider', () => {
     expect(createBody).not.toHaveProperty('environmentId');
   });
 
+  it('strips control characters from the derived create title', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () =>
+      jsonResponse({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        status: 'accepted',
+        replayed: false,
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+
+    // Pasted terminal output carries ANSI escapes, NUL, BEL or DEL; the
+    // server refuses C0 control characters in a title with 400
+    // invalid_title, so the derivation strips them before posting.
+    await provider.createSession(
+      { text: '\u001b[31mERROR\u001b[0m the build failed\u0007' },
+      { clientId: 'client-1', idempotencyKey: 'key-1' },
+    );
+
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe(
+      'https://product.example/api/agent/web-shell/v1/sessions/create',
+    );
+    expect(JSON.parse(String(init?.body)).title).toBe(
+      '[31mERROR [0m the build failed',
+    );
+  });
+
   it('scopes the storageKey by environmentId when no productScope is given', () => {
     const a = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
@@ -993,6 +1024,30 @@ describe('createJavaManagedAgentProvider', () => {
           idempotencyKey: 'tool_approval_1:deny',
         }),
       ).rejects.toThrow('action_delivery_failed');
+
+      // The failure code rides the error so the hook can classify it (an ended
+      // Action vs a delivery failure worth retrying).
+      fetchImpl.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            operationId: 'op-2',
+            sessionId: 'session-1',
+            type: 'action_response',
+            status: 'failed',
+            admissionStage: 'java_durable',
+            deliveryState: 'confirmed',
+            failureCode: 'action_response_delivery_failed',
+            replayed: true,
+          }),
+          { status: 202, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+      await expect(
+        provider.actions!.respond(pending[0], 'deny', {
+          clientId: 'client-1',
+          idempotencyKey: 'tool_approval_1:deny',
+        }),
+      ).rejects.toMatchObject({ code: 'action_response_delivery_failed' });
 
       for (const status of ['cancelled', 'recovery_blocked'] as const) {
         fetchImpl.mockResolvedValueOnce(
