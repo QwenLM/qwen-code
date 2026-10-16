@@ -26,6 +26,8 @@ public final class LoadHarnessSession {
      * serves child Workspaces (see {@link CreateHarnessSession.Builder#childWorkspaces}).
      */
     private boolean childWorkspaces;
+    /** #13753 I3: with child Workspaces, the control plane serves snapshots too. */
+    private boolean childSnapshots;
 
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
@@ -43,6 +45,15 @@ public final class LoadHarnessSession {
     }
 
     public LoadHarnessSession withChildWorkspaces(boolean value) {
+        return withChildWorkspaces(value, false);
+    }
+
+    /**
+     * #13753 I3: the copy also says whether the control plane serves
+     * read-only snapshot children, which only a host that serves child
+     * Workspaces can (see {@link CreateHarnessSession.Builder#childSnapshots}).
+     */
+    public LoadHarnessSession withChildWorkspaces(boolean value, boolean snapshots) {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
@@ -52,6 +63,7 @@ public final class LoadHarnessSession {
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = value;
+        copy.childSnapshots = value && snapshots;
         copy.stopMessages = stopMessages;
         return copy;
     }
@@ -76,6 +88,7 @@ public final class LoadHarnessSession {
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
         copy.lifecycleProtocolVersion = protocolVersion;
         copy.childWorkspaces = childWorkspaces;
+        copy.childSnapshots = childSnapshots;
         copy.stopMessages = stopMessages;
         return copy;
     }
@@ -92,6 +105,7 @@ public final class LoadHarnessSession {
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = childWorkspaces;
+        copy.childSnapshots = childSnapshots;
         copy.stopMessages = true;
         return copy;
     }
@@ -203,6 +217,9 @@ public final class LoadHarnessSession {
         }
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
+        }
+        if (childSnapshots) {
+            result.put("childSnapshots", true);
         }
         return result;
     }

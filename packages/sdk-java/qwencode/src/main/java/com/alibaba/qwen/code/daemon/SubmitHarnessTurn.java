@@ -19,6 +19,7 @@ public final class SubmitHarnessTurn {
     private final List<Map<String, Object>> promptContent;
     private final String payloadDigest;
     private final Long deadlineMillis;
+    private final Map<String, Object> modelSelection;
 
     private SubmitHarnessTurn(Builder builder) {
         if (builder.session == null) {
@@ -44,6 +45,7 @@ public final class SubmitHarnessTurn {
                     "payloadDigest does not match promptContent");
         }
         this.deadlineMillis = builder.deadlineMillis;
+        this.modelSelection = builder.modelSelection;
     }
 
     public static Builder builder() {
@@ -83,6 +85,8 @@ public final class SubmitHarnessTurn {
         return payloadDigest;
     }
 
+    Map<String, Object> getModelSelection() { return modelSelection; }
+
     Map<String, Object> toJson() {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("prompt", promptContent);
@@ -90,6 +94,9 @@ public final class SubmitHarnessTurn {
         result.put("payloadDigest", payloadDigest);
         if (deadlineMillis != null) {
             result.put("deadlineMs", deadlineMillis);
+        }
+        if (modelSelection != null) {
+            result.put("modelSelection", modelSelection);
         }
         return result;
     }
@@ -101,6 +108,7 @@ public final class SubmitHarnessTurn {
                 new ArrayList<>();
         private String payloadDigest;
         private Long deadlineMillis;
+        private Map<String, Object> modelSelection;
 
         private Builder() {
         }
@@ -137,6 +145,18 @@ public final class SubmitHarnessTurn {
 
         public Builder payloadDigest(String payloadDigest) {
             this.payloadDigest = payloadDigest;
+            return this;
+        }
+
+        public Builder modelSelection(String modelId, long revision) {
+            if (modelId == null || modelId.isBlank()
+                    || modelId.getBytes(StandardCharsets.UTF_8).length > 512
+                    || modelId.chars().anyMatch(Character::isISOControl)
+                    || revision < 1 || revision > 9_007_199_254_740_991L) {
+                throw new IllegalArgumentException("Invalid Hosted model selection");
+            }
+            modelSelection = Collections.unmodifiableMap(new LinkedHashMap<>(
+                    Map.of("modelId", modelId, "revision", revision)));
             return this;
         }
 
