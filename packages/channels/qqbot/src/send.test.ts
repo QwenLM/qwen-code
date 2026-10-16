@@ -305,6 +305,7 @@ describe('session persistence paths', () => {
     ).toBe(false);
   });
 });
+
 describe('groupAllPolicy session-scope warning (no forcing)', () => {
   function makeChannel(
     overrides: Record<string, unknown> = {},
