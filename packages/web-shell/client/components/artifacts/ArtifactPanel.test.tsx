@@ -39,6 +39,11 @@ const {
     readWorkspaceFileBytes: vi.fn(),
     fileStat: vi.fn(),
     dirList: vi.fn(),
+    uploadWorkspaceFile: vi.fn(),
+    deleteWorkspaceFile: vi.fn(),
+    writeWorkspaceFile: vi.fn(),
+    createWorkspaceDirectory: vi.fn(),
+    deleteWorkspaceDirectory: vi.fn(),
   };
   return {
     mockActions: {
@@ -459,6 +464,11 @@ afterEach(() => {
   mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
   mockSecondaryWorkspaceActions.fileStat.mockReset();
   mockSecondaryWorkspaceActions.dirList.mockReset();
+  mockSecondaryWorkspaceActions.uploadWorkspaceFile.mockReset();
+  mockSecondaryWorkspaceActions.deleteWorkspaceFile.mockReset();
+  mockSecondaryWorkspaceActions.writeWorkspaceFile.mockReset();
+  mockSecondaryWorkspaceActions.createWorkspaceDirectory.mockReset();
+  mockSecondaryWorkspaceActions.deleteWorkspaceDirectory.mockReset();
   mockWorkspace.client.workspaceByCwd.mockClear();
   mockWorkspace.capabilities.features = [];
   latestArtifactWorkspaceTarget = undefined;
@@ -648,6 +658,439 @@ describe('ArtifactPanel web previews', () => {
 });
 
 describe('artifact workspace authority', () => {
+  it.each(['/primary', '/secondary'])(
+    'deletes through the qualified advertised owner for %s',
+    async (cwd) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_delete',
+        'workspace_qualified_rest_core',
+      ];
+      mockSecondaryWorkspaceActions.deleteWorkspaceFile.mockResolvedValue(
+        undefined,
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd={cwd} />,
+        ),
+      );
+      await latestArtifactWorkspaceTarget!.actions.deleteWorkspaceFile!(
+        'nested/file.txt',
+      );
+      expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(cwd);
+      expect(
+        mockSecondaryWorkspaceActions.deleteWorkspaceFile,
+      ).toHaveBeenCalledWith('nested/file.txt');
+    },
+  );
+
+  it.each(['missing-delete', 'missing-rest', 'ssh'])(
+    'does not expose unsupported deletion: %s',
+    (reason) => {
+      mockWorkspace.capabilities.features =
+        reason === 'missing-delete'
+          ? ['workspace_qualified_rest_core']
+          : reason === 'missing-rest'
+            ? ['workspace_file_delete']
+            : ['workspace_file_delete', 'workspace_qualified_rest_core'];
+      if (reason === 'ssh')
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: mockWorkspace.capabilities.workspaces.map((entry) =>
+            entry.cwd === '/secondary'
+              ? { ...entry, ssh: { host: 'remote', directory: '/remote' } }
+              : entry,
+          ),
+        };
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      expect(
+        latestArtifactWorkspaceTarget!.actions.deleteWorkspaceFile,
+      ).toBeUndefined();
+    },
+  );
+
+  it.each(['capability', 'owner'])(
+    'rejects captured and pending deletion after %s revocation',
+    async (reason) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_delete',
+        'workspace_qualified_rest_core',
+      ];
+      let finish!: () => void;
+      mockSecondaryWorkspaceActions.deleteWorkspaceFile.mockReturnValue(
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      const remove =
+        latestArtifactWorkspaceTarget!.actions.deleteWorkspaceFile!;
+      const pending = remove('file.txt');
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        ...(reason === 'capability'
+          ? { features: [] }
+          : {
+              workspaces: mockWorkspace.capabilities.workspaces.filter(
+                (entry) => entry.cwd !== '/secondary',
+              ),
+            }),
+      };
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+      finish();
+      await expect(pending).rejects.toThrow(/no longer available/);
+      await expect(remove('file.txt')).rejects.toThrow(/no longer available/);
+      expect(
+        mockSecondaryWorkspaceActions.deleteWorkspaceFile,
+      ).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['/primary', '/secondary'])(
+    'uploads only through the qualified advertised owner for %s',
+    async (cwd) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_upload',
+        'workspace_qualified_rest_core',
+      ];
+      const result = {
+        kind: 'file_upload',
+        path: 'src/file.bin',
+        sizeBytes: 1,
+        hash: 'sha256:test',
+      };
+      mockSecondaryWorkspaceActions.uploadWorkspaceFile.mockResolvedValue(
+        result,
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd={cwd} />,
+        ),
+      );
+      const request = { path: 'src/file.bin', data: new Blob(['x']) };
+      await expect(
+        latestArtifactWorkspaceTarget!.actions.uploadWorkspaceFile!(request),
+      ).resolves.toEqual(result);
+      expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(cwd);
+      expect(
+        mockSecondaryWorkspaceActions.uploadWorkspaceFile,
+      ).toHaveBeenCalledWith(request, undefined);
+    },
+  );
+
+  it.each([[], ['workspace_file_upload'], ['workspace_qualified_rest_core']])(
+    'does not expose uploads without both capabilities: %j',
+    (features) => {
+      mockWorkspace.capabilities.features = features;
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      expect(
+        latestArtifactWorkspaceTarget!.actions.uploadWorkspaceFile,
+      ).toBeUndefined();
+    },
+  );
+
+  it('does not expose uploads for an id-less legacy workspace even with both capabilities', () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/primary',
+      features: ['workspace_file_upload', 'workspace_qualified_rest_core'],
+    } as unknown as typeof mockWorkspace.capabilities;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd="/primary" />,
+      ),
+    );
+    expect(
+      latestArtifactWorkspaceTarget!.actions.uploadWorkspaceFile,
+    ).toBeUndefined();
+    expect(mockWorkspace.client.workspaceByCwd).not.toHaveBeenCalled();
+  });
+
+  it.each(['capability', 'owner'])(
+    'rejects captured and pending uploads after %s revocation',
+    async (revocation) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_upload',
+        'workspace_qualified_rest_core',
+      ];
+      let finish!: (value: unknown) => void;
+      mockSecondaryWorkspaceActions.uploadWorkspaceFile.mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      const upload =
+        latestArtifactWorkspaceTarget!.actions.uploadWorkspaceFile!;
+      const request = { path: 'file.bin', data: new Blob(['x']) };
+      const pending = upload(request);
+      if (revocation === 'capability') mockWorkspace.capabilities.features = [];
+      else
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: mockWorkspace.capabilities.workspaces.filter(
+            (entry) => entry.cwd !== '/secondary',
+          ),
+        };
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+      finish({
+        kind: 'file_upload',
+        path: 'file.bin',
+        sizeBytes: 1,
+        hash: 'sha256:test',
+      });
+      await expect(pending).rejects.toThrow(/no longer available/);
+      await expect(upload(request)).rejects.toThrow(/no longer available/);
+      expect(
+        mockSecondaryWorkspaceActions.uploadWorkspaceFile,
+      ).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['/primary', '/secondary'])(
+    'deletes a folder through %s',
+    async (cwd) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_directory_delete',
+        'workspace_qualified_rest_core',
+      ];
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd={cwd} />,
+        ),
+      );
+      await latestArtifactWorkspaceTarget!.actions.deleteDirectory!('folder');
+      expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(cwd);
+      expect(
+        mockSecondaryWorkspaceActions.deleteWorkspaceDirectory,
+      ).toHaveBeenCalledWith('folder');
+    },
+  );
+
+  it.each(['missing-capability', 'missing-rest', 'ssh', 'revoked'])(
+    'gates folder deletion with %s',
+    async (reason) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_directory_delete',
+        'workspace_qualified_rest_core',
+      ];
+      if (reason === 'missing-capability')
+        mockWorkspace.capabilities.features = ['workspace_qualified_rest_core'];
+      if (reason === 'missing-rest')
+        mockWorkspace.capabilities.features = ['workspace_directory_delete'];
+      if (reason === 'ssh')
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: mockWorkspace.capabilities.workspaces.map((entry) =>
+            entry.cwd === '/secondary'
+              ? { ...entry, ssh: { host: 'remote', directory: '/remote' } }
+              : entry,
+          ),
+        };
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      if (reason !== 'revoked')
+        expect(
+          latestArtifactWorkspaceTarget!.actions.deleteDirectory,
+        ).toBeUndefined();
+      else {
+        const remove = latestArtifactWorkspaceTarget!.actions.deleteDirectory!;
+        mockWorkspace.capabilities.features = ['workspace_qualified_rest_core'];
+        act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+        await expect(remove('folder')).rejects.toThrow('no longer available');
+      }
+      expect(
+        mockSecondaryWorkspaceActions.deleteWorkspaceDirectory,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a pending folder deletion after owner revocation', async () => {
+    mockWorkspace.capabilities.features = [
+      'workspace_directory_delete',
+      'workspace_qualified_rest_core',
+    ];
+    let complete!: () => void;
+    mockSecondaryWorkspaceActions.deleteWorkspaceDirectory.mockReturnValue(
+      new Promise<void>((resolve) => {
+        complete = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const pending =
+      latestArtifactWorkspaceTarget!.actions.deleteDirectory!('folder');
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+    complete();
+    await expect(pending).rejects.toThrow('no longer available');
+  });
+
+  it.each([
+    ['/primary', 'file'],
+    ['/secondary', 'file'],
+    ['/primary', 'directory'],
+    ['/secondary', 'directory'],
+  ] as const)(
+    'creates %s %s through the qualified owner',
+    async (cwd, kind) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_write',
+        'workspace_directory_create',
+        'workspace_qualified_rest_core',
+      ];
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd={cwd} />,
+        ),
+      );
+      if (kind === 'file')
+        await latestArtifactWorkspaceTarget!.actions.createFile!('new.txt');
+      else
+        await latestArtifactWorkspaceTarget!.actions.createDirectory!('folder');
+      expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(cwd);
+      if (kind === 'file')
+        expect(
+          mockSecondaryWorkspaceActions.writeWorkspaceFile,
+        ).toHaveBeenCalledWith({
+          path: 'new.txt',
+          content: '',
+          mode: 'create',
+        });
+      else
+        expect(
+          mockSecondaryWorkspaceActions.createWorkspaceDirectory,
+        ).toHaveBeenCalledWith('folder');
+    },
+  );
+
+  it.each(['missing-file', 'missing-directory', 'missing-rest', 'ssh'])(
+    'gates creation with %s',
+    (reason) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_write',
+        'workspace_directory_create',
+        'workspace_qualified_rest_core',
+      ].filter(
+        (feature) =>
+          feature !==
+          (reason === 'missing-file'
+            ? 'workspace_file_write'
+            : reason === 'missing-directory'
+              ? 'workspace_directory_create'
+              : reason === 'missing-rest'
+                ? 'workspace_qualified_rest_core'
+                : ''),
+      );
+      if (reason === 'ssh')
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: mockWorkspace.capabilities.workspaces.map((entry) =>
+            entry.cwd === '/secondary'
+              ? { ...entry, ssh: { host: 'remote', directory: '/remote' } }
+              : entry,
+          ),
+        };
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      expect(Boolean(latestArtifactWorkspaceTarget!.actions.createFile)).toBe(
+        reason === 'missing-directory',
+      );
+      expect(
+        Boolean(latestArtifactWorkspaceTarget!.actions.createDirectory),
+      ).toBe(reason === 'missing-file');
+    },
+  );
+
+  it.each(['capability', 'owner'])(
+    'rejects stale creation after %s revocation',
+    async (reason) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_write',
+        'workspace_directory_create',
+        'workspace_qualified_rest_core',
+      ];
+      let finish!: () => void;
+      mockSecondaryWorkspaceActions.writeWorkspaceFile.mockReturnValue(
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      const create = latestArtifactWorkspaceTarget!.actions.createFile!;
+      const pending = create('new.txt');
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        ...(reason === 'capability'
+          ? { features: [] }
+          : {
+              workspaces: mockWorkspace.capabilities.workspaces.filter(
+                (entry) => entry.cwd !== '/secondary',
+              ),
+            }),
+      };
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+      finish();
+      await expect(pending).rejects.toThrow(/no longer available/);
+      await expect(create('another.txt')).rejects.toThrow(
+        /no longer available/,
+      );
+      expect(
+        mockSecondaryWorkspaceActions.writeWorkspaceFile,
+      ).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each(['/primary', '/secondary'])(
     'lists directories through the advertised owner for %s',
     async (cwd) => {
