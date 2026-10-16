@@ -185,6 +185,33 @@ class ManagedAgentDefinitionAdmissionTest {
     }
 
     @Test
+    void configuredExtensionsStayOnTheAdmittedRevisionAfterAnUpdate() throws Exception {
+        String tenant = tenant();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor", true);
+        var content = mapper.readTree(FILES_DEFINITION).deepCopy();
+        var object = (com.fasterxml.jackson.databind.node.ObjectNode) content;
+        object.putArray("skills").addObject().put("name", "review").put("description", "Review changes")
+                .put("body", "Original instructions").put("base_directory", ".qwen/skills/review");
+        object.putObject("hook_catalog").put("catalog_id", "review").put("catalog_revision", 1)
+                .put("definition_digest", "a".repeat(64));
+        JsonNode definition = define(tenant, "create", object.toString());
+        String agentId = definition.path("id").asText();
+        JsonNode created = mapper.readTree(createBound(tenant, agentId, null, "configured")
+                .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString());
+        String sessionId = created.path("id").asText();
+        var session = store.requireSession(tenant, sessionId);
+        assertThat(definitions.pinnedContent(session)).containsKey("skills").containsKey("hook_catalog");
+        define(tenant, "update", agentId, object.toString().replace("Original instructions", "New instructions"));
+        assertThat(mapper.valueToTree(definitions.pinnedContent(session)).at("/skills/0/body").asText())
+                .isEqualTo("Original instructions");
+        createBound(tenant, agentId, null, "configured").andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.id").value(sessionId)).andExpect(jsonPath("$.agent_revision").value("1"));
+        createBound(tenant, agentId, null, "new-configured").andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.agent_revision").value("2"));
+    }
+
+    @Test
     void omittedAndExplicitRevisionsPinAndExposeTheDigest() throws Exception {
         String tenant = tenant();
         register(tenant, "ws-a", "storage-a");
