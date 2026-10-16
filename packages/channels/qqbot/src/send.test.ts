@@ -2486,10 +2486,13 @@ describe('replyMsgId cleanup timer', () => {
       vi.useFakeTimers();
       const ch = makeChannelForFlush();
       const chp = ch as unknown as Record<string, unknown>;
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
 
       const state = {
         chatId: 'test-chat-id',
-        buffer: 'test buffer',
+        buffer: '',
         timer: null as ReturnType<typeof setTimeout> | null,
         retryCount: 0,
       };
@@ -2502,19 +2505,13 @@ describe('replyMsgId cleanup timer', () => {
           retryCount: number;
         }
       >;
-      streamState.set('session-1', state);
+      streamState.set('sess-1', state);
 
-      // Spy on sendMessage to throw RATE_LIMITED
-      const sendSpy = vi
-        .spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessage: () => Promise<void>;
-          },
-          'sendMessage',
-        )
-        .mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
+      // A permanently blocked route resolves without throwing and never
+      // reaches the wire, so flushAndTrack must take its permanent-failure
+      // teardown instead of recording the payload as delivered.
+      chp['resolveRoute'] = async () => ({ block: 'permanent' });
 
-      // Call flushAndTrack
       (
         chp['flushAndTrack'] as (
           sessionId: string,
@@ -2522,16 +2519,18 @@ describe('replyMsgId cleanup timer', () => {
           state: typeof state,
           logLabel: string,
         ) => void
-      )('session-1', 'test buffer', state, 'test');
+      )('sess-1', 'FULL-REPLY-TEXT', state, 'test');
 
-      // Drain microtask queue so the .catch() handler runs
-      // (must NOT advance timers — that would fire the retry setTimeout)
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
 
-      // RATE_LIMITED is transient — streamState should keep the entry
-      expect(streamState.has('session-1')).toBe(true);
+      const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(streamState.has('sess-1')).toBe(false);
+      expect(state.retryCount).toBe(0);
+      expect(state.timer).toBeNull();
+      expect(logged).toContain('test delivery failed (FALLBACK_FAILED)');
+      expect(mockSendQQMessage).not.toHaveBeenCalled();
 
-      sendSpy.mockRestore();
+      stderrSpy.mockRestore();
       vi.useRealTimers();
     });
 

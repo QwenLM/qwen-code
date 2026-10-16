@@ -2242,6 +2242,41 @@ describe('resolveRoute chatTypes fallback', () => {
 
     expect(result).toEqual({ block: 'transient' });
   });
+
+  it('reports a permanent block for a disposed channel', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['disposed'] = true;
+
+    const pvt = ch as unknown as QQChannelRaw;
+    // A disposed channel can never put text on the wire, so the guard must
+    // name the permanent class rather than a retryable one.
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | { block: string }>
+    )('group-1');
+
+    expect(result).toEqual({ block: 'permanent' });
+  });
+
+  it('reports a transient block when the token refresh throws', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    mockFetchAccessToken.mockRejectedValue(new Error('auth failed'));
+
+    const pvt = ch as unknown as QQChannelRaw;
+    // A failed token refresh is recoverable, so the guard must name the
+    // transient class: the caller re-attempts instead of dropping the text.
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | { block: string }>
+    )('group-1');
+
+    expect(result).toEqual({ block: 'transient' });
+  });
 });
 
 // ---------------------------------------------------------------------------
