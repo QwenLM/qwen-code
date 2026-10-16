@@ -311,16 +311,13 @@ class WorkspaceCsiSessionMainTest {
     }
 
     @Test
-    void oldWorkspaceCreationDoesNotAcquireTheNewProfileOrRequestPin() {
-        WorkspaceTestStorage.register(jdbc, "tenant", "legacy-local-storage");
-        jdbc.update("UPDATE ma_workspace SET storage_id = 'legacy-local-storage'");
-        var legacy = new TransactionTemplate(manager).execute(status -> store().insertWorkspaceSessionCommand("tenant",
-                "actor", "old", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("workspace", ".")));
-        assertThat(legacy).isNotNull();
-        assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session", String.class))
-                .isEqualTo("hosted-workspace-files/1");
-        assertThat(jdbc.queryForObject("SELECT runtime_request_key FROM ma_session", String.class)).isNull();
+    void oldWorkspaceCreationRefusesTheCsiStorageWithoutAPinOrSession() {
+        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> store().insertWorkspaceSessionCommand(
+                "tenant", "actor", "old", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("workspace", "."))))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        assertEmpty("ma_session", "ma_request_receipt", "ma_public_event", "ma_event_stream");
     }
 
     @Test
