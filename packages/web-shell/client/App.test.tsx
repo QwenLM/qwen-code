@@ -1596,6 +1596,8 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
 
 // Render DialogShell as an observable container so tests can detect an open
 // sub-dialog (model picker, approval-mode picker) via [data-testid="dialog-shell"].
+// It also carries the real component's [data-web-shell-dialog] marker, which
+// the drawer's touch-scroll blocker keys its dialog exemption off.
 vi.mock('./components/dialogs/DialogShell', async () => {
   const React = await import('react');
   return {
@@ -1607,6 +1609,7 @@ vi.mock('./components/dialogs/DialogShell', async () => {
         'div',
         {
           'data-testid': 'dialog-shell',
+          'data-web-shell-dialog': '',
           ...(typeof props.title === 'string'
             ? { 'data-dialog-title': props.title }
             : {}),
@@ -37155,6 +37158,51 @@ describe('App session callbacks', () => {
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
+  });
+
+  it('keeps a dialog opened over the drawer touch-scrollable', async () => {
+    // The drawer installs a document-level touchmove blocker whose allowlist
+    // used to cover only [data-sidebar-shell]. Dialogs portal outside that
+    // subtree, so on a phone every dialog opened from the drawer lost touch
+    // scrolling outright — Add Workspace included, which left its confirm
+    // buttons unreachable (#14184). Rotating to landscape closed the drawer
+    // and dropped the blocker, which is why scrolling appeared to come back.
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    const drawer = container.querySelector('[data-sidebar-shell]');
+    expect(drawer).not.toBeNull();
+    expect(document.body.style.overflow).toBe('hidden');
+
+    act(() => {
+      testState.latestChatEditorProps?.onToggleShortcuts?.();
+    });
+    await flush();
+
+    const dialog = container.querySelector('[data-web-shell-dialog]');
+    expect(dialog).not.toBeNull();
+
+    const swipe = (target: EventTarget | null) => {
+      const event = new Event('touchmove', { bubbles: true, cancelable: true });
+      target?.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    expect(swipe(dialog)).toBe(false);
+    // A real phone gesture starts on a descendant of the marker — the panel
+    // itself is not what scrolls — so pin the closest() walk, not just the
+    // marker element.
+    const dialogChild = dialog?.firstElementChild ?? null;
+    expect(dialogChild).not.toBeNull();
+    expect(swipe(dialogChild)).toBe(false);
+    expect(swipe(drawer)).toBe(false);
+    // The page behind the drawer must stay locked.
+    expect(swipe(document.body)).toBe(true);
   });
 
   it('starts a new session from the external shell ref and returns to chat', async () => {
