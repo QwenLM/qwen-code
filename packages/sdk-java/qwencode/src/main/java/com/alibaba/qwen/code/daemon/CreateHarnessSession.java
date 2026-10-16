@@ -1,7 +1,9 @@
 package com.alibaba.qwen.code.daemon;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /** Input for creating a Hosted Harness session with a caller-owned UUID. */
 public final class CreateHarnessSession {
@@ -12,6 +14,8 @@ public final class CreateHarnessSession {
     private final Long approvalTimeoutMs;
     private final Long captureBytes;
     private final Map<String, Object> agentDefinition;
+    private final List<Map<String, Object>> mcpServers;
+    private final Map<String, Object> hookCatalog;
     private final Map<String, Object> lineage;
     private final boolean suppressChildAgents;
     private final boolean childWorkspaces;
@@ -25,6 +29,8 @@ public final class CreateHarnessSession {
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
         this.captureBytes = builder.captureBytes;
         this.agentDefinition = builder.agentDefinition;
+        this.mcpServers = builder.mcpServers;
+        this.hookCatalog = builder.hookCatalog;
         this.lineage = builder.lineage;
         this.suppressChildAgents = builder.suppressChildAgents;
         this.childWorkspaces = builder.childWorkspaces;
@@ -63,6 +69,12 @@ public final class CreateHarnessSession {
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
         }
+        if (mcpServers != null) {
+            result.put("mcpServers", mcpServers);
+        }
+        if (hookCatalog != null) {
+            result.put("hookCatalog", hookCatalog);
+        }
         if (lineage != null) {
             result.put("lineage", lineage);
         }
@@ -80,6 +92,8 @@ public final class CreateHarnessSession {
         private Long approvalTimeoutMs;
         private Long captureBytes;
         private Map<String, Object> agentDefinition;
+        private List<Map<String, Object>> mcpServers;
+        private Map<String, Object> hookCatalog;
         private Map<String, Object> lineage;
         private boolean suppressChildAgents;
         private boolean childWorkspaces;
@@ -97,6 +111,16 @@ public final class CreateHarnessSession {
 
         public Builder agentDefinition(Map<String, Object> value) {
             this.agentDefinition = Map.copyOf(value);
+            return this;
+        }
+
+        public Builder mcpServers(List<Map<String, Object>> value) {
+            this.mcpServers = value.stream().map(Map::copyOf).collect(Collectors.toUnmodifiableList());
+            return this;
+        }
+
+        public Builder hookCatalog(Map<String, Object> value) {
+            this.hookCatalog = Map.copyOf(value);
             return this;
         }
 
