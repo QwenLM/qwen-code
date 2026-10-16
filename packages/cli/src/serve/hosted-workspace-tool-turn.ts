@@ -4572,13 +4572,13 @@ export class HostedWorkspaceToolTurn {
         )
           probeBindings.push({ executionCallId, request });
       }
-      const probeResults = await Promise.all(
-        probeBindings.map(({ executionCallId }) =>
-          probeNeverStarted(this.broker, executionCallId),
-        ),
+      const probeOutcomes = await Promise.all(
+        probeBindings.map(async (binding) => ({
+          ...binding,
+          probe: await probeNeverStarted(this.broker, binding.executionCallId),
+        })),
       );
-      for (const [index, probe] of probeResults.entries()) {
-        const { executionCallId, request } = probeBindings[index]!;
+      for (const { executionCallId, request, probe } of probeOutcomes) {
         if (!probe.proven) {
           writeStderrLineSafe(
             `qwen serve: Background process absence could not be confirmed for ${executionCallId} (${probe.cause}).`,

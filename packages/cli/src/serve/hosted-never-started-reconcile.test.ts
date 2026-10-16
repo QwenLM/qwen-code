@@ -300,6 +300,10 @@ describe('probeNeverStarted', () => {
       'probe_rejected (outcome_unknown)',
     ],
     [new TypeError('fetch failed'), 'probe_rejected (error TypeError)'],
+    [
+      new DOMException('timed out', 'TimeoutError'),
+      'probe_rejected (error TimeoutError)',
+    ],
     ['unexpected rejection', 'probe_rejected (no status)'],
   ])(
     'classifies a rejected probe without logging its message',

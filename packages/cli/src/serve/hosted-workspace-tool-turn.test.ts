@@ -6391,6 +6391,74 @@ it('settles grant-proven bindings before waiting for process probes', async () =
   }
 });
 
+it('settles only the binding whose own probe proves absence in a mixed fan-out', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  try {
+    const template = backgroundCall().call;
+    const backgroundCalls = [1, 2].map((index) => ({
+      ...template,
+      callId: `background-call-${index}`,
+    }));
+    const backgroundParts: Part[] = backgroundCalls.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    }));
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      {
+        publicationMissing: true,
+        executionCallIds: ['shell-execution-1', 'shell-execution-2'],
+      },
+    );
+    turn = rig.turn;
+    broker.executeV3.mockRejectedValue(new Error('trigger recovery'));
+    broker.backgroundProcessStatus.mockImplementation(async () =>
+      broker.backgroundProcessStatus.mock.calls.length === 1
+        ? { state: 'executing' }
+        : undefined,
+    );
+    const outcome = turn
+      .execute(
+        backgroundCalls,
+        backgroundParts,
+        'model',
+        new AbortController().signal,
+      )
+      .then(
+        () => ({ rejection: undefined }),
+        (rejection: unknown) => ({ rejection }),
+      );
+
+    const { rejection } = await outcome;
+    expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(broker.backgroundProcessStatus).toHaveBeenCalledTimes(2);
+    expect(
+      rig.orchestrator.calls.filter(([name]) => name === 'settleFailed'),
+    ).toEqual([
+      [
+        'settleFailed',
+        {
+          id: 'shell-execution-2',
+          params: { stopReason: 'start_failed', started: false },
+        },
+      ],
+    ]);
+    expect(stderr).toHaveBeenCalledWith(
+      'qwen serve: Background process absence could not be confirmed for shell-execution-1 (ambiguous_state (executing)).',
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      'qwen serve: Settled never-started background child run shell-execution-2 from durable process-ledger absence.',
+    );
+  } finally {
+    stderr.mockRestore();
+  }
+});
+
 it('keeps an in-flight dispatch blocked when cancellation fails before process admission', async () => {
   const { call, parts } = backgroundCall();
   const rig = backgroundTurnRig(

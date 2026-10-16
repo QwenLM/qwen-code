@@ -49,8 +49,8 @@ type RouteResolution =
 // The stderr diagnostic carries these fields and nothing more: the
 // rejection's message embeds the request URL with its session ids (and a
 // mis-typed logger could leak the bearer token), so it is never interpolated.
-// Only status/code, stable tokens for known contract errors, or Error.name
-// describe a rejection.
+// Only status/code, stable tokens for known contract errors, or an
+// Error/DOMException name describe a rejection.
 function rejectionDetail(cause: unknown): string {
   const bag =
     cause !== null && typeof cause === 'object'
@@ -67,6 +67,10 @@ function rejectionDetail(cause: unknown): string {
       return 'outcome_unknown';
     return `error ${cause.name}`;
   }
+  // AbortSignal.timeout rejects fetch with a DOMException, which is not an
+  // Error subclass; its legacy numeric `code` is not a route code and must
+  // not pass as one, so the name is its only redacted discriminator.
+  if (cause instanceof DOMException) return `error ${cause.name}`;
   return 'no status';
 }
 
