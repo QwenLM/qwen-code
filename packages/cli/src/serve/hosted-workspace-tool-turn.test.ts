@@ -77,6 +77,8 @@ import {
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 
 const broker = vi.hoisted(() => ({
+  capabilityDigest:
+    'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91',
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
@@ -89,6 +91,7 @@ const broker = vi.hoisted(() => ({
   acknowledgeV3: vi.fn(),
   cancel: vi.fn(),
   release: vi.fn(),
+  releaseMount: vi.fn(),
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
   backgroundProcessStatus: vi.fn(),
@@ -105,11 +108,19 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    readonly capabilityDigest = broker.capabilityDigest;
+    // Like the real client: the claim is recorded before the acquire
+    // request leaves, so a lost reply still names it.
+    private claim?: string;
+    mountClaim = () => this.claim;
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
     warm = broker.warm;
-    acquire = broker.acquire;
+    acquire = (...args: unknown[]) => {
+      this.claim = `claim-${broker.acquire.mock.calls.length + 1}`;
+      return broker.acquire(...args);
+    };
     prepare = broker.prepare;
     prepareV3 = broker.prepareV3;
     execute = broker.execute;
@@ -117,6 +128,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     acknowledgeV3 = broker.acknowledgeV3;
     cancel = broker.cancel;
     release = broker.release;
+    releaseMount = broker.releaseMount;
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
     backgroundProcessStatus = broker.backgroundProcessStatus;
@@ -219,6 +231,7 @@ beforeEach(async () => {
     broker.acquire,
     broker.cancel,
     broker.release,
+    broker.releaseMount,
   ])
     method.mockResolvedValue(undefined);
   root = await mkdtemp(path.join(tmpdir(), 'hosted-tool-turn-'));
@@ -678,6 +691,7 @@ async function shellReceiptScenario(
     | 'sentinel'
     | 'lost-admission'
     | 'lost-reserve',
+  approval?: { mode: HostedApprovalMode },
 ) {
   const shellCall = {
     ...calls[0],
@@ -847,6 +861,10 @@ async function shellReceiptScenario(
       mode !== 'large' ||
       Buffer.byteLength(JSON.stringify(messageParts)) <= 64 * 1024,
     { owner, captureBytes: 1024 * 1024 },
+    undefined,
+    approval
+      ? { settings: { mode: approval.mode, timeoutMs: 1000 }, waiters }
+      : undefined,
   );
   const execution = shellTurn.execute(
     [shellCall],
@@ -947,6 +965,11 @@ async function shellReceiptScenario(
   ).toHaveLength(1);
 }
 
+it('runs Full Access Shell without ordinary Actions through durable result and replay acceptance', async () => {
+  await shellReceiptScenario('normal', { mode: 'yolo' });
+  expect(actionIds()).toEqual([]);
+});
+
 it.each([
   'normal',
   'abandoned',
@@ -958,7 +981,7 @@ it.each([
   'lost-reserve',
 ] as const)(
   'uses only the original Shell publication after Broker %s',
-  shellReceiptScenario,
+  (mode) => shellReceiptScenario(mode),
 );
 
 it('records a durable receipt for a proven unstarted Shell', async () => {
@@ -2015,6 +2038,225 @@ it('keeps release failures recovery blocked', async () => {
   await expect(turn.finish()).rejects.toBeInstanceOf(
     HostedToolRecoveryRequiredError,
   );
+});
+
+it('hands back only the Workspace mount on the recovery-block path', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  expect(broker.acquire).toHaveBeenCalledOnce();
+  await turn.releaseForRecoveryBlock();
+  // #13800: the mount lease goes back so later Sessions on the same
+  // storage are never wedged by this turn's block; the Runtime Session
+  // itself never sees the RELEASED-forever full release, and the handback
+  // names the claim of the acquire that owes it.
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  expect(broker.releaseMount).toHaveBeenCalledWith('claim-1');
+  expect(broker.release).not.toHaveBeenCalled();
+  // A repeated block-side handback is a no-op.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+});
+
+it('keeps the block verdict deliverable when the mount handback fails, and keeps the handback owed until it lands', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  vi.useFakeTimers();
+  try {
+    // The failure is logged, never thrown: the recovery-block verdict must
+    // still reach the Session.
+    await expect(turn.releaseForRecoveryBlock()).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    // Owed until it lands: the cadence keeps asking on a widening backoff
+    // and then a steady one-minute tail instead of dropping the debt after
+    // two gaps — the freeze stays honest while the turn's work is unproven.
+    for (const [gap, calls] of [
+      [1000, 2],
+      [3000, 3],
+      [5000, 4],
+      [10000, 5],
+      [30000, 6],
+      [60000, 7],
+      [60000, 8],
+    ] as const) {
+      await vi.advanceTimersByTimeAsync(gap);
+      expect(broker.releaseMount).toHaveBeenCalledTimes(calls);
+    }
+    // One line for the repeated refusal, not one per minute.
+    expect(log).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('hands the mount back once a busy refusal settles', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount
+    .mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+    )
+    .mockResolvedValue(undefined);
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  [503, 'runtime_reconciliation_required'],
+  [409, 'runtime_session_conflict'],
+  [409, 'runtime_admission_closed'],
+  [409, 'workspace_writer_unproven'],
+])(
+  'makes one attempt for a final %s %s refusal without retrying',
+  async (status, code) => {
+    await turn.execute(calls, parts, 'model', new AbortController().signal);
+    // A Session the Broker no longer holds, a claim a re-drive superseded,
+    // a lifecycle drain that frees the mount itself, or a writer that never
+    // proved it stopped: waiting settles none of them.
+    broker.releaseMount.mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(status, code),
+    );
+    await turn.releaseForRecoveryBlock();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    await turn.blockMountRetry;
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([
+  ['a lost reply', () => new TypeError('fetch failed')],
+  [
+    "the Broker's internal error",
+    () =>
+      new HostedWorkspaceBrokerRejection(500, 'runtime_broker_internal_error'),
+  ],
+])('re-sends the handback after %s', async (_label, failure) => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount
+    .mockRejectedValueOnce(failure())
+    .mockResolvedValue(undefined);
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  // Neither decided anything, and the holder-conditioned clear is
+  // idempotent, so the chain re-sends on the cadence until it lands.
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+});
+
+it('delivers the block verdict without waiting out a hung handback', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  let rejectFirst!: (cause: unknown) => void;
+  broker.releaseMount
+    .mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectFirst = reject;
+        }),
+    )
+    .mockResolvedValue(undefined);
+  vi.useFakeTimers();
+  try {
+    const verdict = turn.releaseForRecoveryBlock();
+    await vi.advanceTimersByTimeAsync(2000);
+    // The verdict proceeded on its own short bound, not on the Broker's
+    // 30s fetch timeout; the attempt itself is still alive in the chain.
+    await expect(verdict).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    rejectFirst(new TypeError('fetch failed'));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+    await turn.blockMountRetry;
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('hands nothing back when the turn never sent an acquire', async () => {
+  // Only an acquire's claim can name a mount: a turn blocked before its
+  // first acquire holds nothing.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).not.toHaveBeenCalled();
+  expect(turn.blockMountRetry).toBeUndefined();
+});
+
+it('stops the owed handback when the daemon shuts down', async () => {
+  const mountHandbacks = new Set<() => void>();
+  const owned = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test', mountHandbacks },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+  );
+  await owned.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+  await owned.releaseForRecoveryBlock();
+  expect(mountHandbacks.size).toBe(1);
+  for (const stop of mountHandbacks) stop();
+  await owned.blockMountRetry;
+  expect(mountHandbacks.size).toBe(0);
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+});
+
+it('hands the mount back even when the acquire answer was lost after the grant', async () => {
+  broker.acquire.mockRejectedValue(new TypeError('fetch failed'));
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  // The reply loss means no acquired flag — but the Broker may have
+  // committed the claim, so the handback still runs under the claim the
+  // request carried; the holder-conditioned clear is a no-op when nothing
+  // was granted.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  expect(broker.releaseMount).toHaveBeenCalledWith('claim-1');
+});
+
+it("hands the Hook and MCP lanes' Session-scoped mounts back through their own discipline", async () => {
+  const mcpAttempt = vi.fn(async () => undefined);
+  const mcpHandback = vi.fn(() => mcpAttempt);
+  const mcpTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    {
+      mcp: {
+        broker: { ...broker, runtimeSessionId: 'mcp:session' },
+        ensureReady: async () => undefined,
+        refresh: async () => undefined,
+        tools: () => [],
+        toolInput: () => undefined,
+        mountHandback: mcpHandback,
+      } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
+  );
+  await mcpTurn.releaseForRecoveryBlock();
+  expect(mcpHandback).toHaveBeenCalledOnce();
+  expect(mcpAttempt).toHaveBeenCalledOnce();
+  const hookAttempt = vi.fn(async () => undefined);
+  const hooksTurn = createTurn(false, undefined, {
+    acquire: vi.fn(async () => undefined),
+    mountHandback: () => hookAttempt,
+  } as unknown as HostedHookSession);
+  await hooksTurn.releaseForRecoveryBlock();
+  expect(hookAttempt).toHaveBeenCalledOnce();
+  // The lanes' Session-scoped mounts never go back through the turn's
+  // own per-turn broker.
+  expect(broker.releaseMount).not.toHaveBeenCalled();
 });
 
 it('keeps an empty Runtime error visible to the model instead of reporting success', async () => {
@@ -5331,6 +5573,8 @@ function backgroundTurnRig(
     notStartedProven?: boolean;
     reserveRefused?: boolean;
     publicationMissing?: boolean;
+    closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
+    executionCallIds?: readonly string[];
   } = {},
 ) {
   enablement.childRun = true;
@@ -5385,23 +5629,32 @@ function backgroundTurnRig(
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
-        if (options.publicationMissing)
+        const closeResult =
+          options.closeResults?.[
+            order.filter((item) => item === 'close_not_started').length - 1
+          ];
+        if (options.publicationMissing || closeResult === 'MISSING')
           throw new ManagedSessionStoreHttpError(
             404,
             'publication_not_found',
             'Publication does not exist',
           );
         return {
-          state: options.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED',
+          state:
+            closeResult ??
+            (options.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED'),
         };
       }
       throw new Error('Unexpected publication route ' + route);
     }),
   } as unknown as HttpToolPublicationOwner;
-  broker.prepareV3.mockResolvedValue({
-    executionCallId: 'shell-execution',
-    runtimeBindingId: 'binding-1',
-    bindingGeneration: '1',
+  broker.prepareV3.mockImplementation(async () => {
+    const index = broker.prepareV3.mock.calls.length - 1;
+    return {
+      executionCallId: options.executionCallIds?.[index] ?? 'shell-execution',
+      runtimeBindingId: `binding-${index + 1}`,
+      bindingGeneration: '1',
+    };
   });
   broker.executeV3.mockImplementation(async () => {
     order.push('execute');
@@ -6561,6 +6814,9 @@ it('settles the admitted child run when grant reservation exhausts its retries',
 });
 
 it('settles an in-turn dispatch with no publication and no durable process row', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
   const { call, parts } = backgroundCall();
   const rig = backgroundTurnRig(
     { executionStatus: 'success', responseParts: [], capture: null },
@@ -6584,6 +6840,258 @@ it('settles an in-turn dispatch with no publication and no durable process row',
   expect(broker.backgroundProcessStatus).toHaveBeenCalledWith(
     'shell-execution',
   );
+  expect(stderr).toHaveBeenCalledWith(
+    'qwen serve: Settled never-started background child run shell-execution from durable process-ledger absence.',
+  );
+  stderr.mockRestore();
+});
+
+it('probes every inconclusive background binding within one timeout window', async () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  vi.useFakeTimers();
+  let guard: ReturnType<typeof realSetTimeout> | undefined;
+  try {
+    const template = backgroundCall().call;
+    const backgroundCalls = [1, 2].map((index) => ({
+      ...template,
+      callId: `background-call-${index}`,
+    }));
+    const backgroundParts: Part[] = backgroundCalls.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    }));
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      {
+        publicationMissing: true,
+        executionCallIds: ['shell-execution-1', 'shell-execution-2'],
+      },
+    );
+    turn = rig.turn;
+    broker.executeV3.mockRejectedValue(new Error('trigger recovery'));
+    let resolveBothProbes!: () => void;
+    const bothProbesStarted = new Promise<void>((resolve) => {
+      resolveBothProbes = resolve;
+    });
+    broker.backgroundProcessStatus.mockImplementation(
+      () =>
+        new Promise<undefined>((_resolve, reject) => {
+          if (broker.backgroundProcessStatus.mock.calls.length === 2)
+            resolveBothProbes();
+          setTimeout(
+            () => reject(new DOMException('timed out', 'TimeoutError')),
+            30_000,
+          );
+        }),
+    );
+    let completed = false;
+    const outcome = turn
+      .execute(
+        backgroundCalls,
+        backgroundParts,
+        'model',
+        new AbortController().signal,
+      )
+      .then(
+        () => ({ rejection: undefined }),
+        (rejection: unknown) => ({ rejection }),
+      )
+      .finally(() => {
+        completed = true;
+      });
+    const guardedStart = new Promise<never>((_resolve, reject) => {
+      guard = realSetTimeout(
+        () => reject(new Error('both probes did not start concurrently')),
+        1_000,
+      );
+    });
+
+    await Promise.race([bothProbesStarted, guardedStart]);
+    if (guard !== undefined) realClearTimeout(guard);
+    guard = undefined;
+    expect(broker.backgroundProcessStatus).toHaveBeenCalledTimes(2);
+    expect(completed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(completed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const { rejection } = await outcome;
+    expect(completed).toBe(true);
+    expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      rig.order.filter((item) => item === 'close_not_started'),
+    ).toHaveLength(2);
+    expect(
+      rig.orchestrator.calls.filter(([name]) => name === 'settleFailed'),
+    ).toHaveLength(0);
+  } finally {
+    if (guard !== undefined) realClearTimeout(guard);
+    vi.useRealTimers();
+    turn = createTurn();
+  }
+});
+
+it('settles grant-proven bindings before waiting for process probes', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  vi.useFakeTimers();
+  let guard: ReturnType<typeof realSetTimeout> | undefined;
+  try {
+    const template = backgroundCall().call;
+    const backgroundCalls = [1, 2].map((index) => ({
+      ...template,
+      callId: `background-call-${index}`,
+    }));
+    const backgroundParts: Part[] = backgroundCalls.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    }));
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      {
+        closeResults: ['NOT_STARTED', 'MISSING'],
+        executionCallIds: ['shell-execution-1', 'shell-execution-2'],
+      },
+    );
+    turn = rig.turn;
+    broker.executeV3.mockRejectedValue(new Error('trigger recovery'));
+    let resolveProbeStarted!: () => void;
+    const probeStarted = new Promise<void>((resolve) => {
+      resolveProbeStarted = resolve;
+    });
+    broker.backgroundProcessStatus.mockImplementation(() => {
+      resolveProbeStarted();
+      return new Promise<undefined>((_resolve, reject) => {
+        setTimeout(
+          () => reject(new DOMException('timed out', 'TimeoutError')),
+          30_000,
+        );
+      });
+    });
+    const outcome = turn
+      .execute(
+        backgroundCalls,
+        backgroundParts,
+        'model',
+        new AbortController().signal,
+      )
+      .then(
+        () => ({ rejection: undefined }),
+        (rejection: unknown) => ({ rejection }),
+      );
+    const guardedStart = new Promise<never>((_resolve, reject) => {
+      guard = realSetTimeout(
+        () => reject(new Error('process probe did not start')),
+        1_000,
+      );
+    });
+
+    await Promise.race([probeStarted, guardedStart]);
+    if (guard !== undefined) realClearTimeout(guard);
+    guard = undefined;
+    expect(broker.backgroundProcessStatus).toHaveBeenCalledOnce();
+    expect(rig.orchestrator.calls.at(-1)).toEqual([
+      'settleFailed',
+      {
+        id: 'shell-execution-1',
+        params: { stopReason: 'start_failed', started: false },
+      },
+    ]);
+    // Grant-owner proof is not process-ledger proof.
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('from durable process-ledger absence'),
+    );
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    const { rejection } = await outcome;
+    expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      rig.orchestrator.calls.filter(([name]) => name === 'settleFailed'),
+    ).toHaveLength(1);
+  } finally {
+    if (guard !== undefined) realClearTimeout(guard);
+    vi.useRealTimers();
+    turn = createTurn();
+  }
+});
+
+it('settles only the binding whose own probe proves absence in a mixed fan-out', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  try {
+    const template = backgroundCall().call;
+    const backgroundCalls = [1, 2].map((index) => ({
+      ...template,
+      callId: `background-call-${index}`,
+    }));
+    const backgroundParts: Part[] = backgroundCalls.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    }));
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      {
+        publicationMissing: true,
+        executionCallIds: ['shell-execution-1', 'shell-execution-2'],
+      },
+    );
+    turn = rig.turn;
+    broker.executeV3.mockRejectedValue(new Error('trigger recovery'));
+    broker.backgroundProcessStatus.mockImplementation(async () =>
+      broker.backgroundProcessStatus.mock.calls.length === 1
+        ? { state: 'executing' }
+        : undefined,
+    );
+    const outcome = turn
+      .execute(
+        backgroundCalls,
+        backgroundParts,
+        'model',
+        new AbortController().signal,
+      )
+      .then(
+        () => ({ rejection: undefined }),
+        (rejection: unknown) => ({ rejection }),
+      );
+
+    const { rejection } = await outcome;
+    expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(broker.backgroundProcessStatus).toHaveBeenCalledTimes(2);
+    expect(
+      rig.orchestrator.calls.filter(([name]) => name === 'settleFailed'),
+    ).toEqual([
+      [
+        'settleFailed',
+        {
+          id: 'shell-execution-2',
+          params: { stopReason: 'start_failed', started: false },
+        },
+      ],
+    ]);
+    expect(stderr).toHaveBeenCalledWith(
+      'qwen serve: Background process absence could not be confirmed for shell-execution-1 (ambiguous_state (executing)).',
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      'qwen serve: Settled never-started background child run shell-execution-2 from durable process-ledger absence.',
+    );
+  } finally {
+    stderr.mockRestore();
+  }
 });
 
 it('keeps an in-flight dispatch blocked when cancellation fails before process admission', async () => {
@@ -6638,10 +7146,12 @@ it.each(['present', 'unavailable'] as const)(
       'admit',
       'dispatchStarted',
     ]);
-    if (proof === 'unavailable')
-      expect(stderr).toHaveBeenCalledWith(
-        'qwen serve: Background process absence could not be confirmed for shell-execution (status 503, code store_unavailable).',
-      );
+    expect(stderr).toHaveBeenCalledWith(
+      proof === 'present'
+        ? 'qwen serve: Background process absence could not be confirmed for shell-execution (ambiguous_state (executing)).'
+        : 'qwen serve: Background process absence could not be confirmed for shell-execution (probe_rejected (status 503, code store_unavailable)).',
+    );
+    stderr.mockRestore();
   },
 );
 

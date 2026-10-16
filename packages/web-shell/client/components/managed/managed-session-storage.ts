@@ -22,27 +22,23 @@ export function getManagedClientId(baseUrl: string): string {
   return clientId;
 }
 
-export function managedSelectionFromUrl(): {
+export function managedSelectionFromUrl(defaultOpen = false): {
   open: boolean;
   sessionId?: string;
 } {
   if (typeof window === 'undefined') return { open: false };
   const params = new URLSearchParams(window.location.search);
   return {
-    open: params.get('managed') === '1',
+    open:
+      params.get('managed') === '1' || (defaultOpen && !params.has('managed')),
     sessionId: params.get('managedSession') || undefined,
   };
 }
 
 export function saveManagedSelection(open: boolean, sessionId?: string): void {
   const url = new URL(window.location.href);
-  if (open) {
-    url.searchParams.set('managed', '1');
-    if (sessionId) url.searchParams.set('managedSession', sessionId);
-    else url.searchParams.delete('managedSession');
-  } else {
-    url.searchParams.delete('managed');
-    url.searchParams.delete('managedSession');
-  }
+  url.searchParams.set('managed', open ? '1' : '0');
+  if (sessionId) url.searchParams.set('managedSession', sessionId);
+  else url.searchParams.delete('managedSession');
   window.history.replaceState(window.history.state, '', url);
 }

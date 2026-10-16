@@ -256,8 +256,13 @@
 }
 
 :global([data-web-shell-toolbar-popover]) {
-  width: min(max-content, var(--radix-popover-content-available-width));
+  width: max-content;
+  max-width: min(
+    var(--radix-popover-content-available-width),
+    calc(100vw - 16px)
+  );
   max-height: var(--radix-popover-content-available-height);
+  box-sizing: border-box;
   overflow: hidden;
 }
 
@@ -946,6 +951,13 @@
   padding: 3px 0 3px 0.5ch;
   color: var(--foreground, #e4e4e4);
   opacity: 1;
+}
+
+/* The label and value carry no right padding of their own; the remove button
+   supplies that edge when it is present. A chip without one ends on the
+   content box, so it needs the inset itself. */
+.tagContent:last-child {
+  padding-right: 7px;
 }
 
 .tagRemove {

@@ -321,6 +321,10 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg8-cases/',
     );
+    // FG9's session-relay fault gates keep theirs in target/fg9-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg9-cases/',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag.
     const evidence = job.steps.find(
@@ -372,12 +376,12 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (45 + 16x10 + 20 + 50); the uncapped setup steps
+    // Step ceilings today (75 + 16x10 + 20 + 50); the uncapped setup steps
     // need their own allowance — the job comment estimates it at ~13, so
     // the enforced floor moves with that estimate, not the older 10.
-    expect(summed).toBe(275);
+    expect(summed).toBe(305);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
-    expect(job['timeout-minutes']).toBe(290);
+    expect(job['timeout-minutes']).toBe(320);
   });
 
   it('runs every failover arm with its own runner arguments', () => {
@@ -469,24 +473,36 @@ describe('Hosted real-process gates', () => {
       // crash class, ~150 s of wall clock at 2x headroom; then the L4
       // recovery class's four real-process cuts, ~300 s more the FG7
       // sizing never covered — #14125's per-commit kill; the FG8
-      // monitor/run letters, ~310 s measured on the lane with real
-      // background processes and >16 MiB captures): the relational check
-      // above tolerates anything up to step*60, so the value is pinned
-      // literally here — an unnoticed raise has no other red to land on.
+      // monitor/run letters grew to five letters / twenty-one cases in
+      // #14334, whose lane (run 38848525079 at fee23d2d3c) saw four
+      // letters finish by ~700 s into the fork while the old 1800 s
+      // budget killed the fork before the last letter reported, so the
+      // fork doubles to 3600 in the same diff; and the FG9 session/relay
+      // letters, ~170 s measured locally, fit inside that same
+      // lane-measured envelope): the relational check above tolerates
+      // anything up to step*60, so the value is pinned literally here —
+      // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(1800);
+        expect(forkSeconds).toBe(3600);
       }
     },
   );
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
-  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
-  // the FG8 monitor/run letters add ~310s measured on the lane (~450s with
-  // CI headroom); with the fork itself ~14s, 1100s covers them. A larger
-  // ceiling lets failsafe kill the fork mid-run, and the classes left
-  // unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 1100;
+  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, the
+  // FG8 monitor/run letters grew from two letters / seven cases to five
+  // letters / twenty-one cases in #14334 — on that PR's lane (run
+  // 38848525079 at fee23d2d3c) four letters finished by ~700s into the
+  // fork, the fork was still killed at the old 1800s budget before the last
+  // letter reported, and the fork now sits at 3600s for the same 2×
+  // headroom — and the FG9 session/relay letters add 166–175s measured
+  // locally on JDK 21 + MariaDB 10.11 across three acceptance runs (~300s
+  // budgeted at >1.7x the heaviest measured run) into the same envelope;
+  // with the fork itself ~14s, 2400s covers them. A larger ceiling lets
+  // failsafe kill the fork mid-run, and the classes left unrun never
+  // report, failing the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 2400;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -528,6 +544,24 @@ describe('Hosted real-process gates', () => {
     // same shape the FG7 channel letters are held to) is the honest model.
     const ceilings = ceilingsOf(
       hostedTestSource('HostedMonitorRunFaultGatesIT'),
+    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedSessionRelayFaultGatesIT ceilings inside the shared fork budget', () => {
+    // Like the FG8 monitor/run letters, the FG9 session/relay letters are
+    // independent fixtures sharing the fork — each letter boots its own
+    // Spring application, Harness, and proxies under its own tenant
+    // prefix, so a stall in one letter leaves the other running — and one
+    // letter stalling to its @Timeout must still leave the fork enough
+    // healthy runtime and budget for the sibling letter to finish.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedSessionRelayFaultGatesIT'),
     );
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {

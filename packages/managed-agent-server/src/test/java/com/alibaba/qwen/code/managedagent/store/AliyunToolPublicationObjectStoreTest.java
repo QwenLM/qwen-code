@@ -48,6 +48,7 @@ class AliyunToolPublicationObjectStoreTest {
         var objects = store();
         var denied = new OSSException("denied");
         doThrow(denied).when(client).deleteObject("private-bucket", "exact/key");
-        assertThatThrownBy(() -> objects.deleteIfPresent("exact/key")).isSameAs(denied);
+        assertThatThrownBy(() -> objects.deleteIfPresent("exact/key"))
+                .isInstanceOf(ToolPublicationStorageException.class).hasCause(denied);
     }
 }

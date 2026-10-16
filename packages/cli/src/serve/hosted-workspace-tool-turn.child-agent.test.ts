@@ -223,6 +223,16 @@ async function executeAgent(
   );
 }
 
+function cancelWhenChildWaits(abort: AbortController): void {
+  // Acceptance polling starts only after child admission has committed.
+  const readAcceptance = children.acceptance.bind(children);
+  vi.spyOn(children, 'acceptance').mockImplementationOnce((childRunId) => {
+    const acceptance = readAcceptance(childRunId);
+    abort.abort();
+    return acceptance;
+  });
+}
+
 beforeEach(async () => {
   vi.resetAllMocks();
   for (const method of [
@@ -1341,7 +1351,7 @@ it('a cancelled turn abandons the answer but never the committed child', async (
   const turn = createTurn();
   const abort = new AbortController();
   const childRunId = `prompt:call-1`;
-  setTimeout(() => abort.abort(), 200);
+  cancelWhenChildWaits(abort);
   const responses = await executeAgent(
     turn,
     call({
@@ -1364,7 +1374,7 @@ it('a cancelled turn abandons the answer but never the committed child', async (
 it('a cancelled turn never admits children queued behind its abandoned wait', async () => {
   const turn = createTurn();
   const abort = new AbortController();
-  setTimeout(() => abort.abort(), 200);
+  cancelWhenChildWaits(abort);
   const batch = await turn.execute(
     [
       call(
@@ -1763,6 +1773,7 @@ it.each([false, true])(
       original.getCatalog()!,
     );
     const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
+    const childSession = children;
     try {
       expect(original.hasMountableToolResultHooks).toBe(true);
       await original.fire(
@@ -1779,26 +1790,30 @@ it.each([false, true])(
       await original.close();
       await hooks.ensureReady();
       expect(hooks.mountHeld).toBe(false);
-      const result = executeAgent(
-        turn,
-        call({
-          description: 'audit',
-          prompt: 'review',
-          run_in_background: background,
-        }),
-      );
-      if (!background) {
-        await vi.waitFor(() =>
-          expect(children.record('prompt:call-1')).toBeDefined(),
-        );
-        await children.settleFailed('prompt:call-1', {
-          stopReason: 'creation_failed',
-          reason: null,
-          started: false,
-        });
-      }
-      expect(JSON.stringify(await result)).not.toContain(mountRefusal);
-      expect(children.record('prompt:call-1')).toBeDefined();
+      const [result] = await Promise.all([
+        executeAgent(
+          turn,
+          call({
+            description: 'audit',
+            prompt: 'review',
+            run_in_background: background,
+          }),
+        ),
+        (async () => {
+          if (background) return;
+          await vi.waitFor(
+            () => expect(childSession.record('prompt:call-1')).toBeDefined(),
+            { timeout: 10_000 },
+          );
+          await childSession.settleFailed('prompt:call-1', {
+            stopReason: 'creation_failed',
+            reason: null,
+            started: false,
+          });
+        })(),
+      ]);
+      expect(JSON.stringify(result)).not.toContain(mountRefusal);
+      expect(childSession.record('prompt:call-1')).toBeDefined();
       expect(
         broker.hookControl.mock.calls.filter(
           ([operation]) => operation.kind === 'hook-execute',
@@ -1888,27 +1903,32 @@ it.each(
       duration: 1,
       output: {},
     }));
+    const childSession = children;
     try {
-      const result = executeAgent(
-        turn,
-        call({
-          description: 'audit',
-          prompt: 'review',
-          run_in_background: background,
-        }),
-      );
-      if (!background) {
-        await vi.waitFor(() =>
-          expect(children.record('prompt:call-1')).toBeDefined(),
-        );
-        await children.settleFailed('prompt:call-1', {
-          stopReason: 'creation_failed',
-          reason: null,
-          started: false,
-        });
-      }
-      expect(JSON.stringify(await result)).not.toContain(mountRefusal);
-      expect(children.record('prompt:call-1')).toBeDefined();
+      const [result] = await Promise.all([
+        executeAgent(
+          turn,
+          call({
+            description: 'audit',
+            prompt: 'review',
+            run_in_background: background,
+          }),
+        ),
+        (async () => {
+          if (background) return;
+          await vi.waitFor(
+            () => expect(childSession.record('prompt:call-1')).toBeDefined(),
+            { timeout: 10_000 },
+          );
+          await childSession.settleFailed('prompt:call-1', {
+            stopReason: 'creation_failed',
+            reason: null,
+            started: false,
+          });
+        })(),
+      ]);
+      expect(JSON.stringify(result)).not.toContain(mountRefusal);
+      expect(childSession.record('prompt:call-1')).toBeDefined();
     } finally {
       await turn.finish();
       await hooks.close();
