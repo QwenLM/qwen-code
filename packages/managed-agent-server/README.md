@@ -808,11 +808,11 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
-After a credential-key rotation, keep each prior key in deployment config
-until no persisted Runtime binding references its key ID (wrap every map key
-in `[ ... ]` — Spring's relaxed binder normalises plain keys, so an ID like
-`legacy/v1`, `legacy:v1` or `legacy v1`, quoted or not, binds as `legacyv1`
-and matches nothing):
+After a credential-key rotation, keep each prior key in
+`previous-credential-keys` until no persisted Runtime binding references its
+key ID. The brackets are not decoration: Spring's relaxed binder strips `/`,
+`:` and spaces from plain map keys, so an unbracketed ID binds as a key that
+matches no persisted row.
 
 ```yaml
 qwen:
@@ -824,17 +824,11 @@ qwen:
         '[local-dev-v1]': replace-with-base64-encoded-32-byte-v1-key
 ```
 
-New credentials use only the active key. Reads select the active or previous
-key by the ID stored with the ciphertext; an unavailable ID fails closed. The
-server does not re-encrypt old rows during reads. See the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
-
-The ring is YAML-only: `previous-credential-keys` is a map and cannot be set
-through a `QWEN_MANAGED_AGENT_*` environment variable — relaxed binding
-silently produces an empty ring. A deployment that sets only environment
-variables and then rotates `credential-key-id` can no longer read rows
-written under the previous key. The operator-recovery and CSI/migration mains
-accept a single key pair only; run them with the previous key as the active
-pair when recovering pre-rotation bindings.
+New credentials use only the active key; reads select the active or previous
+key by the ID stored with the ciphertext, and an unavailable ID fails closed.
+The YAML-only ring, the retirement query and the single-key-pair maintenance
+entries are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
+with the rationale in the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
 
 Two optional knobs change how the Broker listens and how long it waits for a
 dispatched v3 execution's result:

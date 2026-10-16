@@ -128,7 +128,7 @@ FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL;
 
 查询结果列出持久化记录仍需要的 key ID：预期只剩 active ID（`reference-v2`）。只要结果中仍出现 `reference-v1`，就必须继续配置该密钥。
 
-该 key ring 是映射结构，无法通过 `QWEN_MANAGED_AGENT_*` 环境变量提供：宽松绑定会把环境变量形式静默解析为空 ring 或键名错误的 ring，且启动时不报错。`previous-credential-keys` 只能在覆盖的 `application.yml` 中配置。只依赖环境变量的部署会以空 ring 启动，因此在未配置旧密钥的情况下轮换 `credential-key-id` 会使旧密钥写入的记录不可读。
+该 key ring 是映射结构，无法通过 `QWEN_MANAGED_AGENT_*` 环境变量提供：宽松绑定会把环境变量形式静默解析为空 ring 或键名错误的 ring，且启动时不报错。`previous-credential-keys` 只能在服务进程真正加载到的 `application.yml` 中配置：参考分发产物不含配置文件，且 Spring 是按进程工作目录（`./` 与 `./config/`）解析外部 `application.yml`，而不是按分发产物根目录解析；`bin/qwen-managed-agent-server` 会把参数透传给 JVM，因此可用 `--spring.config.additional-location=file:<绝对路径>` 固定加载位置。只依赖环境变量的部署会以空 ring 启动，因此在未配置旧密钥的情况下轮换 `credential-key-id` 会使旧密钥写入的记录不可读。
 
 `operator-recovery` 入口和 CSI/迁移维护入口仍只配置单个 credential key pair，不会读取 `previous-credential-keys`。如需对轮换前写入的 binding 执行恢复，请以对应旧密钥作为该入口的 active credential pair 启动。
 
