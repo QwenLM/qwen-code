@@ -30,6 +30,7 @@ import {
   LIST_ITEM_PREFIX_PADDING,
   BLOCKQUOTE_PREFIX_PADDING,
   BLOCKQUOTE_PREFIX,
+  PENDING_MERMAID_HEADER,
 } from './pending-rendered-height.js';
 // Minimum content lines to keep in a clipped live preview (own constant — not
 // coupled to MaxSizedBox's floor).
@@ -971,7 +972,7 @@ const RenderPendingMermaidBlockInternal: React.FC<
       width={contentWidth}
       flexShrink={0}
     >
-      <Text color={theme.text.accent}>Mermaid diagram is being written...</Text>
+      <Text color={theme.text.accent}>{PENDING_MERMAID_HEADER}</Text>
       {previewLines.map((line, index) => (
         <Text key={index} color={theme.text.secondary} wrap="truncate-end">
           {line || ' '}

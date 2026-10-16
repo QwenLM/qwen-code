@@ -59,6 +59,10 @@ describe('estimateWrappedRows', () => {
     expect(estimateWrappedRows('aaa\nbbbb\ncc', 80)).toBe(3);
   });
 
+  it('counts tab stops even when the printable characters fit', () => {
+    expect(estimateWrappedRows('\t'.repeat(12) + 'x'.repeat(20), 80)).toBe(2);
+  });
+
   it('returns 1 for an empty line', () => {
     expect(estimateWrappedRows('', 80)).toBe(1);
   });
@@ -487,7 +491,33 @@ describe('fitPendingSlice', () => {
     expect(
       fitPendingSlice(['- ' + 'x'.repeat(22)], 24, 1, CLAMP).keptLines,
     ).toBe(0);
+    expect(
+      fitPendingSlice(['    - ' + 'x'.repeat(18)], 24, 1, CLAMP).keptLines,
+    ).toBe(0);
   });
+
+  it.each(['```mermaid', '~~~MERMAID'])(
+    'charges pending %s previews without gutters or wrapping',
+    (opening) => {
+      const body = ['x'.repeat(78), '\t'.repeat(30) + 'tail'];
+      const lines = [opening, ...body];
+      expect(fitPendingSlice(lines, 80, 3, CLAMP).clipped).toBe(false);
+      expect(
+        fitPendingSlice([...lines, opening.slice(0, 3)], 80, 3, CLAMP).clipped,
+      ).toBe(false);
+      expect(fitPendingSlice(lines, 80, 2, CLAMP).keptLines).toBe(2);
+      expect(
+        fitPendingSlice(lines, 80, 3, CLAMP, true, {
+          renderVisualBlocks: false,
+        }).clipped,
+      ).toBe(true);
+      expect(
+        fitPendingSlice(lines, 80, 3, CLAMP, false, {
+          rejectVisualBlocks: false,
+        }).clipped,
+      ).toBe(true);
+    },
+  );
 
   it.each(['-', '123.'])(
     'strips %s task checkboxes only in render mode',

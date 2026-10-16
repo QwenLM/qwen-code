@@ -13,6 +13,7 @@ import { renderTableText, TABLE_MARGIN_ROWS } from './TableRenderer.js';
 export const LIST_ITEM_PREFIX_PADDING = 1;
 export const BLOCKQUOTE_PREFIX_PADDING = 1;
 export const BLOCKQUOTE_PREFIX = '│ ';
+export const PENDING_MERMAID_HEADER = 'Mermaid diagram is being written...';
 
 /**
  * Shared rendered-height accounting for bounding the live (pending) markdown
@@ -102,7 +103,9 @@ export function splitMarkdownTableRow(row: string): string[] {
 export function estimateWrappedRows(line: string, width: number): number {
   if (
     width <= 0 ||
-    (!line.includes('\n') && getCachedStringWidth(line) <= width)
+    (!line.includes('\n') &&
+      !line.includes('\t') &&
+      getCachedStringWidth(line) <= width)
   )
     return 1;
   return wrapAnsi(line, width, { trim: false, hard: true }).split('\n').length;
@@ -179,6 +182,7 @@ export function fitPendingSlice(
   let codeFence = ''; // non-empty while inside a fenced code block
   let inMathBlock = false;
   let codeContentWidth = contentWidth;
+  let pendingMermaid = false;
   for (let i = 0; i < allLines.length; ) {
     const line = allLines[i]!;
     const fenceMatch = CODE_FENCE_RE.exec(line);
@@ -208,10 +212,12 @@ export function fitPendingSlice(
       ) {
         codeFence = '';
       }
-      rendered += estimateWrappedRows(
-        line.replace(/\t/g, '    '),
-        codeContentWidth,
-      );
+      // Pending diagrams truncate each source line and omit the closing fence.
+      rendered += pendingMermaid
+        ? codeFence
+          ? 1
+          : 0
+        : estimateWrappedRows(line.replace(/\t/g, '    '), codeContentWidth);
       if (rendered > budget) {
         kept = i;
         break;
@@ -223,6 +229,8 @@ export function fitPendingSlice(
       codeFence = fenceMatch[1]!;
       // CodeColorizer adds padding and a numbered gutter, and expands tabs.
       const { lang, startLine } = parseCodeFenceInfo(fenceMatch[2]);
+      pendingMermaid =
+        isPending && renderVisualBlocks && lang?.toLowerCase() === 'mermaid';
       // A diagram's height cannot be inferred from its source lines.
       if (
         rejectVisualBlocks &&
@@ -252,7 +260,12 @@ export function fitPendingSlice(
         ? String(startLine + blockLineCount - 1).length + 1
         : 0;
       codeContentWidth = Math.max(1, contentWidth - 1 - gutterWidth);
-      rendered += estimateWrappedRows(line, contentWidth);
+      rendered += pendingMermaid
+        ? estimateWrappedRows(
+            PENDING_MERMAID_HEADER,
+            Math.max(1, contentWidth - 1),
+          )
+        : estimateWrappedRows(line, contentWidth);
       if (rendered > budget) {
         kept = i;
         break;

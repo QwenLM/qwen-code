@@ -26,6 +26,8 @@ This is a CLI-only bugfix; no core, configuration, dependency, or protocol chang
   oversized first table: live tools replace output rather than commit a hidden
   prefix to scrollback. Overflowing live results therefore keep their newest
   tail and hidden-row count, not an assistant-style head slice.
+  Trim trailing whitespace only when probing pending text, matching the renderer;
+  completed results retain their trailing rows in both the probe and rendering.
 - Completed enforceHeightBudget callers with an actual height budget render
   Mermaid as code and display-math as literal source. Math contents are not
   reparsed as Markdown, and their invisible `$$` delimiters do not consume the
@@ -39,6 +41,10 @@ This is a CLI-only bugfix; no core, configuration, dependency, or protocol chang
   block's own lines, not the entire buffer; honor the live render mode and
   showLineNumbers at every fitPendingSlice caller: the shared Markdown renderer,
   streaming commit loop, and tool-result full-fit probe.
+  Non-code tabs bypass the printable-width shortcut and use wrap-ansi's tab stops.
+  Pending Mermaid previews count the header's wrapped height and one truncated
+  row per source line, without code gutters, source wrapping, or a visible closing
+  fence. Completed bounded Mermaid source keeps ordinary code-block accounting.
 - Reuse the table renderer's pure renderTableText layout function instead of a
   separate approximate column-width algorithm. Budgeting and rendering share
   horizontal/vertical layout decisions. A pending slice can turn a closed table

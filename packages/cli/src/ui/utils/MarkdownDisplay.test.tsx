@@ -96,7 +96,10 @@ describe('<MarkdownDisplay />', () => {
       expect(lastFrame()).toContain('Step 2');
       expect(lastFrame()).not.toContain('more lines');
       expect(lastFrame()).not.toContain('LaTeX block');
-      expect(lastFrame()).not.toContain('Mermaid diagram');
+      expect(lastFrame()).not.toContain('Mermaid source');
+      if (_name === 'Mermaid') {
+        expect(lastFrame()).toContain('graph TD; A-->B');
+      }
       if (_name === 'literal math source') {
         expect(lastFrame()).toContain('```mermaid');
         expect(lastFrame()).toContain('- [ ] literal');
@@ -237,11 +240,19 @@ describe('<MarkdownDisplay />', () => {
   });
 
   it('shares the table margin and exact layout with the height estimator', () => {
-    const lines = ['intro', '| A | B |', '| --- | --- |', '| x | y |', 'after'];
+    const math = '$x$ $x$ $x$';
+    const lines = [
+      'intro',
+      '| A | B |',
+      '| --- | --- |',
+      `| ${math} | y |`,
+      'after',
+    ];
     const { lastFrame } = renderWithProviders(
-      <Box width={80} flexDirection="column">
+      <Box width={24} flexDirection="column">
         <MarkdownDisplay
           {...baseProps}
+          contentWidth={24}
           text={lines.join('\n')}
           availableTerminalHeight={undefined}
         />
@@ -250,16 +261,57 @@ describe('<MarkdownDisplay />', () => {
     const height =
       renderTableText({
         headers: ['A', 'B'],
-        rows: [['x', 'y']],
-        contentWidth: 80,
+        rows: [[math, 'y']],
+        contentWidth: 24,
+        enableInlineMath: true,
+        isStreaming: false,
       }).split('\n').length +
       TABLE_MARGIN_ROWS +
       2;
     expect((lastFrame() ?? '').split('\n')).toHaveLength(height);
-    expect(fitPendingSlice(lines, 80, height, 1000, false).clipped).toBe(false);
-    expect(fitPendingSlice(lines, 80, height - 1, 1000, false).clipped).toBe(
+    expect(fitPendingSlice(lines, 24, height, 1000, false).clipped).toBe(false);
+    expect(fitPendingSlice(lines, 24, height - 1, 1000, false).clipped).toBe(
       true,
     );
+  });
+
+  it.each([
+    '| A | B |\n| --- | --- |\n| x | y |\n| z | w |\n| p | q |',
+    '$$\n| A | B |\n| --- | --- |\n| x | y |\n$$',
+  ])('keeps fitting bounded raw source and the following step', (block) => {
+    const { lastFrame } = renderWithProviders(
+      <RenderModeProvider value={{ renderMode: 'raw', setRenderMode: vi.fn() }}>
+        <Box width={80} flexDirection="column">
+          <MarkdownDisplay
+            {...baseProps}
+            text={`intro\n${block}\noutro`}
+            availableTerminalHeight={10}
+            enforceHeightBudget
+          />
+        </Box>
+      </RenderModeProvider>,
+    );
+    expect(lastFrame()).toContain(block);
+    expect(lastFrame()).toContain('outro');
+    expect(lastFrame()).not.toContain('more lines');
+    expect(lastFrame()).not.toContain('┌');
+  });
+
+  it('reserves wrapped pending Mermaid header rows on narrow terminals', () => {
+    const { lastFrame } = renderWithProviders(
+      <Box width={20} flexDirection="column">
+        <MarkdownDisplay
+          {...baseProps}
+          isPending
+          contentWidth={20}
+          availableTerminalHeight={5}
+          text={'```mermaid\nfirst-source\nlast-source\n```'}
+        />
+      </Box>,
+    );
+    expect(lastFrame()).toContain('first-source');
+    expect(lastFrame()).not.toContain('last-source');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(3);
   });
 
   it.each([false, true])(

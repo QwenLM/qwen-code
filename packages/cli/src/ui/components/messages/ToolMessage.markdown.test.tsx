@@ -283,6 +283,63 @@ describe('tool result Markdown with a real renderer', () => {
     expect(lastFrame()).not.toContain('row 0');
   });
 
+  it('uses the completed budget for a successful string in a pending group', () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        isPending: true,
+        availableTerminalHeight: 21,
+        resultDisplay: Array.from(
+          { length: 15 },
+          (_, i) => `**row ${i}**`,
+        ).join('\n'),
+      }),
+    );
+    expect(lastFrame()).toContain('row 0');
+    expect(lastFrame()).toContain('row 14');
+    expect(lastFrame()).toContain('overflow:0');
+    expect(lastFrame()).not.toContain('**');
+    expect(lastFrame()).not.toContain('hidden');
+  });
+
+  it.each([1, 3])(
+    'ignores %s trailing newlines only for executing Markdown',
+    (trailingNewlines) => {
+      const resultDisplay =
+        '**one**\n**two**\n**three**' + '\n'.repeat(trailingNewlines);
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          contentWidth: 42,
+          availableTerminalHeight: 11,
+          isPending: true,
+          status: ToolCallStatus.Executing,
+          resultDisplay,
+        }),
+      );
+      expect(lastFrame()).toContain('one\n');
+      expect(lastFrame()).toContain('two\n');
+      expect(lastFrame()).toContain('three');
+      expect(lastFrame()).not.toContain('**');
+      expect(lastFrame()).not.toContain('hidden');
+      expect(lastFrame()).toContain('overflow:0');
+    },
+  );
+
+  it('preserves trailing blank rows when measuring completed Markdown', async () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        contentWidth: 42,
+        availableTerminalHeight: 11,
+        resultDisplay: '**one**\n**two**\n**three**\n\n\n',
+      }),
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
+    expect(lastFrame()).toContain('**three**');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(7);
+  });
+
   it('keeps the newest executing Markdown output and its hidden-line count', async () => {
     const props = {
       ...baseProps,
@@ -405,6 +462,25 @@ describe('tool result Markdown with a real renderer', () => {
     expect(lastFrame()).not.toContain('**row 0**');
   });
 
+  it.each(['Shell', 'MCP'])(
+    'defaults uncapped %s output to the appropriate rendering mode',
+    (name) => {
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          name,
+          renderOutputAsMarkdown: undefined,
+          forceShowResult: true,
+          availableTerminalHeight: undefined,
+          resultDisplay: '**row 0**\n**row 59**',
+        }),
+      );
+      expect(lastFrame()).toContain('row 0');
+      expect(lastFrame()).toContain('row 59');
+      expect((lastFrame() ?? '').includes('**row 59**')).toBe(name === 'Shell');
+    },
+  );
+
   it.each([false, true])(
     'honors explicit shell Markdown only when forceShowResult=%s lifts the cap',
     (forceShowResult) => {
@@ -425,100 +501,99 @@ describe('tool result Markdown with a real renderer', () => {
   it.each([
     [
       'paragraphs',
-      Array.from({ length: 60 }, (_, i) => `**row ${i}**`).join('\n'),
-      80,
+      Array.from({ length: 7 }, () => '**' + 'x'.repeat(80) + '**').join('\n'),
+      24,
+      '**',
     ],
     [
       'list marker wrapping',
-      Array.from({ length: 20 }, () => '- ' + 'a'.repeat(20)).join('\n'),
+      Array.from({ length: 8 }, () => '- ' + 'a'.repeat(20)).join('\n'),
       24,
+      '- ' + 'a'.repeat(20),
     ],
     [
       'asymmetric table after prose',
-      'One\nTwo\nThree\nFour\n| A | B |\n| --- | --- |\n' +
-        `| ${'x'.repeat(100)} | ${'a '.repeat(20).trim()} |\n` +
-        Array.from({ length: 50 }, () => '| a | b |').join('\n'),
+      'One\nTwo\n| A | B |\n| --- | --- |\n' +
+        `| ${'x'.repeat(200)} | ${'a '.repeat(100).trim()} |`,
       80,
-      40,
+      '|',
     ],
-    ['word-wrapped paragraph', `${'a'.repeat(40)} `.repeat(22).trim(), 80],
+    [
+      'word-wrapped paragraph',
+      `**${`${'a'.repeat(40)} `.repeat(22).trim()}**`,
+      80,
+      '**',
+    ],
     [
       'long vertical table cells',
       `| A | B |\n| --- | --- |\n| ${'x'.repeat(200)} | ${'y'.repeat(200)} |`,
       24,
+      '|',
     ],
     [
       'wrapped Chinese',
-      Array.from({ length: 30 }, () => '**中文内容**'.repeat(8)).join('\n'),
+      Array.from({ length: 7 }, () => '**中文内容**'.repeat(8)).join('\n'),
       32,
+      '**',
     ],
     [
       'code block',
       '```typescript\n' +
-        Array.from({ length: 60 }, (_, i) => `const value${i} = ${i};`).join(
-          '\n',
-        ) +
+        Array.from({ length: 7 }, () => 'x'.repeat(80)).join('\n') +
         '\n```',
-      80,
+      24,
+      '```',
     ],
     [
       'wrapped code after prose',
       'First line\nSecond line\nThird line\n```typescript\n' +
         Array.from(
-          { length: 60 },
+          { length: 4 },
           () => 'const value = "very long content";',
         ).join('\n') +
         '\n```',
       24,
+      '```',
     ],
     [
       'code gutter wrapping',
       'First line\nSecond line\nThird line\n```typescript\n' +
-        Array.from({ length: 60 }, () => 'abcdefghijklmnopqrstu').join('\n') +
+        Array.from({ length: 6 }, () => 'abcdefghijklmnopqrstu').join('\n') +
         '\n```',
       24,
+      '```',
     ],
     [
       'tabbed code',
-      'First line\nSecond line\nThird line\n```typescript\n' +
-        Array.from({ length: 60 }, () => '\t\t\t\t\t\tvalue').join('\n') +
+      '```typescript\n' +
+        Array.from({ length: 5 }, () => '\t'.repeat(16) + 'value').join('\n') +
         '\n```',
       24,
+      '```',
     ],
     [
       'table with following text',
-      '| A | B |\n| --- | --- |\n' +
-        Array.from({ length: 40 }, (_, i) => `| value${i} | result${i} |`).join(
-          '\n',
-        ) +
-        '\nAfter the table',
-      80,
+      `| A | B |\n| --- | --- |\n| ${'x'.repeat(200)} | ${'y'.repeat(200)} |\nAfter the table`,
+      40,
+      '|',
     ],
     [
       'table',
-      '| A | B |\n| --- | --- |\n' +
-        Array.from({ length: 40 }, (_, i) => `| value${i} | result${i} |`).join(
-          '\n',
-        ),
+      `| A | B |\n| --- | --- |\n| ${'x'.repeat(200)} | ${'y'.repeat(200)} |`,
       80,
+      '|',
     ],
     [
       'narrow table',
-      '| A | B |\n| --- | --- |\n' +
-        Array.from(
-          { length: 40 },
-          (_, i) => `| 中文内容${i} | 很长的结果${i} |`,
-        ).join('\n'),
+      `| A | B |\n| --- | --- |\n| ${'中文内容'.repeat(40)} | ${'很长的结果'.repeat(40)} |`,
       24,
+      '|',
     ],
   ])(
-    'bounds %s and registers expandable overflow',
-    async (
-      _name,
-      resultDisplay,
-      contentWidth,
-      availableTerminalHeight = 20,
-    ) => {
+    'uses literal source when rendered %s exceeds the budget',
+    (_name, resultDisplay, contentWidth, literalMarker) => {
+      const availableTerminalHeight =
+        Math.max(3, resultDisplay.split('\n').length) + 6;
       const { lastFrame } = renderWithProviders(
         resultWithOverflow({
           ...baseProps,
@@ -527,17 +602,7 @@ describe('tool result Markdown with a real renderer', () => {
           availableTerminalHeight,
         }),
       );
-      await vi.waitFor(() => expect(lastFrame()).toMatch(/overflow:[1-9]/));
-      const frame = lastFrame() ?? '';
-      // Six rows are reserved; the tool header and overflow probe use two.
-      expect(frame.split('\n').length).toBeLessThanOrEqual(
-        availableTerminalHeight - 4,
-      );
-      expect(frame.split('\n').length).toBeGreaterThanOrEqual(
-        availableTerminalHeight - 6,
-      );
-      expect(frame).toMatch(/\.\.\. first \d+/);
-      expect(frame).not.toContain('streaming');
+      expect(lastFrame()).toContain(literalMarker);
     },
   );
 

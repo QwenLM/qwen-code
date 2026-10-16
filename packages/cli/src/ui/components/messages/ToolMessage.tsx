@@ -650,7 +650,9 @@ const StringResultRenderer: React.FC<{
       : isPending
         ? Math.max(1, availableHeight - 2)
         : availableHeight;
-  const resultLines = displayData.split(/\r?\n/);
+  const resultLines = (isPending ? displayData.trimEnd() : displayData).split(
+    /\r?\n/,
+  );
   const useMarkdown =
     renderAsMarkdown &&
     (markdownBudget === undefined ||

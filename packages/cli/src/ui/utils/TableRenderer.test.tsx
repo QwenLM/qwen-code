@@ -912,6 +912,24 @@ describe('<TableRenderer />', () => {
         expect(stringWidth(line)).toBeLessThanOrEqual(20);
       }
     });
+
+    it('wraps long vertical cells before applying the height clamp', () => {
+      const output = renderWithMaxHeight(
+        ['A', 'B'],
+        [
+          ['x'.repeat(200), 'y'],
+          ['short', 'value'],
+          ['tail', 'value'],
+        ],
+        8,
+        40,
+      );
+      expect(getVisibleLines(output).length).toBeLessThanOrEqual(8);
+      expect(stripAnsi(output)).toContain('more rows');
+      for (const line of getVisibleLines(output)) {
+        expect(stringWidth(line)).toBeLessThanOrEqual(40);
+      }
+    });
   });
 
   describe('streaming table rendering (format stability)', () => {
