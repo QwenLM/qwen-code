@@ -74,11 +74,12 @@ export QQ_APP_SECRET=<your-app-secret>
 
 ### QQ-Specific Options
 
-| Option      | Default | Description                                                                       |
-| ----------- | ------- | --------------------------------------------------------------------------------- |
-| `appID`     | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.            |
-| `appSecret` | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.  |
-| `sandbox`   | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`) |
+| Option            | Default | Description                                                                                                                                                       |
+| ----------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appID`           | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.                                                                                            |
+| `appSecret`       | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.                                                                                  |
+| `sandbox`         | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`)                                                                                 |
+| `moderationTools` | `true`  | Expose the QQ group-management tools to the agent — see [Group Management Tools](#group-management-tools). Set `false` to keep the agent out of group management. |
 
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
 `privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
@@ -107,6 +108,20 @@ To use the bot in QQ groups:
 QQ Bot API V2 only delivers group messages that @mention the bot — the bot does not see all group messages. By default, `requireMention` is `true` and should be left that way for QQ.
 
 See [Group Chats](./overview#group-chats) for full details on group policies and mention gating.
+
+## Group Management Tools
+
+With `moderationTools` on (the default), the channel exposes the QQ group-management API to the agent as **client MCP tools in that channel's sessions**. The agent calls them itself while answering — there is no slash command to type and no operator gate: the tools run with the bot's own token, and the platform's own rules are the only limit. Set `moderationTools: false` to register none of them.
+
+| Tool                | QQ endpoint                                                                             | Requirement                                                                                                                                                     |
+| ------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `qq_recall_message` | `DELETE /v2/groups/{id}/messages/{msg_id}` or `DELETE /v2/users/{id}/messages/{msg_id}` | Bot is a group admin to recall another member's message; within 2 minutes. A direct chat only recalls the bot's own messages, so `message_id` is required there |
+
+Every tool reports the platform's error code and what it means, so the agent can tell "the bot is not a group admin" from "the message is past the 2-minute window" from "this app is not allowed to call this endpoint".
+
+For a group action to reach a member's message by name, the channel remembers the last inbound messages per chat for the platform's 2-minute recall window; a message older than that cannot be recalled at all. That memory is per-process only — after a restart there is nothing to recall by member until new messages arrive.
+
+Each channel instance owns its tools: one bridge can serve several channels, and a tool is only offered to sessions of the channel that registered it, so two QQ channels in one process never act on each other's chats or credentials.
 
 ## Markdown Support
 
