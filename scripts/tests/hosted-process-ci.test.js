@@ -238,7 +238,7 @@ describe('Hosted real-process gates', () => {
     expect(job.steps[relay].shell).toBeUndefined();
     expect(job.steps[relay]['working-directory']).toBeUndefined();
     expect(relay).toBeLessThan(job.steps.indexOf(run));
-    const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
+    const pom = read('packages/managed-agent-server/pom.xml').replace(
       /<!--[\s\S]*?-->/g,
       '',
     );
@@ -248,9 +248,6 @@ describe('Hosted real-process gates', () => {
     const selection = /it\.test|includesFile|excludesFile|<test>/;
     expect(read('.github/workflows/sdk-java.yml')).not.toMatch(selection);
     expect(pom).not.toMatch(selection);
-    expect(read('packages/sdk-java/runtime-broker/pom.xml')).not.toMatch(
-      selection,
-    );
     const [mariadb, hosted] = pom.split('<id>hosted-harness-mysql</id>');
     expect(mariadb).toContain('<id>mysql-integration</id>');
     expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
@@ -272,12 +269,12 @@ describe('Hosted real-process gates', () => {
       [
         'mysql-integration',
         mariadbRun.name,
-        'non-hosted packages/sdk-java/runtime-broker packages/sdk-java/managed-agent-server',
+        'non-hosted packages/managed-agent-server',
       ],
       [
         'hosted-harness-mysql',
         run.name,
-        'hosted packages/sdk-java/managed-agent-server',
+        'hosted packages/managed-agent-server',
       ],
     ]) {
       const steps = java.jobs[name].steps;
@@ -292,7 +289,7 @@ describe('Hosted real-process gates', () => {
     // test would move to MariaDB, a renamed MariaDB test to the Hosted job.
     const its = readdirSync(
       new URL(
-        '../../packages/sdk-java/managed-agent-server/src/test/java/',
+        '../../packages/managed-agent-server/src/test/java/',
         import.meta.url,
       ),
       { recursive: true },
@@ -305,6 +302,9 @@ describe('Hosted real-process gates', () => {
     expect(its.filter((file) => !/^Hosted.*IT\.java$/.test(file))).toContain(
       'ManagedAgentMySqlIT.java',
     );
+    expect(its.filter((file) => !/^Hosted.*IT\.java$/.test(file))).toContain(
+      'JdbcRuntimeBrokerMySqlIT.java',
+    );
     const upload = job.steps.find(
       (step) => step.name === 'Upload Hosted process reports',
     );
@@ -314,12 +314,16 @@ describe('Hosted real-process gates', () => {
     // module-relative directory precisely so an artifact can carry it; the
     // writer and the upload path must not drift.
     expect(upload.with.path).toContain(
-      'packages/sdk-java/managed-agent-server/target/fg7-cases/',
+      'packages/managed-agent-server/target/fg7-cases/',
     );
     // FG8 follows the same precedent: its per-case evidence lives in
     // target/fg8-cases/.
     expect(upload.with.path).toContain(
-      'packages/sdk-java/managed-agent-server/target/fg8-cases/',
+      'packages/managed-agent-server/target/fg8-cases/',
+    );
+    // FG9's session-relay fault gates keep theirs in target/fg9-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg9-cases/',
     );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag.
@@ -452,7 +456,7 @@ describe('Hosted real-process gates', () => {
       // re-pointed -P flag must not leave the row reading the old profile.
       expect(run.run).toContain(`-P${profile}`);
       const forkSeconds = Number(
-        read('packages/sdk-java/managed-agent-server/pom.xml')
+        read('packages/managed-agent-server/pom.xml')
           .split(`<id>${profile}</id>`)[1]
           .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
       );
@@ -470,31 +474,37 @@ describe('Hosted real-process gates', () => {
       // recovery class's four real-process cuts, ~300 s more the FG7
       // sizing never covered — #14125's per-commit kill; the FG8
       // monitor/run letters, ~310 s measured on the lane with real
-      // background processes and >16 MiB captures): the relational check
-      // above tolerates anything up to step*60, so the value is pinned
-      // literally here — an unnoticed raise has no other red to land on.
+      // background processes and >16 MiB captures; and the FG9 session/
+      // relay letters, ~170 s measured locally, for which the budget
+      // moves 1800→2100 in the same diff that adds them): the relational
+      // check above tolerates anything up to step*60, so the value is
+      // pinned literally here — an unnoticed raise has no other red to
+      // land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(1800);
+        expect(forkSeconds).toBe(2100);
       }
     },
   );
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
-  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
-  // the FG8 monitor/run letters add ~310s measured on the lane (~450s with
-  // CI headroom); with the fork itself ~14s, 1100s covers them. A larger
-  // ceiling lets failsafe kill the fork mid-run, and the classes left
-  // unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 1100;
+  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, the
+  // FG8 monitor/run letters add ~310s measured on the lane (~450s with CI
+  // headroom), and the FG9 session/relay letters add 166–175s measured
+  // locally on JDK 21 + MariaDB 10.11 across three acceptance runs (~300s
+  // budgeted at >1.7x the heaviest measured run); with the fork itself
+  // ~14s, 1400s covers them. A larger ceiling lets failsafe kill the fork mid-run,
+  // and the classes left unrun never report, failing the gate
+  // undiagnosably (#13780).
+  const hostedForkHealthySeconds = 1400;
   const hostedForkSeconds = () =>
     Number(
-      read('packages/sdk-java/managed-agent-server/pom.xml')
+      read('packages/managed-agent-server/pom.xml')
         .split('<id>hosted-harness-mysql</id>')[1]
         .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
     );
   const hostedTestPath = (className) =>
-    'packages/sdk-java/managed-agent-server/src/test/java/' +
+    'packages/managed-agent-server/src/test/java/' +
     `com/alibaba/qwen/code/managedagent/${className}.java`;
   // Java code without its string literals and comments, so neither a
   // commented-out annotation nor a "/*" inside a string skews the counts.
@@ -537,29 +547,52 @@ describe('Hosted real-process gates', () => {
     }
   });
 
-  it('keeps every HostedTeamLeadMySqlIT ceiling together inside the shared fork budget', () => {
-    const source = hostedTestSource('HostedTeamLeadMySqlIT');
-    const cases = [
-      ...source.matchAll(
-        /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
-      ),
-    ].length;
-    const ceilings = ceilingsOf(source);
-    expect(cases).toBeGreaterThan(0);
-    expect(ceilings).toHaveLength(cases);
-    // A regression such as a lost wake Turn leaves no failed row for the
-    // cases to stop on, so every case may stall to its ceiling at once.
-    const total = ceilings.reduce((sum, ceiling) => sum + ceiling, 0);
-    expect(total + hostedForkHealthySeconds).toBeLessThanOrEqual(
-      hostedForkSeconds(),
+  it('keeps the HostedSessionRelayFaultGatesIT ceilings inside the shared fork budget', () => {
+    // Like the FG8 monitor/run letters, the FG9 session/relay letters are
+    // independent fixtures sharing the fork — each letter boots its own
+    // Spring application, Harness, and proxies under its own tenant
+    // prefix, so a stall in one letter leaves the other running — and one
+    // letter stalling to its @Timeout must still leave the fork enough
+    // healthy runtime and budget for the sibling letter to finish.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedSessionRelayFaultGatesIT'),
     );
-    // Awaitility ignores the interrupt a @Timeout sends, so a ceiling holds
-    // only when every wait goes through the helper that fails on it.
-    expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
-    expect(read(hostedTestPath('HostedTeamLeadMySqlIT'))).toContain(
-      'await().failFast("The case\'s @Timeout interrupted it"',
-    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
   });
+
+  it.each(['HostedTeamLeadMySqlIT', 'HostedTeamMemberCommandMySqlIT'])(
+    'keeps every %s ceiling together inside the shared fork budget',
+    (className) => {
+      const source = hostedTestSource(className);
+      const cases = [
+        ...source.matchAll(
+          /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
+        ),
+      ].length;
+      const ceilings = ceilingsOf(source);
+      expect(cases).toBeGreaterThan(0);
+      expect(ceilings).toHaveLength(cases);
+      // A regression such as a lost wake Turn or a stalled message relay
+      // leaves no failed row for the cases to stop on, so every case may
+      // stall to its ceiling at once.
+      const total = ceilings.reduce((sum, ceiling) => sum + ceiling, 0);
+      expect(total + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+      // Awaitility ignores the interrupt a @Timeout sends, so a ceiling
+      // holds only when every wait goes through the helper that fails on
+      // it.
+      expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
+      expect(read(hostedTestPath(className))).toContain(
+        'await().failFast("The case\'s @Timeout interrupted it"',
+      );
+    },
+  );
 
   // The Hosted*IT classes share one fork, and Spring caches a test context
   // for the rest of it. A Managed Agent context's recovery scans cover
@@ -567,7 +600,7 @@ describe('Hosted real-process gates', () => {
   // claims the work of the classes that run after it. A context inherited
   // from a base class or a meta-annotation is not seen here; none exists.
   it('closes the Spring test context each Hosted IT class declares', () => {
-    const root = 'packages/sdk-java/managed-agent-server/src/test/java/';
+    const root = 'packages/managed-agent-server/src/test/java/';
     const contexts = readdirSync(new URL(`../../${root}`, import.meta.url), {
       recursive: true,
     })

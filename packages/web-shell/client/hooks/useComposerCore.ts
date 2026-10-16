@@ -1442,8 +1442,6 @@ export interface UseComposerCoreReturn {
   currentMode: string;
   sessionName: string | undefined;
   searchState: SearchState;
-  navigatePrevHistory: () => void;
-  navigateNextHistory: () => void;
   showShortcutHints: boolean;
   followupState: UseDaemonFollowupSuggestionReturn['followupState'];
   disabled: boolean;
@@ -2262,6 +2260,12 @@ export function useComposerCore(
   const restoreSelectedHistoryMatch = useCallback(
     (text: string) => {
       const view = viewRef.current;
+      // A panel recall counts as history browsing on both backends, so the
+      // debounced draft save and the session/workspace-switch draft
+      // migration keep skipping the restored text; the next edit clears the
+      // flag and re-arms persistence (handleMobileChange or a programmatic
+      // write on touch, the CodeMirror update listener on desktop).
+      historyBrowseActiveRef.current = true;
       if (!view) {
         if (isTouchComposer) {
           // Plain-text restore: inline tag chips are not recreated on the
@@ -2635,16 +2639,22 @@ export function useComposerCore(
   };
   const shellHistoryActionsRef = useRef(shellHistory);
   shellHistoryActionsRef.current = shellHistory;
-  const getSearchMatches = useCallback((query: string) => {
-    const isShellMode = shellModeRef.current;
-    const history = isShellMode
-      ? shellHistoryActionsRef.current
-      : historyActionsRef.current;
-    const matches = history.getReverseMatches(query);
-    return isShellMode
-      ? matches
-      : matches.filter((item) => !item.trimStart().startsWith('/'));
-  }, []);
+  const getSearchMatches = useCallback(
+    (query: string) => {
+      const isShellMode = shellModeRef.current;
+      const history = isShellMode
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current;
+      const matches = history.getReverseMatches(query);
+      // The touch backend has no slash completion menu, so the history panel
+      // is the only touch path that can recall a submitted slash command;
+      // the desktop panel keeps hiding them (its slash menu re-offers them).
+      return isShellMode || isTouchComposer
+        ? matches
+        : matches.filter((item) => !item.trimStart().startsWith('/'));
+    },
+    [isTouchComposer],
+  );
 
   const openHistorySearch = useCallback(() => {
     if (disabledRef.current) return;
@@ -2670,104 +2680,6 @@ export function useComposerCore(
   useEffect(() => {
     if (searchMode) searchInputRef.current?.focus();
   }, [searchMode]);
-
-  const navigatePrevHistory = useCallback(() => {
-    if (disabledRef.current) return;
-    const view = viewRef.current;
-    if (!view) {
-      // Touch textarea backend: browse the same prompt history with a
-      // plain-text restore (inline tag chips are not recreated).
-      if (!isTouchComposer) return;
-      const history = shellModeRef.current
-        ? shellHistoryActionsRef.current
-        : historyActionsRef.current;
-      const current = mobileTextRef.current;
-      if (!history.isNavigating()) {
-        saveCurrentDraftRef.current();
-      }
-      const prev = history.navigateUp(current);
-      if (prev !== null) {
-        historyBrowseActiveRef.current = true;
-        restoreSelectedHistoryMatch(prev);
-      }
-      return;
-    }
-    if (completionStatus(view.state) === 'active') {
-      moveCompletionSelection(false)(view);
-      view.focus();
-      return;
-    }
-    if (view.state.doc.lines > 1) {
-      view.focus();
-      return;
-    }
-    const history = shellModeRef.current
-      ? shellHistoryActionsRef.current
-      : historyActionsRef.current;
-    const current = view.state.doc.toString();
-    if (!history.isNavigating()) {
-      saveCurrentDraftRef.current();
-    }
-    const prev = history.navigateUp(current);
-    if (prev !== null) {
-      historyBrowseActiveRef.current = true;
-      if (!shellModeRef.current) {
-        rememberPromptHistoryDraftTags();
-      }
-      restoreHistoryEntry(view, prev);
-    }
-    view.focus();
-  }, [
-    isTouchComposer,
-    rememberPromptHistoryDraftTags,
-    restoreHistoryEntry,
-    restoreSelectedHistoryMatch,
-  ]);
-
-  const navigateNextHistory = useCallback(() => {
-    if (disabledRef.current) return;
-    const view = viewRef.current;
-    if (!view) {
-      if (!isTouchComposer) return;
-      const history = shellModeRef.current
-        ? shellHistoryActionsRef.current
-        : historyActionsRef.current;
-      const next = history.navigateDown();
-      if (next !== null) {
-        historyBrowseActiveRef.current = history.isNavigating();
-        restoreSelectedHistoryMatch(next);
-      }
-      return;
-    }
-    if (completionStatus(view.state) === 'active') {
-      moveCompletionSelection(true)(view);
-      view.focus();
-      return;
-    }
-    if (view.state.doc.lines > 1) {
-      view.focus();
-      return;
-    }
-    const history = shellModeRef.current
-      ? shellHistoryActionsRef.current
-      : historyActionsRef.current;
-    const next = history.navigateDown();
-    if (next !== null) {
-      const returningToPromptDraft =
-        !shellModeRef.current && !history.isNavigating();
-      historyBrowseActiveRef.current = history.isNavigating();
-      restoreHistoryEntry(view, next);
-      if (returningToPromptDraft) {
-        restorePromptHistoryDraftTags();
-      }
-    }
-    view.focus();
-  }, [
-    isTouchComposer,
-    restoreHistoryEntry,
-    restorePromptHistoryDraftTags,
-    restoreSelectedHistoryMatch,
-  ]);
 
   const handleMobileChange = useCallback(
     (event: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -4131,6 +4043,7 @@ export function useComposerCore(
       if (isTouchComposer) {
         const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
         if (text) {
+          historyBrowseActiveRef.current = false;
           if (options?.mode === 'replace') {
             setMobileText(text);
           } else {
@@ -4253,6 +4166,7 @@ export function useComposerCore(
       if (isTouchComposer) {
         // Unlike the CodeMirror path, no focus: on touch devices a
         // programmatic focus would pop the virtual keyboard unexpectedly.
+        historyBrowseActiveRef.current = false;
         setMobileText(text);
         return;
       }
@@ -4539,6 +4453,7 @@ export function useComposerCore(
         setComposerTags([...input.tags]);
       }
       if (input.text !== undefined) {
+        historyBrowseActiveRef.current = false;
         setMobileText(input.text);
       }
       let submitTimer: number | null = null;
@@ -4681,6 +4596,11 @@ export function useComposerCore(
       );
       if (accepted === false) {
         restoreSelectedHistoryMatch(match);
+        // The restore armed the browse flag (and so skipped scheduling a
+        // save), but a rejected submit leaves the entry as the live draft:
+        // re-arm persistence and schedule the save explicitly.
+        historyBrowseActiveRef.current = false;
+        scheduleDraftSaveRef.current();
         return;
       }
       onDismissFollowupRef.current?.();
@@ -4955,8 +4875,6 @@ export function useComposerCore(
       handleSearchInput,
       handleSearchCompositionEnd,
     },
-    navigatePrevHistory,
-    navigateNextHistory,
     showShortcutHints,
     followupState:
       followupState as UseDaemonFollowupSuggestionReturn['followupState'],

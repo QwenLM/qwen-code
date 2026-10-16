@@ -218,7 +218,12 @@ test('Managed progress stays visible through a long transcript and live thought/
     page
       .getByRole('region', { name: 'Managed conversation' })
       .locator('[data-web-shell-composer-submit]'),
-  ).toBeDisabled();
+  ).toHaveAccessibleName('esc to cancel');
+  await expect(
+    page
+      .getByRole('region', { name: 'Managed conversation' })
+      .getByRole('button', { name: 'esc to cancel', exact: true }),
+  ).toBeEnabled();
   await expect(page.locator('[data-managed-progress]')).toContainText(
     /[1-9]\d*s elapsed/,
   );
@@ -276,7 +281,10 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   await composer.fill('Turn to cancel');
   await send.click();
   await fixture.waitForCurrentStream();
-  await page.getByRole('button', { name: 'Cancel turn', exact: true }).click();
+  await page
+    .getByRole('region', { name: 'Managed conversation' })
+    .getByRole('button', { name: 'esc to cancel', exact: true })
+    .click();
   await fixture.waitForCurrentStream();
   // waitForCurrentStream can pass on the still-running turn's stale cursor
   // while the cancel POST is still on the wire: poll the actual list.
@@ -333,7 +341,7 @@ test('a permanently failing pending create exposes a discard path @smoke', async
     },
   );
 
-  await page.getByRole('button', { name: 'New managed task' }).click();
+  await page.getByRole('button', { name: 'New task', exact: true }).click();
   const composer = page
     .getByRole('region', { name: 'Managed conversation' })
     .locator('[data-web-shell-composer-editor] .cm-content');
