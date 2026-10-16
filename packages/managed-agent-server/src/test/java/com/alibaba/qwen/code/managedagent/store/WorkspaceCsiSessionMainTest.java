@@ -323,13 +323,15 @@ class WorkspaceCsiSessionMainTest {
     }
 
     @Test
-    void oldWorkspaceCreationCannotAcquireThePrivateCsiStorageAlias() {
+    void oldWorkspaceCreationRefusesTheCsiStorageWithoutAPinOrSession() {
         var before = allTables();
-        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status ->
-                store().insertWorkspaceSessionCommand("tenant", "actor", "old", "sha256:" + "b".repeat(64),
-                        "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))))
-                .isInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class)
+        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> store().insertWorkspaceSessionCommand(
+                "tenant", "actor", "old", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("workspace", "."))))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"))
                 .hasMessage("Workspace execution authority is unavailable.");
+        assertEmpty("ma_session", "ma_request_receipt", "ma_public_event", "ma_event_stream");
         assertThat(allTables()).isEqualTo(before);
     }
 
