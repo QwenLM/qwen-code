@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,13 +36,15 @@ import java.util.function.IntFunction;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-// FG8 (issue #14054): multi-process fault gates for monitor_run and the
-// child_run shell kind — the capabilities #13889 enabled without a fault
-// round. FG8e gates SSE continuity across abort/resume while a background
-// run or a monitor watch keeps progressing; FG8f gates background output
-// delivery under publisher loss. Real packaged Harness, real MySQL, JDBC
-// ground truth; no production code changes. Slice 1 lands e and f; a–d
-// land behind their in-flight prerequisites per the design doc.
+// FG8 (issues #14054/#14163): multi-process fault gates for monitor_run
+// and the child_run shell kind — the capabilities #13889 enabled without
+// a fault round. FG8a gates reply loss (retries must resolve through the
+// original identity); FG8b gates store failures (a rejected commit inside
+// a real transaction leaves zero OS effects); FG8d gates cancellation and
+// the routine/drain release split; FG8e gates SSE continuity across
+// abort/resume; FG8f gates output delivery under publisher loss. Real
+// packaged Harness, real MySQL, JDBC ground truth; no production code
+// changes. FG8c lands with #13986 per the issue's sequencing constraint.
 class HostedMonitorRunFaultGatesIT {
     private final ObjectMapper json = new ObjectMapper();
 
@@ -85,6 +88,33 @@ class HostedMonitorRunFaultGatesIT {
         runLetter("fg8f", List.of("publisher-kill-mid-capture",
                 "in-flight-cap", "receipt-drop-after-watermark"));
     }
+
+    @Test
+    @Timeout(600)
+    void fg8aLostRepliesResolveThroughTheOriginalIdentityOnMySql()
+            throws Exception {
+        runLetter("fg8a", List.of("dispatch-reply", "monitor-stop-reply",
+                "capture-commit-reply", "observation-advance-reply"));
+    }
+
+    @Test
+    @Timeout(600)
+    void fg8bStoreFailuresLeaveNoOsEffectsOnMySql() throws Exception {
+        runLetter("fg8b", List.of("invocation-commit", "process-ledger-commit",
+                "manifest-commit", "page-envelope-commit"));
+    }
+
+    @Test
+    @Timeout(600)
+    void fg8dCancellationAndDrainSettleHonestlyOnMySql() throws Exception {
+        runLetter("fg8d", List.of("cancel-before-start",
+                "cancel-during-capture", "cancel-status-unavailable",
+                "cancel-reply-lost", "routine-release-refusal",
+                "drain-release"));
+    }
+
+    /** Trigger rows this letter installed for FG8b (dropped after it). */
+    private List<String> fg8bTriggers;
 
     private void runLetter(String letter, List<String> allCases)
             throws Exception {
@@ -217,6 +247,32 @@ class HostedMonitorRunFaultGatesIT {
                 guard.register(tenant, "storage-" + index,
                         UUID.randomUUID().toString());
             }
+        } else {
+            // register() is gated on its Linux identity probe; everywhere
+            // else the fixture owes the broker the storage ledger rows a
+            // finished registration leaves behind, or claim() refuses every
+            // acquire as workspace_unavailable.
+            for (int index = 0; index < cases.size(); index++) {
+                String physical = UUID.randomUUID().toString()
+                        .replace("-", "");
+                jdbc.update("INSERT INTO ma_storage (alias_key,"
+                        + " tenant_key, storage_key, tenant_id, storage_id,"
+                        + " physical_key, storage_kind, registration_state,"
+                        + " registration_revision, registration_json) VALUES"
+                        + " (?, ?, ?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1,"
+                        + " '{}')",
+                        JdbcRuntimeBindingRepository.storageAliasKey(tenant,
+                                "storage-" + index),
+                        JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                        JdbcRuntimeBindingRepository.storageFenceKey(
+                                "storage-" + index),
+                        tenant, "storage-" + index, physical);
+                jdbc.update("INSERT INTO ma_storage_owner (storage_key,"
+                        + " physical_key, storage_kind, tenant_id,"
+                        + " storage_id, mount_state) VALUES (?, ?, 'LOCAL',"
+                        + " ?, ?, 'READY')",
+                        physical, physical, tenant, "storage-" + index);
+            }
         }
         var sessions = new ArrayList<Map<String, Object>>();
         for (int index = 0; index < cases.size(); index++) {
@@ -240,6 +296,9 @@ class HostedMonitorRunFaultGatesIT {
                     created.sessionId(), "workspaceId", workspaceId,
                     "directory",
                     workspaces.get(index).resolve("child").toString()));
+        }
+        if (letter.equals("fg8b")) {
+            installFg8bTriggers(jdbc, tenant, sessions);
         }
         gateServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0),
                 0);
@@ -279,7 +338,14 @@ class HostedMonitorRunFaultGatesIT {
                 assertThat(driver.exitValue())
                         .as(letter + " driver output:\n%s", output).isZero();
                 assertThat(output).contains(letter.equals("fg8f")
-                        ? "FG8_OUTPUT_DELIVERY_OK" : "FG8_STREAM_GAPS_OK");
+                        ? "FG8_OUTPUT_DELIVERY_OK"
+                        : letter.equals("fg8a")
+                            ? "FG8_REPLY_LOSS_OK"
+                            : letter.equals("fg8b")
+                                ? "FG8_STORE_FAILURE_OK"
+                                : letter.equals("fg8d")
+                                    ? "FG8_CANCEL_DRAIN_OK"
+                                    : "FG8_STREAM_GAPS_OK");
                 JsonNode reports = json.readTree(
                         Files.readString(resultFile));
                 assertThat(reports).hasSize(cases.size());
@@ -288,6 +354,11 @@ class HostedMonitorRunFaultGatesIT {
                             reports.get(index));
                 }
             } finally {
+                // The triggers must go down on the failure path too: an
+                // armed BEFORE INSERT survives for the rest of the fork.
+                if (letter.equals("fg8b")) {
+                    dropFg8bTriggers(jdbc);
+                }
                 driver.descendants()
                         .forEach(process -> process.destroyForcibly());
                 if (driver.isAlive()) {
@@ -297,8 +368,390 @@ class HostedMonitorRunFaultGatesIT {
         }
     }
 
+    // FG8b's fault source: a test-only trigger per case, scoped to that
+    // case's session rows, permanently refusing the case's commit kind
+    // inside a real transaction — a fire-once-then-disarm arm would let
+    // the next commit heal over the very blocking the issue gates. Each
+    // fire also writes fg8b_fire (MyISAM, so the row survives the
+    // signalled rollback): the broker flattens this SQLException into
+    // runtime_broker_internal_error, so unlike FG7B the marker text never
+    // reaches captured output and the fire count is the attribution.
+    private void installFg8bTriggers(JdbcTemplate jdbc, String tenant,
+            List<Map<String, Object>> sessions) {
+        fg8bTriggers = new ArrayList<>();
+        jdbc.execute("CREATE TABLE fg8b_fire (case_name VARCHAR(64)"
+                + " NOT NULL, fired_at TIMESTAMP(6) NOT NULL DEFAULT"
+                + " CURRENT_TIMESTAMP(6)) ENGINE = MyISAM");
+        for (Map<String, Object> session : sessions) {
+            String name = session.get("name").toString();
+            String sessionId = session.get("sessionId").toString();
+            String table;
+            String condition;
+            String marker;
+            switch (name) {
+                case "invocation-commit":
+                    table = "ma_tool_execution";
+                    condition = "NEW.harness_session_id = '" + sessionId
+                            + "' AND NEW.execution_call_id NOT LIKE"
+                            + " '%:process'";
+                    marker = "FG8B_INVOCATION_COMMIT";
+                    break;
+                case "process-ledger-commit":
+                    table = "ma_tool_execution";
+                    condition = "NEW.harness_session_id = '" + sessionId
+                            + "' AND NEW.execution_call_id LIKE '%:process'";
+                    marker = "FG8B_PROCESS_LEDGER_COMMIT";
+                    break;
+                case "manifest-commit":
+                    table = "ma_resource";
+                    // The capture's prepare publishes an initial empty
+                    // manifest (executionStatus 'unknown'); it must land,
+                    // or the worker never starts. The arm targets the
+                    // manifest that closes the run: a settled execution.
+                    condition = "NEW.session_id = '" + sessionId
+                            + "' AND NEW.kind"
+                            + " = 'managed-tool-result-manifest'"
+                            + " AND CONVERT(NEW.inline_bytes USING utf8mb4)"
+                            + " LIKE '%\"executionStatus\":\"success\"%'";
+                    marker = "FG8B_MANIFEST_COMMIT";
+                    break;
+                case "page-envelope-commit":
+                    table = "ma_resource";
+                    condition = "NEW.session_id = '" + sessionId
+                            + "' AND NEW.kind = 'managed-tool-result-page'";
+                    marker = "FG8B_PAGE_ENVELOPE_COMMIT";
+                    break;
+                default:
+                    throw new IllegalStateException(name);
+            }
+            String trigger = "fg8b_"
+                    + UUID.randomUUID().toString().replace("-", "");
+            fg8bTriggers.add(trigger);
+            // ma_tool_execution has no tenant column: the session scope
+            // inside each condition is the fence.
+            jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON "
+                    + table + " FOR EACH ROW BEGIN IF " + condition
+                    + " THEN INSERT INTO fg8b_fire (case_name) VALUES ('"
+                    + name + "'); SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT"
+                    + " = '" + marker + "'; END IF; END");
+        }
+    }
+
+    private void dropFg8bTriggers(JdbcTemplate jdbc) {
+        if (fg8bTriggers != null) {
+            for (String trigger : fg8bTriggers) {
+                jdbc.execute("DROP TRIGGER IF EXISTS " + trigger);
+            }
+            fg8bTriggers = null;
+        }
+        jdbc.execute("DROP TABLE IF EXISTS fg8b_fire");
+    }
+
     private void assertCase(String letter, JdbcTemplate jdbc, String tenant,
             Map<String, Object> session, JsonNode report) throws Exception {
+        switch (letter) {
+            case "fg8a" -> assertReplyLossCase(jdbc, tenant, session, report);
+            case "fg8b" -> assertStoreFailureCase(jdbc, tenant, session,
+                    report);
+            case "fg8d" -> assertCancelDrainCase(jdbc, tenant, session,
+                    report);
+            default -> assertStreamPublishCase(letter, jdbc, tenant, session,
+                    report);
+        }
+    }
+
+    private void assertReplyLossCase(JdbcTemplate jdbc, String tenant,
+            Map<String, Object> session, JsonNode report) throws Exception {
+        String sessionId = session.get("sessionId").toString();
+        String name = session.get("name").toString();
+        // Reply loss always resolves through the original execution
+        // identity: exactly one physical process per dispatch, proven by
+        // exactly one `:process` row in the execution ledger.
+        assertProcessRows(jdbc, sessionId, name, 1);
+        switch (name) {
+            case "dispatch-reply" -> {
+                assertThat(report.path("brokerDropped").asInt())
+                        .as(name + " dropped exactly one :start reply")
+                        .isEqualTo(1);
+                assertThat(report.path("brokerStartedForwards").asInt())
+                        .as(name + ": the original identity admitted once")
+                        .isEqualTo(1);
+                JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+                        "child_run");
+                // A lost :start reply must not mint a second identity: the
+                // run is settled either from real exit evidence (a cgroup
+                // runtime) or as an honest not-start where no process could
+                // be isolated (this Runtime is not a Linux + cgroup v2
+                // host). What is forbidden is a fabricated outcome.
+                String stopReason = record.path("stopReason").asText();
+                if ("start_failed".equals(stopReason)) {
+                    assertThat(record.path("run").path("state").asText())
+                            .isEqualTo("failed");
+                    assertThat(record.path("run").path("execution").asText())
+                            .isEqualTo("not_started_proven");
+                    assertThat(record.path("startReceiptRef").isNull())
+                            .isTrue();
+                } else {
+                    assertThat(record.path("run").path("state").asText())
+                            .as(name + " settled from real exit evidence")
+                            .isEqualTo("settled");
+                    assertThat(stopReason).isEqualTo("exited");
+                    assertThat(record.path("exitCode").asInt()).isZero();
+                    assertThat(record.path("startReceiptRef").isNull())
+                            .isFalse();
+                }
+            }
+            case "monitor-stop-reply" -> {
+                assertThat(report.path("brokerDropped").asInt())
+                        .as(name + " dropped exactly one monitor-stop reply")
+                        .isEqualTo(1);
+                assertThat(report.path("brokerMonitorStopForwards")
+                        .asInt()).as(name + ": exactly one physical stop")
+                        .isEqualTo(1);
+                JsonNode watch = extensionRecord(jdbc, tenant, sessionId,
+                        "monitor_run");
+                assertThat(watch.path("stopReason").asText())
+                        .as(name + " settled from real exit evidence")
+                        .isEqualTo("max_events");
+                assertThat(watch.path("observationSequence").asInt())
+                        .isEqualTo(watch.path("maxEvents").asInt());
+                assertThat(watch.path("notifiedThrough").asInt())
+                        .isEqualTo(watch.path("observationSequence").asInt());
+            }
+            case "capture-commit-reply" -> {
+                assertThat(report.path("droppedPagePublishes").asInt())
+                        .as(name + " dropped exactly one page publish reply")
+                        .isEqualTo(1);
+                JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+                        "child_run");
+                assertThat(record.path("run").path("state").asText())
+                        .as(name + " settled from real exit evidence")
+                        .isEqualTo("settled");
+                assertThat(record.path("stopReason").asText())
+                        .isEqualTo("exited");
+                assertThat(record.path("exitCode").asInt()).isZero();
+                // The re-driven publish is idempotent: the existing chain
+                // walk already refuses duplicated pages or revisions.
+                verifyOutputChain(jdbc, tenant, sessionId, true);
+            }
+            case "observation-advance-reply" -> {
+                var droppedOps = new ArrayList<String>();
+                report.path("droppedCommitOps")
+                        .forEach(node -> droppedOps.add(node.asText()));
+                assertThat(droppedOps)
+                        .as(name + " dropped exactly one observation commit")
+                        .containsExactly("commitMonitorRun");
+                JsonNode watch = extensionRecord(jdbc, tenant, sessionId,
+                        "monitor_run");
+                assertThat(watch.path("observationSequence").asInt())
+                        .as(name + " stayed behind, then landed")
+                        .isEqualTo(watch.path("maxEvents").asInt());
+                assertThat(watch.path("notifiedThrough").asInt())
+                        .isEqualTo(watch.path("observationSequence").asInt());
+                assertThat(watch.path("stopReason").asText())
+                        .isEqualTo("max_events");
+            }
+            default -> throw new IllegalStateException(name);
+        }
+    }
+
+    private void assertStoreFailureCase(JdbcTemplate jdbc, String tenant,
+            Map<String, Object> session, JsonNode report) throws Exception {
+        String sessionId = session.get("sessionId").toString();
+        String name = session.get("name").toString();
+        // Attribution first: the rejections this case watched must come
+        // from this case's own trigger. A trigger that silently never
+        // armed goes red here, not on an outcome (the broker's flattened
+        // runtime_broker_internal_error carries no marker text).
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM fg8b_fire WHERE case_name = ?",
+                Integer.class, name))
+                .as(name + ": the case trigger really fired").isPositive();
+        switch (name) {
+            case "invocation-commit" -> {
+                // The admission's INSERT was rejected inside a real
+                // transaction: there can be no invocation row, no `:process`
+                // row, and no physical process.
+                assertThat(report.path("bgStarted").asBoolean())
+                        .as(name + ": a physical process never existed")
+                        .isFalse();
+                assertThat(report.path("executions").size())
+                        .as(name + ": no invocation row either").isZero();
+            }
+            case "process-ledger-commit" -> {
+                assertThat(report.path("bgStarted").asBoolean())
+                        .as(name + ": a physical process never existed")
+                        .isFalse();
+                // The reservation committed before the rejected ledger
+                // insert, so an invocation row may exist; what must never
+                // exist is its `:process` suffix.
+            }
+            case "manifest-commit", "page-envelope-commit" -> {
+                assertThat(report.path("bgStarted").asBoolean())
+                        .as(name + ": the admitted run exists").isTrue();
+                assertThat(report.path("brokerStartAttempts").asInt())
+                        .as(name + ": never re-executed to recover")
+                        .isEqualTo(1);
+            }
+            default -> throw new IllegalStateException(name);
+        }
+        if (name.equals("invocation-commit")
+                || name.equals("process-ledger-commit")) {
+            assertProcessRows(jdbc, sessionId, name, 0);
+            return;
+        }
+        // What a refused publication commit does to the run depends on
+        // which commit the arm targets. A refused OUTPUT MANIFEST commit
+        // is the settle transaction's own head — the fused settle commit
+        // rolls back whole, so the run stays blocked open with the
+        // process long gone and its exit evidence unjournaled (the
+        // issue's "blocks the run" cell, measured on lane run
+        // 38868090681: three refused settle commits, then silence —
+        // including through a drain release). A refused page-envelope
+        // commit poisons the capture alone: the record settles from real
+        // exit evidence with the envelope degraded — never cancelled,
+        // never re-executed.
+        assertProcessRows(jdbc, sessionId, name, 1);
+        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+                "child_run");
+        if (name.equals("manifest-commit")) {
+            assertThat(report.path("recovered").asBoolean())
+                    .as(name + ": a refused settle commit never recovers")
+                    .isFalse();
+            assertThat(record.path("run").path("state").asText())
+                    .as(name + ": the blocked commit keeps the run open")
+                    .isEqualTo("running");
+            assertThat(record.path("stopReason").isNull())
+                    .as(name + ": no stop proof was ever journaled")
+                    .isTrue();
+            assertThat(record.path("stopRequested").asBoolean(false))
+                    .as(name + ": nothing ever asked it to stop")
+                    .isFalse();
+            // The finalize manifest (executionStatus 'success') is the
+            // arm's target and never persisted; the initial empty
+            // manifest is what keeps the read chain honest.
+            var settleManifests = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
+                            + " AND session_id = ? AND kind ="
+                            + " 'managed-tool-result-manifest' AND"
+                            + " CONVERT(inline_bytes USING utf8mb4) LIKE"
+                            + " '%\"executionStatus\":\"success\"%'",
+                    Integer.class, tenant, sessionId);
+            assertThat(settleManifests).as(name
+                    + ": the settle-manifest commit was rejected")
+                    .isZero();
+        } else {
+            assertThat(report.path("recovered").asBoolean())
+                    .as(name + ": the producer exited naturally").isTrue();
+            assertThat(record.path("run").path("state").asText())
+                    .as(name + ": settles from real exit evidence")
+                    .isEqualTo("settled");
+            assertThat(record.path("stopReason").asText())
+                    .isEqualTo("exited");
+            assertThat(record.path("exitCode").asInt()).isZero();
+            assertThat(record.path("stopRequested").asBoolean(false))
+                    .as(name + ": nothing ever asked it to stop")
+                    .isFalse();
+            assertThat(jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
+                            + " AND session_id = ? AND kind ="
+                            + " 'managed-tool-result-page'",
+                    Integer.class, tenant, sessionId))
+                    .as(name + ": every page-envelope commit was rejected")
+                    .isZero();
+        }
+        // Whatever manifests did commit (the initial empty one, and in
+        // the process-ledger variant reserved ones) may never name a
+        // page envelope that is not persisted — the read chain's own
+        // refusal, asserted here over JDBC rather than on outcomes.
+        var dangling = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_resource m WHERE m.tenant_id = ?"
+                        + " AND m.session_id = ? AND m.kind ="
+                        + " 'managed-tool-result-manifest' AND"
+                        + " CONVERT(m.inline_bytes USING utf8mb4) LIKE"
+                        + " '%\"pages\":[{%' AND NOT EXISTS (SELECT 1"
+                        + " FROM ma_resource p WHERE p.tenant_id ="
+                        + " m.tenant_id AND p.session_id = m.session_id"
+                        + " AND p.kind = 'managed-tool-result-page')",
+                Integer.class, tenant, sessionId);
+        assertThat(dangling).as(name
+                + ": no manifest names an unpersisted page").isZero();
+    }
+
+    private void assertCancelDrainCase(JdbcTemplate jdbc, String tenant,
+            Map<String, Object> session, JsonNode report) throws Exception {
+        String sessionId = session.get("sessionId").toString();
+        String name = session.get("name").toString();
+        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+                "child_run");
+        switch (name) {
+            case "cancel-before-start" -> {
+                assertProcessRows(jdbc, sessionId, name, 0);
+                assertThat(report.path("bgStarted").asBoolean())
+                        .as(name + ": zero OS effects").isFalse();
+                assertThat(record.path("run").path("state").asText())
+                        .as(name + " settles cancelled, never exited")
+                        .isNotEqualTo("settled");
+            }
+            case "routine-release-refusal" -> {
+                assertProcessRows(jdbc, sessionId, name, 1);
+                assertThat(record.path("run").path("state").asText())
+                        .as(name
+                                + ": the refusal stopped nothing, natural exit")
+                        .isEqualTo("settled");
+                assertThat(record.path("stopReason").asText())
+                        .isEqualTo("exited");
+                assertThat(record.path("exitCode").asInt()).isZero();
+            }
+            case "drain-release", "cancel-during-capture",
+                    "cancel-status-unavailable" -> {
+                assertProcessRows(jdbc, sessionId, name, 1);
+                assertThat(record.path("stopRequested").asBoolean())
+                        .as(name + " carried the stop marker").isTrue();
+                assertThat(record.path("run").path("state").asText())
+                        .as(name + " settles cancelled").isEqualTo(
+                                "cancelled");
+                assertThat(record.path("stopReason").asText())
+                        .isEqualTo("stop_requested");
+            }
+            case "cancel-reply-lost" -> {
+                assertProcessRows(jdbc, sessionId, name, 1);
+                assertThat(report.path("droppedCancelReply").asBoolean())
+                        .as(name + " dropped exactly one cancel reply")
+                        .isTrue();
+                assertThat(record.path("stopRequested").asBoolean())
+                        .isTrue();
+                assertThat(record.path("run").path("state").asText())
+                        .isEqualTo("cancelled");
+                assertThat(record.path("stopReason").asText())
+                        .isEqualTo("stop_requested");
+            }
+            default -> throw new IllegalStateException(name);
+        }
+        // A run the platform stopped is never settled as `exited` — and a
+        // natural exit only ever records its own exit, which is why this
+        // invariant is letter-wide rather than per-case wording.
+        if (record.path("run").path("state").asText().equals("cancelled")) {
+            assertThat(record.path("stopReason").asText())
+                    .as(name + ": a platform stop never reads as exited")
+                    .isNotEqualTo("exited");
+        }
+    }
+
+    private void assertProcessRows(JdbcTemplate jdbc, String sessionId,
+            String name, int expected) {
+        Integer processes = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_tool_execution WHERE"
+                        + " harness_session_id = ? AND execution_call_id LIKE"
+                        + " '%:process'",
+                Integer.class, sessionId);
+        assertThat(processes).as(name + " :process rows")
+                .isEqualTo(expected);
+    }
+
+    private void assertStreamPublishCase(String letter, JdbcTemplate jdbc,
+            String tenant, Map<String, Object> session, JsonNode report)
+            throws Exception {
         String sessionId = session.get("sessionId").toString();
         String name = session.get("name").toString();
         assertThat(report.path("case").asText()).isEqualTo(name);
