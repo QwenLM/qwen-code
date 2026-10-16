@@ -136,14 +136,24 @@ const proxy = createServer(async (req, res) => {
     const operation =
       req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
     if (!store) {
+      const harnessScoped =
+        req.method === 'POST' &&
+        [
+          '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/tool-sessions:active-holds',
+        ].includes(url.pathname);
       assert.equal(fields.harnessSessionId, config.sessionId);
-      assert.equal(fields.runtimeSessionId, report.promptId);
+      assert.equal(
+        fields.runtimeSessionId,
+        harnessScoped ? undefined : report.promptId,
+      );
       assert.notEqual(
         operation,
         'release',
         'Unsettled execution must retain its owner',
       );
-      report.operations.push(operation);
+      if (!(harnessScoped && operation === 'active-holds'))
+        report.operations.push(operation);
       const executionId = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
       if (executionId) assert.equal(executionId, report.executionCallId);
       if (operation === 'start' && inFlight)
@@ -441,7 +451,7 @@ try {
   assert.equal(
     report.operations.length,
     operations,
-    'Cold load must not contact Broker',
+    'Cold load must not execute Broker operations',
   );
   assert.equal(report.modelCalls, 1, 'Cold load must not call the model');
   await assertEffect();
