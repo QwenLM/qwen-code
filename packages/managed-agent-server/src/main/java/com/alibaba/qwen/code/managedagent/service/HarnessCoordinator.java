@@ -1057,7 +1057,8 @@ public class HarnessCoordinator {
     // refused while another Turn is live (R6-3). The row is re-read rather
     // than trusted from the claim-time record: the admission the mark
     // precedes may have landed after the claim (R4-1).
-    private boolean cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn) {
+    private boolean cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn,
+            boolean recoveryBlocked) {
         try {
             TurnRecord current = store.findTurn(turn.tenantId(),
                     turn.sessionId(), turn.turnId()).orElse(null);
@@ -1074,6 +1075,20 @@ public class HarnessCoordinator {
             if (session.workspace() != null
                     && !harness.isWorkspaceFilesAvailable()) {
                 return false;
+            }
+            if (recoveryBlocked && session.workspace() != null
+                    && "RUNNING".equals(current.status())) {
+                Attachment takeover = harness.recoverManagedFailureCancellation(
+                        session.tenantId(), session.sessionId(), current.turnId(), owner);
+                HarnessRuntimeRecovery recovery = takeover.runtimeRecovery();
+                if (recovery != null) {
+                    if (!recovery.isCancellationReady()) {
+                        return false;
+                    }
+                    harness.cancelManagedRuntime(session.tenantId(), session.sessionId(),
+                            current.promptId(), recovery.getCheckpointId(), recovery.getActivationId());
+                }
+                return true;
             }
             if (session.harnessBootId() != null
                     && store.bindHarness(turn.tenantId(), turn.sessionId(),
@@ -1127,12 +1142,17 @@ public class HarnessCoordinator {
         // R12-3).
         TurnRecord current = store.findTurn(turn.tenantId(),
                 turn.sessionId(), turn.turnId()).orElse(turn);
+        boolean recoveryBlocked = "managed_runtime_recovery_blocked".equals(code);
         if (current.submissionAttempted()) {
-            boolean reconciled = cancelAdmittedTurnBeforeTerminalFail(current);
-            if (!reconciled && "managed_runtime_recovery_blocked".equals(code)) {
+            boolean reconciled = cancelAdmittedTurnBeforeTerminalFail(current, recoveryBlocked);
+            if (!reconciled && recoveryBlocked) {
                 return transientFailure(current, true,
                         new IllegalStateException("Recovery cancellation remains unsettled"), true);
             }
+        }
+        if (recoveryBlocked && !"CANCELLING".equals(turn.status())) {
+            return store.failRecoveryBlockedTurn(turn.tenantId(), turn.sessionId(),
+                    turn.turnId(), owner, message);
         }
         store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
                 owner, code, message);

@@ -341,6 +341,7 @@ class SessionRowLockOrderTest {
                 "recordRecoveryAdmission", "retractContinuationOutput",
                 "retractHarnessTurnOutput", "recordHarnessEvents",
                 "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn",
+                "failRecoveryBlockedTurn",
                 "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent",
                 // Main's rename-delivery family (#13682): each takes the
                 // session-row FOR UPDATE before its delivery-row work.
@@ -379,7 +380,8 @@ class SessionRowLockOrderTest {
                         "bindHarness", "bindRecoveredHarness",
                         "cancelBeforeAdmission", "changeSessionModel", "changeSessionApproval", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
-                        "deferTurnRetry", "failTurn", "findActiveTurns",
+                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn",
+                        "settleFailedTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
                         "findTurnSummary", "hasActiveTurn",
@@ -422,7 +424,7 @@ class SessionRowLockOrderTest {
     // assertion still green. Pin the boundary on the R2 entry points.
     @Test
     void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
-        for (String name : List.of("recordAdmission", "failTurn",
+        for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn",
                 "cancelUnadmittedTurn", "cancelBeforeAdmission")) {
             List<Method> entries = Arrays.stream(ManagedAgentStore.class
                     .getDeclaredMethods())

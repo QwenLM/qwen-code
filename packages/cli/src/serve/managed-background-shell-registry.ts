@@ -10,7 +10,6 @@ import type {
   ManagedChildRunProcess,
   ChildRunExitEvidence,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
-import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type {
   ManagedShellCapturePublisher,
@@ -248,11 +247,7 @@ export class ManagedBackgroundShellRegistry {
         if (publisher.finish) {
           await publisher.finish(identity, envelope);
         } else if (publisher.accept) {
-          const receipt: LocalShellReceipt = await publisher.accept(
-            identity,
-            envelope,
-          );
-          void receipt;
+          await publisher.accept(identity, envelope);
         }
       } catch (cause) {
         captureError = cause instanceof Error ? cause.message : String(cause);

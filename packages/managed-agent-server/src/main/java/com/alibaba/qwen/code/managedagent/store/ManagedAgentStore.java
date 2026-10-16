@@ -4943,12 +4943,25 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message) {
+        settleFailedTurn(tenantId, sessionId, turnId, owner, code, message, true);
+    }
+
+    @Transactional
+    public boolean failRecoveryBlockedTurn(String tenantId, String sessionId,
+            String turnId, String owner, String message) {
+        return settleFailedTurn(tenantId, sessionId, turnId, owner,
+                "managed_runtime_recovery_blocked", message, false);
+    }
+
+    private boolean settleFailedTurn(String tenantId, String sessionId, String turnId,
+            String owner, String code, String message, boolean allowCancelling) {
         // Session-row lock first; see recordAdmission.
         requireLegacySessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
-                || !ACTIVE_TURN_STATES.contains(turn.status())) {
-            return;
+                || !ACTIVE_TURN_STATES.contains(turn.status())
+                || !allowCancelling && "CANCELLING".equals(turn.status())) {
+            return false;
         }
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET status ="
@@ -4958,15 +4971,17 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " dispatch_lease_until = NULL, version = version +"
                         + " 1 WHERE tenant_id = ? AND session_id = ? AND"
                         + " turn_id = ? AND dispatch_owner = ? AND status IN"
-                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
+                        + (allowCancelling ? " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
+                                : " ('ACCEPTED', 'RUNNING') AND")
                         + " dispatch_lease_until >= ?",
                 code, message, now, now, tenantId, sessionId, turnId, owner,
                 now);
         if (updated != 1) {
-            return;
+            return false;
         }
         appendEvent(tenantId, sessionId, turnId, "turn.failed",
                 Map.of("code", code, "message", message), true, null, now);
+        return true;
     }
 
     @Transactional

@@ -148,6 +148,19 @@ public class WorkspaceExecutionStore {
         authorizeAttachment(session, true, false, null, false);
     }
 
+    public void authorizeRecoveryCancellation(SessionRecord session,
+            String turnId, String dispatchOwner) {
+        if (turnId == null || dispatchOwner == null
+                || jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ? AND status = 'RUNNING'"
+                        + " AND submission_attempted = TRUE AND harness_event_epoch IS NOT NULL"
+                        + " AND dispatch_owner = ? AND dispatch_lease_until >= " + ManagedSchemaTime.SQL_NOW,
+                        Long.class, session.tenantId(), session.sessionId(), turnId, dispatchOwner) != 1) {
+            throw unavailable();
+        }
+        authorizeAttachment(session, false, false, null, false, true);
+    }
+
     /**
      * H4f × H4d-b: the attachment that carries a stopped run's message
      * stop. Like a persisted cancellation it was authorized when the stop

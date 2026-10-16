@@ -679,6 +679,9 @@ public interface AgentStateStore {
     void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message);
 
+    boolean failRecoveryBlockedTurn(String tenantId, String sessionId,
+            String turnId, String owner, String message);
+
     void appendPublicEventIfAbsent(String tenantId, String sessionId,
             String turnId, String type, Map<String, Object> data,
             boolean terminal, String sourceKey);
