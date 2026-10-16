@@ -34,9 +34,9 @@ public final class WorkspaceCsiPhysicalMain {
         var request = WorkspaceCsiRuntimeMain.readRequest(Path.of(args[2]), json);
         byte[] bytes;
         try (var input = Files.newInputStream(Path.of(args[3]))) {
-            bytes = input.readNBytes(16 * 1024 + 1);
+            bytes = input.readNBytes(WorkspaceCsiNodeSourceStore.CONFIGURATION_LIMIT + 1);
         }
-        if (bytes.length == 0 || bytes.length > 16 * 1024) {
+        if (bytes.length == 0 || bytes.length > WorkspaceCsiNodeSourceStore.CONFIGURATION_LIMIT) {
             throw new IllegalArgumentException("A bounded reviewed node source is required");
         }
         var nodeRequest = json.readValue(bytes, WorkspaceCsiRuntimeMain.NodeRequest.class);

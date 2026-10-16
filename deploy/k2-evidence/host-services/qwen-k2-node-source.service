@@ -9,7 +9,6 @@ User=root
 Group=root
 AppArmorProfile=qwen-k2-source-v1
 UMask=0077
-ExecStartPre=/usr/bin/sha256sum --check /etc/qwen-k2/executable.sha256
 ExecStart=/opt/qwen-k2/bin/k2-node-evidence source /etc/qwen-k2/source.json
 Restart=no
 TimeoutStopSec=15

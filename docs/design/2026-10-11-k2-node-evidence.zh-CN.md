@@ -2,7 +2,7 @@
 
 [English](2026-10-11-k2-node-evidence.md) | [简体中文](2026-10-11-k2-node-evidence.zh-CN.md)
 
-状态：正在实施的候选，尚未在 ACK 资格化。journal 与受限 runtime gateway 协议测试通过。此前 custody 候选通过实际 Linux pidfd/cgroup 测试，覆盖后代、迁移、descriptor 丢失、路径替换与 PID 复用。完整 source engine 与 CSI frontend 通过了自有 Linux 进程测试，使用真实任务、后代、cgroup descriptors 和挂载；其 runtime/CSI RPC backend 仍为协议夹具。Go、Java 21 与 guest OpenSSL 的严格 TLS 1.3 互操作通过。匹配 peer 权限、UID 1000 任务、只读 cgroup 视图及单向挂载传播通过了自有内核测试。这些结果不资格化实际 ACK artifacts 或正常 Pod 删除。Java source reader 与私有观测命令已通过实际自有 Linux source 的认证读取，以及 17 个独立 TLS/parser/失败窗口。普通重复 Maven package 也会更新全部五个 Boot artifact 的 broker，server classes/resources 不变。私有 pre-CREATE coordinator 接线已实现为新候选，完整 source-control/provisioning 验收待完成。部署与物理释放尚未完成。关联 #13395 和 Draft PR #13526。本文给退役交接设计 §6 提供具体来源，但不启用物理释放。现有 ACK 是目标环境；其两个共享系统节点不属于拟议安装范围。
+状态：source/6 实现候选已接入专用首次执行前 shim、配对出生 handler 及 Java reviewed-input consumer，正在编译和运行允许的数据检查。下文旧有界结果仅属于明确列出的历史候选，不资格化本次改动、实际 ACK 安装、物理释放或复用。[当前出生设计](2026-10-16-k2-pre-exec-birth.zh-CN.md)说明实际 Create/Start/Delete 边界及剩余安装、原子完成要求。关联 #13395 和 Draft PR #13526；常驻 Workspace 第一版独立维护。目标仍为原 ACK，共享系统节点不属于拟安装范围。
 
 ## 问题与支持边界
 
@@ -18,13 +18,13 @@
 
 Custody 需要实际 host PID namespace、受限 host /proc 观察，以及 host cgroup v2 固定根下持续持有的 descriptors。部署必须说明这些权限，以及 source 不能修改或委派原 cgroup 的限制。host namespace 访问属于可信边界；容器内 PID/cgroup 观察不能资格化原 task。gateway 保存首次完整 terminal observation，后续 exit status、timestamp 或 identity 发生变化均拒绝。
 
-来源不持久 credential、environment、CSI secret、VolumeContext 或无限制 RPC payload，只记录固定 identity 投影和 operation result。不支持的 method 或 parser version 对已登记原 scope 失败闭合。
+来源不持久化 CSI secret、VolumeContext 或无限制 RPC payload。出生记录保留有界的实际原始/消费 OCI 输入（含已审阅命令和环境）及 exact Create 输入。受支持的创建契约必须将凭据放在固定私有文件输入中，不能放入这些命令/环境值。其他记录保留固定身份投影和操作结果。不支持的 method 或 parser version 对已登记原 scope 失败闭合。
 
 JSON 控制、配置及 gateway response 字段必须使用声明的精确拼写，拒绝未知字段、重复名称与大小写 alias，包括嵌套对象中的 alias。HTTP routes 属于 node-source scope：gateway 上仅 coordinator 可登记原 task，仅 source 可读取 runtime/original；source 上仅 coordinator 可进行 ARM、UID binding、stop intent 和 journal 读取。它们不选择用户 workspace，也不授予 worker runtime 权限。
 
 ## 持久 journal 与 incarnation
 
-下一版 journal 格式 `qwen-k2-node-source/4` 补齐 saved stop 到 backend
+当前候选 journal 格式 `qwen-k2-node-source/6` 保留 saved stop 到 backend
 卸载之间的观测区间。等待卸载期间，source 继续检查持续持有的原 pidfd、leaf、
 Pod parent 与 events descriptor。转发 NodeUnpublishVolume 前及取得实际 backend
 成功后，必须重新取得与 ORIGINAL_STOPPED 完全相同的 terminal、unpopulated
@@ -32,7 +32,7 @@ custody tuple。UNPUBLISH_BEGIN 和 UNPUBLISH_OK 持久保存这些 fresh observ
 及未变化的 saved terminal runtime identity。观测失败、存活后代、对象替换或
 descriptor 丢失均永久阻断 scope。Java reader 要求两次 observation 均与原 stop
 相等；重新计算 hash 的替换观测或缺少这些字段的 journal 不能提供当前卸载证据。
-旧 v1–v3 journal 保留为历史材料，v4 reader 拒绝它们。本改动仅补齐后续观测区间，
+旧 v1–v5 journal 保留为历史材料，v6 reader 拒绝它们。候选还要求 sandbox/worker 配对的 BIRTH_PREPARED、BIRTH_CREATED、BIRTH_START_BEGIN 和 BIRTH_STARTED 依赖先于 CUSTODY_OPEN。每条 record 上限为 192 KiB，整份 journal 仍限 64 MiB 和 65536 条。本改动仅补齐后续观测区间，
 不建立首次执行前的 confinement，也不授权物理释放。
 
 journal 位于 worker 及其 PVC 之外的独立来源磁盘，使用排他所有权、有界 length-delimited records、连续 sequence、predecessor hash，并在确认来源转换前执行 `fsync`。每条 record 绑定 format、source incarnation 和 exact original scope。reader 拒绝截断、缺口、重复 sequence、hash mismatch 和未知字段。write 或 sync 失败使当前来源失效，后续调用不能修复未知 append outcome。
@@ -49,7 +49,7 @@ runtime 和 plugin identity 包含实际 Unix peer PID、进程 start time 与 e
 
 客户端要求 TLS 1.3、配置的 CA、HTTPS hostname 校验，以及客户端身份和实际 server peer 各自唯一且精确匹配的 certificate URI principal。拒绝 redirect、超限 body、缺失或重复的 cache/content-type headers，以及停滞超过十秒的 body。journal reader 保留 Go 的有序 body 编码，包括 HTML 与 Unicode 分隔符转义，不对排序后的 Java 表示求 hash。验证精确字段、无符号 kernel identity、canonical frame、连续 sequence/hash/incarnation、独立 durable head、不可变原关联，以及每个显式 begin/publication/stop cursor。即使输入 chain 已正确重新求 hash，替换 cgroup/runtime image 的 stop 或替换 kubelet caller 的 unpublish 仍被拒绝。
 
-保留的 v1 协议 fixture 包含自有 Linux source 进程的 exact bytes，source ELF digest 为 `ac051c616ee1900256da8ac6c70f449f187912c7245ccf0fdc008feb8891f14f`。任务、后代和挂载是真实的，runtime/CSI RPC provider 为夹具。它仍是历史证据，当前 v2 reader 会拒绝。新增 v2 fixture 使用合成 policy/process 值及实际 Go canonical encoding。独立 v2 验收通过 83 个 Go cases、同一组 83 个 Java parser/association cases 和 16 个 inert client/BIND cases，包括错误 digest/resourceVersion 在 mutation 前拒绝，以及 mock save 先于 gate。这覆盖本地协议与调用顺序，不建立成功 SQL 持久化、真实 TLS/gate PATCH、native policy 或 ACK 资格。观测命令不能绕过 pre-CREATE 关联、正常 UID-precondition 删除、部署资格化或未来原子释放事务。
+保留的 v1 协议 fixture 包含自有 Linux source 进程的 exact bytes，source ELF digest 为 `ac051c616ee1900256da8ac6c70f449f187912c7245ccf0fdc008feb8891f14f`。任务、后代和挂载是真实的，runtime/CSI RPC provider 为夹具。它仍是历史证据，后来的 v2 reader 已拒绝。历史 v2 fixture 使用合成 policy/process 值及实际 Go canonical encoding。独立 v2 验收通过 83 个 Go cases、同一组 83 个 Java parser/association cases 和 16 个 inert client/BIND cases，包括错误 digest/resourceVersion 在 mutation 前拒绝，以及 mock save 先于 gate。这覆盖本地协议与调用顺序，不建立成功 SQL 持久化、真实 TLS/gate PATCH、native policy 或 ACK 资格。观测命令不能绕过 pre-CREATE 关联、正常 UID-precondition 删除、部署资格化或未来原子释放事务。
 
 ## pre-CREATE ARM 与 containment
 
@@ -59,7 +59,7 @@ Evidence Pod 显式声明且只接受 `qwen-code.io/k2-evidence=isolated:NoSched
 
 私有 evidence Pod 使用固定 `qwen-k2-worker` ServiceAccount 和 Pod AppArmor Localhost profile `qwen-k2-worker-v1`。Readback 要求精确 account，deprecated account alias 若存在也须一致，完整 profile object 保持相等。拒绝 container override、冲突的旧 AppArmor annotation、static-Pod annotation 和非空 image-pull secrets；专用 account 创建时不能继承 pull secrets。这些字段进入 admitted gated/running spec digest。字段存在不能证明 profile 已加载、account 没有其他权限或出生 confinement 已资格化；仍需完成 installation consumer 和实际 ACK 验证。
 
-node request 是有界 16 KiB 的 closed JSON，含 `node`、`coordinatorPrincipal`、`clientStore`、`passwordFile`、`caFile`。`node` 含 `name`、`incarnation`、`identity`、`sourceOrigin`、`sourcePrincipal`、`gatewayOrigin`、`gatewayPrincipal`，以及必需的 `workerPolicySha256`。`identity` 是经过认证的 exact SOURCE_START 投影：node UID、boot ID、runtime executable digest/start/PID、gateway incarnation 和 plugin executable digest/start/PID。证书与 password file 使用部署方拥有的绝对路径，不进入 SQL 或 worker。实际节点的 source-status 输出提供这些 pins；示例或历史 fixture identity 不能资格化部署。source/gateway 使用不同固定 peer principal 和同一经审阅的 coordinator client identity。
+node request 是有界 64 KiB 的 closed JSON，含 `node`、`coordinatorPrincipal`、`clientStore`、`passwordFile`、`caFile`。`node` 含 `name`、`incarnation`、`identity`、`sourceOrigin`、`sourcePrincipal`、`gatewayOrigin`、`gatewayPrincipal`，以及必需的 `workerPolicySha256` 和 `birthInputs`。后者包含已审阅的 `shimSha256`、`runcSha256`、`sandboxImageSha256` 和 canonical base64 `creationContract` 原字节（解码后最多 16 KiB）。`node-config` 读取已审阅的 source/shim 配置和经过认证的来源身份生成请求，不从 observed birth 复制期待 artifact 或 contract 值。发布保存和后续 physical-source 读取必须确认两个实际角色匹配这些期待值，包括原始 OCI command/environment/mount/seccomp 契约。持久化 source configuration 限制 64 KiB；其他既有 decoder 上限保持。`identity` 是经过认证的 exact SOURCE_START 投影：node UID、boot ID、runtime executable digest/start/PID、gateway incarnation 和 plugin executable digest/start/PID。证书与 password file 使用部署方拥有的绝对路径，不进入 SQL 或 worker。实际节点的 source-status 输出提供这些 pins；示例或历史 fixture identity 不能资格化部署。source/gateway 使用不同固定 peer principal 和同一经审阅的 coordinator client identity。
 
 gateway、CSI frontend、其真实 kubelet/registrar peers 和 journal 必须先于 ARM 就绪。核对实际 Node 的 exact name/UID、`status.nodeInfo.bootID` 与认证 source identity 精确相等、非删除状态及唯一 Ready=True condition，再为原 binding/reservation 取得 durable ARM。boot identity 缺失或改变，在 source control 和 SQL 前拒绝。解除 gate、接受 publication 以及确认 live original 前重复这项校验。arm ID 用 `qwen-csi-source-arm/1` domain，由原 binding ID 和 reservation UUID 确定性派生。任何 Pod CREATE 前保存经过认证的完整 prefix 和独立 head。原 scope 的 namespace、未来 Pod name、driver、volume、PV/PVC UID 来自受保护原 seed/registration；UID、container、target、retirement 保持空白。worker image digest 独立固定。
 
@@ -67,7 +67,7 @@ CREATE 原 bare Pod，带唯一 gate `qwen-code.io/k2-source-ready`，required n
 
 gate 打开前持久保存 BOUND。再次核对 reviewed Node，再提交固定四个 JSONPatch operation：test 原 UID、test 不透明 resourceVersion、test 完整 admitted gated spec、remove `/spec/schedulingGates`。响应必须保持该 UID 和只移除 gate 的 exact spec。之后正常 scheduler binding 设置原 nodeName；完整 running-spec digest 和原 attestation 仍必需。接受 handle 前，仅当同一连续 source 同时报告原 publication 和 retained custody，且 Pod/container/image/source/node 全部匹配时，保存 PUBLISHED。后续 live observation 要求认证 journal 逐字扩展保存的 prefix，不能替换原字节。
 
-`managed_workspace_csi_source`（V73）有十九个 typed column，只支持 ARMED/v1、BOUND/v2、PUBLISHED/v3。保存原 binding/generation/physical/reservation、无 secret 的 reviewed configuration、完整 ARM/BIND/publication prefix 及独立 head、原 Pod UID/gated-spec digest。每个 prefix 限制 1 MiB。写入使用同 DataSource 的十秒事务，拒绝 ambient composition，先取得共同原 binding-control prefix，再取 registration/holder/source，重查原 operation owner/generation 与 DB-time lease。正常续租可推进 binding version、改变 operation expiry；其他原 binding 值必须逐项保持相等，包括 request、seed、state、drain flag、runtime lease/handle、attestation generation、activity timestamps 及保存的 evidence。即使 owner 相同，replacement claim 仍拒绝。所有 source/Kubernetes 外部操作都在 SQL locks 外。PUBLISHED 不再修改，并加入显式应用库存；它本身不授予物理 stop/release。
+`ma_csi_source`（V7）有十九个 typed column，只支持 ARMED/v1、BOUND/v2、PUBLISHED/v3。保存原 binding/generation/physical/reservation、无 secret 的 reviewed configuration、完整 ARM/BIND/publication prefix 及独立 head、原 Pod UID/gated-spec digest。每个 prefix 限制 1 MiB。写入使用同 DataSource 的十秒事务，拒绝 ambient composition，先取得共同原 binding-control prefix，再取 registration/holder/source，重查原 operation owner/generation 与 DB-time lease。正常续租可推进 binding version、改变 operation expiry；其他原 binding 值必须逐项保持相等，包括 request、seed、state、drain flag、runtime lease/handle、attestation generation、activity timestamps 及保存的 evidence。即使 owner 相同，replacement claim 仍拒绝。所有 source/Kubernetes 外部操作都在 SQL locks 外。PUBLISHED 不再修改，并加入显式应用库存；它本身不授予物理 stop/release。
 
 每个 source 操作都必须接收原 provisioning grant 与调用方单调截止时间的检查。外部响应返回后、后续变更之前重新检查，包括解除 scheduling gate 前刚返回的 Node 查询。准入还在 SQL 返回后重新检查截止时间。可见 async timeout 不会中断待返回的查询；晚到响应不能授权新的变更。检查不能撤回已发送的 HTTP 请求。已保存 handle 的观察仅检查截止时间，不重新取得 provisioning grant。
 
@@ -119,7 +119,7 @@ CREATED observation可能先于worker on-exec profile切换，不能视为本项
 
 ## 已加载 worker policy 与 admitted BIND 候选
 
-当前来源候选使用 `qwen-k2-node-source/4`，包含上述显式 retained-parent custody tuple。ARM 保留 v2 的原 image digest，以及内核中固定 `qwen-k2-worker-v1` profile 的实际测量。source 配置与经审阅 Java node 配置必需 `workerPolicySha256`，其值为经审阅 packed policy artifact 在内核导出后的 digest。profile 名称、磁盘文件或 operator 断言不能代替该测量。旧 v1/v2/v3 journal 保留为早期有界测试的历史证据，当前 reader 拒绝它们；改标签或补合成 parent 字段不能建立 v4 evidence。v3/v4 contract fixture 明确是合成协议输入，不是实际 parent 测量或 birth record。
+当前来源候选使用 `qwen-k2-node-source/6` 及显式 retained-parent tuple。ARM 保留原镜像及固定 worker profile 的内核测量；策略复核还要求 sandbox/shim/gateway profiles 位于同一 locked bundle。旧协议 fixture 保留为历史数据。v6 fixture 是 canonical encoding、镜像祖先链、配对出生和 cursor 校验的合成输入，不是实际出生或安装测量。新增日志上限更大，当前 OCI 元数据门仍单独限制为 64 KiB。
 
 固定 Linux reader 通过内核明确的 magic link 进入 `/sys/kernel/security/apparmor/policy`，随后持续持有实际 AppArmor filesystem root。普通 profile entry 在该根下打开，不跟随任意 symlink。读取并验证 profile 明确的 `raw_data` link，仅接受指向同一根 `raw_data` 子树的相对引用。同一经审阅 packed bundle 同时包含固定 worker/source profile，两者唯一当前 entry 必须指向同一导出 raw object；source 实际 label 必须为 `qwen-k2-source-v1 (enforce)`，避免仅 source profile 名称代替其实际 policy bytes。持续持有导出字节 descriptor，对完整有界解压 blob 求 hash，并在读取前后核对两者当前 profile link、mode、namespace/load revision 和 object identity。重读已持有旧 blob 不能建立当前 policy。内核 signed-long revision 使用 `Long.MAX_VALUE` 内的 canonical decimal string，load revision 不得大于 namespace revision，ABI 限制为 v5 至 v9；kernel device/inode 保留完整无符号范围。固定 proc/sys anchors 与当前线程 namespace descriptors 均核对实际内核 filesystem 类型。打开内核 raw snapshot 前先核导出尺寸；完整 snapshot 和 kernel raw SHA 均须等于经审阅 artifact。持续持有的 revision stream 只读一次，后续必须返回 EAGAIN，不能重新打开来恢复 custody。
 
@@ -129,7 +129,7 @@ CREATED observation可能先于worker on-exec profile切换，不能视为本项
 
 BIND 增加经过认证 coordinator 提供的实际 admitted gated-spec digest 和不透明 Pod resourceVersion。client 将返回 record 与同一次实际 CREATE 值核对，SQL store 将保存的 BIND record 与 gated-spec 列核对；之后现有 UID/RV/whole-spec JSONPatch 才可移除 gate。source 记录只认证 coordinator input，其含义仍依赖实际 API readback、admission 和 actor 边界。
 
-每次 live ARM、BIND、stop-intent、poll 和原 publish/stage/unpublish pre/post call 都复核原 policy measurement，包括 durable stop 后到 unpublish 前。durable 原 publication 之前发现原 task 会拒绝；当前 parser 同样要求依次 BIND、PUBLISH_OK、CUSTODY_OPEN。已完成 unpublish 的重放和后续普通 unstage 不创建新 source evidence。ARM 后、BIND 前的丢失也必须持久 `CONFINEMENT_LOST`，永久阻断原 scope。未知 append outcome 使 source poisoned。已完成的原 unpublish history 可继续读取，但下次 ARM 不能继承旧测量。本阶段尚不提供 immutable OCI birth provenance、实际内核 task confinement、迁移/逃逸排除或 qualified release writer；仍需完成这些 consumer 和实际部署验收。
+每次 live ARM、BIND、stop-intent、poll 和原 publish/stage/unpublish pre/post call 都复核原 policy measurement，包括 durable stop 后到 unpublish 前。durable 原 publication 之前发现原 task 会拒绝；v6 parser 还要求 PUBLISH_OK 与 CUSTODY_OPEN 之间的实际配对出生依赖。已完成 unpublish 的重放和后续普通 unstage 不创建新 source evidence。ARM 后、BIND 前的丢失也必须持久 `CONFINEMENT_LOST`，永久阻断原 scope。未知 append outcome 使 source poisoned。已完成的原 unpublish history 可继续读取，但下次 ARM 不能继承旧测量。新 producer 已记录 immutable OCI 输入候选，但实际消费/containment、迁移/逃逸排除、安装资格及 qualified release writer 仍未验收。
 
 ## 实验 runtime 配置
 
@@ -141,7 +141,7 @@ BIND 增加经过认证 coordinator 提供的实际 admitted gated-spec digest �
 
 前后认证 API 与 host 检查确认节点 exact UID、boot、cordon/隔离 taint、6个系统 Pod身份/状态、原两个 Ready 节点/CSI Pod，以及 CSI guard/DaemonSet 身份和完整 spec 保持。121个 loaded profile entry 和完整摘要相同，policy lock 仍关闭。没有 K2 worker、CSI publication 或默认 plugin 替代；已有系统卷和一条非CSI subpath仍存在。独立本地 artifact audit 通过56项一致性检查。本批准阶段没有安装 collector、K2 profile、backend 或 registrar，也没有写 policy lock。原24小时/25元上限和2026-10-12 20:46:55上海时间清理截止不变。未来普通容器 CREATE 仍可能触发 runtime 默认 profile 加载。
 
-实际 containerd/shim revision `4eddfe81d0f9aaaa4363faf25c473a874ce2ee2e` 和 runc 1.4.3 revision `bb14dab` 与已读 upstream reference 不同，不能从版本字符串转移源码语义或出生资格。当前 `Containers.Get` metadata pinning 已实现为 observation 检查。Retained running-task namespace/root context 和 consumed-input producer 仍须实现；合法 metadata/resource 更新可替换 Spec，当前 metadata 不能重建 birth。实际消费的OCI/runtime/task/rootfs inputs必须在untrusted execution之前由原creation boundary记录，前后相同hash不能提供该证据。固定upstream使用API1.11.1，本gateway为API1.9读模型，仅Containers proto作静态对比；Tasks存在较新creation fields，完整兼容未资格化。CREATED task的AppArmor on-exec设置不是实际running label。物理释放前须验证Any/Options/spec字段、runtime执行边界和完整child confinement。
+实际 containerd/shim revision `4eddfe81d0f9aaaa4363faf25c473a874ce2ee2e` 和 runc 1.4.3 revision `bb14dab` 与已读 upstream reference 不同，不能从版本字符串转移源码语义或出生资格。当前 `Containers.Get` metadata pinning 已实现为 observation 检查。retained created-task namespace/root context 和 consumed-input producer 已实现为候选；合法 metadata/resource 更新可替换 Spec，当前 metadata 不能重建 birth。实际消费的OCI/runtime/task/rootfs inputs必须在untrusted execution之前由原creation boundary记录，前后相同hash不能提供该证据。固定upstream使用API1.11.1，本候选模块现使用API1.11.1读模型，仅Containers proto作静态对比；Tasks存在较新creation fields，完整兼容未资格化。CREATED task的AppArmor on-exec设置不是实际running label。物理释放前须验证Any/Options/spec字段、runtime执行边界和完整child confinement。
 
 ## CSI frontend 与因果 stop barrier
 
@@ -163,7 +163,7 @@ target 固定为绑定 Pod UID 的 kubelet path。kernel `statx` 观察 device�
 
 ## 打包与验收
 
-[Host service 候选](../../deploy/k2-evidence/README.zh-CN.md#host-service-部署候选) 提供两个 static unit、私有目录规则和 executable-digest startup check。它们保留 host PID/user/cgroup namespace、建立私有 mount view，仅保留候选 proc-read capability，并拒绝 tracing、process-memory、pidfd signalling 和 namespace-changing syscalls，不自动开机启用或 restart。较早的 units 通过了下述有界自有 Linux 功能测试。当前 source unit 新增强制 `AppArmorProfile=qwen-k2-source-v1`，改变后的 unit 与新 policy reader 不继承旧结果；它们的 native 验收与 ACK 资格化待完成。安装前需验证目标 systemd version、实际 peer capability sets、LSM 限制及所需 proc/cgroup/socket 操作。[systemd execution 文档](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml) 区分 host cgroup read-only 设置与 private cgroup namespace，并说明 incoming mount propagation；新 CSI submount 仍需强制只读边界。原 Pod actor/admission 边界和独占的选定 driver/registrar 是另外的前置条件。
+[Host service 候选](../../deploy/k2-evidence/README.zh-CN.md#host-service-部署候选) 提供两个 static unit、私有目录规则，以及基于持续持有的受保护 shim 配置的 executable 校验。source/gateway 配置及 TLS 对象在处理前后核对；私钥要求 0400，每个角色文件限制 32 KiB。它们保留 host PID/user/cgroup namespace、建立私有 mount view，仅保留候选 proc-read capability，并拒绝 tracing、process-memory、pidfd signalling 和 namespace-changing syscalls，不自动开机启用或 restart。较早的 units 通过了下述有界自有 Linux 功能测试。当前两个 unit 分别强制 `qwen-k2-source-v1`、`qwen-k2-gateway-v1` AppArmor profile，并允许必需的 openat2 resolver；gateway 另核对实际 credentials、seccomp 与 initial user mapping。改变后的 unit 与读端不继承旧结果；它们的 native 验收与 ACK 资格化待完成。安装前需验证目标 systemd version、实际 peer capability sets、LSM 限制及所需 proc/cgroup/socket 操作。[systemd execution 文档](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml) 区分 host cgroup read-only 设置与 private cgroup namespace，并说明 incoming mount propagation；新 CSI submount 仍需强制只读边界。原 Pod actor/admission 边界和独占的选定 driver/registrar 是另外的前置条件。
 
 涉及独立 Go 模块的 gateway、custody、CSI proxy 和 journal；isolated-node deployment artifacts；私有 Kubernetes client/provisioner；physical source/outcome persistence 和窄 release consumer；holder revision readers 及后续 qualified public selector。固定依赖，可复现构建 Linux binaries/images，记录实际 digest。server jar plugin 强制在 Boot repackage 前生成普通 jar，避免 incremental package 留下旧 nested broker。自有两次 package 实验验证仅 broker 变化时，四个 classified jar 和主 Boot jar 均更新。安装申请前准备可审阅 deployment；本文不是安装 privileged 软件的授权。
 

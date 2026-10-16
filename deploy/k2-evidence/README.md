@@ -75,13 +75,19 @@ avoids assuming that a `hostPID` Pod also sees the host cgroup hierarchy. The
 source must still prove that `/proc/<originalPID>/cgroup` resolves beneath its
 actual `/sys/fs/cgroup` view.
 
-Install the reviewed executable at `/opt/qwen-k2/bin/k2-node-evidence`. Both units
-require `/etc/qwen-k2/executable.sha256`, containing its actual SHA-256 and this
-absolute path. Supply root-owned configuration and certificate files beneath
+Install the reviewed executable at `/opt/qwen-k2/bin/k2-node-evidence`. Both roles
+verify its actual digest against the retained `/etc/qwen-k2/shim.json` and use
+that configuration for the dedicated handler inputs. Supply root-owned
+configuration and certificate files beneath
 the private `/etc/qwen-k2` directory. `gateway.json` and `source.json` must contain
 the exact fields declared by the Go entry point; credentials and invented
 node/process/image pins are not distributed in this directory. The gateway's
 runtime socket remains an administrative capability held by that trusted helper.
+Each configuration/PEM object must be a root-owned immutable read-only regular
+file on ext4, at most 32 KiB; private keys require mode 0400. Both roles retain
+the original descriptors and verify names, identity and bytes before and after
+control processing. Source gateway RPCs and CSI forwarding also check both
+sides of the call. These checks do not establish complete installation authority.
 
 The selected driver must expose its private socket under
 `/run/qwen-k2/backend`. The source configuration uses
@@ -103,15 +109,17 @@ proc reads, reviewed sockets, source journal and frontend, with no task-memory
 or worker-volume writes. Do not infer that an empty capability set works from
 the owned fixture's test result.
 
-The source explicitly sets `RestrictSUIDSGID=no`: systemd's
+Both roles explicitly set `RestrictSUIDSGID=no`: systemd's
 [SUID/SGID filter](https://github.com/systemd/systemd/blob/v259.5/src/shared/seccomp-util.c)
 returns `ENOSYS` for every `openat2` call. An actual service trace reproduced
-this failure at the original BIND target check. The source requires `openat2`
-with beneath-root and no-symlink resolution; it never falls back to a weaker
+this failure at the original BIND target check. Both roles require `openat2`
+for protected role files; the source also requires beneath-root target resolution, and it never falls back to a weaker
 resolver. `NoNewPrivileges`, the capability bound and the declared writable
 paths remain enforced. The reviewed LSM policy must additionally prevent
 set-ID file creation or changes; these service units alone do not establish
-that restriction. The gateway retains its SUID/SGID filter.
+that restriction. The gateway now requires its dedicated enforced AppArmor
+profile and checks its actual root credentials, initial user mapping, seccomp
+and SYS_PTRACE-only capability set before serving and returning control replies.
 
 Filesystem read-only settings do not prove that newly propagated CSI submounts
 are recursively read-only. Verify one-way mount visibility and enforce the
@@ -132,4 +140,32 @@ fixtures and the LSM was unconfined. This result does not qualify actual ACK
 runtime/plugin/driver wiring, a restrictive LSM, admission, physical release or
 volume reuse. It does not qualify the changed current source unit or v2 reader. The original `openat2` failure remains recorded separately.
 
-The current source requires `workerPolicySha256`, the reviewed full packed bundle containing both fixed worker/source profiles. It records actual loaded-policy measurements and the original image in a v4 ARM, and the admitted gated-spec digest/resourceVersion in BIND. Startup and live operations fail closed on missing or changed measurements. Mandatory source confinement, actual node-wide enforce/lock, the source-only disconnected exporter prefix and complete birth confinement still require concrete native qualification and installation approval. The code only reads policy; these artifacts never set the node-wide lock.
+The current source requires `workerPolicySha256`, the reviewed full packed bundle containing the fixed worker/source/sandbox/shim/gateway profiles. It records actual loaded-policy measurements and the original image in a v6 ARM, and the admitted gated-spec digest/resourceVersion in BIND. Startup and live operations fail closed on missing or changed measurements. Mandatory source confinement, actual node-wide enforce/lock, the source-only disconnected exporter prefix and complete birth confinement still require concrete native qualification and installation approval. The code only reads policy; these artifacts never set the node-wide lock.
+
+## Pre-execution shim candidate
+
+Build the dedicated shim with the same Go 1.26.3-or-newer toolchain and locked module as the source. Record both architecture builds of both entry points; do not substitute a source-only build for the shim.
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GOTOOLCHAIN=local GOWORK=off \
+  go build -mod=readonly -trimpath -buildvcs=false \
+  -o /absolute/output/containerd-shim-qwen-k2-v1 ./cmd/containerd-shim-qwen-k2-v1
+```
+
+From the repository root, render the reviewed candidate from the exact source, shim and separately reviewed runc artifacts and original creation-contract bytes:
+
+```sh
+python3 deploy/k2-evidence/render-pre-exec.py \
+  --source /absolute/output/k2-node-evidence \
+  --shim /absolute/output/containerd-shim-qwen-k2-v1 \
+  --runc /absolute/reviewed/runc \
+  --sandbox-image-sha256 REVIEWED_SANDBOX_MANIFEST_SHA256 \
+  --creation-contract /absolute/reviewed/creation-contract.json \
+  --output /absolute/output/new-pre-exec-candidate
+```
+
+The renderer hashes the actual artifact bytes, checks their ELF header architecture agrees, preserves the contract bytes, refuses duplicate JSON and existing output, and writes root-private candidate files. It checks the contract envelope; the shim and Java consumer perform the complete semantic validation. It does not establish artifact source provenance or execution compatibility.
+
+`shim.json` is the candidate for `/etc/qwen-k2/shim.json`; `runtime-handler.toml` is a fragment for the reviewed containerd CRI runtime configuration, with explicit `runtime_path` and `io.containerd.qwen-k2.v1` runtime type. The existing RuntimeClass name/handler remains `qwen-k2-runc-v1`. The source configuration additionally requires the generated `sandboxImageSha256`. The tmpfiles fragment supplies the fixed private directories. None of these files is installed or applied by this tool.
+
+Before installation, qualify the actual daemon's handler/bootstrap compatibility, private ext4 consumed-input mount, immutable installed files and ancestors, initial namespaces, complete loaded/locked AppArmor bundle and actor/admission boundary. The current service units and historical profiles have not inherited this changed candidate's qualification. The runtime directory must remain writable for its normal PID/log/rootfs/cleanup operations. Do not make the entire consumption bundle immutable. Use `node-config` with the exact reviewed source/shim configurations to produce the mandatory Java birth inputs; successful parsing remains distinct from installation qualification and physical release. See the [birth design](../../docs/design/2026-10-16-k2-pre-exec-birth.md).

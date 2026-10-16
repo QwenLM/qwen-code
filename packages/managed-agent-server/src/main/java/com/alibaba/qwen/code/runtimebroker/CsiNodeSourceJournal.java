@@ -15,10 +15,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Verifies source bytes and explicit dependencies; observations do not authorize physical release. */
 public final class CsiNodeSourceJournal {
     public static final int MAX_BYTES = 64 * 1024 * 1024;
+    private static final int MAX_RECORD_BYTES = 192 * 1024;
     public static final int RESPONSE_LIMIT = ((MAX_BYTES + 2) / 3) * 4 + 1024;
     private static final BigInteger UINT64 = BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE);
     private static final ObjectMapper JSON = new ObjectMapper(JsonFactory.builder()
@@ -30,10 +32,9 @@ public final class CsiNodeSourceJournal {
             "volumeId", "pvUid", "pvcUid", "target", "bindingId", "retirementId");
     private static final List<String> RECORD = List.of("version", "incarnation", "sequence", "previous", "kind", "source",
             "scope", "begin", "publish", "stop", "custody", "runtime", "caller", "target", "intentHash", "status",
-            "imageDigest", "policy", "gatedSpecSha256", "podResourceVersion", "hash");
+            "imageDigest", "policy", "gatedSpecSha256", "podResourceVersion", "birth", "hash");
 
-    private CsiNodeSourceJournal() {
-    }
+    private CsiNodeSourceJournal() {}
 
     public record Cursor(long sequence, String hash) {
         public Cursor {
@@ -42,15 +43,20 @@ public final class CsiNodeSourceJournal {
     }
 
     public record SourceIdentity(String nodeUid, String bootId, String runtimeDigest, BigInteger runtimeStart,
-            int runtimePid, String gatewayIncarnation, String pluginDigest, BigInteger pluginStart, int pluginPid) {
-    }
+            int runtimePid, String gatewayIncarnation, String pluginDigest, BigInteger pluginStart, int pluginPid) {}
 
     public record Scope(String armId, String namespace, String podName, String podUid, String containerId, String driver,
-            String volumeId, String pvUid, String pvcUid, String target, String bindingId, String retirementId) {
-    }
+            String volumeId, String pvUid, String pvcUid, String target, String bindingId, String retirementId) {}
+
+    /** Read-only projections of verified birth records, never deployment or release permissions. */
+    public record BirthObservation(String role, String containerId, String sandboxId, String imageDigest,
+            Cursor prepared, Cursor created, Cursor startBegin, Cursor started, Cursor deleted) {}
 
     public record Observation(Scope scope, String state, Cursor arm, Cursor bound, Cursor custody,
-            Cursor publish, Cursor intent, Cursor stopped, Cursor unpublished) {
+            Cursor publish, Cursor intent, Cursor stopped, Cursor unpublished, List<BirthObservation> births) {
+        public Observation {
+            births = List.copyOf(births);
+        }
     }
 
     public record Stream(String incarnation, SourceIdentity source, Cursor head, String bytesSha256, List<Observation> observations) {
@@ -89,7 +95,7 @@ public final class CsiNodeSourceJournal {
                 if (sequence == cursor.sequence()) {
                     byte[] raw = new byte[size];
                     input.get(raw);
-                    var record = object(raw, 64 * 1024);
+                    var record = object(raw, MAX_RECORD_BYTES);
                     require(cursor.hash().equals(text(record, "hash")));
                     return record;
                 }
@@ -114,10 +120,10 @@ public final class CsiNodeSourceJournal {
         while (input.hasRemaining()) {
             require(input.remaining() >= 4 && records.size() < 65536);
             int size = input.getInt();
-            require(size > 0 && size <= 64 * 1024 && input.remaining() >= size);
+            require(size > 0 && size <= MAX_RECORD_BYTES && input.remaining() >= size);
             byte[] raw = new byte[size];
             input.get(raw);
-            JsonNode record = object(raw, 64 * 1024);
+            JsonNode record = object(raw, MAX_RECORD_BYTES);
             validate(record);
             require(integer(record, "sequence", 65536) == records.size() + 1L
                     && previous.equals(text(record, "previous")));
@@ -193,7 +199,7 @@ public final class CsiNodeSourceJournal {
         return number.longValue();
     }
 
-    private static void unsigned(JsonNode value, String field, boolean positive) {
+    static void unsigned(JsonNode value, String field, boolean positive) {
         JsonNode number = value.path(field);
         require(number.isIntegralNumber() && number.bigIntegerValue().signum() >= (positive ? 1 : 0)
                 && number.bigIntegerValue().compareTo(UINT64) <= 0);
@@ -208,7 +214,7 @@ public final class CsiNodeSourceJournal {
     private static void validate(JsonNode r) {
         String kind = text(r, "kind");
         var expected = new ArrayList<>(List.of("version", "incarnation", "sequence", "previous", "kind"));
-        require("qwen-k2-node-source/4".equals(text(r, "version"))
+        require("qwen-k2-node-source/6".equals(text(r, "version"))
                 && text(r, "incarnation").matches("[0-9a-f]{32}")
                 && text(r, "previous").matches("[0-9a-f]{64}") && text(r, "hash").matches("[0-9a-f]{64}"));
         if ("SOURCE_START".equals(kind)) {
@@ -253,7 +259,8 @@ public final class CsiNodeSourceJournal {
                 case "BIND" -> List.of("gatedSpecSha256", "podResourceVersion");
                 case "CONFINEMENT_LOST" -> List.<String>of();
                 case "PUBLISH_BEGIN" -> List.of("caller");
-                case "CUSTODY_OPEN" -> List.of("custody", "runtime");
+                case "CUSTODY_OPEN" -> List.of("begin", "custody", "runtime");
+                case "BIRTH_PREPARED", "BIRTH_CREATED", "BIRTH_START_BEGIN", "BIRTH_STARTED", "BIRTH_NATIVE_DELETED" -> List.of("publish", "birth");
                 case "PUBLISH_OK" -> List.of("begin", "target");
                 case "PUBLISH_FAILED" -> List.of("begin", "status");
                 case "STOP_INTENT" -> List.of("intentHash");
@@ -295,6 +302,9 @@ public final class CsiNodeSourceJournal {
             }
             if (extras.contains("custody")) {
                 custody(r);
+            }
+            if (extras.contains("birth")) {
+                CsiNodeSourceBirth.validate(r);
             }
         }
         expected.add("hash");
@@ -408,6 +418,7 @@ public final class CsiNodeSourceJournal {
         private final JsonNode arm;
         private JsonNode scope, bound, opened, publishBegin, publish, intent, stopped, unpublishBegin, unpublished;
         private boolean blocked, lost;
+        private final Map<String, Birth> births = new LinkedHashMap<>();
 
         private Original(JsonNode arm) {
             this.arm = arm;
@@ -420,13 +431,49 @@ public final class CsiNodeSourceJournal {
             JsonNode next = r.path("scope");
             for (String f : SCOPE) {
                 if ("BIND".equals(kind) && List.of("podUid", "target").contains(f)
-                        || "CUSTODY_OPEN".equals(kind) && "containerId".equals(f)
+                        || "BIRTH_CREATED".equals(kind) && "container".equals(text(r.path("birth"), "role")) && "containerId".equals(f)
                         || "STOP_INTENT".equals(kind) && "retirementId".equals(f)) {
                     continue;
                 }
                 require(scope.path(f).equals(next.path(f)));
             }
             switch (kind) {
+                case "BIRTH_PREPARED", "BIRTH_CREATED", "BIRTH_START_BEGIN", "BIRTH_STARTED", "BIRTH_NATIVE_DELETED" -> {
+                    require(bound != null && publish != null && (!kind.equals("BIRTH_NATIVE_DELETED") ? intent == null : true));
+                    dependency(r, "publish", publish, records);
+                    String id = text(r.path("birth"), "id");
+                    if (kind.equals("BIRTH_PREPARED")) {
+                        require(!births.containsKey(id) && births.size() < 2);
+                        for (Birth existing : births.values()) {
+                            require(!text(existing.prepared.path("birth"), "role").equals(text(r.path("birth"), "role"))
+                                    && existing.prepared.path("birth").path("sandboxId").equals(r.path("birth").path("sandboxId"))
+                                    && existing.prepared.path("birth").path("peer").equals(r.path("birth").path("peer"))
+                                    && existing.prepared.path("birth").path("policy").equals(r.path("birth").path("policy")));
+                        }
+                        if ("container".equals(text(r.path("birth"), "role"))) {
+                            require(arm.path("imageDigest").equals(r.path("birth").path("imageRootfs").path("manifestSha256")));
+                            Birth sandbox = births.get(text(r.path("birth"), "sandboxId"));
+                            require(sandbox != null && sandbox.started != null && sandbox.deleted == null);
+                        }
+                        births.put(id, new Birth(r));
+                    } else {
+                        Birth born = births.get(id);
+                        require(born != null);
+                        born.accept(r, records);
+                        if (kind.equals("BIRTH_CREATED") && "container".equals(text(r.path("birth"), "role"))) {
+                            require(text(next, "containerId").equals(id));
+                            Birth sandbox = births.get(text(r.path("birth"), "sandboxId"));
+                            require(sandbox != null && sandbox.started != null);
+                            JsonNode workerNs = r.path("birth").path("namespaces").path("namespaces");
+                            JsonNode sandboxNs = sandbox.created.path("birth").path("namespaces").path("namespaces");
+                            for (int index = 0; index < 7; index++) {
+                                require(workerNs.get(index).equals(sandboxNs.get(index)) == (index >= 3));
+                            }
+                            require(r.path("birth").path("custody").path("parentDevice").equals(sandbox.created.path("birth").path("custody").path("parentDevice"))
+                                    && r.path("birth").path("custody").path("parentInode").equals(sandbox.created.path("birth").path("custody").path("parentInode")));
+                        }
+                    }
+                }
                 case "BIND" -> {
                     require(bound == null);
                     bound = r;
@@ -434,6 +481,13 @@ public final class CsiNodeSourceJournal {
                 case "CUSTODY_OPEN" -> {
                     require(bound != null && publish != null && opened == null);
                     require(arm.path("imageDigest").equals(r.path("runtime").path("imageDigest")));
+                    Birth worker = births.get(text(next, "containerId"));
+                    require(worker != null && worker.started != null);
+                    dependency(r, "begin", worker.started, records);
+                    require(r.path("runtime").path("sandboxId").equals(worker.prepared.path("birth").path("sandboxId")));
+                    for (String field : List.of("pid", "startTicks", "cgroupDevice", "cgroupInode", "coverage", "parentDevice", "parentInode")) {
+                        require(r.path("custody").path(field).equals(worker.created.path("birth").path("custody").path(field)));
+                    }
                     opened = r;
                 }
                 case "PUBLISH_BEGIN" -> {
@@ -505,11 +559,65 @@ public final class CsiNodeSourceJournal {
             return new Observation(identity, state, recordCursor(arm), bound == null ? null : recordCursor(bound),
                     opened == null ? null : recordCursor(opened), publish == null ? null : recordCursor(publish),
                     intent == null ? null : recordCursor(intent),
-                    stopped == null ? null : recordCursor(stopped), unpublished == null ? null : recordCursor(unpublished));
+                    stopped == null ? null : recordCursor(stopped), unpublished == null ? null : recordCursor(unpublished),
+                    births.values().stream().map(Birth::observation).toList());
+        }
+    }
+
+    private static final class Birth {
+        private final JsonNode prepared;
+        private JsonNode created, startBegin, started, deleted;
+
+        private Birth(JsonNode prepared) {
+            this.prepared = prepared;
+        }
+
+        private BirthObservation observation() {
+            JsonNode value = prepared.path("birth");
+            return new BirthObservation(text(value, "role"), text(value, "id"), text(value, "sandboxId"),
+                    text(value.path("imageRootfs"), "manifestSha256"), recordCursor(prepared),
+                    created == null ? null : recordCursor(created), startBegin == null ? null : recordCursor(startBegin),
+                    started == null ? null : recordCursor(started), deleted == null ? null : recordCursor(deleted));
+        }
+
+        private void accept(JsonNode record, List<JsonNode> records) {
+            JsonNode b = record.path("birth");
+            CsiNodeSourceBirth.sameBase(prepared.path("birth"), b);
+            dependency(b, "prepared", prepared, records);
+            String kind = text(record, "kind");
+            require(deleted == null);
+            if (kind.equals("BIRTH_CREATED")) {
+                require(created == null);
+                created = record;
+                return;
+            }
+            require(created != null && b.path("namespaces").equals(created.path("birth").path("namespaces")));
+            for (String field : List.of("pid", "startTicks", "cgroupDevice", "cgroupInode", "coverage", "parentDevice", "parentInode")) {
+                require(b.path("custody").path(field).equals(created.path("birth").path("custody").path(field)));
+            }
+            if (kind.equals("BIRTH_START_BEGIN")) {
+                require(startBegin == null && started == null);
+                dependency(b, "created", created, records);
+                startBegin = record;
+            } else if (kind.equals("BIRTH_STARTED")) {
+                require(startBegin != null && started == null);
+                dependency(b, "created", created, records);
+                dependency(b, "startBegin", startBegin, records);
+                started = record;
+            } else if (kind.equals("BIRTH_NATIVE_DELETED")) {
+                deleted = record;
+            } else {
+                throw new IllegalArgumentException("Invalid original birth transition");
+            }
         }
     }
 
     private static String goJson(JsonNode node) {
+        if (node.isArray()) {
+            var values = new ArrayList<String>();
+            node.forEach(value -> values.add(goJson(value)));
+            return "[" + String.join(",", values) + "]";
+        }
         if (node.isObject()) {
             var fields = new ArrayList<String>();
             node.fields().forEachRemaining(f -> fields.add(quote(f.getKey()) + ":" + goJson(f.getValue())));

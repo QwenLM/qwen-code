@@ -201,7 +201,7 @@ func newGatewayFixture(t *testing.T) (*runtimeReadGateway, *gatewayFixture, cont
 	stamp := timestamppb.New(time.Unix(1710000000, 123456))
 	f := &gatewayFixture{t: t, state: tasktypes.Status_CREATED, criState: cri.ContainerState_CONTAINER_CREATED, pid: 12345, image: "sha256:" + gatewayTask.ImageDigest, stamp: stamp, finishedAt: stamp.AsTime().UnixNano(), exited: make(chan struct{}), started: make(chan struct{}), waitDone: make(chan struct{})}
 	f.metadata = &containers.Container{ID: gatewayCID, Image: "opaque-original-image", Snapshotter: "overlayfs", SnapshotKey: gatewayCID,
-		Runtime: &containers.Container_Runtime{Name: "io.containerd.runc.v2", Options: &anypb.Any{TypeUrl: "synthetic-runtime-options", Value: []byte{1}}},
+		Runtime: &containers.Container_Runtime{Name: "io.containerd.qwen-k2.v1", Options: &anypb.Any{TypeUrl: "synthetic-runtime-options", Value: []byte{1}}},
 		Spec:    &anypb.Any{TypeUrl: "types.containerd.io/opencontainers/runtime-spec/1/Spec", Value: []byte(gatewayOCISpec)}, CreatedAt: stamp,
 		Labels: map[string]string{"io.kubernetes.pod.uid": gatewayTask.PodUID, "io.kubernetes.pod.namespace": gatewayTask.Namespace,
 			"io.kubernetes.pod.name": gatewayTask.PodName, "io.kubernetes.container.name": "runtime", "io.cri-containerd.kind": "container"}}

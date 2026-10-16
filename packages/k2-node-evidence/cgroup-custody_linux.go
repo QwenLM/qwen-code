@@ -148,6 +148,10 @@ func (c *kernelCustody) processIdentity() (uint64, string, error) {
 }
 
 func (c *kernelCustody) verifyRunningSecurity() error {
+	return c.verifyRunningSecurityProfile(workerProfile)
+}
+
+func (c *kernelCustody) verifyRunningSecurityProfile(profile string) error {
 	fail := func() error {
 		c.failed = true
 		return errors.New("original running process security changed")
@@ -165,7 +169,7 @@ func (c *kernelCustody) verifyRunningSecurity() error {
 		return fail()
 	}
 	label, err := procFile(c.process, "attr/apparmor/current")
-	if err != nil || string(label) != workerProfile+" (enforce)\n" {
+	if err != nil || string(label) != profile+" (enforce)\n" {
 		return fail()
 	}
 	after, err := c.observe()
@@ -182,6 +186,13 @@ func openOriginalCustody(original runtimeObservation) (_ *kernelCustody, err err
 	if original.PID == 0 || original.State != "created" && original.State != "running" {
 		return nil, errors.New("original process must be observed before termination")
 	}
+	return openCreatedCustody(original.PID, original.PodUID, original.ContainerID)
+}
+
+func openCreatedCustody(pid uint32, podUID, containerID string) (_ *kernelCustody, err error) {
+	if pid == 0 || !safeID(podUID) || !hashString(containerID) {
+		return nil, errors.New("actual created init identity is required")
+	}
 	c := &kernelCustody{pidfd: -1, process: -1, directory: -1, parent: -1, events: -1}
 	defer func() {
 		if err != nil {
@@ -196,7 +207,7 @@ func openOriginalCustody(original runtimeObservation) (_ *kernelCustody, err err
 	if policyKind(proc, unix.PROC_SUPER_MAGIC, unix.S_IFDIR) != nil {
 		return nil, errors.New("original proc root is not a kernel filesystem")
 	}
-	c.process, err = policyOpen(proc, strconv.FormatUint(uint64(original.PID), 10), true)
+	c.process, err = policyOpen(proc, strconv.FormatUint(uint64(pid), 10), true)
 	if err != nil {
 		return nil, errors.New("original proc directory could not be retained")
 	}
@@ -209,11 +220,11 @@ func openOriginalCustody(original runtimeObservation) (_ *kernelCustody, err err
 		return nil, err
 	}
 	c.path = path
-	parentPath, err := originalPodParent(path, original.PodUID, original.ContainerID)
+	parentPath, err := originalPodParent(path, podUID, containerID)
 	if err != nil {
 		return nil, err
 	}
-	c.pidfd, err = unix.PidfdOpen(int(original.PID), 0)
+	c.pidfd, err = unix.PidfdOpen(int(pid), 0)
 	if err != nil {
 		return nil, errors.New("original pidfd could not be retained")
 	}
@@ -247,7 +258,7 @@ func openOriginalCustody(original runtimeObservation) (_ *kernelCustody, err err
 	if err = unix.Fstat(c.directory, &stat); err != nil {
 		return nil, errors.New("original cgroup identity unavailable")
 	}
-	c.initial = custodyObservation{PID: original.PID, StartTicks: ticks, CgroupDevice: uint64(stat.Dev), CgroupInode: stat.Ino}
+	c.initial = custodyObservation{PID: pid, StartTicks: ticks, CgroupDevice: uint64(stat.Dev), CgroupInode: stat.Ino}
 	if err = unix.Fstat(c.parent, &stat); err != nil || uint64(stat.Dev) != c.initial.CgroupDevice || stat.Ino == 0 || stat.Ino == c.initial.CgroupInode {
 		return nil, errors.New("original Pod parent must be a distinct same-filesystem object")
 	}

@@ -75,7 +75,7 @@ public final class WorkspaceCsiRuntimeMain {
             WorkspaceCsiPhysicalMain.run(args);
             return;
         }
-        if (args.length == 2 && "source-status".equals(args[0])) {
+        if (args.length == 2 && java.util.Set.of("source-status", "node-config").contains(args[0])) {
             WorkspaceCsiNodeSourceMain.run(args);
             return;
         }
@@ -177,9 +177,9 @@ public final class WorkspaceCsiRuntimeMain {
             com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient api) throws java.io.IOException {
         byte[] bytes;
         try (var input = Files.newInputStream(path)) {
-            bytes = input.readNBytes(16 * 1024 + 1);
+            bytes = input.readNBytes(WorkspaceCsiNodeSourceStore.CONFIGURATION_LIMIT + 1);
         }
-        if (bytes.length == 0 || bytes.length > 16 * 1024) {
+        if (bytes.length == 0 || bytes.length > WorkspaceCsiNodeSourceStore.CONFIGURATION_LIMIT) {
             throw new IllegalArgumentException("A bounded reviewed node source is required");
         }
         var request = json.readValue(bytes, NodeRequest.class);

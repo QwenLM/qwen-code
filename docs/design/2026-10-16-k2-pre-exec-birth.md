@@ -1,0 +1,118 @@
+# K2 pre-execution birth and physical completion
+
+[English](2026-10-16-k2-pre-exec-birth.md) | [简体中文](2026-10-16-k2-pre-exec-birth.zh-CN.md)
+
+Status: implementation in progress. The resident Workspace first version is
+separate. The source/6 implementation now connects actual shim birth records to the Java
+consumer. Its compilation and ordinary data tests do not establish installed
+confinement from birth and cannot authorize physical release. Ref #13395 and
+Draft PR #13526.
+
+## Problem
+
+Reading the current container specification after Start cannot prove what the
+runtime consumed before the first instruction. A stopped task and an empty
+cgroup cannot repair that missing interval. The source must bind the actual
+normal Create, its consumed inputs, the original created process and the normal
+Start before accepting publication and subsequent stop evidence.
+
+## Actual task boundary
+
+Use a dedicated `io.containerd.qwen-k2.v1` shim. Its task service wraps the real
+containerd runc task service. It accepts only the original Kubernetes init task;
+exec, checkpoint, update, pause, resume and terminal operations are refused.
+Create reserves the original ID, protects its inputs, obtains a durable source
+association, delegates the exact request with only Bundle relocated, then binds
+the actual returned PID. Start requires that same owner/PID and source
+permission, delegates normal Start, and reports the actual result. A failed or
+ambiguous transition never supplies release evidence.
+
+Delete saves the actual native response before input cleanup. A cleanup retry
+uses that response without issuing a second Delete. Shutdown delegates only
+after every registered owner has completed cleanup or failed preparation before
+any native Create call. An unknown native Create result still blocks shutdown. The manager's emergency
+cleanup remains a runtime maintenance path and never produces a qualified
+normal-stop receipt.
+
+The shim uses pinned containerd SDK APIs rather than a replacement task engine.
+The SDK module's minimum Go and dependency versions enter this module's lock
+files. Both Linux architecture builds must include the new shim command and
+the existing gateway/source command; build success establishes compilation
+only.
+
+## Consumed inputs and creator channel
+
+Preserve the original Create protobuf and OCI bytes. Protect a separate private
+ext4 bundle with immutable regular files for the original/consumed request and
+configuration. Keep the bundle directory writable for runc's normal PID, log,
+rootfs and work entries. Retain the exact read-only descriptors and the pinned
+runc executable. Reject unknown protobuf fields, altered request fields,
+unbounded inputs, unsafe paths and changed objects. Never infer consumption
+from two equal reads of a mutable pathname.
+
+The original worker keeps its reviewed OCI bytes. The sandbox receives the
+explicit no-new-privileges, empty-capability, AppArmor and cgroup-namespace
+changes before Create. Both roles must match a complete reviewed creation
+contract covering command, environment, mounts, devices, seccomp and protected
+paths. Parsing that contract is data validation, not deployment authority.
+
+Use a private sequenced-packet Unix creator channel. Authenticate its actual
+root peer, PID/start/pidfd, immutable executable and enforced AppArmor label.
+Pass the retained input descriptors, not caller-provided file hashes. Bind
+sequence, request hash, source incarnation and the original association on
+every reply. A lost channel, changed peer or input object blocks the live
+association. The source's matching handler and journal consumer must be wired
+before this shim is installable; an isolated producer is not a working source.
+
+## Retained service inputs
+
+Source and gateway retain the immutable ext4 configuration, CA, certificate and
+private-key objects from startup. TLS consumes their retained bytes; private
+keys require mode 0400. Every control operation checks the original named
+object and retained descriptor before processing and before returning its
+buffered response. CSI forwarding and gateway RPCs check their role files on
+both sides of the call. Changed or unavailable inputs fail closed. Each role
+file remains bounded at 32 KiB.
+
+The gateway verifies the actual root credentials, initial user mapping,
+SYS_PTRACE-only capability set, no-new-privileges, seccomp filter and dedicated
+enforced AppArmor profile. Both service units name their own mandatory profile
+and permit the required openat2 resolver. They run only the reviewed source
+entry point; executable verification comes from the protected shim
+configuration, rather than a separate pre-start executable. These checks do
+not yet measure the complete installed policy semantics, effective runtime
+handler, admission actors or exclusive CSI wiring. None grants release.
+
+## Source and release dependency
+
+The current source/6 format preserves paired sandbox/worker births, actual image
+and snapshot ancestry, raw consumed inputs, created-process custody and the
+explicit publication/stop/unpublish dependencies. Update the Go producer and
+Java reader together. A decoder, signature, hash chain or claimed digest does
+not qualify the installed implementation. The consumer must compare the actual
+installation and reviewed shim/runc/sandbox/role inputs, including the creation
+contract, through a private authority tied to the original SQL connection.
+
+Only that complete authority may commit the final receipt and four compare-and-
+set writes on one connection: physical outcome, original binding, original
+occupied request slot and original holder. Preserve every other column and raw
+credential value; any count mismatch, overflow, expiry or post-image mismatch
+rolls back all four. Historical reads must return the saved original outcome
+after a later owner reserves the volume. New ownership requires a fresh
+Session/request/slot/binding and the actual monotonic shared-holder revision.
+Do not relax the current reuse fence before this entire path is connected.
+
+## Validation and acceptance
+
+Keep old candidates as read-only references and select individual reviewed
+files. Do not restore an old tree, dependencies or test qualification wholesale.
+Use compilation and permitted ordinary data/Java checks for the current
+candidate. Previously refused native/source/custody/Main-F2 groups remain
+unexecuted; a different directory or runner does not change that restriction.
+
+Acceptance requires a real installed Create-to-Start chain, paired birth
+custody, original normal stop and CSI unpublish, all four atomic writes with
+rollback cases, historical credential replay and a subsequent distinct owner
+using the same volume. Current metadata fixtures, compiler output and resident
+Workspace acceptance cannot stand in for those results. Keep physical release
+and public selection closed while any prerequisite is missing.

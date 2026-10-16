@@ -64,8 +64,8 @@ func TestPolicyRequiresActualClosedEnforceMeasurement(t *testing.T) {
 	}
 }
 
-func TestV4FixtureMatchesActualGoCanonicalEncoding(t *testing.T) {
-	raw, err := os.ReadFile("../sdk-java/runtime-broker/src/test/resources/contracts/k2-node-source-v4.fixture.json")
+func TestV6FixtureMatchesActualGoCanonicalEncoding(t *testing.T) {
+	raw, err := os.ReadFile("../managed-agent-server/src/test/resources/contracts/k2-node-source-v6.fixture.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestV4FixtureMatchesActualGoCanonicalEncoding(t *testing.T) {
 	if err != nil || digest(frames) != fixture.BytesSHA256 {
 		t.Fatal("fixture byte digest differs")
 	}
-	if records, err := readJournal(bytes.NewReader(frames), fixture.Head); err != nil || len(records) != 10 {
+	if records, err := readJournal(bytes.NewReader(frames), fixture.Head); err != nil || len(records) != 18 {
 		t.Fatalf("Go canonical body/field validation failed: %v", err)
 	}
 	input := frames

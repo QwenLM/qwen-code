@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.CsiCreationContract;
 import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -18,10 +19,13 @@ import java.net.URI;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Base64;
+import java.util.List;
 import java.util.Objects;
 
 /** Saves the original source before scheduling; immutable publication never proves release. */
 public final class WorkspaceCsiNodeSourceStore {
+    public static final int CONFIGURATION_LIMIT = 64 * 1024;
     public static final int EVIDENCE_LIMIT = 1024 * 1024;
     private static final JsonMapper JSON = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
@@ -35,14 +39,27 @@ public final class WorkspaceCsiNodeSourceStore {
     private final JdbcRuntimeBindingRepository bindings;
     private final TransactionTemplate transaction;
 
+    /** Reviewed data expectations; these inputs alone never qualify an installation. */
+    public record BirthInputs(String shimSha256, String runcSha256, String sandboxImageSha256, String creationContract) {
+        public BirthInputs {
+            require(shimSha256 != null && shimSha256.matches("[0-9a-f]{64}")
+                    && runcSha256 != null && runcSha256.matches("[0-9a-f]{64}")
+                    && sandboxImageSha256 != null && sandboxImageSha256.matches("[0-9a-f]{64}")
+                    && creationContract != null && creationContract.length() <= (CsiCreationContract.LIMIT + 2) / 3 * 4);
+            byte[] raw = Base64.getDecoder().decode(creationContract);
+            require(creationContract.equals(Base64.getEncoder().encodeToString(raw)));
+            CsiCreationContract.validate(raw);
+        }
+    }
+
     public record Node(String name, String incarnation, CsiNodeSourceJournal.SourceIdentity identity,
-            URI sourceOrigin, String sourcePrincipal, URI gatewayOrigin, String gatewayPrincipal, String workerPolicySha256) {
+            URI sourceOrigin, String sourcePrincipal, URI gatewayOrigin, String gatewayPrincipal, String workerPolicySha256, BirthInputs birthInputs) {
         public Node {
             require(name != null && name.matches("[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
                     && incarnation != null && incarnation.matches("[0-9a-f]{32}") && identity != null
                     && sourceOrigin != null && gatewayOrigin != null && !sourceOrigin.equals(gatewayOrigin)
                     && sourcePrincipal != null && gatewayPrincipal != null && !sourcePrincipal.equals(gatewayPrincipal)
-                    && workerPolicySha256 != null && workerPolicySha256.matches("[0-9a-f]{64}"));
+                    && workerPolicySha256 != null && workerPolicySha256.matches("[0-9a-f]{64}") && birthInputs != null);
         }
     }
 
@@ -250,7 +267,8 @@ public final class WorkspaceCsiNodeSourceStore {
 
     public static CsiNodeSourceJournal.Observation validateEvidence(Configuration configuration,
             CsiNodeSourceJournal.Evidence evidence, String phase, String podUid) {
-        require(evidence != null && evidence.bytes().length <= EVIDENCE_LIMIT
+        require(configuration != null && phase != null && List.of("ARMED", "BOUND", "PUBLISHED").contains(phase)
+                && evidence != null && evidence.bytes().length <= EVIDENCE_LIMIT
                 && configuration.node().identity().equals(evidence.stream().source())
                 && configuration.node().incarnation().equals(evidence.stream().incarnation()));
         var matches = evidence.stream().observations().stream().filter(value -> value.scope().armId().equals(configuration.scope().armId())).toList();
@@ -276,9 +294,48 @@ public final class WorkspaceCsiNodeSourceStore {
             if ("PUBLISHED".equals(phase)) {
                 require(observation.custody() != null && observation.publish() != null && scope.containerId().matches("[0-9a-f]{64}"));
                 require(configuration.imageDigest().equals(evidence.record(observation.custody()).path("runtime").path("imageDigest").textValue()));
+                validateBirths(configuration, evidence, observation, true);
             }
         }
         return observation;
+    }
+
+    static void validateBirths(Configuration configuration, CsiNodeSourceJournal.Evidence evidence,
+            CsiNodeSourceJournal.Observation observation, boolean published) {
+        require(observation.births().size() == 2);
+        var sandboxes = observation.births().stream().filter(value -> "sandbox".equals(value.role())).toList();
+        var workers = observation.births().stream().filter(value -> "container".equals(value.role())).toList();
+        require(sandboxes.size() == 1 && workers.size() == 1);
+        var sandbox = sandboxes.getFirst();
+        var worker = workers.getFirst();
+        var inputs = configuration.node().birthInputs();
+        require(sandbox.containerId().equals(sandbox.sandboxId()) && worker.sandboxId().equals(sandbox.containerId())
+                && worker.containerId().equals(observation.scope().containerId())
+                && configuration.imageDigest().equals(worker.imageDigest())
+                && inputs.sandboxImageSha256().equals(sandbox.imageDigest()));
+        for (var born : observation.births()) {
+            require(born.prepared() != null && born.created() != null && born.startBegin() != null && born.started() != null
+                    && (!published || born.deleted() == null));
+            var birth = evidence.record(born.prepared()).path("birth");
+            var policy = birth.path("policy");
+            require(inputs.shimSha256().equals(birth.path("peer").path("executable").path("sha256").textValue())
+                    && inputs.runcSha256().equals(policy.path("runcSha256").textValue())
+                    && inputs.runcSha256().equals(birth.path("objects").get(4).path("sha256").textValue()));
+            require(matchesFixedBirthPolicy(policy));
+            try {
+                CsiCreationContract.requireMatch(Base64.getDecoder().decode(inputs.creationContract()),
+                        Base64.getDecoder().decode(birth.path("originalSpec").textValue()), born.containerId());
+            } catch (IllegalArgumentException invalid) {
+                throw unavailable();
+            }
+        }
+    }
+
+    static boolean matchesFixedBirthPolicy(com.fasterxml.jackson.databind.JsonNode policy) {
+        return policy != null && "/run/containerd/io.containerd.runtime.v2.task/k8s.io".equals(policy.path("bundleRoot").textValue())
+                && "/var/lib/qwen-k2/inputs".equals(policy.path("inputRoot").textValue())
+                && "/opt/qwen-k2/bin/runc".equals(policy.path("runcPath").textValue())
+                && "/run/qwen-k2/runc".equals(policy.path("runcRoot").textValue());
     }
 
     private static CsiNodeSourceJournal.Evidence evidence(ResultSet row, String prefix, boolean required) throws SQLException {
@@ -305,14 +362,17 @@ public final class WorkspaceCsiNodeSourceStore {
 
     private static String encode(Object value) {
         try {
-            return JSON.writeValueAsString(value);
+            String encoded = JSON.writeValueAsString(value);
+            require(encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= CONFIGURATION_LIMIT);
+            return encoded;
         } catch (java.io.IOException error) {
             throw unavailable();
         }
     }
 
     public static <T> T decode(String value, Class<T> type) {
-        require(value != null && value.length() <= 16 * 1024);
+        require(value != null && value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+                <= (type == Configuration.class ? CONFIGURATION_LIMIT : 16 * 1024));
         try {
             return JSON.readValue(value, type);
         } catch (java.io.IOException error) {

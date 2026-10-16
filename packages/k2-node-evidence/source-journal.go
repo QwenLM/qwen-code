@@ -18,8 +18,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const journalVersion = "qwen-k2-node-source/4"
-const maxRecordBytes = 64 << 10
+const journalVersion = "qwen-k2-node-source/6"
+const maxRecordBytes = 192 << 10
 const maxJournalBytes = 64 << 20
 const maxJournalRecords = 65536
 
@@ -96,6 +96,7 @@ type journalBody struct {
 	Policy             *workerPolicy       `json:"policy,omitempty"`
 	GatedSpecSHA256    string              `json:"gatedSpecSha256,omitempty"`
 	PodResourceVersion string              `json:"podResourceVersion,omitempty"`
+	Birth              *birthRecord        `json:"birth,omitempty"`
 }
 
 type journalRecord struct {
@@ -137,7 +138,7 @@ func validateBody(b journalBody) error {
 		return errors.New("invalid source journal chain")
 	}
 	if b.Kind == "SOURCE_START" {
-		if b.Sequence != 1 || b.Source == nil || b.Scope != nil || b.Begin != nil || b.Publish != nil || b.Stop != nil || b.Custody != nil || b.Runtime != nil || b.Caller != nil || b.Target != nil || b.IntentHash != "" || b.Status != 0 || b.ImageDigest != "" || b.Policy != nil || b.GatedSpecSHA256 != "" || b.PodResourceVersion != "" {
+		if b.Sequence != 1 || b.Source == nil || b.Scope != nil || b.Begin != nil || b.Publish != nil || b.Stop != nil || b.Custody != nil || b.Runtime != nil || b.Caller != nil || b.Target != nil || b.IntentHash != "" || b.Status != 0 || b.ImageDigest != "" || b.Policy != nil || b.GatedSpecSHA256 != "" || b.PodResourceVersion != "" || b.Birth != nil {
 			return errors.New("invalid source start")
 		}
 		s := b.Source
@@ -171,10 +172,13 @@ func validateBody(b journalBody) error {
 		return errors.New("invalid original policy or admitted BIND")
 	}
 	wantBegin, wantPublish, wantStop, wantCustody, wantTarget, wantIntent, wantStatus := false, false, false, false, false, false, false
+	wantBirth := false
 	switch b.Kind {
 	case "ARM", "BIND", "PUBLISH_BEGIN":
 	case "CUSTODY_OPEN":
-		wantCustody = true
+		wantCustody, wantBegin = true, true
+	case "BIRTH_PREPARED", "BIRTH_CREATED", "BIRTH_START_BEGIN", "BIRTH_STARTED", "BIRTH_NATIVE_DELETED":
+		wantBirth, wantPublish = true, true
 	case "CONFINEMENT_LOST":
 	case "PUBLISH_OK":
 		wantBegin, wantTarget = true, true
@@ -192,6 +196,9 @@ func validateBody(b journalBody) error {
 		wantBegin, wantPublish, wantStop, wantCustody = true, true, true, true
 	default:
 		return errors.New("unknown source record kind")
+	}
+	if (b.Birth != nil) != wantBirth || wantBirth && validateBirthRecord(b.Birth, b.Kind, *b.Scope, b.Sequence) != nil {
+		return errors.New("invalid actual birth source record")
 	}
 	if (b.Begin != nil) != wantBegin || (b.Publish != nil) != wantPublish || (b.Stop != nil) != wantStop || (b.Custody != nil) != wantCustody || (b.Runtime != nil) != wantCustody || (b.Target != nil) != wantTarget || (b.IntentHash != "") != wantIntent || (b.Status != 0) != wantStatus {
 		return errors.New("unexpected source record fields")

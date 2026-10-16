@@ -730,7 +730,8 @@ class WorkspaceCsiApplicationInventoryTest {
         var nextArm = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(json.writeValueAsBytes(
                 fixture.evidence().record(original.arm().stream().observations().getFirst().arm())));
         ((com.fasterxml.jackson.databind.node.ObjectNode) nextArm.path("scope")).put("armId", "later-arm").put("bindingId", "later-binding");
-        nextArm.put("sequence", 11).put("previous", fixture.evidence().stream().head().hash());
+        long nextSequence = fixture.evidence().stream().head().sequence() + 1;
+        nextArm.put("sequence", nextSequence).put("previous", fixture.evidence().stream().head().hash());
         nextArm.remove("hash");
         nextArm.put("hash", sha(json.writeValueAsBytes(nextArm)));
         var futureBytes = new java.io.ByteArrayOutputStream();
@@ -740,7 +741,7 @@ class WorkspaceCsiApplicationInventoryTest {
         futureOutput.writeInt(nextRaw.length);
         futureOutput.write(nextRaw);
         var future = com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal.verify(futureBytes.toByteArray(),
-                new com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal.Cursor(11, nextArm.path("hash").textValue()));
+                new com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal.Cursor(nextSequence, nextArm.path("hash").textValue()));
         var futureProgress = replied.withObservation(future, original);
         assertThat(futureProgress.stage()).isEqualTo("UNPUBLISHED");
         assertThatThrownBy(() -> verifyPhysicalData(futureProgress, expectedPlan, original, references)).isInstanceOf(IllegalArgumentException.class);
@@ -780,7 +781,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var json = new ObjectMapper();
         var identity = json.readTree(plan);
         byte[] raw;
-        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v4.fixture.json")) {
+        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v6.fixture.json")) {
             assertThat(input).isNotNull();
             raw = java.util.Base64.getDecoder().decode(json.readTree(input).path("bytesBase64").textValue());
         }
@@ -809,6 +810,7 @@ class WorkspaceCsiApplicationInventoryTest {
             if (record.has("intentHash")) {
                 record.put("intentHash", sha(plan));
             }
+            WorkspaceCsiBirthTestInputs.mapOriginalScope(record, hashes);
             record.put("previous", previous);
             for (String field : List.of("begin", "publish", "stop")) {
                 if (record.has(field)) {
@@ -828,7 +830,7 @@ class WorkspaceCsiApplicationInventoryTest {
             byte[] encoded = json.writeValueAsBytes(frame);
             output.writeInt(encoded.length);
             output.write(encoded);
-            if (List.of(2L, 3L, 6L, 8L, 10L).contains(frame.path("sequence").longValue())) {
+            if (List.of(2L, 3L, 14L, 16L, 18L).contains(frame.path("sequence").longValue())) {
                 prefixes.add(com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal.verify(bytes.toByteArray(),
                         new com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal.Cursor(frame.path("sequence").longValue(), frame.path("hash").textValue())));
             }
@@ -838,7 +840,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var scope = armed.stream().observations().getFirst().scope();
         var node = new WorkspaceCsiNodeSourceStore.Node("owned-node", armed.stream().incarnation(), armed.stream().source(),
                 URI.create("https://source.invalid"), "spiffe://test/source", URI.create("https://gateway.invalid"), "spiffe://test/gateway",
-                frames.get(1).path("policy").path("rawSha256").textValue());
+                frames.get(1).path("policy").path("rawSha256").textValue(), WorkspaceCsiBirthTestInputs.reviewed());
         var configuration = new WorkspaceCsiNodeSourceStore.Configuration(node, frames.get(1).path("imageDigest").textValue(), scope);
         var association = new WorkspaceCsiNodeSourceStore.Association(scope.bindingId(), 1, identity.path("physicalKey").textValue(),
                 UUID.randomUUID().toString(), 1, configuration, "PUBLISHED", 3, armed, frames.get(2).path("scope").path("podUid").textValue(),

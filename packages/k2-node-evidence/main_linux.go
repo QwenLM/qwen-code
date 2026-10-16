@@ -19,8 +19,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/birth"
+	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/roleboundary"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	containers "github.com/containerd/containerd/api/services/containers/v1"
+	content "github.com/containerd/containerd/api/services/content/v1"
+	images "github.com/containerd/containerd/api/services/images/v1"
+	snapshots "github.com/containerd/containerd/api/services/snapshots/v1"
 	tasks "github.com/containerd/containerd/api/services/tasks/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -58,6 +63,7 @@ type sourceConfig struct {
 	GatewayClientCertificate string `json:"gatewayClientCertificate"`
 	GatewayClientKey         string `json:"gatewayClientKey"`
 	WorkerPolicySHA256       string `json:"workerPolicySha256"`
+	SandboxImageSHA256       string `json:"sandboxImageSha256"`
 }
 
 func main() {
@@ -79,18 +85,6 @@ func main() {
 	}
 }
 
-func configuration(path string, target any) error {
-	if !filepath.IsAbs(path) {
-		return errors.New("source configuration path must be absolute")
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return errors.New("source configuration unavailable")
-	}
-	defer f.Close()
-	return decodeClosed(f, target)
-}
-
 func bootID() (string, error) {
 	raw, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	if err != nil || len(raw) > 128 {
@@ -103,15 +97,11 @@ func bootID() (string, error) {
 	return id, nil
 }
 
-func serveControl(ctx context.Context, cfg listenerConfig, handler http.Handler) error {
+func serveControl(ctx context.Context, cfg listenerConfig, tlsConfig *tls.Config, handler http.Handler) error {
 	host, port, err := net.SplitHostPort(cfg.Listen)
 	n, portErr := strconv.Atoi(port)
 	if err != nil || net.ParseIP(host) == nil || portErr != nil || n < 1024 || n > 65535 || cfg.CoordinatorPrincipal == "" {
 		return errors.New("invalid source control listener")
-	}
-	tlsConfig, err := serverTLS(cfg.Certificate, cfg.Key, cfg.Authority)
-	if err != nil {
-		return err
 	}
 	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
@@ -139,11 +129,32 @@ func serveControl(ctx context.Context, cfg listenerConfig, handler http.Handler)
 
 func runGateway(ctx context.Context, path string) error {
 	var cfg gatewayConfig
-	if err := configuration(path, &cfg); err != nil {
+	files, err := loadRoleConfiguration(path, &cfg)
+	if err != nil {
+		return err
+	}
+	defer files.close()
+	if err := files.add(cfg.Certificate, cfg.Key, cfg.Authority); err != nil {
+		return err
+	}
+	if err := files.private(cfg.Key); err != nil {
+		return err
+	}
+	tlsConfig, err := files.serverTLS(cfg.listenerConfig)
+	if err != nil {
 		return err
 	}
 	if cfg.SourcePrincipal == "" || cfg.SourcePrincipal == cfg.CoordinatorPrincipal {
 		return errors.New("gateway source and coordinator principals must differ")
+	}
+	shimConfiguration, err := birth.LoadShimConfig()
+	if err != nil {
+		return err
+	}
+	defer shimConfiguration.Close()
+	self, err := os.Executable()
+	if err != nil || birth.VerifyExecutable(self, shimConfiguration.SourceSHA256) != nil || gatewayConfinement() != nil {
+		return errors.New("actual gateway executable or confinement differs from the protected installation")
 	}
 	conn, process, err := connectBackend(cfg.RuntimeSocket, cfg.RuntimeDigest)
 	if err != nil {
@@ -159,16 +170,14 @@ func runGateway(ctx context.Context, path string) error {
 	if _, err = rand.Read(incarnation[:]); err != nil {
 		return errors.New("gateway incarnation unavailable")
 	}
-	gateway := &runtimeReadGateway{tasks: tasks.NewTasksClient(conn), containers: containers.NewContainersClient(conn), cri: cri.NewRuntimeServiceClient(conn), lifetime: ctx, connection: conn, coordinator: cfg.CoordinatorPrincipal, source: cfg.SourcePrincipal, identity: &gatewayIdentity{Version: "qwen-k2-runtime-identity/1", Incarnation: hex.EncodeToString(incarnation[:]), BootID: boot, Peer: process.identity}}
-	err = serveControl(ctx, cfg.listenerConfig, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gateway := &runtimeReadGateway{tasks: tasks.NewTasksClient(conn), containers: containers.NewContainersClient(conn), content: content.NewContentClient(conn), images: images.NewImagesClient(conn), snapshots: snapshots.NewSnapshotsClient(conn), cri: cri.NewRuntimeServiceClient(conn), lifetime: ctx, connection: conn, coordinator: cfg.CoordinatorPrincipal, source: cfg.SourcePrincipal, identity: &gatewayIdentity{Version: "qwen-k2-runtime-identity/1", Incarnation: hex.EncodeToString(incarnation[:]), BootID: boot, Peer: process.identity}}
+	err = serveControl(ctx, cfg.listenerConfig, tlsConfig, roleboundary.Handler(func() error {
 		current, err := bootID()
-		if err != nil || current != boot || process.verify() != nil {
-			w.Header().Set("Cache-Control", "no-store")
-			http.Error(w, "original runtime incarnation unavailable", http.StatusServiceUnavailable)
-			return
+		if err != nil || current != boot || process.verify() != nil || files.verify() != nil || shimConfiguration.Verify() != nil || gatewayConfinement() != nil {
+			return errors.New("original gateway installation or runtime incarnation changed")
 		}
-		gateway.ServeHTTP(w, r)
-	}))
+		return nil
+	}, gateway))
 	if closeErr := gateway.close(); closeErr != nil {
 		return closeErr
 	}
@@ -177,11 +186,32 @@ func runGateway(ctx context.Context, path string) error {
 
 func runSource(ctx context.Context, path string) error {
 	var cfg sourceConfig
-	if err := configuration(path, &cfg); err != nil {
+	files, err := loadRoleConfiguration(path, &cfg)
+	if err != nil {
 		return err
 	}
-	if !bounded(cfg.NodeUID) || !bounded(cfg.Driver) || !hashString(cfg.KubeletDigest) || !hashString(cfg.RegistrarDigest) || cfg.KubeletDigest == cfg.RegistrarDigest || !hashString(cfg.RuntimeDigest) {
+	defer files.close()
+	if err := files.add(cfg.Certificate, cfg.Key, cfg.Authority, cfg.GatewayClientCertificate, cfg.GatewayClientKey); err != nil {
+		return err
+	}
+	if err := files.private(cfg.Key, cfg.GatewayClientKey); err != nil {
+		return err
+	}
+	tlsConfig, err := files.serverTLS(cfg.listenerConfig)
+	if err != nil {
+		return err
+	}
+	if !bounded(cfg.NodeUID) || !bounded(cfg.Driver) || !hashString(cfg.KubeletDigest) || !hashString(cfg.RegistrarDigest) || cfg.KubeletDigest == cfg.RegistrarDigest || !hashString(cfg.RuntimeDigest) || !hashString(cfg.SandboxImageSHA256) {
 		return errors.New("invalid original source identities")
+	}
+	shimConfiguration, err := birth.LoadShimConfig()
+	if err != nil {
+		return err
+	}
+	defer shimConfiguration.Close()
+	self, err := os.Executable()
+	if err != nil || birth.VerifyExecutable(self, shimConfiguration.SourceSHA256) != nil || birth.VerifyExecutable(shimConfiguration.ShimPath, shimConfiguration.ShimSHA256) != nil {
+		return errors.New("actual source and shim executables differ from the protected handler configuration")
 	}
 	policy, err := openFixedWorkerPolicy(cfg.WorkerPolicySHA256)
 	if err != nil {
@@ -201,7 +231,7 @@ func runSource(ctx context.Context, path string) error {
 	if err != nil || info.GetName() != cfg.Driver {
 		return errors.New("original CSI driver identity differs")
 	}
-	gateway, err := gatewayClient(cfg.GatewayURL, cfg.GatewayClientCertificate, cfg.GatewayClientKey, cfg.Authority, cfg.GatewayPrincipal)
+	gateway, err := gatewayClient(cfg.GatewayURL, cfg.GatewayClientCertificate, cfg.GatewayClientKey, cfg.Authority, cfg.GatewayPrincipal, files)
 	if err != nil {
 		return err
 	}
@@ -214,6 +244,7 @@ func runSource(ctx context.Context, path string) error {
 	frontend := &frontendPeers{kubeletDigest: cfg.KubeletDigest, registrarDigest: cfg.RegistrarDigest}
 	defer frontend.close()
 	gateway.identity, gateway.plugin, gateway.frontend, gateway.policy = runtime, plugin, frontend, policy
+	gateway.shimConfig = shimConfiguration
 	sourceIdentity := sourceIdentity{NodeUID: cfg.NodeUID, BootID: boot, RuntimeDigest: runtime.Peer.Digest, RuntimeStart: runtime.Peer.StartTicks, RuntimePID: runtime.Peer.PID, GatewayIncarnation: runtime.Incarnation, PluginDigest: plugin.identity.Digest, PluginStart: plugin.identity.StartTicks, PluginPID: plugin.identity.PID}
 	journal, journalPath, err := createJournal(cfg.JournalRoot, sourceIdentity)
 	if err != nil {
@@ -221,6 +252,11 @@ func runSource(ctx context.Context, path string) error {
 	}
 	defer journal.close()
 	source := &nodeSource{journal: journal, journalPath: journalPath, gateway: gateway, coordinator: cfg.CoordinatorPrincipal, driver: cfg.Driver}
+	birthSocket, err := openBirthListener(shimConfiguration)
+	if err != nil {
+		return err
+	}
+	defer birthSocket.close()
 	if !filepath.IsAbs(cfg.FrontendSocket) || filepath.Clean(cfg.FrontendSocket) != cfg.FrontendSocket {
 		return errors.New("invalid CSI frontend socket path")
 	}
@@ -248,7 +284,14 @@ func runSource(ctx context.Context, path string) error {
 		if !ok || strings.HasPrefix(info.FullMethod, "/csi.v1.Node/") && auth.role != "kubelet" {
 			return nil, status.Error(codes.PermissionDenied, "CSI frontend role differs")
 		}
-		return handler(ctx, request)
+		if files.verify() != nil {
+			return nil, status.Error(codes.FailedPrecondition, "original source role files changed")
+		}
+		response, err := handler(ctx, request)
+		if files.verify() != nil {
+			return nil, status.Error(codes.FailedPrecondition, "original source role files changed")
+		}
+		return response, err
 	}))
 	proxy := &csiProxy{node: csi.NewNodeClient(conn), identity: identity, source: source}
 	csi.RegisterIdentityServer(server, proxy)
@@ -258,23 +301,35 @@ func runSource(ctx context.Context, path string) error {
 	go func() { serveDone <- server.Serve(listener) }()
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
+	birthDone := make(chan error, 1)
+	go func() { birthDone <- birthSocket.run(runCtx, shimConfiguration, source, cfg.SandboxImageSHA256) }()
 	observeDone := make(chan struct{})
 	go func() { defer close(observeDone); source.run(runCtx) }()
 	defer func() {
 		stop()
 		server.Stop()
 		<-observeDone
+		<-birthDone
 		source.mu.Lock()
 		defer source.mu.Unlock()
-		if source.active != nil && source.active.unpublish == nil {
-			_ = source.block(source.active)
+		for _, original := range source.originals {
+			if original.unpublish == nil {
+				_ = source.block(original)
+			} else {
+				_ = original.closePins()
+			}
 		}
 	}()
 	controlDone := make(chan error, 1)
-	go func() { controlDone <- serveControl(runCtx, cfg.listenerConfig, source) }()
+	go func() { controlDone <- serveControl(runCtx, cfg.listenerConfig, tlsConfig, files.handler(source)) }()
 	select {
 	case err := <-controlDone:
 		return err
+	case err := <-birthDone:
+		stop()
+		<-controlDone
+		birthDone <- err
+		return errors.New("pre-exec source listener stopped unexpectedly")
 	case <-serveDone:
 		stop()
 		<-controlDone

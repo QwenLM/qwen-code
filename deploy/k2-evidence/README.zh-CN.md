@@ -65,11 +65,15 @@ hierarchy。source 仍必须证明 `/proc/<originalPID>/cgroup` 在其实际
 `/sys/fs/cgroup` view 中解析到同一原目录。
 
 经过审阅的 executable 安装路径为 `/opt/qwen-k2/bin/k2-node-evidence`。
-两个 unit 均要求 `/etc/qwen-k2/executable.sha256` 保存其实际 SHA-256 和该
-absolute path。在私有 `/etc/qwen-k2` 下提供 root-owned configuration 与
+两个角色均用持续持有的 `/etc/qwen-k2/shim.json` 校验实际 executable digest，
+并由该配置取得专用 handler 输入。在私有 `/etc/qwen-k2` 下提供 root-owned configuration 与
 certificate files。`gateway.json`、`source.json` 使用 Go entry point 声明的
 exact fields；本目录不分发凭据或编造 node/process/image pins。gateway
 持有的 runtime socket 仍是该可信 helper 的行政能力。
+每个配置/PEM 对象必须为 root-owned、immutable、只读的 ext4 普通文件，限制
+32 KiB；私钥必须为 0400。两个角色持续持有原描述符，在 control 处理前后核对
+命名对象、identity 和原字节。source gateway RPC 与 CSI 转发也在调用两侧核对。
+这些检查不建立完整安装权限。
 
 选定 driver 的 private socket 位于 `/run/qwen-k2/backend`。
 source configuration 使用 `/run/qwen-k2/source/csi.sock` 作为 frontend、
@@ -87,13 +91,15 @@ peer capability sets 与 LSM rules 必须验证。LSM profile 只允许所需 pr
 reviewed sockets、source journal 与 frontend，禁止 task-memory 和 worker-volume
 writes。不能从 owned fixture 的结果推断 empty capability set 已可用。
 
-source 显式设置 `RestrictSUIDSGID=no`：systemd 的
+两个角色均显式设置 `RestrictSUIDSGID=no`：systemd 的
 [SUID/SGID filter](https://github.com/systemd/systemd/blob/v259.5/src/shared/seccomp-util.c)
 让每个 `openat2` 调用返回 `ENOSYS`。实际 service trace 已在原 BIND target
-检查复现该失败。source 必须使用 beneath-root、no-symlink 的 `openat2`
-解析，不回退到更弱的 resolver。`NoNewPrivileges`、capability bound 和声明的
+检查复现该失败。两个角色均以 `openat2` 读取受保护角色文件；source 另以 beneath-root、no-symlink
+方式解析 target，不回退到更弱的 resolver。`NoNewPrivileges`、capability bound 和声明的
 writable paths 仍强制执行。经审阅的 LSM policy 还必须禁止创建或修改 set-ID
-文件；这些 service unit 本身不建立该限制。gateway 保留 SUID/SGID filter。
+文件；这些 service unit 本身不建立该限制。gateway 现必须有专用 enforce AppArmor
+profile，在处理及返回 control 响应前核对实际 root credentials、initial user
+mapping、seccomp 以及仅 SYS_PTRACE 的 capability set。
 
 Filesystem read-only 设置不能证明后续传播的 CSI submount 递归只读。
 必须验证单向 mount visibility，并通过经过审阅的 LSM policy 禁止 source
@@ -110,4 +116,32 @@ processes、mounts、cgroups、临时路径和 VM 均已关闭。Runtime/CSI bac
 明示为协议夹具，LSM 为 unconfined；这些结果不资格化实际 ACK runtime/plugin/
 driver 接线、受限 LSM、admission、物理释放或卷复用，也不资格化改变后的当前 source unit 或 v2 reader。原 `openat2` 失败单独保留。
 
-当前 source 强制要求 `workerPolicySha256`，代表同时包含固定 worker/source profiles 的经审阅完整 packed bundle。v4 ARM 保存实际加载策略测量和原镜像，BIND 保存实际 admitted gated-spec digest/resourceVersion；启动和持续操作在测量缺失或变化时 fail closed。强制 source confinement、节点实际 enforce/lock、source 专用 disconnected exporter prefix 和完整 birth confinement 仍需具体 native 资格化及安装批准。代码只读策略，这些交付物不会设置节点级锁。
+当前 source 强制要求 `workerPolicySha256`，代表包含固定 worker/source/sandbox/shim/gateway profiles 的经审阅完整 packed bundle。v6 ARM 保存实际加载策略测量和原镜像，BIND 保存实际 admitted gated-spec digest/resourceVersion；启动和持续操作在测量缺失或变化时 fail closed。强制 source confinement、节点实际 enforce/lock、source 专用 disconnected exporter prefix 和完整 birth confinement 仍需具体 native 资格化及安装批准。代码只读策略，这些交付物不会设置节点级锁。
+
+## 首次执行前 shim 候选
+
+用与 source 相同的 Go 1.26.3 或更新工具链及锁定模块构建专用 shim。记录两个入口的两个架构构建，不能用只构建 source 代替 shim 构建。
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GOTOOLCHAIN=local GOWORK=off \
+  go build -mod=readonly -trimpath -buildvcs=false \
+  -o /absolute/output/containerd-shim-qwen-k2-v1 ./cmd/containerd-shim-qwen-k2-v1
+```
+
+在仓库根目录，以 exact source、shim、另外经过审阅的 runc 产物和创建契约原字节生成候选：
+
+```sh
+python3 deploy/k2-evidence/render-pre-exec.py \
+  --source /absolute/output/k2-node-evidence \
+  --shim /absolute/output/containerd-shim-qwen-k2-v1 \
+  --runc /absolute/reviewed/runc \
+  --sandbox-image-sha256 REVIEWED_SANDBOX_MANIFEST_SHA256 \
+  --creation-contract /absolute/reviewed/creation-contract.json \
+  --output /absolute/output/new-pre-exec-candidate
+```
+
+工具对实际产物字节计算 hash，核对 ELF header 架构相同，保留契约原字节，拒绝重复 JSON 和已存在的输出，生成 root-private 候选文件。工具检查契约 envelope；shim 与 Java consumer 执行完整语义校验。这不建立 artifact 源码 provenance 或实际执行兼容性。
+
+`shim.json` 对应拟安装的 `/etc/qwen-k2/shim.json`；`runtime-handler.toml` 是经审阅 containerd CRI runtime 配置的 fragment，明确使用 `runtime_path` 与 `io.containerd.qwen-k2.v1` runtime type。既有 RuntimeClass name/handler 仍为 `qwen-k2-runc-v1`。source 配置还必须加入生成的 `sandboxImageSha256`。tmpfiles fragment 提供固定私有目录。工具不会安装或 apply 这些文件。
+
+安装前必须资格化实际 daemon 的 handler/bootstrap 兼容性、私有 ext4 消费输入挂载、immutable 安装文件及 ancestor、初始 namespaces、完整已加载并 locked 的 AppArmor bundle 和 actor/admission 边界。当前 service units 和历史 profiles 不继承本次改变后候选的资格。运行时目录必须允许正常 PID/log/rootfs/cleanup 写入，不能将整个消费 bundle 设为 immutable。用 exact reviewed source/shim 配置执行 `node-config`，生成 Java 必需的出生期待值；解析成功仍不代表安装资格或物理释放。详见[出生设计](../../docs/design/2026-10-16-k2-pre-exec-birth.zh-CN.md)。

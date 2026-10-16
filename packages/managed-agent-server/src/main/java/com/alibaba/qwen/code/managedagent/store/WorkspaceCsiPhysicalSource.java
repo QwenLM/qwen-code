@@ -31,6 +31,7 @@ final class WorkspaceCsiPhysicalSource {
                 && published.arm().equals(result.arm()) && published.bound().equals(result.bound())
                 && published.custody().equals(result.custody()) && published.publish().equals(result.publish())
                 && result.intent() != null && planSha256.equals(evidence.record(result.intent()).path("intentHash").textValue()));
+        WorkspaceCsiNodeSourceStore.validateBirths(original.configuration(), evidence, result, false);
         return result;
     }
 

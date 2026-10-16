@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 )
 
 func decodeClosed(reader io.Reader, target any) error {
@@ -109,14 +108,10 @@ func hasPrincipal(r *http.Request, expected string) bool {
 	return len(leaf.URIs) == 1 && leaf.URIs[0].String() == expected
 }
 
-func serverTLS(certPath, keyPath, caPath string) (*tls.Config, error) {
-	certificate, err := tls.LoadX509KeyPair(certPath, keyPath)
+func serverTLS(cert, key, ca []byte) (*tls.Config, error) {
+	certificate, err := tls.X509KeyPair(cert, key)
 	if err != nil {
 		return nil, errors.New("source server certificate is unavailable")
-	}
-	ca, err := os.ReadFile(caPath)
-	if err != nil {
-		return nil, errors.New("source authority is unavailable")
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(ca) {

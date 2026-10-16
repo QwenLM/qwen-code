@@ -13,30 +13,38 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/birth"
 )
 
 type sourceGateway struct {
-	client   *http.Client
-	url      string
-	identity gatewayIdentity
-	plugin   *backendPeer
-	frontend *frontendPeers
-	policy   *fixedWorkerPolicy
+	verification sync.Mutex
+	shimConfig   *birth.ShimConfig
+	files        *roleFiles
+	client       *http.Client
+	url          string
+	identity     gatewayIdentity
+	plugin       *backendPeer
+	frontend     *frontendPeers
+	policy       *fixedWorkerPolicy
 }
 
-func gatewayClient(endpoint, certPath, keyPath, caPath, principal string) (*sourceGateway, error) {
+func gatewayClient(endpoint, certPath, keyPath, caPath, principal string, files *roleFiles) (*sourceGateway, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || principal == "" {
 		return nil, errors.New("gateway endpoint must be a fixed HTTPS origin")
 	}
-	certificate, err := tls.LoadX509KeyPair(certPath, keyPath)
+	cert, certErr := files.bytes(certPath)
+	key, keyErr := files.bytes(keyPath)
+	ca, caErr := files.bytes(caPath)
+	if errors.Join(certErr, keyErr, caErr) != nil {
+		return nil, errors.New("original gateway TLS inputs are unavailable")
+	}
+	certificate, err := tls.X509KeyPair(cert, key)
 	if err != nil {
 		return nil, errors.New("source client certificate is unavailable")
-	}
-	ca, err := os.ReadFile(caPath)
-	if err != nil {
-		return nil, errors.New("gateway authority is unavailable")
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(ca) {
@@ -48,10 +56,13 @@ func gatewayClient(endpoint, certPath, keyPath, caPath, principal string) (*sour
 		}
 		return nil
 	}}}
-	return &sourceGateway{url: endpoint, client: &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("gateway redirect refused") }}}, nil
+	return &sourceGateway{files: files, url: endpoint, client: &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("gateway redirect refused") }}}, nil
 }
 
 func (g *sourceGateway) call(ctx context.Context, method, path string, body any, output any) error {
+	if g.files == nil || g.files.verify() != nil {
+		return errors.New("original gateway TLS inputs changed")
+	}
 	var raw []byte
 	var err error
 	if body != nil {
@@ -70,6 +81,9 @@ func (g *sourceGateway) call(ctx context.Context, method, path string, body any,
 		return errors.New("original gateway channel unavailable")
 	}
 	defer response.Body.Close()
+	if g.files.verify() != nil {
+		return errors.New("original gateway TLS inputs changed")
+	}
 	if response.Header.Get("Cache-Control") != "no-store" {
 		return errors.New("original gateway cache policy differs")
 	}
@@ -79,10 +93,16 @@ func (g *sourceGateway) call(ctx context.Context, method, path string, body any,
 		}
 		return nil
 	}
+	if response.StatusCode == http.StatusAccepted && method == http.MethodGet && strings.HasPrefix(path, "/v1/original/") && !strings.Contains(strings.TrimPrefix(path, "/v1/original/"), "/") {
+		return errRuntimeTransition
+	}
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/json" {
 		return errors.New("original gateway observation refused")
 	}
-	return decodeClosed(response.Body, output)
+	if err := decodeClosed(response.Body, output); err != nil {
+		return err
+	}
+	return g.files.verify()
 }
 
 func (g *sourceGateway) current(ctx context.Context) (gatewayIdentity, error) {
@@ -95,9 +115,11 @@ func (g *sourceGateway) current(ctx context.Context) (gatewayIdentity, error) {
 }
 
 func (g *sourceGateway) verify(ctx context.Context) error {
+	g.verification.Lock()
+	defer g.verification.Unlock()
 	current, err := g.current(ctx)
 	boot, bootErr := os.ReadFile("/proc/sys/kernel/random/boot_id")
-	if err != nil || current != g.identity || bootErr != nil || strings.TrimSpace(string(boot)) != current.BootID || g.plugin == nil || g.plugin.verify() != nil || g.frontend == nil || g.frontend.verify() != nil || g.policy.verify() != nil {
+	if err != nil || current != g.identity || bootErr != nil || strings.TrimSpace(string(boot)) != current.BootID || g.plugin == nil || g.plugin.verify() != nil || g.frontend == nil || g.frontend.verify() != nil || g.policy == nil || g.policy.verify() != nil || g.shimConfig == nil || g.shimConfig.Verify() != nil {
 		return errors.New("original source incarnation changed")
 	}
 	return nil
@@ -109,6 +131,9 @@ func (g *sourceGateway) observe(ctx context.Context, arm string) (runtimeObserva
 	}
 	var observation runtimeObservation
 	err := g.call(ctx, http.MethodGet, "/v1/original/"+arm, nil, &observation)
+	if errors.Is(err, errRuntimeTransition) {
+		return runtimeObservation{}, err
+	}
 	if err != nil || observation.Version != "qwen-k2-runtime-read/1" || observation.ArmID != arm {
 		return runtimeObservation{}, errors.New("original runtime observation unavailable")
 	}

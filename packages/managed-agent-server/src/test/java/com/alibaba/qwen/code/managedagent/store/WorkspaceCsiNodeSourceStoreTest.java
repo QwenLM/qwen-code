@@ -413,7 +413,7 @@ class WorkspaceCsiNodeSourceStoreTest {
 
     private void prepareProtocolFixture() throws Exception {
         byte[] raw;
-        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v4.fixture.json")) {
+        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v6.fixture.json")) {
             raw = Base64.getDecoder().decode(json.readTree(input).path("bytesBase64").textValue());
         }
         var input = ByteBuffer.wrap(raw);
@@ -446,6 +446,7 @@ class WorkspaceCsiNodeSourceStoreTest {
                     ((ObjectNode) record.path("runtime")).put("podUid", podUid).put("armId", scope.path("armId").textValue());
                 }
             }
+            WorkspaceCsiBirthTestInputs.mapOriginalScope(record, hashes);
             record.put("previous", previous);
             for (String field : new String[] {"begin", "publish", "stop"}) {
                 if (record.has(field)) {
@@ -461,13 +462,13 @@ class WorkspaceCsiNodeSourceStoreTest {
         initial = prefix(frames, 1);
         arm = prefix(frames, 2);
         bound = prefix(frames, 3);
-        publication = prefix(frames, 6);
-        stopIntent = prefix(frames, 7);
-        stopped = prefix(frames, 8);
-        unpublished = prefix(frames, 10);
+        publication = prefix(frames, 14);
+        stopIntent = prefix(frames, 15);
+        stopped = prefix(frames, 16);
+        unpublished = prefix(frames, 18);
         var identity = arm.stream().source();
         var node = new WorkspaceCsiNodeSourceStore.Node("node", arm.stream().incarnation(), identity,
-                URI.create("https://source.invalid"), "spiffe://test/source", URI.create("https://gateway.invalid"), "spiffe://test/gateway", arm.record(arm.stream().observations().getFirst().arm()).path("policy").path("rawSha256").textValue());
+                URI.create("https://source.invalid"), "spiffe://test/source", URI.create("https://gateway.invalid"), "spiffe://test/gateway", arm.record(arm.stream().observations().getFirst().arm()).path("policy").path("rawSha256").textValue(), WorkspaceCsiBirthTestInputs.reviewed());
         var observed = publication.stream().observations().getFirst();
         String imageDigest = publication.record(observed.custody()).path("runtime").path("imageDigest").textValue();
         configuration = new WorkspaceCsiNodeSourceStore.Configuration(node, imageDigest, arm.stream().observations().getFirst().scope());
@@ -484,7 +485,7 @@ class WorkspaceCsiNodeSourceStoreTest {
         var state = new WorkspaceCsiPhysicalStore.Status("d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", "PLANNED", 1, CsiNativeActivationProof.sha256(plan), 0);
         var selected = new WorkspaceCsiPhysicalStore.Original("tenant", binding.getRequest().getIsolationKey(), "workspace", state.retirementId());
         when(physical.plan(selected, "token", configuration.node())).thenReturn(new WorkspaceCsiPhysicalStore.Work(state, original, plan, null));
-        var evidence = physicalEvidence(plan, 7);
+        var evidence = physicalEvidence(plan, 15);
         when(source.requestStop(configuration.scope().armId(), state.retirementId(), state.planSha256()))
                 .thenAnswer(invocation -> {
                     assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
@@ -513,7 +514,7 @@ class WorkspaceCsiNodeSourceStoreTest {
         var api = mock(KubernetesRuntimeClient.class);
         var guard = mock(WorkspaceCsiResourceGuard.class);
         byte[] plan = coordinatorPlan();
-        var evidence = physicalEvidence(plan, 7);
+        var evidence = physicalEvidence(plan, 15);
         var state = new WorkspaceCsiPhysicalStore.Status("d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", "INTENT", 2, CsiNativeActivationProof.sha256(plan), 0);
         var selected = new WorkspaceCsiPhysicalStore.Original("tenant", binding.getRequest().getIsolationKey(), "workspace", state.retirementId());
         when(physical.plan(selected, "token", configuration.node())).thenReturn(new WorkspaceCsiPhysicalStore.Work(state, original, plan, evidence));
@@ -607,7 +608,7 @@ class WorkspaceCsiNodeSourceStoreTest {
     void physicalProgressCanDeleteAnExistingPodAfterObservedStop() throws Exception {
         var original = publishedAssociation();
         byte[] plan = physicalPlan();
-        var stoppedEvidence = physicalEvidence(plan, 8);
+        var stoppedEvidence = physicalEvidence(plan, 16);
         var current = WorkspaceCsiPhysicalProgress.planned(plan).withIntent(stoppedEvidence, original)
                 .withObservation(stoppedEvidence, original);
         assertThat(current.stage()).isEqualTo("STOPPED");
@@ -627,7 +628,7 @@ class WorkspaceCsiNodeSourceStoreTest {
         var unsigned = new CsiNodeSourceJournal.SourceIdentity(identity.nodeUid(), identity.bootId(), identity.runtimeDigest(),
                 max, identity.runtimePid(), identity.gatewayIncarnation(), identity.pluginDigest(), max, identity.pluginPid());
         var node = new WorkspaceCsiNodeSourceStore.Node(before.name(), before.incarnation(), unsigned, before.sourceOrigin(),
-                before.sourcePrincipal(), before.gatewayOrigin(), before.gatewayPrincipal(), before.workerPolicySha256());
+                before.sourcePrincipal(), before.gatewayOrigin(), before.gatewayPrincipal(), before.workerPolicySha256(), before.birthInputs());
         var encoded = new WorkspaceCsiNodeSourceStore.Configuration(node, configuration.imageDigest(), configuration.scope());
         byte[] configBytes = WorkspaceCsiApplicationJson.encode(encoded);
         var plan = (ObjectNode) json.readTree(physicalPlan());
@@ -693,7 +694,7 @@ class WorkspaceCsiNodeSourceStoreTest {
         current = current.withIntent(evidence, original);
         assertThat(current.stage()).isEqualTo("INTENT");
         assertThat(current.version()).isEqualTo(2);
-        assertThat(current.latestEvidence().stream().head().sequence()).isEqualTo(7);
+        assertThat(current.latestEvidence().stream().head().sequence()).isEqualTo(15);
         var request = CsiPodDeletion.prepare(registration.namespace(), configuration.scope().podName(), podUid, "opaque:315");
         current = current.withAttempt(request);
         byte[] unknown = current.bytes();
@@ -864,7 +865,7 @@ class WorkspaceCsiNodeSourceStoreTest {
     }
 
     private CsiNodeSourceJournal.Evidence physicalEvidence(byte[] plan) throws Exception {
-        return physicalEvidence(plan, 10);
+        return physicalEvidence(plan, 18);
     }
 
     private CsiNodeSourceJournal.Evidence physicalEvidence(byte[] plan, int count) throws Exception {
@@ -879,6 +880,7 @@ class WorkspaceCsiNodeSourceStoreTest {
             if (record.has("intentHash")) {
                 record.put("intentHash", CsiNativeActivationProof.sha256(plan));
             }
+            WorkspaceCsiBirthTestInputs.mapOriginalScope(record, hashes);
             record.put("previous", previous);
             for (String field : List.of("begin", "publish", "stop")) {
                 if (record.has(field)) {
@@ -946,10 +948,40 @@ class WorkspaceCsiNodeSourceStoreTest {
     void wrongReviewedPolicyCannotSaveArm() {
         var old = configuration.node();
         var node = new WorkspaceCsiNodeSourceStore.Node(old.name(), old.incarnation(), old.identity(), old.sourceOrigin(),
-                old.sourcePrincipal(), old.gatewayOrigin(), old.gatewayPrincipal(), "f".repeat(64));
+                old.sourcePrincipal(), old.gatewayOrigin(), old.gatewayPrincipal(), "f".repeat(64), old.birthInputs());
         var wrong = new WorkspaceCsiNodeSourceStore.Configuration(node, configuration.imageDigest(), configuration.scope());
         assertThatThrownBy(() -> store.saveArm(binding, registration, reservation, wrong, arm)).isInstanceOf(RuntimeBrokerException.class);
         assertThat(store.inspect(binding.getBindingId())).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"shim", "runc", "sandbox", "contract"})
+    void publicationConsumesReviewedBirthInputsBeforeSqlMutation(String changed) throws Exception {
+        var node = configuration.node();
+        var inputs = node.birthInputs();
+        String contract = inputs.creationContract();
+        if (changed.equals("contract")) {
+            var value = (ObjectNode) json.readTree(Base64.getDecoder().decode(contract));
+            ((ObjectNode) value.path("worker")).putArray("args").add("/different-reviewed-command");
+            contract = Base64.getEncoder().encodeToString(json.writeValueAsBytes(value));
+        }
+        var reviewed = new WorkspaceCsiNodeSourceStore.BirthInputs(changed.equals("shim") ? "f".repeat(64) : inputs.shimSha256(),
+                changed.equals("runc") ? "f".repeat(64) : inputs.runcSha256(),
+                changed.equals("sandbox") ? "f".repeat(64) : inputs.sandboxImageSha256(), contract);
+        var selected = new WorkspaceCsiNodeSourceStore.Node(node.name(), node.incarnation(), node.identity(), node.sourceOrigin(),
+                node.sourcePrincipal(), node.gatewayOrigin(), node.gatewayPrincipal(), node.workerPolicySha256(), reviewed);
+        var expected = new WorkspaceCsiNodeSourceStore.Configuration(selected, configuration.imageDigest(), configuration.scope());
+        store.saveArm(binding, registration, reservation, expected, arm);
+        store.saveBound(binding, registration, reservation, store.inspect(binding.getBindingId()), podUid, "a".repeat(64), "opaque:1", bound);
+        var before = store.inspect(binding.getBindingId());
+        assertThatThrownBy(() -> store.savePublication(binding, registration, reservation, before, publication))
+                .isInstanceOf(RuntimeBrokerException.class);
+        var after = store.inspect(binding.getBindingId());
+        assertThat(after.phase()).isEqualTo("BOUND");
+        assertThat(after.version()).isEqualTo(2);
+        assertThat(after.configuration()).isEqualTo(expected);
+        assertThat(after.bound().bytes()).isEqualTo(before.bound().bytes());
+        assertThat(after.publication()).isNull();
     }
 
     private CsiNodeSourceJournal.Evidence prefix(ArrayList<ObjectNode> frames, int count) throws Exception {

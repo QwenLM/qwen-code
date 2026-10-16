@@ -12,6 +12,9 @@ import (
 	"unicode/utf8"
 
 	containers "github.com/containerd/containerd/api/services/containers/v1"
+	content "github.com/containerd/containerd/api/services/content/v1"
+	images "github.com/containerd/containerd/api/services/images/v1"
+	snapshots "github.com/containerd/containerd/api/services/snapshots/v1"
 	tasks "github.com/containerd/containerd/api/services/tasks/v1"
 	tasktypes "github.com/containerd/containerd/api/types/task"
 	"google.golang.org/grpc"
@@ -44,6 +47,8 @@ type runtimeObservation struct {
 	ExitedAtNano int64  `json:"exitedAtNano"`
 }
 
+var errRuntimeTransition = errors.New("original runtime and CRI creation states are converging")
+
 type gatewayOriginal struct {
 	task           registeredTask
 	containerID    string
@@ -67,6 +72,9 @@ type runtimeReadGateway struct {
 	mu          sync.Mutex
 	tasks       tasks.TasksClient
 	containers  containers.ContainersClient
+	content     content.ContentClient
+	images      images.ImagesClient
+	snapshots   snapshots.SnapshotsClient
 	cri         cri.RuntimeServiceClient
 	originals   map[string]*gatewayOriginal
 	coordinator string
@@ -131,6 +139,20 @@ func (g *runtimeReadGateway) observe(parent context.Context, arm string) (runtim
 	defer cancel()
 	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("containerd-namespace", "k8s.io"))
 	result, err := g.readOriginal(ctx, original)
+	if errors.Is(err, errRuntimeTransition) && ctx.Err() == nil && g.lifetime.Err() == nil {
+		if result.PID == 0 || original.pid != 0 && result.PID != original.pid || g.verifyMetadata(ctx, original, result) != nil {
+			original.blocked = true
+			return runtimeObservation{}, errors.New("original creation transition identity differs")
+		}
+		original.pid, original.containerID, original.sandboxID = result.PID, result.ContainerID, result.SandboxID
+		if original.wait == nil {
+			if err := g.startWait(original); err != nil {
+				original.blocked = true
+				return runtimeObservation{}, err
+			}
+		}
+		return runtimeObservation{}, errRuntimeTransition
+	}
 	if err == nil && result.ContainerID != "" {
 		err = g.verifyMetadata(ctx, original, result)
 	}
@@ -166,7 +188,7 @@ func (g *runtimeReadGateway) verifyMetadata(ctx context.Context, original *gatew
 		return errors.New("original container metadata is unavailable")
 	}
 	c := reply.Container
-	if c.ID != observed.ContainerID || c.Runtime == nil || c.Runtime.Name != "io.containerd.runc.v2" || c.Spec == nil ||
+	if c.ID != observed.ContainerID || c.Runtime == nil || c.Runtime.Name != "io.containerd.qwen-k2.v1" || c.Spec == nil ||
 		c.Spec.TypeUrl != "types.containerd.io/opencontainers/runtime-spec/1/Spec" || len(c.Spec.Value) == 0 ||
 		c.Image == "" || c.Snapshotter == "" || c.SnapshotKey == "" || c.CreatedAt == nil || c.CreatedAt.CheckValid() != nil ||
 		c.Labels["io.kubernetes.pod.uid"] != original.task.PodUID || c.Labels["io.kubernetes.pod.namespace"] != original.task.Namespace ||
@@ -192,7 +214,7 @@ func (g *runtimeReadGateway) verifyMetadata(ctx context.Context, original *gatew
 
 func validateWorkerOCIIntent(raw []byte) error {
 	var spec, process, user map[string]json.RawMessage
-	if !utf8.Valid(raw) || decodeClosed(bytes.NewReader(raw), &spec) != nil || spec == nil ||
+	if len(raw) > 64<<10 || !utf8.Valid(raw) || decodeClosed(bytes.NewReader(raw), &spec) != nil || spec == nil ||
 		decodeClosed(bytes.NewReader(spec["process"]), &process) != nil || process == nil ||
 		decodeClosed(bytes.NewReader(process["user"]), &user) != nil || user == nil {
 		return errors.New("original OCI process intent is unavailable")
@@ -426,6 +448,8 @@ func (g *runtimeReadGateway) readOriginal(ctx context.Context, original *gateway
 		result.State = "created"
 	case p.Status == tasktypes.Status_RUNNING && status.State == cri.ContainerState_CONTAINER_RUNNING:
 		result.State = "running"
+	case p.Status == tasktypes.Status_RUNNING && status.State == cri.ContainerState_CONTAINER_CREATED:
+		return result, errRuntimeTransition
 	default:
 		return runtimeObservation{}, errors.New("original runtime states differ")
 	}
@@ -468,6 +492,20 @@ func (g *runtimeReadGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if arm, id, ok := creationPath(r.URL.Path); ok && r.Method == http.MethodGet && r.ContentLength == 0 {
+		if !hasPrincipal(r, g.source) {
+			http.Error(w, "original source principal is required", http.StatusForbidden)
+			return
+		}
+		result, err := g.creation(r.Context(), arm, id)
+		if err != nil {
+			http.Error(w, "actual original creation metadata refused", http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(result)
+		return
+	}
 	const prefix = "/v1/original/"
 	if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, prefix) || !safeID(strings.TrimPrefix(r.URL.Path, prefix)) || r.ContentLength != 0 {
 		http.Error(w, "unsupported runtime read", http.StatusNotFound)
@@ -478,6 +516,10 @@ func (g *runtimeReadGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	observation, err := g.observe(r.Context(), strings.TrimPrefix(r.URL.Path, prefix))
+	if errors.Is(err, errRuntimeTransition) {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	if err != nil {
 		http.Error(w, "original runtime observation unavailable", http.StatusConflict)
 		return

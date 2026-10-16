@@ -105,7 +105,8 @@ class WorkspaceCsiNodeEvidenceTest {
                 10, "b".repeat(32), "c".repeat(64), BigInteger.TWO, 20);
         var node = new WorkspaceCsiNodeSourceStore.Node("owned-node", "d".repeat(32), identity,
                 URI.create("https://source.example"), "spiffe://example/source", URI.create("https://gateway.example"),
-                "spiffe://example/gateway", "e".repeat(64));
+                "spiffe://example/gateway", "e".repeat(64),
+                com.alibaba.qwen.code.managedagent.store.WorkspaceCsiBirthTestInputs.reviewed());
         var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "runtime", "claim", "pvc-uid",
                 "volume", "pv-uid", "diskplugin.csi.alibabacloud.com", "handle", "backend", "serial", "/workspace", 1);
         return new WorkspaceCsiNodeEvidence(store, node, registration, api, source, gateway,

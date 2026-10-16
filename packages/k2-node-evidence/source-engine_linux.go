@@ -51,6 +51,9 @@ type originalSource struct {
 	stop           *journalRecord
 	unpublish      *journalRecord
 	blocked        bool
+	births         map[string]*sourceBirth
+	disposed       bool
+	disposalError  error
 }
 
 type nodeSource struct {
@@ -79,10 +82,32 @@ func (s *nodeSource) block(original *originalSource) error {
 		original.blocked = true
 		_, _ = s.record(original, journalBody{Kind: "CONFINEMENT_LOST"})
 	}
-	if original.custody != nil {
-		_ = original.custody.close()
-	}
+	_ = original.closePins()
 	return errors.New("original source custody is unavailable")
+}
+
+// Called under source.mu after completion or invalidation. Peer descriptors
+// belong to ServeConnection; saved journal facts survive disposal of these pins.
+func (original *originalSource) closePins() error {
+	if original.disposed {
+		return original.disposalError
+	}
+	original.disposed = true
+	if original.custody != nil {
+		original.disposalError = errors.Join(original.disposalError, original.custody.close())
+	}
+	for _, b := range original.births {
+		if b.custody != nil {
+			original.disposalError = errors.Join(original.disposalError, b.custody.close())
+		}
+		if b.namespaces != nil {
+			original.disposalError = errors.Join(original.disposalError, b.namespaces.close())
+		}
+		if b.inputs != nil {
+			original.disposalError = errors.Join(original.disposalError, b.inputs.Close())
+		}
+	}
+	return original.disposalError
 }
 
 func (s *nodeSource) arm(request armRequest) (journalRecord, error) {
@@ -102,6 +127,9 @@ func (s *nodeSource) arm(request armRequest) (journalRecord, error) {
 	}
 	if s.active != nil && s.active.unpublish == nil || len(s.originals) >= 4096 {
 		return journalRecord{}, errors.New("source has an unreleased original scope")
+	}
+	if s.active != nil && s.active.closePins() != nil {
+		return journalRecord{}, errors.New("completed original descriptor disposal is unavailable")
 	}
 	if err := s.gateway.verify(context.Background()); err != nil {
 		return journalRecord{}, err
@@ -201,70 +229,101 @@ func (s *nodeSource) verifyStopped(ctx context.Context, original *originalSource
 
 func (s *nodeSource) poll(ctx context.Context) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	original := s.active
-	if original == nil || original.blocked || original.unpublish != nil {
+	if original == nil || original.blocked || original.unpublish != nil || original.bound == nil {
+		s.mu.Unlock()
 		return
 	}
-	if s.gateway.verify(ctx) != nil {
+	for _, born := range original.births {
+		if born.receipt.Role != "sandbox" || born.started == nil || born.deleted != nil {
+			continue
+		}
+		actual, err := born.custody.observe()
+		if err != nil || !actual.Terminal && (born.namespaces.verify(born.custody) != nil || born.custody.verifyRunningSecurityProfile("qwen-k2-sandbox-v1") != nil) {
+			_ = s.block(original)
+			s.mu.Unlock()
+			return
+		}
+	}
+	worker := original.births[original.scope.ContainerID]
+	if worker == nil || worker.started == nil {
+		s.mu.Unlock()
+		return
+	}
+	scope, bound, publish, stop := original.scope, original.bound, original.publish, original.stop
+	s.mu.Unlock()
+	identityErr := s.gateway.verify(ctx)
+	var runtime runtimeObservation
+	var observationErr error
+	if identityErr == nil && stop == nil {
+		runtime, observationErr = s.gateway.observe(ctx, scope.ArmID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active != original || original.blocked || original.unpublish != nil || original.scope != scope || original.bound != bound || original.publish != publish || original.stop != stop || original.births[scope.ContainerID] != worker {
+		return
+	}
+	if identityErr != nil {
 		_ = s.block(original)
 		return
 	}
-	if original.bound == nil {
+	if stop != nil {
+		current, err := original.custody.observe()
+		if err != nil || !sameTerminalCustody(current, *stop.Custody) {
+			_ = s.block(original)
+		}
 		return
 	}
-	if original.stop != nil {
-		_, _ = s.verifyStopped(ctx, original)
+	if errors.Is(observationErr, errRuntimeTransition) && original.opened == nil && time.Since(worker.startedAt) < 30*time.Second {
 		return
 	}
-	runtime, err := s.gateway.observe(ctx, original.scope.ArmID)
-	if err != nil || runtime.PodUID != original.scope.PodUID || runtime.ImageDigest != original.imageDigest || s.gateway.verify(ctx) != nil {
+	if observationErr != nil || runtime.PodUID != scope.PodUID || runtime.ImageDigest != original.imageDigest || runtime.ContainerID != scope.ContainerID || runtime.SandboxID != worker.receipt.SandboxID || original.custody != worker.custody {
 		_ = s.block(original)
 		return
 	}
-	if runtime.State == "pending" && original.custody == nil {
+	observation, err := original.custody.observe()
+	if err != nil || runtime.PID != observation.PID {
+		_ = s.block(original)
 		return
 	}
-	if original.custody == nil {
-		if original.publish == nil {
+	if runtime.State == "running" && (worker.namespaces.verify(worker.custody) != nil || original.custody.verifyRunningSecurity() != nil) || runtime.State == "created" {
+		_ = s.block(original)
+		return
+	}
+	if original.opened == nil {
+		if observation.Terminal || !observation.Populated || runtime.State != "running" {
 			_ = s.block(original)
 			return
 		}
-		c, err := openOriginalCustody(runtime)
-		if err != nil {
-			_ = s.block(original)
-			return
-		}
-		if s.gateway.verify(ctx) != nil {
-			_ = c.close()
-			_ = s.block(original)
-			return
-		}
-		original.custody, original.scope.ContainerID = c, runtime.ContainerID
-		observation := c.initial
-		r, err := s.record(original, journalBody{Kind: "CUSTODY_OPEN", Custody: &observation, Runtime: &runtime})
+		birth := worker.started.cursor()
+		r, err := s.record(original, journalBody{Kind: "CUSTODY_OPEN", Begin: &birth, Custody: &observation, Runtime: &runtime})
 		if err != nil {
 			_ = s.block(original)
 			return
 		}
 		original.opened = &r
 	}
-	observation, err := original.custody.observe()
-	if err != nil || runtime.PID != observation.PID || runtime.ContainerID != original.scope.ContainerID || runtime.SandboxID != original.opened.Runtime.SandboxID || s.gateway.verify(ctx) != nil {
-		_ = s.block(original)
-		return
-	}
-	if runtime.State == "running" && original.custody.verifyRunningSecurity() != nil || runtime.State == "created" && original.custody.security != nil {
-		_ = s.block(original)
-		return
-	}
 	if runtime.State == "stopped" && observation.Terminal && !observation.Populated {
-		if original.publish == nil || original.intent == nil || original.opened == nil || original.custody.security == nil {
+		pause := original.births[worker.receipt.SandboxID]
+		if original.publish == nil || original.intent == nil || original.custody.security == nil || pause == nil || pause.custody.security == nil {
 			_ = s.block(original)
 			return
 		}
-		begin, publish := original.opened.cursor(), original.publish.cursor()
-		r, err := s.record(original, journalBody{Kind: "ORIGINAL_STOPPED", Begin: &begin, Publish: &publish, Custody: &observation, Runtime: &runtime, IntentHash: original.intent.IntentHash})
+		pauseState, pauseErr := pause.custody.observe()
+		if pauseErr != nil {
+			_ = s.block(original)
+			return
+		}
+		if !pauseState.Terminal || pauseState.Populated {
+			return
+		}
+		// Release the source's namespace/root pins before CSI teardown; Delete may follow unpublish.
+		if errors.Join(worker.namespaces.close(), pause.namespaces.close()) != nil {
+			_ = s.block(original)
+			return
+		}
+		begin, publication := original.opened.cursor(), original.publish.cursor()
+		r, err := s.record(original, journalBody{Kind: "ORIGINAL_STOPPED", Begin: &begin, Publish: &publication, Custody: &observation, Runtime: &runtime, IntentHash: original.intent.IntentHash})
 		if err != nil {
 			_ = s.block(original)
 			return

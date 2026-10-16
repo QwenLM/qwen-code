@@ -9,11 +9,13 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
 
 type fixedWorkerPolicy struct {
+	mu       sync.Mutex
 	proc     int
 	sys      int
 	security int
@@ -379,9 +381,14 @@ func (p *fixedWorkerPolicy) context() error {
 }
 
 func (p *fixedWorkerPolicy) verify() error {
+	if p == nil {
+		return errors.New("original loaded worker policy unavailable")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if p == nil || p.closed || p.context() != nil {
+	if p.closed || p.context() != nil {
 		return errors.New("original loaded worker policy unavailable")
 	}
 	for name, kind := range map[string]int{"user": unix.CLONE_NEWUSER, "mnt": unix.CLONE_NEWNS} {
@@ -441,6 +448,16 @@ func (p *fixedWorkerPolicy) verify() error {
 			return errors.New("current original policy profile differs")
 		}
 	}
+	for _, name := range []string{"qwen-k2-sandbox-v1", "qwen-k2-shim-v1", "qwen-k2-gateway-v1"} {
+		_, fd, link, err := p.profile(name)
+		if err != nil {
+			return errors.New("original birth actor profile is unavailable")
+		}
+		closeErr := unix.Close(fd)
+		if closeErr != nil || link != p.value.RawLink {
+			return errors.New("birth actors must share the reviewed locked policy bundle")
+		}
+	}
 	path, err := policyRawPath(p.value.RawLink)
 	if err != nil {
 		return err
@@ -472,6 +489,8 @@ func (p *fixedWorkerPolicy) verify() error {
 }
 
 func (p *fixedWorkerPolicy) close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.closed {
 		return nil
 	}
