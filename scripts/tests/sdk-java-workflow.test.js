@@ -231,16 +231,34 @@ describe('SDK Java self-hosted workflow guards', () => {
     // drift class; the checksum gate in this body is the security-relevant
     // part, so pin the whole body equal — not just the step name.
     const parsed = parse(workflow);
-    const bodies = ['test', 'mysql-integration', 'daemon-e2e'].map((name) => {
-      const s = parsed.jobs[name].steps.find(
+    const reference = parse(
+      readFileSync(
+        '.github/workflows/release-managed-agent-reference.yml',
+        'utf8',
+      ),
+    );
+    const bodies = [
+      ...['test', 'mysql-integration', 'daemon-e2e'].map(
+        (name) => parsed.jobs[name],
+      ),
+      reference.jobs.build,
+    ].map((pooledJob, index) => {
+      const s = pooledJob.steps.find(
         (candidate) => candidate.name === 'Set up Maven (self-hosted)',
       );
-      expect(s, name).toBeDefined();
-      expect(s.if, name).toBe("${{ runner.environment == 'self-hosted' }}");
+      expect(s, String(index)).toBeDefined();
+      expect(s.if, String(index)).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
       return s.run;
     });
     expect(bodies[1]).toBe(bodies[0]);
     expect(bodies[2]).toBe(bodies[0]);
+    expect(bodies[3]).toBe(bodies[0]);
+    expect(reference.jobs.build.env).toEqual({
+      MAVEN_VERSION: parsed.env.MAVEN_VERSION,
+      MAVEN_SHA512: parsed.env.MAVEN_SHA512,
+    });
     expect(bodies[0]).toContain('sha512sum --check');
     expect(bodies[0]).toContain('>> "${GITHUB_PATH}"');
   });
@@ -772,6 +790,12 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
     'sdk-java-contract-open-prs.yml': parse(
       readFileSync('.github/workflows/sdk-java-contract-open-prs.yml', 'utf8'),
     ),
+    'release-managed-agent-reference.yml': parse(
+      readFileSync(
+        '.github/workflows/release-managed-agent-reference.yml',
+        'utf8',
+      ),
+    ),
   };
   const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
   const ciSteps = Object.values(ci.jobs).flatMap((job) => job.steps ?? []);
@@ -788,6 +812,7 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
     ['sdk-java.yml', 'daemon-e2e'],
     ['sdk-java-flyway-open-prs.yml', 'recheck'],
     ['sdk-java-contract-open-prs.yml', 'recheck'],
+    ['release-managed-agent-reference.yml', 'build'],
   ];
 
   it.each(poolJobs)(
