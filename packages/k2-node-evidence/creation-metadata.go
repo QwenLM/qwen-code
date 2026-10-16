@@ -29,7 +29,7 @@ type creationMetadata struct {
 func (g *runtimeReadGateway) creation(parent context.Context, arm, id string) (creationMetadata, error) {
 	g.mu.Lock()
 	original := g.originals[arm]
-	if g.closed || original == nil || original.blocked || g.snapshots == nil || g.content == nil || g.images == nil || !hashString(id) {
+	if g.closed || g.lifetime == nil || g.lifetime.Err() != nil || original == nil || original.blocked || g.snapshots == nil || g.content == nil || g.images == nil || !hashString(id) {
 		g.mu.Unlock()
 		return creationMetadata{}, errors.New("original creation metadata authority is unavailable")
 	}
@@ -77,7 +77,7 @@ func (g *runtimeReadGateway) creation(parent context.Context, arm, id string) (c
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.closed || g.originals[arm] != original || original.blocked || original.task != registered {
+	if g.closed || g.lifetime.Err() != nil || ctx.Err() != nil || g.originals[arm] != original || original.blocked || original.task != registered {
 		return creationMetadata{}, errors.New("original creation metadata association changed")
 	}
 	return creationMetadata{"qwen-k2-creation-metadata/2", containerRaw, snapshotRaw, mounts.Mounts, image}, nil

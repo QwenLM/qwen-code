@@ -140,8 +140,11 @@ func (g *runtimeReadGateway) observe(parent context.Context, arm string) (runtim
 	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("containerd-namespace", "k8s.io"))
 	result, err := g.readOriginal(ctx, original)
 	if errors.Is(err, errRuntimeTransition) && ctx.Err() == nil && g.lifetime.Err() == nil {
-		if result.PID == 0 || original.pid != 0 && result.PID != original.pid || g.verifyMetadata(ctx, original, result) != nil {
+		if result.PID == 0 || original.pid != 0 && result.PID != original.pid || g.verifyMetadata(ctx, original, result) != nil || ctx.Err() != nil || g.lifetime.Err() != nil {
 			original.blocked = true
+			if original.waitCancel != nil {
+				original.waitCancel()
+			}
 			return runtimeObservation{}, errors.New("original creation transition identity differs")
 		}
 		original.pid, original.containerID, original.sandboxID = result.PID, result.ContainerID, result.SandboxID
