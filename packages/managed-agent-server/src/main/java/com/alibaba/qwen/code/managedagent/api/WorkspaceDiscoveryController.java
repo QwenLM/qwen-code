@@ -3,7 +3,10 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.service.WorkspaceDiscoveryService;
 import com.alibaba.qwen.code.managedagent.service.WorkspaceDiscoveryService.WorkspacePage;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.WorkspaceSummary;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceCreationStore;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.CacheControl;
@@ -21,9 +24,11 @@ import java.util.Locale;
 @RestController
 public class WorkspaceDiscoveryController {
     private final WorkspaceDiscoveryService service;
+    private final WorkspaceCreationStore creation;
 
-    public WorkspaceDiscoveryController(WorkspaceDiscoveryService service) {
+    public WorkspaceDiscoveryController(WorkspaceDiscoveryService service, WorkspaceCreationStore creation) {
         this.service = service;
+        this.creation = creation;
     }
 
     @GetMapping("/v1/agents/workspaces")
@@ -56,7 +61,7 @@ public class WorkspaceDiscoveryController {
                 .map(WorkspaceDiscoveryController::webShellItem).toList(),
                 page.defaultWorkspace() == null ? null
                         : webShellItem(page.defaultWorkspace()), page.hasMore(),
-                page.nextCursor(), new WebShellCapabilities(true, false)));
+                page.nextCursor(), new WebShellCapabilities(true, false, creation.enabled(), true)));
     }
 
     @PostMapping("/api/agent/web-shell/v1/workspaces/get")
@@ -64,6 +69,20 @@ public class WorkspaceDiscoveryController {
             @Valid @RequestBody GetRequest request) {
         return noStore(webShellItem(service.get(tenant.tenantId(),
                 tenant.requireActorId(), request.workspaceId())));
+    }
+
+    @PostMapping("/api/agent/web-shell/v1/workspaces/create")
+    public ResponseEntity<WorkspaceSummary> webShellCreate(TenantContext tenant,
+            @Valid @RequestBody CreateRequest request) {
+        return noStore(webShellItem(creation.create(tenant.tenantId(), tenant.requireActorId(),
+                request.displayName(), request.idempotencyKey())));
+    }
+
+    public record CreateRequest(@NotBlank String displayName, @NotBlank String idempotencyKey) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Workspace creation field");
+        }
     }
 
     private static PublicItem publicItem(WorkspaceSummary item) {
@@ -91,7 +110,11 @@ public class WorkspaceDiscoveryController {
     }
 
     public record WebShellCapabilities(boolean workspaceBinding,
-            boolean workspaceContext) {
+            boolean workspaceContext, boolean workspaceCreation, boolean approvalModeSelection) {
+        public WebShellCapabilities(boolean workspaceBinding,
+                boolean workspaceContext, boolean workspaceCreation) {
+            this(workspaceBinding, workspaceContext, workspaceCreation, false);
+        }
     }
 
     public record WebShellPage(List<WorkspaceSummary> data,

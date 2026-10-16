@@ -37,7 +37,7 @@ public class SshWorkspaceController {
                 tenant.tenantId(), tenant.requireActorId(), request.nodeId(), request.path()));
     }
 
-    @PostMapping("/workspaces/create")
+    @PostMapping("/workspaces/register")
     public ResponseEntity<Operation> create(TenantContext tenant, @Valid @RequestBody CreateRequest request,
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());

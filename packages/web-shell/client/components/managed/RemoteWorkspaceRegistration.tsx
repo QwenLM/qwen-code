@@ -92,7 +92,7 @@ export function RemoteWorkspaceRegistration({
   onRegistered: (workspace: ManagedAgentWorkspace) => void;
 }) {
   const { t } = useI18n();
-  const key = `qwen-managed-workspace-registration:${provider.storageKey}`;
+  const key = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
   const [pending, setPending] = useState(() => readIntent(key));
   const pendingRef = useRef(pending);
   const [nodes, setNodes] = useState<ManagedRuntimeNode[]>([]);

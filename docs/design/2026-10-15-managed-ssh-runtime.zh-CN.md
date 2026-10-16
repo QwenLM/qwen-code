@@ -38,10 +38,10 @@ bootstrap 子进程在节点的独占转发锁之外运行，避免一个慢操�
 | ----------------------------- | ------------------------------------------------------ |
 | `/runtime-nodes/query`        | 列出已启用且当前用户有权使用的节点 ID/名称。           |
 | `/workspaces/check-directory` | 探测 `nodeId/path`，返回已有目录规范路径和兼容性结果。 |
-| `/workspaces/create`          | 为名称、节点和路径创建幂等登记 operation。             |
+| `/workspaces/register`        | 为名称、节点和路径创建幂等登记 operation。             |
 | `/workspaces/operations/get`  | 返回该 actor 的登记状态和成功后的 Workspace ID。       |
 
-公开 OpenAPI contract 版本为 `1.50.0`；四个新增接口和七个 schema 用于生成 WebShell 客户端类型。既有 API 路径和 schema 保留原有契约。节点查询和创建默认关闭，operation 查询继续限定 tenant 和 actor。
+公开 OpenAPI contract 版本为 `1.52.0`；四个新增接口和七个 schema 用于生成 WebShell 客户端类型。SSH 登记使用 `/workspaces/register` 和 `WebShellWorkspaceRegisterRequest`，返回持久化 operation（202）。已独立发布的 `/workspaces/create` 继续创建本地空 Workspace 并返回摘要（200）；两条流程分别保留授权、幂等和浏览器草稿身份。本地创建严格拒绝未知字段，包括值为 null 的远端位置字段，避免旧 SSH 请求分配本地目录。既有 API 路径和 schema 保留原有契约。节点查询和创建默认关闭，operation 查询继续限定 tenant 和 actor。
 
 WebShell 在现有 Workspace 选择器中增加可选登记对话框。检查目录后发起登记，重试保留幂等键和 operation，成功后选中新 Workspace，继续普通 Session 创建流程。预览不授予创建权限；创建时重新授权并验证远端身份。
 
@@ -147,7 +147,7 @@ source reactor 完成 SDK 249 例 unit（跳过 9 例）、Broker 1,005 例（�
 
 ### 合并后的服务端模块验证，2026-10-16
 
-合入 #14277 后，Broker、Server 及 SSH 新增实现统一位于 `packages/managed-agent-server`，Java SDK 仍位于 `packages/sdk-java/qwencode`。SSH 迁移使用 V6，将 V4/V5 留给独立审查中的 #14316；公开 API 在 main 的 V1–V3 / 1.49.0 基础上升为 1.50.0。初始化器使用显式迁移编号，因此 V3 catalog 仍识别为 V3，本分支的下一项可用迁移为 V6。 重建旧预览的临时 catalog 前，先用原构建排空预览 Session。SSH 仅在当前 main baseline 上新增 V6；保留上游 #13219 的规范 V1 改动，不改写、不 repair Flyway history。测试冲突处理保留规范数据库毫秒时钟，并要求父 Session 关闭先取消子 Turn，再释放被阻塞的模型响应；断言完成后释放 latch 做清理。SSH lifecycle-v2 的严格退役证明要求与 main 的旧版 held-Runtime 清单机制分别保留。
+合入 #14277 后，Broker、Server 及 SSH 新增实现统一位于 `packages/managed-agent-server`，Java SDK 仍位于 `packages/sdk-java/qwencode`。main 现已包含 #14316 的 V4 Workspace 创建 receipt namespace 和 V5 模型选择 schema；SSH 追加 V6，不改写任何迁移资源。初始化器与 catalog 在应用 V6 前识别所有已发布的 V1–V5 catalog。公开 API 从 main 的 1.50.0 升为 1.52.0，保留本地 Workspace 创建及模型、审批控件。重建旧预览的临时 catalog 前，先用原构建排空预览 Session；不改写、不 repair Flyway history。动态创建的本地根目录与登记的 SSH storage 分别保留身份校验，SSH lifecycle-v2 的严格退役证明要求与 main 的旧版 held-Runtime 清单机制分别保留。浏览器使用独立 SSH 登记草稿 key，避免刷新后由本地创建消费远端登记 receipt，并在 Managed 模式不活动时隐藏远端登记对话框。
 
 前一 head `7521696` 的 Linux CI 通过全部 56 例 O4 集成测试，无跳过，包含容量探针。其 Hosted 进程 profile 仍有 46 例中的一项错误：`resident-expiry` fixture 的首个 Turn 在 Harness 记录阻塞恢复的 HTTP 非法参数响应后保持 RUNNING，尚未进入删除故障点。现有 artifact 无法识别被拒绝的路由或字段。没有将其归类为基础设施偶发问题，加长等待或自动重试也不能证明修复。仅此合成 Linux fixture 启用两个窄范围 Spring DEBUG logger，并保持请求详情遮蔽，以便后续失败产物记录请求路径、状态和异常。独立真实 DispatcherServlet 探针已验证配置有效，且未暴露其 header/body/parameter 哨兵值；原始 query 和异常 message 仍可见，因此这不是生产日志配置。
 

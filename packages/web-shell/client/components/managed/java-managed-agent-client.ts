@@ -161,12 +161,12 @@ export class JavaManagedAgentClient {
     );
   }
 
-  createWorkspace(
-    request: Schemas['WebShellWorkspaceCreateRequest'],
+  registerWorkspace(
+    request: Schemas['WebShellWorkspaceRegisterRequest'],
     signal?: AbortSignal,
   ) {
     return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
-      '/workspaces/create',
+      '/workspaces/register',
       request,
       signal,
     );
@@ -178,6 +178,20 @@ export class JavaManagedAgentClient {
       { operationId },
       signal,
     );
+  }
+
+  createWorkspace(
+    request: Schemas['WebShellWorkspaceCreateRequest'],
+    signal?: AbortSignal,
+  ): Promise<JavaAgentWorkspace> {
+    return this.post('/workspaces/create', request, signal);
+  }
+
+  getSessionOptions(
+    agentId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionOptions']> {
+    return this.post('/session-options/query', { agentId }, signal);
   }
 
   getTranscript(
@@ -272,6 +286,25 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellCwdOperation']> {
     return this.post('/sessions/cwd/change', request, signal);
+  }
+
+  getSessionModels(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellSessionModels']>(
+      '/session-models/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  changeModel(
+    request: Schemas['WebShellChangeModelRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellModelChangeResult']>(
+      '/session-models/change',
+      request,
+      signal,
+    );
   }
 
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {

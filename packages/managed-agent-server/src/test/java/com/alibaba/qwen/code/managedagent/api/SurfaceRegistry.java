@@ -286,13 +286,29 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.RUNTIME_NODE_ACCESS,
             EnumSet.of(Capability.WORKSPACE_DIRECTORY_CHECK)),
     WEBSHELL_WORKSPACE_REGISTER(Method.POST,
-            "/api/agent/web-shell/v1/workspaces/create",
+            "/api/agent/web-shell/v1/workspaces/register",
             Surface.WEBSHELL, RuleClass.RUNTIME_NODE_ACCESS,
             EnumSet.of(Capability.WORKSPACE_REGISTER)),
     WEBSHELL_WORKSPACE_REGISTRATION_GET(Method.POST,
             "/api/agent/web-shell/v1/workspaces/operations/get",
             Surface.WEBSHELL, RuleClass.WORKSPACE_REGISTRATION_OWNER,
             EnumSet.of(Capability.WORKSPACE_REGISTRATION_GET)),
+    WEBSHELL_WORKSPACE_CREATE(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/create",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_ALLOCATION,
+            EnumSet.of(Capability.WORKSPACE_CREATE)),
+    WEBSHELL_SESSION_OPTIONS(Method.POST,
+            "/api/agent/web-shell/v1/session-options/query",
+            Surface.WEBSHELL, RuleClass.SESSION_OPTIONS,
+            EnumSet.of(Capability.SESSION_OPTIONS)),
+    WEBSHELL_SESSION_MODELS(Method.POST,
+            "/api/agent/web-shell/v1/session-models/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR,
+            EnumSet.of(Capability.SESSION_MODELS)),
+    WEBSHELL_SESSION_MODEL_CHANGE(Method.POST,
+            "/api/agent/web-shell/v1/session-models/change",
+            Surface.WEBSHELL, RuleClass.OPERATOR,
+            EnumSet.of(Capability.SESSION_MODEL_CHANGE)),
     // ManagedSessionStoreController: internal writer routes.
     INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
@@ -533,6 +549,10 @@ public enum SurfaceRegistry {
         ARTIFACT_LIST,
         ARTIFACT_GET,
         ARTIFACT_CONTENT,
+        WORKSPACE_CREATE,
+        SESSION_OPTIONS,
+        SESSION_MODELS,
+        SESSION_MODEL_CHANGE,
         WORKSPACE_LIST,
         WORKSPACE_GET,
         RUNTIME_NODE_LIST,
@@ -682,6 +702,10 @@ public enum SurfaceRegistry {
          * Workspace is invisible.
          */
         WORKSPACE_DISCOVERY,
+        /** A trusted tenant actor allocates a new root only when operator configuration enables it. */
+        WORKSPACE_ALLOCATION,
+        /** A trusted tenant actor may inspect effective creation policy for a tenant Agent. */
+        SESSION_OPTIONS,
         /**
          * SSH node discovery and fresh directory registration require a
          * trusted actor ({@code 401 actor_required} without one). The

@@ -166,7 +166,7 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
                     entry(SshWorkspaceController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryRequest")),
-                    entry(SshWorkspaceController.CreateRequest.class, List.of("WebShellWorkspaceCreateRequest")),
+                    entry(SshWorkspaceController.CreateRequest.class, List.of("WebShellWorkspaceRegisterRequest")),
                     entry(SshWorkspaceController.OperationRequest.class, List.of("WebShellWorkspaceOperationRequest")),
                     entry(SshWorkspaceService.NodeSummary.class, List.of("WebShellRuntimeNode")),
                     entry(SshWorkspaceService.NodePage.class, List.of("WebShellRuntimeNodePage")),
@@ -231,6 +231,10 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellStreamRequest")),
                     entry(WebShellCreateRequest.class,
                             List.of("WebShellCreateRequest")),
+                    entry(ApiModels.WebShellSessionOptionsRequest.class,
+                            List.of("WebShellSessionOptionsRequest")),
+                    entry(ApiModels.WebShellSessionOptions.class,
+                            List.of("WebShellSessionOptions")),
                     entry(WebShellSubmitRequest.class,
                             List.of("WebShellSubmitRequest")),
                     entry(WebShellCancelRequest.class,
@@ -245,6 +249,14 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellCommandOperation")),
                     entry(WebShellTurn.class, List.of("WebShellTurn")),
                     entry(WebShellSession.class, List.of("WebShellSession")),
+                    entry(ApiModels.WebShellModelContext.class,
+                            List.of("WebShellModelContext")),
+                    entry(ApiModels.WebShellModelOption.class, List.of("WebShellModelOption")),
+                    entry(ApiModels.WebShellModelSelection.class, List.of("WebShellModelSelection")),
+                    entry(ApiModels.WebShellSessionModelsRequest.class, List.of("WebShellSessionModelsRequest")),
+                    entry(ApiModels.WebShellSessionModels.class, List.of("WebShellSessionModels")),
+                    entry(ApiModels.WebShellChangeModelRequest.class, List.of("WebShellChangeModelRequest")),
+                    entry(ApiModels.WebShellModelChangeResult.class, List.of("WebShellModelChangeResult")),
                     entry(WebShellSessionCapabilities.class,
                             List.of("WebShellSessionCapabilities")),
                     entry(WebShellPage.class, List.of("WebShellSessionPage",
@@ -301,6 +313,24 @@ class ManagedAgentApiContractTest {
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
+
+    private void exchangeApprovalOptions(Map<String, String> drift, String tenant) throws Exception {
+        String request = "{\"agentId\":\"qwen-code\"}";
+        exchange(drift, "queryWebShellSessionOptions", 401,
+                post(WEB_SHELL + "/session-options/query").header(TENANT, tenant), request);
+        String response = exchange(drift, "queryWebShellSessionOptions", 200,
+                post(WEB_SHELL + "/session-options/query").header(TENANT, tenant).principal(actor(tenant)),
+                request);
+        assertThat(json(response).path("approvalMode").asText()).isEqualTo("yolo");
+        assertThat(json(response).path("availableApprovalModes").size()).isEqualTo(3);
+        exchange(drift, "queryWebShellSessionOptions", 400,
+                post(WEB_SHELL + "/session-options/query").header(TENANT, tenant).principal(actor(tenant)), "{}");
+        exchange(drift, "queryWebShellSessionOptions", 403,
+                post(WEB_SHELL + "/session-options/query").header(TENANT, tenant).principal(actor("other")), request);
+        exchange(drift, "queryWebShellSessionOptions", 404,
+                post(WEB_SHELL + "/session-options/query").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"agentId\":\"unknown\"}");
+    }
 
     @Test
     void migrationRefusalsDeclareTheActualErrorCodeAndRetryability() throws Exception {
@@ -1149,6 +1179,11 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/get")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"workspaceId\":\"ws-default\"}");
+        exchangeApprovalOptions(drift, tenant);
+        exchange(drift, "webShellCreateWorkspace", 409,
+                post(WEB_SHELL + "/workspaces/create")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"workspace-create\"}");
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
@@ -1188,6 +1223,18 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(1);
         assertThat(webBound.at("/workspace/state").asText())
                 .isEqualTo("ready");
+        exchange(drift, "queryWebShellSessionModels", 200,
+                post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionModels", 401,
+                post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "changeWebShellSessionModel", 409,
+                post(WEB_SHELL + "/session-models/change").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"modelId\":\"model-a\",\"expectedRevision\":0,\"idempotencyKey\":\"model-key\"}");
+        exchange(drift, "changeWebShellSessionModel", 401,
+                post(WEB_SHELL + "/session-models/change").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + webBoundId + "\",\"modelId\":\"model-a\",\"expectedRevision\":0,\"idempotencyKey\":\"model-key\"}");
         exchangeAutomations(drift, workspaceTenant, otherTenant, actor,
                 publicBoundId);
         // W2 refuses the operation on this fixture's deployment: the
@@ -1377,8 +1424,8 @@ class ManagedAgentApiContractTest {
         for (String code : List.of(
                 exchange(drift, "webShellCheckWorkspaceDirectory", 404,
                         post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant).principal(owner), directory),
-                exchange(drift, "webShellCreateWorkspace", 404,
-                        post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(owner), create))) {
+                exchange(drift, "webShellRegisterWorkspace", 404,
+                        post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant).principal(owner), create))) {
             assertThat(json(code).at("/error/code").asText()).isEqualTo("ssh_runtime_disabled");
         }
         exchange(drift, "webShellGetWorkspaceOperation", 404,
@@ -1388,10 +1435,30 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant), null);
         exchange(drift, "webShellCheckWorkspaceDirectory", 401,
                 post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant), directory);
-        exchange(drift, "webShellCreateWorkspace", 401,
-                post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant), create);
+        exchange(drift, "webShellRegisterWorkspace", 401,
+                post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant), create);
         exchange(drift, "webShellGetWorkspaceOperation", 401,
                 post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant), "{\"operationId\":\"missing\"}");
+    }
+
+    @Test
+    void localWorkspaceCreationRejectsRemotePayloadsBeforeAdmission() throws Exception {
+        String tenant = "contract-local-remote-boundary-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        for (String extra : List.of(
+                ",\"nodeId\":\"mac\",\"path\":\"/work/project\"",
+                ",\"nodeId\":null,\"path\":\"/work/project\"",
+                ",\"nodeId\":null", ",\"path\":null")) {
+            String body = "{\"displayName\":\"Remote\",\"idempotencyKey\":\"original\"" + extra + "}";
+            assertThat(json(exchange(drift, "webShellCreateWorkspace", 400,
+                    post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)), body))
+                    .at("/error/code").asText()).isEqualTo("invalid_request");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?"
+                + " AND namespace = 'WORKSPACE_CREATE'", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+        assertThat(drift).isEmpty();
     }
 
     @Test
@@ -1437,8 +1504,8 @@ class ManagedAgentApiContractTest {
         exchange(proxy, drift, "webShellCheckWorkspaceDirectory", 200,
                 post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant).principal(actor(tenant)),
                 "{\"nodeId\":\"mac\",\"path\":\"/work/project\"}");
-        exchange(proxy, drift, "webShellCreateWorkspace", 202,
-                post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)),
+        exchange(proxy, drift, "webShellRegisterWorkspace", 202,
+                post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant).principal(actor(tenant)),
                 """
                 {"nodeId":"mac","path":"/work/project","displayName":"Project",
                  "idempotencyKey":"original","requestId":"create-registration-trace"}
@@ -2458,7 +2525,7 @@ class ManagedAgentApiContractTest {
                 assertThat(other.get("capabilities"))
                         .isEqualTo(json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false}
                                 """));
             }
         }

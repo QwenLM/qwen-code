@@ -49,7 +49,7 @@ for (const width of [1280, 390]) {
           },
         });
       }
-      if (path.endsWith('/workspaces/create')) {
+      if (path.endsWith('/workspaces/register')) {
         creates.push(body);
         if (loseResponse) {
           loseResponse = false;
