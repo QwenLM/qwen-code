@@ -396,10 +396,17 @@ class ManagedAgentCsiMutationMySqlIT {
                 }
                 long before = System.nanoTime();
                 try (var pool = Executors.newSingleThreadExecutor()) {
-                    var blocked = pool.submit(() -> transaction.execute(ignored -> journal.blockRecovery("tenant",
-                            session, "csi-original-writer-token-for-test",
-                            new ManagedSessionStoreModels.BlockRecoveryRequest("workspace", "writer", 1,
-                                    "BLOCKED_RESOURCE", "guard-witness"))));
+                    var blocked = pool.submit(() -> transaction.execute(ignored -> {
+                        // Past the 20 s wait below: without the 5 s bound
+                        // the server's own lock wait cannot answer first
+                        // and pass for it, whatever the server's default
+                        // (#13800 R2-11).
+                        jdbc.execute("SET SESSION innodb_lock_wait_timeout = 30");
+                        return journal.blockRecovery("tenant",
+                                session, "csi-original-writer-token-for-test",
+                                new ManagedSessionStoreModels.BlockRecoveryRequest("workspace", "writer", 1,
+                                        "BLOCKED_RESOURCE", "guard-witness"));
+                    }));
                     assertThatThrownBy(() -> blocked.get(20, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
                             .satisfies(error -> {
                                 assertThat(error.getCause()).isInstanceOf(ApiException.class);
@@ -408,9 +415,12 @@ class ManagedAgentCsiMutationMySqlIT {
                                 assertThat(refusal.getCode()).isEqualTo("tenant_guard_contended");
                             });
                 }
-                // One bounded wait (5 s) plus slack; a fixed number, so a
-                // raised bound fails here too.
-                assertThat((System.nanoTime() - before) / 1_000_000).isLessThan(15_000);
+                // One bounded wait (5 s) plus slack; fixed numbers, so a
+                // raised bound fails here too, and the floor shows the
+                // refusal came from a wait on the held row that actually
+                // ran to the bound rather than from an earlier failure.
+                long elapsedMillis = (System.nanoTime() - before) / 1_000_000;
+                assertThat(elapsedMillis).isGreaterThanOrEqualTo(4_000).isLessThan(15_000);
             } finally {
                 manager.rollback(hold);
             }
