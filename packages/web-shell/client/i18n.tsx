@@ -1,4 +1,8 @@
 import {
+  TRAJECTORY_EXECUTION_MESSAGES_EN,
+  TRAJECTORY_EXECUTION_MESSAGES_ZH,
+} from './trajectory/execution-messages.js';
+import {
   FILES_MESSAGES_EN,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
@@ -21,6 +25,10 @@ import {
 
 import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
+import {
+  MCP_APP_MESSAGES_EN,
+  MCP_APP_MESSAGES_ZH,
+} from './mcp-app/messages.js';
 import {
   COLLAB_MESSAGES_EN,
   COLLAB_MESSAGES_ZH,
@@ -918,8 +926,6 @@ const EN: Messages = {
   'composerMobile.commands': 'All commands',
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
-  'composerMobile.previousInput': 'Previous input',
-  'composerMobile.nextInput': 'Next input',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,
@@ -1802,7 +1808,7 @@ const EN: Messages = {
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
   'webPreview.title': 'Web preview',
-  'webPreview.openHint': 'Preview a running web app',
+  'webPreview.openHint': 'Preview web apps',
   'webPreview.address': 'Development URL',
   'webPreview.open': 'Open',
   'webPreview.refresh': 'Refresh preview',
@@ -3335,7 +3341,7 @@ const EN: Messages = {
   'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
   'trajectory.title': 'Trajectory',
-  'trajectory.description': 'See where a run spent its time and tokens',
+  'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
@@ -4381,11 +4387,13 @@ const EN: Messages = {
   'welcome.prompt': 'What would you like to do?',
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
+  ...MCP_APP_MESSAGES_EN,
   ...VOICE_MESSAGES_EN,
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
+  ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
@@ -5279,8 +5287,6 @@ const ZH: Messages = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜索命令',
   'composerMobile.history': '输入历史',
-  'composerMobile.previousInput': '上一条输入',
-  'composerMobile.nextInput': '下一条输入',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已添加附件/图片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此处没有可用的添加操作',
@@ -6089,7 +6095,7 @@ const ZH: Messages = {
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
   'webPreview.title': '网页预览',
-  'webPreview.openHint': '预览正在运行的网页应用',
+  'webPreview.openHint': '预览网页应用',
   'webPreview.address': '开发地址',
   'webPreview.open': '打开',
   'webPreview.refresh': '刷新预览',
@@ -7501,7 +7507,7 @@ const ZH: Messages = {
   'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
   'trajectory.title': '轨迹',
-  'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
+  'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
   'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
@@ -8459,11 +8465,13 @@ const ZH: Messages = {
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
+  ...MCP_APP_MESSAGES_ZH,
   ...VOICE_MESSAGES_ZH,
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
+  ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };

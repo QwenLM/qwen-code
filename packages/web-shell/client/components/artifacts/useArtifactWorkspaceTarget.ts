@@ -10,6 +10,7 @@ import {
   type DaemonWorkspaceActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useEffect, useMemo, useRef } from 'react';
+import type { FileUploadClient } from '../../hooks/useFileUpload';
 
 export type ArtifactWorkspaceActions = Pick<
   DaemonWorkspaceActions,
@@ -20,7 +21,8 @@ export type ArtifactWorkspaceActions = Pick<
   | 'listScheduledTasks'
   | 'updateScheduledTask'
   | 'deleteScheduledTask'
->;
+> &
+  Partial<FileUploadClient>;
 
 interface ArtifactWorkspaceOwner {
   cwd: string;
@@ -95,6 +97,15 @@ export function useArtifactWorkspaceTarget(
     () => resolveArtifactWorkspaceOwner(workspace.capabilities, workspaceCwd),
     [workspace.capabilities, workspaceCwd],
   );
+  const canUpload = Boolean(
+    owner?.id &&
+      workspace.capabilities?.features?.includes('workspace_file_upload') &&
+      workspace.capabilities?.features?.includes(
+        'workspace_qualified_rest_core',
+      ),
+  );
+  const uploadAllowedRef = useRef(canUpload);
+  uploadAllowedRef.current = canUpload;
   const authorityRef = useRef<ArtifactWorkspaceAuthority | undefined>(
     undefined,
   );
@@ -145,6 +156,24 @@ export function useArtifactWorkspaceTarget(
       return current;
     };
     return {
+      ...(canUpload
+        ? ({
+            async uploadWorkspaceFile(req, clientId) {
+              const current = requireOwner();
+              if (!uploadAllowedRef.current) {
+                throw new Error('Workspace file upload is no longer available');
+              }
+              const result = await workspace.client
+                .workspaceByCwd(current.cwd)
+                .uploadWorkspaceFile(req, clientId);
+              requireOwner();
+              if (!uploadAllowedRef.current) {
+                throw new Error('Workspace file upload is no longer available');
+              }
+              return result;
+            },
+          } satisfies FileUploadClient)
+        : {}),
       async listDirectory(path) {
         const current = requireOwner();
         const result = await (current.id
@@ -207,7 +236,7 @@ export function useArtifactWorkspaceTarget(
         requireScheduledTaskOwner(workspaceId);
       },
     };
-  }, [authority, primaryActions, workspace.client]);
+  }, [authority, primaryActions, workspace.client, canUpload]);
 
   if (!authority || !actions) return undefined;
   return {

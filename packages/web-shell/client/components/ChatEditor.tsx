@@ -89,8 +89,6 @@ import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
-  ArrowDownIcon,
-  ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FolderClosedIcon,
@@ -2119,6 +2117,11 @@ export const ChatEditor = memo(
       if (!visibleActionSet) return true;
       return visibleActionSet.has(action);
     };
+    // A host with no details surface — the embedded side-task pane, which
+    // already lives inside the right panel — keeps the transcript snapshot as
+    // its only way to read the breakdown, and only that case advertises it.
+    const contextRingAction = onOpenContextUsage ?? onShowContextUsage;
+    const contextRingHint = Boolean(onShowContextUsage) && !onOpenContextUsage;
     const showModeAction = showToolbarAction('approvalMode');
     const showPlanAction = Boolean(
       onTogglePlan && visibleActionSet?.has('plan'),
@@ -3195,28 +3198,6 @@ export const ChatEditor = memo(
                 className={styles.mobileEditingActions}
                 data-web-shell-mobile-editing-actions
               >
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.previousInput')}
-                  title={t('composerMobile.previousInput')}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={core.navigatePrevHistory}
-                >
-                  <ArrowUpIcon />
-                </button>
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.nextInput')}
-                  title={t('composerMobile.nextInput')}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={core.navigateNextHistory}
-                >
-                  <ArrowDownIcon />
-                </button>
                 {!showAddMenuAction && (
                   <button
                     type="button"
@@ -3728,7 +3709,7 @@ export const ChatEditor = memo(
                       contextWindow={contextWindow}
                       controls={contextUsageControls}
                       onOpenDetails={onOpenContextUsage}
-                      showSnapshotHint={Boolean(onShowContextUsage)}
+                      showSnapshotHint={contextRingHint}
                     >
                       <button
                         className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
@@ -3736,9 +3717,9 @@ export const ChatEditor = memo(
                         data-web-shell-context-usage
                         onClick={(e) => {
                           e.stopPropagation();
-                          onShowContextUsage?.();
+                          contextRingAction?.();
                         }}
-                        disabled={!onShowContextUsage}
+                        disabled={!contextRingAction}
                         aria-label={
                           contextWindow > 0 && tokenCount > 0
                             ? t('status.contextUsed', {

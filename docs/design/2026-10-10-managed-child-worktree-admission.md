@@ -73,7 +73,7 @@ The facts below are from `main` at `1136a51a68`.
 - `packages/core/src/managed-runtime/managed-child-operations.ts`: the admitted modes, the launch body's mode, and the capability refusal.
 - `packages/cli/src/serve/hosted-workspace-tool-turn.ts`: the `isolation` argument and its admission; the foreground result's workspace line. `hosted-child-agent-session.ts`: the launch mode and its replay check; the notification's `<workspace>` element. `hosted-harness-session.ts`: the `childWorkspaces` flag on create and load. `hosted-runtime-recovery.ts`: the gap fill's workspace line.
 - `packages/sdk-java/qwencode`: `CreateHarnessSession` and `LoadHarnessSession` carry `childWorkspaces`.
-- `packages/sdk-java/managed-agent-server`: `ManagedAgentProperties` (the durable Broker requirement), `QwenHostedHarnessConnector` (the flag), `ChildResultRelay` (prepare, merge before commit, discard on failure, the receipt), `SessionLifecycleCoordinator` (the cascade's discard), `ChildWorkspaceService` and `ChildWorkspaceStore` (request-only entries, the deferred finish, a discard replacing an unstarted merge, an ended merge's outcome kept).
+- `packages/managed-agent-server`: `ManagedAgentProperties` (the durable Broker requirement), `QwenHostedHarnessConnector` (the flag), `ChildResultRelay` (prepare, merge before commit, discard on failure, the receipt), `SessionLifecycleCoordinator` (the cascade's discard), `ChildWorkspaceService` and `ChildWorkspaceStore` (request-only entries, the deferred finish, a discard replacing an unstarted merge, an ended merge's outcome kept).
 - Tests beside each, this design in both languages, and a note in the I1 design.
 
 ## Validation
