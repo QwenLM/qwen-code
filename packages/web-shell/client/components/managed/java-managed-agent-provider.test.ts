@@ -10,6 +10,99 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('uses the WebShell approval contract and preserves the exact request id and idempotency key', async () => {
+    const selection = {
+      approvalMode: 'default',
+      approvalRevision: 0,
+      availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+      supported: true,
+    };
+    const receipt = {
+      sessionId: 's',
+      approvalMode: 'yolo',
+      approvalRevision: 1,
+      replayed: true,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ ...selection, privateRoute: 'private' }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ ...receipt, privateRoute: 'private' }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.approvalChange!.queryOptions('s', { clientId: 'client' }),
+    ).toEqual(selection);
+    expect(
+      await provider.approvalChange!.submit(
+        's',
+        { approvalMode: 'yolo', expectedRevision: 0 },
+        {
+          clientId: 'client',
+          idempotencyKey: 'original-key',
+          requestId: 'original-request',
+        },
+      ),
+    ).toEqual(receipt);
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://product.example/api/agent/web-shell/v1/session-approval/query',
+      'https://product.example/api/agent/web-shell/v1/session-approval/change',
+    ]);
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      sessionId: 's',
+      approvalMode: 'yolo',
+      expectedRevision: 0,
+      idempotencyKey: 'original-key',
+      requestId: 'original-request',
+    });
+    expect(
+      createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
+        .approvalChange,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    {
+      approvalMode: ['yolo'],
+      approvalRevision: 0,
+      availableApprovalModes: ['yolo'],
+      supported: true,
+    },
+    {
+      approvalMode: 'yolo',
+      approvalRevision: -1,
+      availableApprovalModes: ['yolo'],
+      supported: true,
+    },
+    {
+      approvalMode: 'yolo',
+      approvalRevision: 0,
+      availableApprovalModes: ['default'],
+      supported: true,
+    },
+    {
+      approvalMode: 'yolo',
+      approvalRevision: 0,
+      availableApprovalModes: ['yolo', 'auto'],
+      supported: true,
+    },
+  ])('refuses invalid approval options (%j)', async (selection) => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(selection)),
+    });
+    await expect(
+      provider.approvalChange!.queryOptions('s', { clientId: 'client' }),
+    ).rejects.toThrow('Invalid Session approval options');
+  });
+
   it('uses only server model choices and preserves the frozen change key and revision', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

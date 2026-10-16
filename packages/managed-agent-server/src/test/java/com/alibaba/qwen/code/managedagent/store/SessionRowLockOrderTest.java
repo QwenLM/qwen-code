@@ -136,6 +136,7 @@ class SessionRowLockOrderTest {
             "ManagedRuntimeRetentionGuard.java",
             "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
             "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
+            "ResidentWorkspaces.java",
             "ToolPublicationRetentionStore.java",
             "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
@@ -325,7 +326,7 @@ class SessionRowLockOrderTest {
         // lockers no helper name would find, and the create entries, whose
         // session-row INSERT is the lock.
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
-                "insertTurnCommand", "insertCancelCommand", "changeSessionModel",
+                "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
                 "insertChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
@@ -376,11 +377,11 @@ class SessionRowLockOrderTest {
                         "beginLifecycle", "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",
-                        "cancelBeforeAdmission", "changeSessionModel", "claimTurn",
+                        "cancelBeforeAdmission", "changeSessionModel", "changeSessionApproval", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
                         "deferTurnRetry", "failTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
-                        "findReplayFloorTargets", "findTurn", "findTurnModelSelection",
+                        "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
                         "findTurnSummary", "hasActiveTurn",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertCsiSessionCommand",
@@ -392,7 +393,7 @@ class SessionRowLockOrderTest {
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
                         "releaseTurnLease", "renewTurn", "requireTurn",
-                        "requireTurnForUpdate", "retractContinuationOutput",
+                        "requireTurnForUpdate", "requireIdlePolicyChange", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "updateHarnessCursor", "validateOperationStart",
                         "withdrawSubmissionAttempted");

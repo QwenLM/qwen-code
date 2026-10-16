@@ -482,6 +482,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-approval/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read the current policy and owner-authorized change support of a readable Workspace Session. */
+        post: operations["queryWebShellSessionApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-approval/change": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Change the next-Turn policy of an idle built-in Workspace Session. Requires its recorded owner and current OPERATOR access. Changes are revision-checked and actor/session-scoped idempotent. */
+        post: operations["changeWebShellSessionApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -616,12 +650,19 @@ export interface components {
             workspace?: components["schemas"]["WebShellWorkspaceContext"];
             capabilities: components["schemas"]["WebShellSessionCapabilities"];
             /**
-             * @description Persisted Session approval policy; older servers may omit it. Existing Sessions cannot change policy through this API.
+             * @description Current effective approval policy; initialApprovalMode retains the immutable creation policy.
              * @enum {string}
              */
             approvalMode?: "default" | "auto-edit" | "yolo";
             modelContext?: components["schemas"]["WebShellModelContext"];
             modelSelection?: components["schemas"]["WebShellModelSelection"];
+            /** Format: int64 */
+            approvalRevision?: number;
+            /**
+             * @description Immutable creation-time policy, used to confirm creation replay.
+             * @enum {string}
+             */
+            initialApprovalMode?: "default" | "auto-edit" | "yolo";
         };
         WebShellSessionCapabilities: {
             /**
@@ -658,10 +699,12 @@ export interface components {
              * @default false
              */
             sessionDelete?: boolean;
-            /** @description Present only for persisted Shell Sessions, with no schema default; files and unbound Sessions omit it. True when Workspace files, Shell deployment admission and persisted default/auto-edit approval are valid. False prevents fresh sending. Disabling only the Shell flag preserves accepted cancellation and approval while Workspace files remain enabled and persisted approval remains valid; files-off or invalid approval can refuse attachment. This capability does not override authorization or recovery refusals. */
+            /** @description Present only for persisted Shell Sessions, with no schema default; files and unbound Sessions omit it. True when Workspace files, Shell deployment admission and a valid persisted approval mode are valid. False prevents fresh sending. Disabling only the Shell flag preserves accepted cancellation and approval while Workspace files remain enabled and persisted approval remains valid; files-off or invalid approval can refuse attachment. This capability does not override authorization or recovery refusals. */
             foregroundShell?: boolean;
             /** @description The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply. */
             modelChange?: boolean;
+            /** @description The caller owns this built-in Workspace Session with OPERATOR access and the Harness supports approval-selection/1. Idle-state admission is checked separately. Missing means false. */
+            approvalModeChange?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -1238,6 +1281,34 @@ export interface components {
         WebShellModelChangeResult: {
             sessionId: string;
             modelSelection: components["schemas"]["WebShellModelSelection"];
+            replayed: boolean;
+        };
+        WebShellSessionApprovalRequest: {
+            sessionId: string;
+        };
+        WebShellSessionApproval: {
+            /** @enum {string} */
+            approvalMode: "default" | "auto-edit" | "yolo";
+            /** Format: int64 */
+            approvalRevision: number;
+            availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
+            supported: boolean;
+        };
+        WebShellChangeApprovalRequest: {
+            sessionId: string;
+            /** Format: int64 */
+            expectedRevision: number;
+            idempotencyKey: string;
+            requestId?: string;
+            /** @enum {string} */
+            approvalMode: "default" | "auto-edit" | "yolo";
+        };
+        WebShellApprovalChangeResult: {
+            sessionId: string;
+            /** @enum {string} */
+            approvalMode: "default" | "auto-edit" | "yolo";
+            /** Format: int64 */
+            approvalRevision: number;
             replayed: boolean;
         };
     };
@@ -2287,6 +2358,66 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WebShellModelChangeResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellSessionApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description The current policy options. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionApproval"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    changeWebShellSessionApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellChangeApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description The committed approval selection, or its original receipt on replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellApprovalChangeResult"];
                 };
             };
             400: components["responses"]["BadRequest"];
