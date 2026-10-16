@@ -5348,6 +5348,7 @@ export function App({
   const removedSideTaskSessionIdsRef = useRef(new Set<string>());
   useLayoutEffect(() => {
     sideTaskCatalogRequestGenerationRef.current += 1;
+    removedSideTaskSessionIdsRef.current.clear();
     setSideTaskCatalog({ items: [], loaded: false });
     setArchivedSideTaskCatalog({ items: [], loaded: false });
   }, [logicalSessionKey]);

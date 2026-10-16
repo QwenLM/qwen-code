@@ -1398,6 +1398,7 @@ export function ArtifactPanel({
                         </DropdownMenuSub>
                       </>
                     )}
+                    {sideTasks.length > 0 && <DropdownMenuSeparator />}
                     <DropdownMenuItem onSelect={onCreateSideTask}>
                       <CirclePlusIcon
                         className={styles.sideTaskNewIcon}
