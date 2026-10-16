@@ -5,11 +5,21 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 
 ## Managed 工作区与模型
 
-`ManagedAgentWebShell` 可通过 `enableWorkspaceBinding` 启用 Java 授权工作区列表，并通过 `modelPresets={[{ agentId: 'agent-model-a', label: 'Model A' }]}` 提供新建会话的模型预设。每个 `agentId` 必须由宿主预先发布为模型专属 AgentDefinition；服务端模型允许列表和定义中的工具、审批设置决定实际准入。浏览器不发布定义或传入模型凭证。模型预设名称是宿主展示数据，已有会话显示其 Agent 身份；实际模型及修订由 Java 固定。
+完整 Web Shell 在配置 `managedAgentProvider` 后，可在首页左侧会话栏切换“本地 / 托管”，Tab 位于“新任务”下方，主聊天区沿用现有交互。托管模式复用标准欢迎界面、输入框、对话和工具卡片、审批、停止按钮及侧栏；“新任务”和历史选择操作 Managed 会话。切换模式保留各自草稿和会话，后台任务继续运行。未配置 provider 时保持原首页。Java Vite 演示入口 `?managedProvider=java` 默认托管，`managed=0` 可明确选择本地，`managed=1&managedSession=...` 深链继续有效；直接打开本地会话链接时保持本地。
 
-Java 新建页直接复用标准 Web Shell 的欢迎标题、输入框、原生模型菜单和工作区底栏。选择工作区、相对目录和模型后输入任务并发送，一次请求创建会话与首个 Turn；响应丢失保留冻结请求，已创建后的读回重试不会再次发送输入。旧 provider 的空创建能力保持兼容。已有会话更换模型或工作区应新建，绑定工作区内切换目录仍使用已有修订校验流程。对话复用标准消息列表及输入框布局，保留 Managed 审批、取消、结果与未确认请求重试；不提供 daemon 附件、文件引用或斜杠命令。
+已有 Managed 会话的工作区、相对目录、Agent 预设和环境状态在会话上下文中查看。模型和工作区仍由 Java 授权，界面复用不改变后端工具范围或审批策略。导出的 `ManagedAgentWebShell` 独立入口保持兼容。
 
-本地 Vite Java 演示可添加 `managedWorkspace=1`，或设置 `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true`。`VITE_MANAGED_AGENT_MODEL_PRESETS` 为上述预设数组的 JSON；`VITE_MANAGED_AGENT_ACTOR_ID` 可通过 `X-Qwen-Actor-Id` 提供本地用户身份，同时进入存储隔离 scope。Java 必须已有对应工作区授权，并显式配置 `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`；该本地开发配置仅用于可信 loopback 环境。文件工具执行还需要 Java 文档中的 Workspace files、Session Store、Broker mounts 和 Harness Broker 连接配置。
+`ManagedAgentWebShell` 可通过 `enableWorkspaceBinding` 启用 Java 授权工作区列表，并通过 `modelPresets={[{ agentId: 'agent-model-a', label: 'Model A' }]}` 提供新建会话的模型预设。每个 `agentId` 必须由宿主预先发布为模型专属 AgentDefinition；服务端模型允许列表和定义中的工具、审批设置决定实际准入。浏览器不发布定义或传入模型凭证。模型预设名称是宿主展示数据；已有会话的初始 AgentDefinition 及工具、审批配置保留，模型选择由独立的 Java 会话接口管理。
+
+Java 新建页直接复用标准 Web Shell 的欢迎标题、输入框、原生模型菜单和工作区底栏。选择工作区、相对目录和模型后输入任务并发送，一次请求创建会话与首个 Turn；响应丢失保留冻结请求，已创建后的读回重试不会再次发送输入。旧 provider 的空创建能力保持兼容。更换工作区需新建会话；支持模型切换的会话可在空闲时选择服务端允许的模型，绑定工作区内切换目录仍使用已有修订校验流程。对话复用标准消息列表及输入框布局，保留 Managed 审批、取消、结果与未确认请求重试；不提供 daemon 附件、文件引用或斜杠命令。
+
+工作区查询返回 `capabilities.approvalModeSelection: true` 时，新任务按所选 Agent 查询审批策略，并复用输入框的策略菜单。Shell profile 支持 Ask Approval 与 Auto Edit，纯文件 profile 还可提供 Full Access；托管模式不提供 Classifier Approval 或 Plan。已保存的 AgentDefinition 只提供自身固定策略。选项加载失败或无效时暂停创建；更换模型会重新读取选项并保留草稿和工作区。明确选择的策略与会话创建请求一起固定保存，刷新后的重试沿用原策略；旧待确认请求继续省略策略。已有会话显示服务端保存的策略并禁用修改，需要新建任务才能更换。未宣告能力的旧服务端保留原行为。
+
+已有工作区托管会话的输入框优先显示服务端已确认的模型选择，其次显示最近成功主模型请求的实际模型；没有这些数据时只显示 Agent 身份。会话摘要返回 `capabilities.modelChange: true` 时，模型菜单从 `/session-models/query` 读取服务端允许列表，空闲时通过 `/session-models/change` 在同一会话内切换，后续消息使用新模型。活跃任务、审批、目录切换或未确认请求期间暂停切换。请求发送前保存会话、目标模型、修订和幂等键；响应不确定或刷新后继续确认原请求，读回后才更新选择，对话与草稿保留。旧服务端和不支持的会话保持只读模型控件。上下文浮层复用原生环形控件，显示最近成功请求的 prompt token 数、同一模型配置的窗口及剩余容量；切换后等待新模型观测，缺少有效计数时明确显示未知，不能用累计计费量推测。该浮层仅提供当前占用，不显示尚无托管接口支持的手动压缩或分类明细操作。本地模式保持原有模型切换与上下文功能。
+
+Java 工作区查询返回 `capabilities.workspaceCreation: true` 时，工作区菜单提供“新建工作区 → 从空目录开始”。输入名称后，服务端创建并登记独立的空目录、授权给当前用户，页面自动选中它并保留任务草稿与模型。创建请求在发送前保存在当前标签页；响应不确定时，关闭弹窗或刷新页面后仍可重试同一请求。该能力默认关闭，需要服务端配置 `qwen.managed-agent.runtime-broker.workspace-creation-root` 及相应的已验证 Workspace 执行依赖；浏览器不选择服务器路径。
+
+本地 Vite Java 演示可添加 `managedWorkspace=1`，或设置 `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true`。`VITE_MANAGED_AGENT_MODEL_PRESETS` 为上述预设数组的 JSON；`VITE_MANAGED_AGENT_ACTOR_ID` 可通过 `X-Qwen-Actor-Id` 提供本地用户身份，同时进入存储隔离 scope。Java 列出当前用户已有授权的工作区，创建能力按上述服务端配置开启；本地演示需显式配置 `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`，该配置仅用于可信 loopback 环境。文件工具执行还需要 Java 文档中的 Workspace files、Session Store、Broker mounts 和 Harness Broker 连接配置。
 
 ## Managed 工具结果
 

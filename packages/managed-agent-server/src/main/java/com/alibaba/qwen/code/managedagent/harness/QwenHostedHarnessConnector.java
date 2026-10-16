@@ -410,6 +410,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
+    @Override
+    public boolean supportsModelSelection() {
+        try {
+            return client().capabilities().getFeatures().contains("model-selection/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
     private Admission doSubmit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
@@ -419,6 +428,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 .promptId(promptId)
                 .payloadDigest(payloadDigest)
                 .deadline(properties.getTurnDeadline());
+        var selection = sessions.findTurnModelSelection(tenantId, sessionId, promptId);
+        if (selection != null) {
+            if (!supportsModelSelection()) {
+                throw new IllegalStateException("Hosted model selection is unavailable");
+            }
+            builder.modelSelection(selection.modelId(), selection.revision());
+        }
         input.forEach(builder::addContent);
         PromptReceipt receipt = client().submitTurn(builder.build());
         return new Admission(receipt.getLastEventId(),
