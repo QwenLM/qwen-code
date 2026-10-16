@@ -12,10 +12,13 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import { convertClaudePluginPackage } from '@qwen-code/qwen-code-core/extension/claude-converter.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
-import type { ModLog } from '@qwen-code/qwen-code-core/mods/types.js';
+import type {
+  ModCommand,
+  ModLog,
+} from '@qwen-code/qwen-code-core/mods/types.js';
 import type { LoadedSettings } from '../config/settings.js';
-import type { JsonOutputAdapterInterface } from './io/BaseJsonOutputAdapter.js';
-import { ModSession } from './mod-session.js';
+import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
+import { ModSession, type ModTerminalHost } from './mod-session.js';
 import { CommandService } from '../services/CommandService.js';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
@@ -33,10 +36,13 @@ vi.mock('@qwen-code/qwen-code-core/mods/runtime.js', () => ({
   ModRuntime: { createGroup: mocks.create },
 }));
 
-describe('headless Mod session ownership', () => {
+describe('Mod session ownership', () => {
   const sessions: ModSession[] = [];
   const tempDirs: string[] = [];
-  const setup = (overrides: Record<string, unknown> = {}) => {
+  const setup = (
+    overrides: Record<string, unknown> = {},
+    terminal?: ModTerminalHost,
+  ) => {
     const extension = {
       id: 'id',
       name: 'hello-mod',
@@ -68,7 +74,9 @@ describe('headless Mod session ownership', () => {
       runTool: vi.fn<ModToolCall>(async (input, next, signal) =>
         next(input, signal, async (_input, verdict) => verdict),
       ),
-      getCommands: vi.fn(() => [{ name: 'hello', description: 'Hello' }]),
+      getCommands: vi.fn<() => ModCommand[]>(() => [
+        { name: 'hello', description: 'Hello' },
+      ]),
       runCommand: vi.fn().mockResolvedValue('answer'),
       end: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn().mockResolvedValue(undefined),
@@ -88,7 +96,7 @@ describe('headless Mod session ownership', () => {
     );
     const session = new ModSession(
       config as unknown as Config,
-      adapter as unknown as JsonOutputAdapterInterface,
+      terminal ?? adapter,
     );
     sessions.push(session);
     return { config, adapter, runtime, session, extension };
@@ -228,8 +236,216 @@ describe('headless Mod session ownership', () => {
       content: 'answer',
     });
     expect(runtime.getCommands).toHaveBeenCalledWith('id');
-    expect(runtime.runCommand).toHaveBeenCalledWith('hello', 'hello', signal);
+    expect(runtime.runCommand).toHaveBeenCalledWith(
+      'hello',
+      'hello',
+      expect.any(AbortSignal),
+      undefined,
+    );
     expect(commands[0].modelInvocable).toBe(false);
+  });
+
+  it('uses terminal presentation and invocation cancellation without retaining a loader signal', async () => {
+    const log = vi.fn();
+    const presentation = { isFullscreen: true, columns: 112 };
+    const { session, runtime } = setup(
+      { isInteractive: () => true },
+      {
+        surface: 'terminal',
+        log,
+        presentation: () => presentation,
+      },
+    );
+    const loader = new AbortController();
+    const [command] = await session.loadCommands(loader.signal);
+    loader.abort();
+    const invocation = new AbortController();
+    runtime.runCommand.mockImplementation(
+      async (_name, _args, signal: AbortSignal) => {
+        expect(signal.aborted).toBe(false);
+        await new Promise<void>((resolve) =>
+          signal.addEventListener('abort', () => resolve(), { once: true }),
+        );
+        signal.throwIfAborted();
+      },
+    );
+    const running = command.action!(
+      { abortSignal: invocation.signal } as CommandContext,
+      'test',
+    );
+    const rejected = Promise.resolve(running).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(runtime.runCommand).toHaveBeenCalledOnce());
+    invocation.abort();
+    expect(await rejected).toBeInstanceOf(Error);
+    expect(command.supportedModes).toEqual(['interactive']);
+    expect(runtime.runCommand).toHaveBeenCalledWith(
+      'hello',
+      'test',
+      expect.any(AbortSignal),
+      presentation,
+    );
+    expect(mocks.create.mock.calls[0][5]).toBe('terminal');
+  });
+
+  it.each([false, true])(
+    'preserves headless metadata and sanitizes terminal metadata: terminal=%s',
+    async (terminal) => {
+      const { session, runtime, extension } = setup(
+        { isInteractive: () => terminal },
+        terminal
+          ? {
+              surface: 'terminal',
+              log: vi.fn(),
+              presentation: () => ({ isFullscreen: false, columns: 80 }),
+            }
+          : undefined,
+      );
+      const link = '\u001b]8;;https://invalid.example/mod-description\u0007';
+      const description = `${link}Description\u001b]8;;\u0007\nline\u202e`;
+      const argumentHint = '\u001b[31m<argument>\u001b[0m\u0007\tvalue\u2066';
+      extension.name = 'hello\nmod\u202e';
+      runtime.getCommands.mockReturnValue([
+        { name: 'hello', description, argumentHint },
+      ]);
+      const [command] = await session.loadCommands(
+        new AbortController().signal,
+      );
+      expect(command.description).toBe(
+        terminal ? 'Description line' : description,
+      );
+      expect(command.argumentHint).toBe(
+        terminal ? '<argument> value' : argumentHint,
+      );
+      expect(command.extensionName).toBe(
+        terminal ? 'hello mod' : extension.name,
+      );
+    },
+  );
+
+  it('waits for cancellation to settle before dispatching the next command', async () => {
+    const { session, runtime } = setup();
+    const [command] = await session.loadCommands(new AbortController().signal);
+    let settle!: () => void;
+    runtime.runCommand.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      return 'late result';
+    });
+    const invocation = new AbortController();
+    const first = command.action!(
+      { abortSignal: invocation.signal } as CommandContext,
+      'first',
+    );
+    const rejected = Promise.resolve(first).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(runtime.runCommand).toHaveBeenCalledOnce());
+    invocation.abort();
+    const second = command.action!({} as CommandContext, 'second');
+    await Promise.resolve();
+    expect(runtime.runCommand).toHaveBeenCalledOnce();
+    settle();
+    expect(await rejected).toBeInstanceOf(Error);
+    await expect(second).resolves.toMatchObject({ content: 'answer' });
+    expect(runtime.runCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it('ends the old session after cancelling work, preserves the runtime, and ignores same-id switches', async () => {
+    const { session, runtime, config } = setup();
+    const [command] = await session.loadCommands(new AbortController().signal);
+    const order: string[] = [];
+    runtime.runCommand.mockImplementationOnce(
+      async (_name, _args, signal: AbortSignal) => {
+        await new Promise<void>((resolve) =>
+          signal.addEventListener('abort', () => resolve(), { once: true }),
+        );
+        order.push('cancelled');
+        return 'late';
+      },
+    );
+    runtime.end.mockImplementation(async () => {
+      order.push('end');
+    });
+    const running = command.action!({} as CommandContext, '');
+    const rejected = Promise.resolve(running).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(runtime.runCommand).toHaveBeenCalledOnce());
+    config.getSessionId.mockReturnValue('session-2');
+    await session.syncSession('resume');
+    expect(await rejected).toBeInstanceOf(Error);
+    await session.syncSession('resume');
+    expect(order).toEqual(['cancelled', 'end']);
+    expect(runtime.end).toHaveBeenCalledWith(
+      'session-1',
+      'resume',
+      expect.any(AbortSignal),
+    );
+    await expect(
+      command.action!({} as CommandContext, 'new'),
+    ).resolves.toMatchObject({ content: 'answer' });
+    expect(mocks.create).toHaveBeenCalledOnce();
+  });
+
+  it('sanitizes terminal output, keeps debug logs private and discards cancelled output', async () => {
+    const log = vi.fn();
+    const { session, runtime } = setup(
+      { isInteractive: () => true },
+      {
+        surface: 'terminal',
+        log,
+        presentation: () => ({ isFullscreen: false, columns: 80 }),
+      },
+    );
+    const [command] = await session.loadCommands(new AbortController().signal);
+    session.flushLogs();
+    log.mockClear();
+    const emit = mocks.create.mock.calls[0][2] as (
+      entry: ModLog,
+      plugin: string,
+    ) => void;
+    emit({ to: 'debug', text: 'private' }, 'hello-mod');
+    emit(
+      { to: 'transcript', text: '\u001b[31m' + 'x'.repeat(2500) },
+      'hello-mod',
+    );
+    expect(log).toHaveBeenCalledExactlyOnceWith(
+      {
+        to: 'transcript',
+        text: 'x'.repeat(2000),
+        plugin: 'hello-mod',
+        sessionId: 'session-1',
+      },
+      'hello-mod',
+      'session-1',
+    );
+    log.mockClear();
+    emit(
+      {
+        to: 'transcript',
+        text: '\u001b[31mline one\u001b[0m\nline two\tvalue\u0007\u202e\u2066',
+      },
+      'hello-mod',
+    );
+    expect(log).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: 'line one\nline two\tvalue' }),
+      'hello-mod',
+      'session-1',
+    );
+    runtime.runCommand.mockResolvedValueOnce(
+      '\u001b[31msafe\u001b[0m\nline two\tvalue\u0007\u007f\u202e',
+    );
+    await expect(
+      command.action!({} as CommandContext, ''),
+    ).resolves.toMatchObject({ content: 'safe\nline two\tvalue' });
+    log.mockClear();
+    const invocation = new AbortController();
+    runtime.runCommand.mockImplementationOnce(async () => {
+      invocation.abort();
+      emit({ to: 'transcript', text: 'late' }, 'hello-mod');
+      return 'late result';
+    });
+    await expect(
+      command.action!({ abortSignal: invocation.signal } as CommandContext, ''),
+    ).rejects.toThrow();
+    expect(log).not.toHaveBeenCalled();
   });
 
   it('uses operator scopes and validates options before starting any runtime', async () => {
