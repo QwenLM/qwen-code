@@ -822,6 +822,312 @@ describe('cronTextHandler', () => {
     );
     stderrSpy.mockRestore();
   });
+
+  // Review finding on #13882: the terminal exits of the retry ladder deleted
+  // the whole entry, including text that arrived while the failed send was in
+  // flight and was never attempted.
+  it('keeps text that arrived during an in-flight cron send when the retries are exhausted', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // Attempt 1 and retry 1 fail transiently.
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-late', 'first');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // The re-retry is in flight when new text arrives; it fails too, so the
+    // ladder is exhausted while that text has never been attempted.
+    let rejectLast!: (e: unknown) => void;
+    mockSendQQMessage.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectLast = reject;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(10000);
+    triggerTextChunk('sess-late', 'late');
+    await flushSetImmediate();
+    rejectLast(new DeliveryError('RATE_LIMITED', 'rate limited'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    // Exhaustion must keep the never-attempted residual and name it.
+    expect(cronBuffer.get('sess-late')?.buffer).toBe('late');
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'kept 4 chars that arrived during the retries for a later flush',
+    );
+
+    // ...and the re-armed flush must still deliver it.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(4);
+    const body = mockSendQQMessage.mock.calls[3][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe('late');
+    expect(cronBuffer.has('sess-late')).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+
+  // The three permanent-failure exits of the ladder (first send, retry 1,
+  // re-retry) must each abandon the payload without taking text that arrived
+  // while that attempt was in flight.
+  const terminalExitRows: Array<[string, number]> = [
+    ['the first send', 0],
+    ['retry 1', 1],
+    ['the re-retry', 2],
+  ];
+  it.each(terminalExitRows)(
+    'keeps text that arrived during an in-flight cron send when %s fails permanently',
+    async (_attempt, priorTransientFailures) => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as Record<string, unknown>;
+      pvt['_ready'] = true;
+      pvt['_inCronFlow'] = 1;
+
+      for (let i = 0; i < priorTransientFailures; i++) {
+        mockSendQQMessage.mockRejectedValueOnce(
+          new DeliveryError('RATE_LIMITED', 'rate limited'),
+        );
+      }
+      let rejectAttempt!: (e: unknown) => void;
+      mockSendQQMessage.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectAttempt = reject;
+          }),
+      );
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      triggerTextChunk('sess-terminal', 'first');
+      await flushSetImmediate();
+      await vi.advanceTimersByTimeAsync(2000);
+      if (priorTransientFailures >= 1) {
+        await vi.advanceTimersByTimeAsync(5000);
+      }
+      if (priorTransientFailures >= 2) {
+        await vi.advanceTimersByTimeAsync(10000);
+      }
+
+      // New text arrives while the doomed attempt is in flight; the permanent
+      // failure then abandons the payload but must not take the residual.
+      triggerTextChunk('sess-terminal', 'late');
+      await flushSetImmediate();
+      rejectAttempt(new DeliveryError('RETRY_EXHAUSTED', 'network error'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      const cronBuffer = pvt['cronBuffer'] as Map<
+        string,
+        { buffer: string; timer: unknown }
+      >;
+      expect(cronBuffer.get('sess-terminal')?.buffer).toBe('late');
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(mockSendQQMessage).toHaveBeenCalledTimes(
+        priorTransientFailures + 2,
+      );
+      const body = mockSendQQMessage.mock.calls[
+        priorTransientFailures + 1
+      ][3] as Record<string, unknown> | undefined;
+      expect((body?.markdown as Record<string, string>).content).toBe('late');
+      expect(cronBuffer.has('sess-terminal')).toBe(false);
+
+      stderrSpy.mockRestore();
+    },
+  );
+
+  // Both no-target exits of the ladder (retry 1 and the re-retry) must keep a
+  // residual that arrived while the failed attempt was in flight.
+  const noTargetExitRows: Array<[string, number]> = [
+    ['retry 1', 0],
+    ['the re-retry', 1],
+  ];
+  it.each(noTargetExitRows)(
+    're-arms text that arrived during an in-flight cron send when %s finds no target',
+    async (_attempt, priorTransientFailures) => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as Record<string, unknown>;
+      const router = (ch as unknown as Record<string, unknown>)['router'] as {
+        getTarget: ReturnType<typeof vi.fn>;
+      };
+      pvt['_ready'] = true;
+      pvt['_inCronFlow'] = 1;
+
+      let rejectFirst!: (e: unknown) => void;
+      mockSendQQMessage.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      );
+      if (priorTransientFailures === 1) {
+        mockSendQQMessage.mockRejectedValueOnce(
+          new DeliveryError('RATE_LIMITED', 'rate limited'),
+        );
+      }
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      triggerTextChunk('sess-no-target', 'A');
+      await flushSetImmediate();
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // B arrives while attempt 1 is in flight; the exit that follows finds no
+      // route, so B was never attempted.
+      triggerTextChunk('sess-no-target', 'B');
+      await flushSetImmediate();
+      if (priorTransientFailures === 0) {
+        router.getTarget.mockReturnValueOnce(null);
+      }
+      rejectFirst(new DeliveryError('RATE_LIMITED', 'rate limited'));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5000);
+      if (priorTransientFailures === 1) {
+        router.getTarget.mockReturnValueOnce(null);
+        await vi.advanceTimersByTimeAsync(10000);
+      }
+
+      const cronBuffer = pvt['cronBuffer'] as Map<
+        string,
+        { buffer: string; timer: unknown }
+      >;
+      expect(cronBuffer.get('sess-no-target')?.buffer).toBe('B');
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+        'Cron flush dropped after retry: no target',
+      );
+
+      // The re-armed flush delivers the residual once the route resolves.
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(mockSendQQMessage).toHaveBeenCalledTimes(
+        priorTransientFailures + 2,
+      );
+      const body = mockSendQQMessage.mock.calls[
+        priorTransientFailures + 1
+      ][3] as Record<string, unknown> | undefined;
+      expect((body?.markdown as Record<string, string>).content).toBe('B');
+      expect(cronBuffer.has('sess-no-target')).toBe(false);
+
+      stderrSpy.mockRestore();
+    },
+  );
+
+  it('keeps a successor entry created while a failed cron flush is being handled', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // The first flush's send stays in flight while a successor entry takes
+    // over the session (the old entry was dropped, then new text arrived).
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-overlap', 'first');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    cronBuffer.delete('sess-overlap');
+    triggerTextChunk('sess-overlap', 'D');
+    await flushSetImmediate();
+    expect(cronBuffer.get('sess-overlap')!.buffer).toBe('D');
+
+    // The old chain gives up permanently: it must not delete the successor.
+    rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'network error'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(cronBuffer.get('sess-overlap')?.buffer).toBe('D');
+
+    stderrSpy.mockRestore();
+  });
+
+  // The re-armed flush must not spin when the route never comes back: it runs
+  // the normal flush once, which drops the residual through the existing
+  // no-target loss log and deletes the entry.
+  it('drops the re-armed residual with a loss log when the route never returns', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    const router = (ch as unknown as Record<string, unknown>)['router'] as {
+      getTarget: ReturnType<typeof vi.fn>;
+    };
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    let rejectFirst!: (e: unknown) => void;
+    mockSendQQMessage.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFirst = reject;
+        }),
+    );
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-no-route', 'A');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    triggerTextChunk('sess-no-route', 'B');
+    await flushSetImmediate();
+
+    // The route never comes back, so every later lookup returns null.
+    router.getTarget.mockReturnValue(null);
+    rejectFirst(new DeliveryError('RATE_LIMITED', 'rate limited'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    expect(cronBuffer.get('sess-no-route')?.buffer).toBe('B');
+
+    // One re-armed flush, then the entry is gone with the loss named.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(cronBuffer.has('sess-no-route')).toBe(false);
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'Cron flush dropped: no target for session sess-no-route, lost 1 chars',
+    );
+
+    // Nothing is re-armed behind it: no further attempts over the next minute.
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(cronBuffer.has('sess-no-route')).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
 });
 
 // ---------------------------------------------------------------------------

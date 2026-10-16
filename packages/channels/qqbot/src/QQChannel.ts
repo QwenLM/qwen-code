@@ -754,7 +754,7 @@ export class QQChannel extends ChannelBase {
               code === 'ACTIVE_MSG_DISABLED' ||
               code === 'FALLBACK_FAILED'
             ) {
-              this.cronBuffer.delete(sessionId);
+              this.dropCronEntryOrRearm(sessionId, entry);
               return;
             }
             entry.pendingRetry = toFlush;
@@ -773,9 +773,12 @@ export class QQChannel extends ChannelBase {
               const retryTarget = this.router.getTarget(sessionId);
               if (!retryTarget) {
                 process.stderr.write(
-                  `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
+                  `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}` +
+                    (entry.buffer
+                      ? `, kept ${entry.buffer.length} chars that arrived during the retries for a later flush\n`
+                      : '\n'),
                 );
-                this.cronBuffer.delete(sessionId);
+                this.dropCronEntryOrRearm(sessionId, entry);
                 return;
               }
               this.sendMessageWithReplyContext(retryTarget.chatId, toFlush)
@@ -807,12 +810,7 @@ export class QQChannel extends ChannelBase {
                     retryCode === 'ACTIVE_MSG_DISABLED' ||
                     retryCode === 'FALLBACK_FAILED'
                   ) {
-                    if (
-                      !entry.buffer &&
-                      this.cronBuffer.get(sessionId) === entry
-                    ) {
-                      this.cronBuffer.delete(sessionId);
-                    }
+                    this.dropCronEntryOrRearm(sessionId, entry);
                     return;
                   }
                   // Transient error on retry (RATE_LIMITED, etc.) — re-schedule with backoff
@@ -831,9 +829,12 @@ export class QQChannel extends ChannelBase {
                       const retryTarget2 = this.router.getTarget(sessionId);
                       if (!retryTarget2) {
                         process.stderr.write(
-                          `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
+                          `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}` +
+                            (entry.buffer
+                              ? `, kept ${entry.buffer.length} chars that arrived during the retries for a later flush\n`
+                              : '\n'),
                         );
-                        this.cronBuffer.delete(sessionId);
+                        this.dropCronEntryOrRearm(sessionId, entry);
                         return;
                       }
                       this.sendMessageWithReplyContext(
@@ -869,14 +870,24 @@ export class QQChannel extends ChannelBase {
                             code2 === 'ACTIVE_MSG_DISABLED' ||
                             code2 === 'FALLBACK_FAILED'
                           ) {
-                            this.cronBuffer.delete(sessionId);
+                            this.dropCronEntryOrRearm(sessionId, entry);
                             return;
                           }
-                          // Transient error: retries exhausted after 3 total attempts
+                          // Transient error: retries exhausted after 3 total
+                          // attempts. Text that arrived while the failed sends
+                          // were in flight was never attempted, so report it as
+                          // kept for the re-armed flush rather than dropped.
+                          const residual =
+                            this.cronBuffer.get(sessionId) === entry
+                              ? entry.buffer.length
+                              : 0;
                           process.stderr.write(
-                            `[QQ:${this.name}] Cron flush retries exhausted, dropped ${toFlush.length} chars for session ${sanitizeLogText(sessionId, 32)}\n`,
+                            `[QQ:${this.name}] Cron flush retries exhausted, dropped ${toFlush.length} chars for session ${sanitizeLogText(sessionId, 32)}` +
+                              (residual > 0
+                                ? `, kept ${residual} chars that arrived during the retries for a later flush\n`
+                                : '\n'),
                           );
-                          this.cronBuffer.delete(sessionId);
+                          this.dropCronEntryOrRearm(sessionId, entry);
                         });
                     },
                     entry.retryCount === 2 ? 10000 : 5000,
@@ -892,6 +903,26 @@ export class QQChannel extends ChannelBase {
     process.stderr.write(
       `[QQ:${this.name}] Cron flush dropped: no target for session ${sanitizeLogText(sessionId, 32)}, lost ${toFlush.length} chars\n`,
     );
+    this.cronBuffer.delete(sessionId);
+  }
+
+  /**
+   * Terminal failure of a cron flush. Text that arrived while the failed send
+   * was in flight was never attempted, so it must not be dropped with the
+   * entry: re-arm the normal flush for that residual, exactly like the success
+   * tail. An entry that no longer owns the session was already replaced, so its
+   * successor's text is left alone, and an entry with an empty residual has
+   * nothing left to deliver — both go.
+   */
+  private dropCronEntryOrRearm(
+    sessionId: string,
+    entry: CronBufferEntry,
+  ): void {
+    if (this.cronBuffer.get(sessionId) !== entry) return;
+    if (entry.buffer) {
+      this.armCronFlush(sessionId, entry);
+      return;
+    }
     this.cronBuffer.delete(sessionId);
   }
 
