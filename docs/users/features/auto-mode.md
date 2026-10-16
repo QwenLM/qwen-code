@@ -217,12 +217,14 @@ It reads the command the way the shell runs it, so printed text, comments
 and quoted data never trigger it, while git global options (`-C`, `-c`),
 option order and wrappers such as `bash -c`, `env` or `sudo` do not hide
 the operation. A command it cannot verify is blocked too when its text
-mentions a protected command anywhere outside the git and
-infrastructure commands the guard already checked: one it cannot
-parse, or one that runs code the guard cannot read — a program or
-arguments built at run time (including arguments `xargs` reads), a
-script file, a program a shell reads from a pipe or file, or code
-handed to `python`, `node`, `perl`, `ruby`, `php` or `awk`.
+mentions a protected command: one it cannot parse, or one that runs
+code the guard cannot read — a program or arguments built at run time
+(including arguments `xargs` reads), a script file, a program a shell
+reads from a pipe or file, or code handed to `python`, `node`, `perl`,
+`ruby`, `php` or `awk`. Comments and the git or infrastructure
+operations the guard has already checked do not count as such a
+mention, but their arguments do, since a command such as `git log` can
+print them.
 
 These blocks fail with `Blocked destructive git command: …`,
 `Blocked infrastructure destroy command: …`,
