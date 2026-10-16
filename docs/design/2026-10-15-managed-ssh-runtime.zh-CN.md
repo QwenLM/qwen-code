@@ -28,6 +28,8 @@ Java 服务负责静态节点目录、SSH 连接、Workspace 登记、授权和 
 
 bootstrap 子进程在节点的独占转发锁之外运行，避免一个慢操作阻塞同节点已有 worker 的 HTTP 请求。共享的在途屏障仍保证关闭时先等待命令完成，再释放控制器文件锁。Provisioner 控制操作限制为 4 个线程和 64 个排队任务，超载返回可重试的 `ssh_runtime_busy`。遗忘某节点/endpoint 的最后一个 lease 时取消对应本地转发并删除缓存地址；取消失败时保留路由，直至确认监听器已消失。其他 worker 的转发及共用 publication 连接继续保留。direct provider 的登记也在匹配的退役完成后，或 release 明确使 delegate 的 lease 不可用后删除。仍可用的持久化 lease 在 release 后保留路由，因为被 fence 的观察者可能与获胜观察者使用同一 lease。
 
+每个节点还保存私有转发清单，以原子替换方式写入，并在 SSH 创建监听之前同步落盘。已确认的记录跨 Broker 崩溃保留，接管仍存活的 master 时复用原本地地址。未确认记录必须先取消才能分配新地址，包括转发已成功但回包丢失的情况。最后一个 lease 退役时，即使此前未解析该 lease，也读取并取消原记录；只有取消成功或确认监听不存在后才删除记录。仍存活的 master 缺少清单或清单无效时拒绝接管。这些控制状态不增加 worker 替换或远端恢复权限。
+
 ## Workspace 登记与 storage
 
 在 `/api/agent/web-shell/v1` 下新增 POST 接口：
@@ -48,6 +50,8 @@ WebShell 在现有 Workspace 选择器中增加可选登记对话框。检查目
 现有 storage/物理 owner 记录增加 `SSH_LOCAL`，现有 operation journal 增加 `WORKSPACE_CREATE`。Workspace 和创建者 OWNER 权限原子提交，不增加节点数据库或 worker 池表。网络操作在 SQL 事务外完成，事务内重新核对登记版本及物理所有权。共用的主机 guard 串行化本地与 SSH 登记，跨节点、跨 tenant 拒绝父子重叠根目录和物理别名。登记 claim 过期后不能写入成功或失败；后续查询可重新认领原 operation。已有 actor 范围的幂等键在新准入检查之前回放。追加下一个 schema migration 并更新 initializer/catalog 检查，不改历史迁移。
 
 身份包含规范目录、稳定主机身份、设备号、inode、可信创建时间及登记 marker。Linux 与现有本地 physical-key 算法一致，macOS 提供原生平台身份；缺少可信身份时拒绝。SSH 别名不能绕过同一物理目录的所有权。worker 固定 storage/root 登记，在 context 安装和后续调用中验证；Session 的 `cwdRelative` 限定在登记根目录内，同 storage 的 Turn 继续由既有 holder 串行化。
+
+取得 holder 前，SSH 在 SQL 事务外通过已有 bootstrap 目录探测检查候选 `cwdRelative`，并核对登记身份和 marker。确定无效的目录或失败的探测不会改动 holder。worker 安装 context 时仍再次校验；成功 claim 后安装结果不明确则继续保留占用，因为 HTTP 响应不能证明是否已安装。
 
 登记 journal 使用共享 schema 的 `gmt_create`/`gmt_modified` 列，claim 截止时间和完成时间采用数据库派生的毫秒时钟。物理 key 复用本地 storage 所有权算法；服务端登记 marker 字段优先于探测得到的身份字段。
 
@@ -141,7 +145,7 @@ source reactor 完成 SDK 249 例 unit（跳过 9 例）、Broker 1,005 例（�
 
 ### 合并后的服务端模块验证，2026-10-16
 
-合入 #14277 后，Broker、Server 及 SSH 新增实现统一位于 `packages/managed-agent-server`，Java SDK 仍位于 `packages/sdk-java/qwencode`。SSH 迁移仍为 V4，公开 API 仍为 1.48.0，基于 main 的 V1–V3 / 1.47.0。测试冲突处理保留规范数据库毫秒时钟，并要求父 Session 关闭先取消子 Turn，再释放被阻塞的模型响应；断言完成后释放 latch 做清理。SSH lifecycle-v2 的严格退役证明要求与 main 的旧版 held-Runtime 清单机制分别保留。
+合入 #14277 后，Broker、Server 及 SSH 新增实现统一位于 `packages/managed-agent-server`，Java SDK 仍位于 `packages/sdk-java/qwencode`。SSH 迁移使用 V6，将 V4/V5 留给独立审查中的 #14316；公开 API 仍为 1.48.0，基于 main 的 V1–V3 / 1.47.0。初始化器使用显式迁移编号，因此 V3 catalog 仍识别为 V3，本分支的下一项可用迁移为 V6。 由本未合入 PR 的旧 V4 预览初始化的临时数据库需要重建；已发布迁移和 Flyway history 不改写、不 repair。测试冲突处理保留规范数据库毫秒时钟，并要求父 Session 关闭先取消子 Turn，再释放被阻塞的模型响应；断言完成后释放 latch 做清理。SSH lifecycle-v2 的严格退役证明要求与 main 的旧版 held-Runtime 清单机制分别保留。
 
 前一 head `7521696` 的 Linux CI 通过全部 56 例 O4 集成测试，无跳过，包含容量探针。其 Hosted 进程 profile 仍有 46 例中的一项错误：`resident-expiry` fixture 的首个 Turn 在 Harness 记录阻塞恢复的 HTTP 非法参数响应后保持 RUNNING，尚未进入删除故障点。现有 artifact 无法识别被拒绝的路由或字段。没有将其归类为基础设施偶发问题，加长等待或自动重试也不能证明修复。仅此合成 Linux fixture 启用两个窄范围 Spring DEBUG logger，并保持请求详情遮蔽，以便后续失败产物记录请求路径、状态和异常。独立真实 DispatcherServlet 探针已验证配置有效，且未暴露其 header/body/parameter 哨兵值；原始 query 和异常 message 仍可见，因此这不是生产日志配置。
 

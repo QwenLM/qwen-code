@@ -55,7 +55,7 @@ class ManagedSchemaConfigurationTest {
                         .locations(ManagedSchema.FLYWAY_LOCATION)
                         .load();
         new ManagedSchemaConfiguration().freshManagedSchema(source).migrate(current);
-        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(4);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
         assertThat(sessionListColumns(source))
                 .containsExactly("tenant_id", "gmt_create", "session_id");
         assertThat(
@@ -113,8 +113,8 @@ class ManagedSchemaConfigurationTest {
                                     "SELECT \"version\" FROM \"flyway_schema_history\" WHERE"
                                             + " \"type\" = 'BASELINE'",
                                     String.class))
-                    .isEqualTo(baselineOnly ? "1" : "4");
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(4);
+                    .isEqualTo(baselineOnly ? "1" : "6");
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class))
                     .isEqualTo(1);
         }
@@ -157,7 +157,7 @@ class ManagedSchemaConfigurationTest {
                                 .locations(ManagedSchema.FLYWAY_LOCATION)
                                 .load());
 
-        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(4);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
         assertThat(sessionListColumns(source))
                 .containsExactly("tenant_id", "gmt_create", "session_id");
         assertThat(
@@ -166,6 +166,26 @@ class ManagedSchemaConfigurationTest {
                                         + " ('1', '2') ORDER BY \"installed_rank\""))
                 .isEqualTo(published);
         assertThat(jdbc.queryForMap("SELECT * FROM ma_session")).isEqualTo(session);
+        ManagedSchema.validate(source);
+    }
+
+    @Test
+    void upgradesPublishedV3DirectlyToV6WithoutInventingTheReservedVersions() {
+        var source = source();
+        Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION)
+                .target("3").load().migrate();
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
+        var published = jdbc.queryForList("SELECT * FROM \"flyway_schema_history\" WHERE \"version\" IN ('1', '2', '3') ORDER BY \"installed_rank\"");
+        assertThatThrownBy(() -> ManagedSchema.initialize(source))
+                .hasRootCauseMessage("The canonical V3 catalog requires the application's V6 migration");
+        new ManagedSchemaConfiguration().freshManagedSchema(source).migrate(
+                Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load());
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
+        assertThat(jdbc.queryForList("SELECT * FROM \"flyway_schema_history\" WHERE \"version\" IN ('1', '2', '3') ORDER BY \"installed_rank\""))
+                .isEqualTo(published);
+        assertThat(jdbc.queryForList("SELECT \"version\" FROM \"flyway_schema_history\" WHERE \"version\" IS NOT NULL ORDER BY \"installed_rank\"", String.class))
+                .containsExactly("1", "2", "3", "6");
         ManagedSchema.validate(source);
     }
 
@@ -203,7 +223,7 @@ class ManagedSchemaConfigurationTest {
 
             ManagedSchema.initialize(source);
 
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(4);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
             assertThat(sessionListColumns(source))
                     .containsExactly("tenant_id", "gmt_create", "session_id");
         }

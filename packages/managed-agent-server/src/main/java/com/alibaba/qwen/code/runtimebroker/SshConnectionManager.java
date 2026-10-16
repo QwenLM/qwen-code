@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
@@ -177,31 +178,35 @@ public final class SshConnectionManager implements AutoCloseable {
             throw conflict();
         }
         Connection connection = connection(route.node());
-        URI forwarded = connection.forwards().get(route.endpoint());
-        if (forwarded != null) {
-            return forwarded;
-        }
         synchronized (nodeLock(route.node())) {
             requireOpen();
             if (routes.get(leaseKey(lease)) != route || connections.get(route.node().nodeId()) != connection) {
                 throw unavailable(null);
             }
-            forwarded = connection.forwards().get(route.endpoint());
+            Forward forwarded = connection.forwards().get(route.endpoint());
             if (forwarded != null) {
-                return forwarded;
+                if (forwarded.ready()) {
+                    return forwarded.endpoint();
+                }
+                cancelForward(connection, route.endpoint(), forwarded);
+                recordForward(connection, route.endpoint(), null);
             }
             for (int attempt = 0; attempt < 3; attempt++) {
                 int port = availablePort();
+                Forward pending = new Forward(URI.create("http://127.0.0.1:" + port), false);
+                // A lost control reply must still leave enough evidence to cancel the listener.
+                recordForward(connection, route.endpoint(), pending);
                 List<String> command = control(route.node(), connection.socket(), "forward");
                 command.add("-L");
                 command.add("127.0.0.1:" + port + ":127.0.0.1:" + route.endpoint().getPort());
                 command.add(route.node().sshHost());
                 CommandResult result = runner.run(List.copyOf(command), new byte[0], COMMAND_TIMEOUT);
                 if (result.exitCode() == 0) {
-                    URI endpoint = URI.create("http://127.0.0.1:" + port);
-                    connection.forwards().put(route.endpoint(), endpoint);
-                    return endpoint;
+                    recordForward(connection, route.endpoint(), new Forward(pending.endpoint(), true));
+                    return pending.endpoint();
                 }
+                cancelForward(connection, route.endpoint(), pending);
+                recordForward(connection, route.endpoint(), null);
             }
             throw unavailable(null);
         }
@@ -226,18 +231,12 @@ public final class SshConnectionManager implements AutoCloseable {
             if (routes.get(key) != route) {
                 return;
             }
-            Connection connection = connections.get(route.node().nodeId());
-            if (connection != null && routes.values().stream().filter(route::equals).count() == 1) {
-                URI forwarded = connection.forwards().get(route.endpoint());
+            if (routes.values().stream().filter(route::equals).count() == 1) {
+                Connection connection = connection(route.node());
+                Forward forwarded = connection.forwards().get(route.endpoint());
                 if (forwarded != null) {
-                    List<String> command = control(route.node(), connection.socket(), "cancel");
-                    command.addAll(List.of("-L", "127.0.0.1:" + forwarded.getPort()
-                            + ":127.0.0.1:" + route.endpoint().getPort(), route.node().sshHost()));
-                    if (runner.run(List.copyOf(command), new byte[0], COMMAND_TIMEOUT).exitCode() != 0
-                            && !forwardClosed(forwarded)) {
-                        throw unavailable(null);
-                    }
-                    connection.forwards().remove(route.endpoint());
+                    cancelForward(connection, route.endpoint(), forwarded);
+                    recordForward(connection, route.endpoint(), null);
                 }
             }
             routes.remove(key, route);
@@ -272,10 +271,12 @@ public final class SshConnectionManager implements AutoCloseable {
         verifyConfiguration(node, socket);
         if (old != null || Files.exists(socket, LinkOption.NOFOLLOW_LINKS)) {
             if ((old == null || old != failed) && checkConnection(node, socket)) {
-                return old == null ? rememberConnection(new Connection(node, socket, new ConcurrentHashMap<>())) : old;
+                return old == null ? rememberConnection(new Connection(node, socket, readForwards(node, socket))) : old;
             }
             removeUnreachableSocket(socket);
         }
+        Connection created = new Connection(node, socket, new ConcurrentHashMap<>());
+        writeForwards(created, created.forwards());
         List<String> command = base(node, socket);
         command.addAll(List.of("-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-o",
                 "ExitOnForwardFailure=yes", "-f", "-N", "-R", "127.0.0.1:" + node.publicationPort()
@@ -283,7 +284,110 @@ public final class SshConnectionManager implements AutoCloseable {
         if (runner.run(List.copyOf(command), new byte[0], COMMAND_TIMEOUT).exitCode() != 0) {
             throw unavailable(null);
         }
-        return rememberConnection(new Connection(node, socket, new ConcurrentHashMap<>()));
+        return rememberConnection(created);
+    }
+
+    private void cancelForward(Connection connection, URI remote, Forward forward) {
+        List<String> command = control(connection.node(), connection.socket(), "cancel");
+        command.addAll(List.of("-L", "127.0.0.1:" + forward.endpoint().getPort()
+                + ":127.0.0.1:" + remote.getPort(), connection.node().sshHost()));
+        if (runner.run(List.copyOf(command), new byte[0], COMMAND_TIMEOUT).exitCode() != 0
+                && !forwardClosed(forward.endpoint())) {
+            throw unavailable(null);
+        }
+    }
+
+    private void recordForward(Connection connection, URI remote, Forward forward) {
+        Map<URI, Forward> updated = new LinkedHashMap<>(connection.forwards());
+        if (forward == null) {
+            updated.remove(remote);
+        } else {
+            updated.put(remote, forward);
+        }
+        writeForwards(connection, updated);
+        if (forward == null) {
+            connection.forwards().remove(remote);
+        } else {
+            connection.forwards().put(remote, forward);
+        }
+    }
+
+    private static Path forwardingRecord(Path socket) {
+        return socket.resolveSibling(socket.getFileName() + ".forwards.json");
+    }
+
+    private Map<URI, Forward> readForwards(SshRuntimeNode node, Path socket) {
+        Path record = forwardingRecord(socket);
+        try {
+            requirePrivateFile(record);
+            if (Files.size(record) > RECORD_LIMIT) {
+                throw conflict();
+            }
+            Map<String, Object> saved = JsonCodec.parseObject(Files.readAllBytes(record), "SSH forwarding inventory");
+            if (saved.size() != 3 || !Long.valueOf(1).equals(BrokerValues.exactLong(saved.get("version")))
+                    || !node.nodeId().equals(saved.get("nodeId")) || !(saved.get("forwards") instanceof List<?> entries)) {
+                throw conflict();
+            }
+            Map<URI, Forward> forwards = new ConcurrentHashMap<>();
+            Set<URI> local = new java.util.HashSet<>();
+            for (Object entry : entries) {
+                if (!(entry instanceof Map<?, ?> fields) || fields.size() != 3
+                        || !(fields.get("remote") instanceof String remote) || !(fields.get("local") instanceof String address)
+                        || !(fields.get("ready") instanceof Boolean ready)) {
+                    throw conflict();
+                }
+                URI endpoint = URI.create(remote);
+                URI forwarded = URI.create(address);
+                requireRemoteEndpoint(endpoint);
+                requireRemoteEndpoint(forwarded);
+                if (forwards.putIfAbsent(endpoint, new Forward(forwarded, ready)) != null || !local.add(forwarded)) {
+                    throw conflict();
+                }
+            }
+            return forwards;
+        } catch (IOException failure) {
+            throw unavailable(failure);
+        } catch (IllegalArgumentException failure) {
+            throw conflict();
+        }
+    }
+
+    private void writeForwards(Connection connection, Map<URI, Forward> forwards) {
+        var entries = forwards.entrySet().stream().map(entry -> Map.of("remote", entry.getKey().toString(),
+                "local", entry.getValue().endpoint().toString(), "ready", entry.getValue().ready())).toList();
+        byte[] bytes = JsonCodec.encode(Map.of("version", 1, "nodeId", connection.node().nodeId(), "forwards", entries));
+        if (bytes.length > RECORD_LIMIT) {
+            throw unavailable(null);
+        }
+        Path temporary = null;
+        try {
+            Path record = forwardingRecord(connection.socket());
+            if (Files.exists(record, LinkOption.NOFOLLOW_LINKS)) {
+                requirePrivateFile(record);
+            }
+            temporary = Files.createTempFile(socketDirectory, "forward-", ".tmp",
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+            try (FileChannel file = FileChannel.open(temporary, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                ByteBuffer buffer = ByteBuffer.wrap(bytes);
+                while (buffer.hasRemaining()) {
+                    file.write(buffer);
+                }
+                file.force(true);
+            }
+            Files.move(temporary, record, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            try (FileChannel directory = FileChannel.open(socketDirectory, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+                directory.force(true);
+            }
+        } catch (IOException failure) {
+            throw unavailable(failure);
+        } finally {
+            if (temporary != null) {
+                try {
+                    Files.deleteIfExists(temporary);
+                } catch (IOException ignored) {
+                }
+            }
+        }
     }
 
     private boolean checkConnection(SshRuntimeNode node, Path socket) {
@@ -575,7 +679,10 @@ public final class SshConnectionManager implements AutoCloseable {
     record CommandResult(int exitCode, byte[] stdout) {
     }
 
-    private record Connection(SshRuntimeNode node, Path socket, Map<URI, URI> forwards) {
+    private record Forward(URI endpoint, boolean ready) {
+    }
+
+    private record Connection(SshRuntimeNode node, Path socket, Map<URI, Forward> forwards) {
     }
 
     private record Route(SshRuntimeNode node, URI endpoint) {

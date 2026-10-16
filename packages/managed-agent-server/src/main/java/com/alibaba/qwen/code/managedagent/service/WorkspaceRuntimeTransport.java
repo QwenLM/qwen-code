@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
@@ -75,9 +76,11 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         Context context = context(lease, session, true);
         // Reject a missing directory before a new claim can strand storage ownership.
-        if (com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
+        if (LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
             WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
-        } else if (!com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
+        } else if (SshRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
+            resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
+        } else {
             throw WorkspaceExecutionStore.unavailable();
         }
         ownership.claim(context.binding(), context.session());

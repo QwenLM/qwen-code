@@ -21,9 +21,13 @@ public final class ManagedSchema {
             "/db/managed-schema/V3__session_list_created_at.sql";
     // Additive migrations over the published V1 baseline, in version order.
     public static final String SSH_WORKSPACE =
-            "/db/managed-schema/V4__ssh_workspace_registration.sql";
-    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, SSH_WORKSPACE);
-    private static final int CURRENT = EXTENSIONS.size() + 1;
+            "/db/managed-schema/V6__ssh_workspace_registration.sql";
+    private static final List<Migration> EXTENSIONS = List.of(new Migration(2, PRIVATE_AUTHORITY),
+            new Migration(3, SESSION_LIST), new Migration(6, SSH_WORKSPACE));
+    private static final int CURRENT = EXTENSIONS.getLast().version();
+
+    private record Migration(int version, String resource) {
+    }
 
     private ManagedSchema() {}
 
@@ -44,11 +48,14 @@ public final class ManagedSchema {
                                 "The canonical V"
                                         + version
                                         + " catalog requires the application's V"
-                                        + (version + 1)
+                                        + EXTENSIONS.stream().filter(extension -> extension.version() > version)
+                                                .findFirst().orElseThrow().version()
                                         + " migration");
                     }
-                    for (String extension : EXTENSIONS.subList(version - 1, EXTENSIONS.size())) {
-                        execute(connection, read(extension));
+                    for (Migration extension : EXTENSIONS) {
+                        if (extension.version() > version) {
+                            execute(connection, read(extension.resource()));
+                        }
                     }
                     ManagedSchemaCatalog.validate(connection, ddl);
                 }
@@ -80,8 +87,10 @@ public final class ManagedSchema {
 
     private static String ddl(int version) {
         String ddl = read(RESOURCE);
-        for (String extension : EXTENSIONS.subList(0, version - 1)) {
-            ddl = extend(ddl, read(extension));
+        for (Migration extension : EXTENSIONS) {
+            if (extension.version() <= version) {
+                ddl = extend(ddl, read(extension.resource()));
+            }
         }
         return ddl;
     }
@@ -153,7 +162,8 @@ public final class ManagedSchema {
 
     private static int schemaVersion(Connection connection) throws SQLException {
         SQLException current = null;
-        for (int version = CURRENT; version >= 1; version--) {
+        for (int index = EXTENSIONS.size(); index >= 0; index--) {
+            int version = index == 0 ? 1 : EXTENSIONS.get(index - 1).version();
             try {
                 ManagedSchemaCatalog.validate(connection, ddl(version));
                 return version;

@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
 import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -29,6 +31,110 @@ class SshConnectionManagerTest {
     Path controlDirectory;
     private static final SshRuntimeNode NODE = new SshRuntimeNode("linux", "Linux", "worker-linux", "/opt/node",
             "/opt/qwen's cli/cli.js", "/var/tmp/qwen", List.of("/workspace"), 34561);
+
+    @Test
+    void adoptsPersistedForwardsAndRetiresTheOriginalPortWithoutResolvingItAgain() {
+        var commands = new ArrayList<List<String>>();
+        var runner = survivingMaster(commands);
+        var first = new RuntimeLease("a", URI.create("http://127.0.0.1:41234"), "a", "a", 1);
+        var peer = new RuntimeLease("b", URI.create("http://127.0.0.1:41235"), "b", "b", 1);
+        URI original;
+        URI peerOriginal;
+        try (var manager = new SshConnectionManager(URI.create("http://127.0.0.1:8080"), controlDirectory, runner)) {
+            manager.register(first, NODE);
+            manager.register(peer, NODE);
+            original = manager.resolveEndpoint(first);
+            peerOriginal = manager.resolveEndpoint(peer);
+        }
+        try (var adopted = new SshConnectionManager(URI.create("http://127.0.0.1:8080"), controlDirectory, runner)) {
+            adopted.register(first, NODE);
+            adopted.register(peer, NODE);
+            adopted.forget(first);
+            assertEquals(peerOriginal, adopted.resolveEndpoint(peer));
+            assertEquals(2, commands.stream().filter(command -> command.contains("forward")).count());
+            assertEquals(1, commands.stream().filter(command -> command.contains("-N")).count());
+            var cancel = commands.stream().filter(command -> command.contains("cancel")).toList();
+            assertEquals(1, cancel.size());
+            assertTrue(cancel.getFirst().contains("127.0.0.1:" + original.getPort() + ":127.0.0.1:41234"));
+            assertThrows(RuntimeBrokerException.class, () -> adopted.resolveEndpoint(first));
+        }
+    }
+
+    @Test
+    void persistsIntentBeforeForwardingAndReconcilesALostReplyAfterAdoption() throws Exception {
+        var commands = new ArrayList<List<String>>();
+        var delegate = survivingMaster(commands);
+        var loseReply = new AtomicBoolean(true);
+        var oldPort = new AtomicReference<String>();
+        SshConnectionManager.CommandRunner runner = (command, input, timeout) -> {
+            var result = delegate.run(command, input, timeout);
+            if (command.contains("forward") && loseReply.getAndSet(false)) {
+                oldPort.set(command.get(command.indexOf("-L") + 1));
+                try {
+                    assertTrue(Files.readString(inventory()).contains("\"ready\":false"));
+                } catch (java.io.IOException failure) {
+                    throw new AssertionError(failure);
+                }
+                throw new RuntimeBrokerException(503, "ssh_runtime_unavailable", "Reply lost", true);
+            }
+            return result;
+        };
+        var lease = new RuntimeLease("a", URI.create("http://127.0.0.1:41234"), "a", "a", 1);
+        try (var manager = new SshConnectionManager(URI.create("http://127.0.0.1:8080"), controlDirectory, runner)) {
+            manager.register(lease, NODE);
+            assertThrows(RuntimeBrokerException.class, () -> manager.resolveEndpoint(lease));
+        }
+        try (var adopted = new SshConnectionManager(URI.create("http://127.0.0.1:8080"), controlDirectory, runner)) {
+            adopted.register(lease, NODE);
+            adopted.resolveEndpoint(lease);
+            var forwards = commands.stream().filter(command -> command.contains("forward") || command.contains("cancel")).toList();
+            assertEquals(List.of("forward", "cancel", "forward"), forwards.stream()
+                    .map(command -> command.get(command.indexOf("-O") + 1)).toList());
+            assertTrue(forwards.get(1).contains(oldPort.get()));
+            assertTrue(Files.readString(inventory()).contains("\"ready\":true"));
+            adopted.forget(lease);
+            assertTrue(Files.readString(inventory()).contains("\"forwards\":[]"));
+        }
+    }
+
+    @Test
+    void corruptInventoryRefusesLiveMasterAdoptionWithoutCreatingMoreListeners() throws Exception {
+        var commands = new ArrayList<List<String>>();
+        var runner = survivingMaster(commands);
+        var lease = new RuntimeLease("a", URI.create("http://127.0.0.1:41234"), "a", "a", 1);
+        try (var manager = new SshConnectionManager(URI.create("http://127.0.0.1:8080"), controlDirectory, runner)) {
+            manager.register(lease, NODE);
+            manager.resolveEndpoint(lease);
+        }
+        Files.writeString(inventory(), "{}");
+        try (var adopted = new SshConnectionManager(URI.create("http://127.0.0.1:8080"), controlDirectory, runner)) {
+            adopted.register(lease, NODE);
+            assertEquals("ssh_runtime_identity_conflict", assertThrows(RuntimeBrokerException.class,
+                    () -> adopted.resolveEndpoint(lease)).getCode());
+            assertEquals(1, commands.stream().filter(command -> command.contains("forward")).count());
+        }
+    }
+
+    private Path inventory() throws java.io.IOException {
+        try (var files = Files.list(controlDirectory)) {
+            return files.filter(file -> file.getFileName().toString().endsWith(".forwards.json")).findFirst().orElseThrow();
+        }
+    }
+
+    private static SshConnectionManager.CommandRunner survivingMaster(List<List<String>> commands) {
+        return (command, input, timeout) -> {
+            commands.add(command);
+            if (command.contains("-N")) {
+                try {
+                    Files.createFile(Path.of(command.get(command.indexOf("-S") + 1)),
+                            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+                } catch (java.io.IOException failure) {
+                    throw new AssertionError(failure);
+                }
+            }
+            return command.contains("exit") ? new SshConnectionManager.CommandResult(255, new byte[0]) : success();
+        };
+    }
 
     @Test
     void admitsOneControllerAndRejectsConfigurationDriftBeforeTouchingSsh() {
