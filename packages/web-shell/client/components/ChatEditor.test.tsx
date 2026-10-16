@@ -154,8 +154,6 @@ const composerCoreState = vi.hoisted(() => ({
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
   imageDragActive: false,
-  navigatePrevHistory: vi.fn(),
-  navigateNextHistory: vi.fn(),
   hasContent: false,
   pendingImageBatchCount: 0,
   shellMode: false,
@@ -302,8 +300,6 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           handleSearchInput: vi.fn(),
           handleSearchCompositionEnd: vi.fn(),
         },
-        navigatePrevHistory: composerCoreState.navigatePrevHistory,
-        navigateNextHistory: composerCoreState.navigateNextHistory,
         showShortcutHints: false,
         followupState: { isVisible: false, suggestion: '' },
         disabled: Boolean(options?.disabled),
@@ -379,8 +375,6 @@ afterEach(() => {
   composerCoreState.ingestFiles.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
-  composerCoreState.navigatePrevHistory.mockReset();
-  composerCoreState.navigateNextHistory.mockReset();
   composerCoreState.setShellMode.mockReset();
   composerCoreState.toggleShellMode.mockReset();
   composerCoreState.submitText.mockReset();
@@ -3672,36 +3666,6 @@ describe('ChatEditor mobile composer actions', () => {
     ).toBeNull();
   });
 
-  it('calls history navigation directly without submitting or moving focus', async () => {
-    const backend = mobileComposer('working draft');
-    const onSubmit = vi.fn();
-    const container = renderChatEditor({ onSubmit });
-    act(() => backend.textareaRef.current!.focus());
-    const previous = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Previous input"]',
-    )!;
-    const pointerDown = new Event('pointerdown', {
-      bubbles: true,
-      cancelable: true,
-    });
-    previous.dispatchEvent(pointerDown);
-    expect(pointerDown.defaultPrevented).toBe(false);
-    const mouseDown = new MouseEvent('mousedown', {
-      bubbles: true,
-      cancelable: true,
-    });
-    previous.dispatchEvent(mouseDown);
-    expect(mouseDown.defaultPrevented).toBe(true);
-    composerCoreState.focus.mockClear();
-    await clickButton('Previous input');
-    await clickButton('Next input');
-    expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledOnce();
-    expect(composerCoreState.navigateNextHistory).toHaveBeenCalledOnce();
-    expect(composerCoreState.focus).not.toHaveBeenCalled();
-    expect(onSubmit).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(backend.textareaRef.current);
-  });
-
   it('prevents mousedown default on the remaining migrated buttons', async () => {
     mobileComposer('draft');
     renderChatEditor({ visibleToolbarActions: [] });
@@ -3742,18 +3706,17 @@ describe('ChatEditor mobile composer actions', () => {
     );
   });
 
-  it('disables both history buttons when the composer is disabled', () => {
+  it('disables the editing row actions when the composer is disabled', () => {
     mobileComposer('draft');
     const container = renderChatEditor({ disabled: true });
-    for (const label of ['Previous input', 'Next input', 'Expand editor']) {
+    for (const label of ['Input history', 'Expand editor']) {
       const button = container.querySelector<HTMLButtonElement>(
         `[aria-label="${label}"]`,
       )!;
       expect(button.disabled).toBe(true);
       act(() => button.click());
     }
-    expect(composerCoreState.navigatePrevHistory).not.toHaveBeenCalled();
-    expect(composerCoreState.navigateNextHistory).not.toHaveBeenCalled();
+    expect(composerCoreState.openHistorySearch).not.toHaveBeenCalled();
   });
 
   it.each([['approvalMode', 'model'], ['commands']] as const)(
@@ -4148,12 +4111,6 @@ describe('ChatEditor mobile composer actions', () => {
       height.mockRestore();
       restore();
     }
-  });
-
-  it('keeps the history arrow controls out of the desktop composer', () => {
-    const container = renderChatEditor({});
-    expect(container.querySelector('[aria-label="Previous input"]')).toBeNull();
-    expect(container.querySelector('[aria-label="Next input"]')).toBeNull();
   });
 
   it('gates the drawer Live entry by support and host voice opt-in and opens the controlled dialog', async () => {
