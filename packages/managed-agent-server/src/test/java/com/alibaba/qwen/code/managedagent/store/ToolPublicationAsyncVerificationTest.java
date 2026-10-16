@@ -285,9 +285,12 @@ public class ToolPublicationAsyncVerificationTest {
         data = replacement(Duration.ofMinutes(5), Duration.ofSeconds(2));
         publish("restart", 0, "bytes");
         new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withConfiguration(org.springframework.boot.autoconfigure.AutoConfigurations.of(
+                        com.alibaba.qwen.code.managedagent.config.AliyunToolPublicationStorageAutoConfiguration.class))
                 .withUserConfiguration(SchedulingHarness.class,
                         com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration.class)
                 .withPropertyValues("qwen.managed-agent.tool-publication.enabled=true",
+                        "qwen.managed-agent.tool-publication.service-base-url=https://test.invalid",
                         "qwen.managed-agent.tool-publication.async-verification-enabled=" + asyncEnabled,
                         "qwen.managed-agent.tool-publication.journal-head-authorization=true",
                         "qwen.managed-agent.tool-publication.execution-bytes=104857600",
@@ -308,16 +311,10 @@ public class ToolPublicationAsyncVerificationTest {
                 .withBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class, () -> fixture.bindings)
                 .withBean(org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder.class,
                         org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder::new)
-                .withBean(org.springframework.beans.factory.config.BeanFactoryPostProcessor.class, () -> beanFactory -> {
-                    ((org.springframework.beans.factory.support.AbstractBeanDefinition)
-                            beanFactory.getBeanDefinition("toolPublicationOss"))
-                            .setInstanceSupplier(() -> org.mockito.Mockito.mock(com.aliyun.oss.OSS.class));
-                    ((org.springframework.beans.factory.support.AbstractBeanDefinition)
-                            beanFactory.getBeanDefinition("toolPublicationObjects")).setInstanceSupplier(() -> bucket);
-                })
+                .withBean(ToolPublicationObjectStore.class, () -> bucket)
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasSingleBean(ToolPublicationVerifier.class)
-                            .hasSingleBean(ToolPublicationDataStore.class);
+                            .hasSingleBean(ToolPublicationDataStore.class).doesNotHaveBean(com.aliyun.oss.OSS.class);
                     var settings = context.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
                             .getToolPublication();
                     assertThat(settings.isAsyncVerificationEnabled()).isEqualTo(asyncEnabled);
@@ -441,7 +438,8 @@ public class ToolPublicationAsyncVerificationTest {
     @Test
     void permanentFailureReleasesItsSlotBeforeItsDeadline() {
         publish("denied", 0, "bytes");
-        bucket.readFailure = new com.aliyun.oss.OSSException("denied", "AccessDenied", "request", "host", "bucket", "key", "resource");
+        bucket.readFailure = new ToolPublicationStorageException(ToolPublicationStorageException.Reason.ACCESS_DENIED,
+                new IllegalStateException("denied"));
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("denied").path("state").asText()).isEqualTo("FAILED");
         assertThat(publish("next", 1, "later").path("state").asText()).isEqualTo("PENDING");
@@ -593,8 +591,8 @@ public class ToolPublicationAsyncVerificationTest {
         publish("retry", 0, "bytes");
         bucket.blockOpen = 1;
         if (failure.equals("denied")) {
-            bucket.readFailure = new com.aliyun.oss.OSSException("denied", "AccessDenied",
-                    "request", "host", "bucket", "key", "resource");
+            bucket.readFailure = new ToolPublicationStorageException(ToolPublicationStorageException.Reason.ACCESS_DENIED,
+                    new IllegalStateException("denied"));
         } else {
             bucket.failRead = true;
         }
@@ -619,8 +617,8 @@ public class ToolPublicationAsyncVerificationTest {
     @Test
     void storageDenialIsPermanentAndDoesNotExposeStorageDetails() {
         publish("denied", 0, "bytes");
-        bucket.readFailure = new com.aliyun.oss.OSSException("private storage message", "AccessDenied",
-                "private-request", "private-host", "private-bucket", "private-key", "private-resource");
+        bucket.readFailure = new ToolPublicationStorageException(ToolPublicationStorageException.Reason.ACCESS_DENIED,
+                new IllegalStateException("private backend diagnostics"));
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
             assertThat(verifier.runOnce()).isFalse();
@@ -1146,7 +1144,7 @@ public class ToolPublicationAsyncVerificationTest {
         }
 
         @Override
-        public void requireUnversioned() {}
+        public void validateConfiguration() {}
 
         @Override
         public void deleteIfPresent(String key) {

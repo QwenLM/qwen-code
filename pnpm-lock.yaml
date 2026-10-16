@@ -1539,6 +1539,9 @@ importers:
       '@tanstack/react-virtual':
         specifier: ^3.13.26
         version: 3.14.2(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      '@types/hast':
+        specifier: ^3.0.5
+        version: 3.0.5
       '@xterm/addon-fit':
         specifier: ^0.11.0
         version: 0.11.0
@@ -1627,9 +1630,6 @@ importers:
       '@tailwindcss/vite':
         specifier: ^4.3.2
         version: 4.3.2(vite@5.4.21(@types/node@22.20.1)(lightningcss@1.32.0))
-      '@types/hast':
-        specifier: ^3.0.5
-        version: 3.0.5
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
@@ -1669,6 +1669,9 @@ importers:
       shadcn:
         specifier: ^4.13.0
         version: 4.13.0(supports-color@7.2.0)(typescript@5.8.3)
+      shiki-files:
+        specifier: npm:shiki@4.5.0
+        version: shiki@4.5.0
       tailwindcss:
         specifier: ^4.3.2
         version: 4.3.2

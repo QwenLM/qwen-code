@@ -143,7 +143,7 @@ class ManagedAgentDefinitionTest {
         JsonNode absent = json(create(tenant, "absent", minimum.toString())
                 .andExpect(status().isAccepted()));
         ObjectNode withNulls = minimum.deepCopy();
-        for (String field : new String[] {"skills", "mcp_servers",
+        for (String field : new String[] {"skills", "mcp_servers", "hook_catalog",
                 "environment_template_id", "metadata"}) {
             withNulls.putNull(field);
         }
@@ -167,6 +167,8 @@ class ManagedAgentDefinitionTest {
         ObjectNode content = (ObjectNode) objectMapper.readTree(DEFINITION);
         content.putArray("skills").addObject().put("name", "review");
         content.putArray("mcp_servers").addObject().put("name", "docs");
+        content.putObject("hook_catalog").put("catalog_id", "review").put("catalog_revision", 1)
+                .put("definition_digest", "b".repeat(64));
         content.put("environment_template_id", "template-1");
         JsonNode first = json(create(tenant, "optional", content.toString())
                 .andExpect(status().isAccepted()));
