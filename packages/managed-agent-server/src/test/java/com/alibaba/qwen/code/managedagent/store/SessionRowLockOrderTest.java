@@ -160,13 +160,16 @@ class SessionRowLockOrderTest {
     // only. Main's private CSI work (#13996) adds the same shapes:
     // data-source probes, the publication-placement lock delegator and the
     // runtime-access record's accessors, none of which reaches either side.
+    // The child Workspace row's snapshot/0 (#13753 I3) is a record accessor
+    // over its mode: it reaches no JDBC call and takes no lock.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
             Map.ofEntries(
                     Map.entry("ChildResultRelayStore.java",
                             Set.of("ChildResultRelayStore.readTree/1")),
                     Map.entry("ChildWorkspaceStore.java",
                             Set.of("ChildWorkspaceStore.find/3",
-                                    "ChildWorkspaceStore.row/2")),
+                                    "ChildWorkspaceStore.row/2",
+                                    "Row.snapshot/0")),
                     Map.entry("JdbcChannelRouteRepository.java",
                             Set.of("JdbcChannelRouteRepository.row/2")),
                     Map.entry("ManagedAgentDefinitionStore.java",
@@ -233,6 +236,10 @@ class SessionRowLockOrderTest {
                                     "Original.csi/0",
                                     "Row.withState/2",
                                     "ToolPublicationStore.usesDataSource/1")),
+                    Map.entry("WorkspaceCreationStore.java",
+                            Set.of("WorkspaceCreationStore.enabled/0")),
+                    Map.entry("WorkspaceExecutionStore.java",
+                            Set.of("WorkspaceExecutionStore.createdStorageRoot/2")),
                     Map.entry("WorkspaceCsiCheckpointSnapshotStore.java",
                             Set.of("WorkspaceCsiCheckpointSnapshotStore.hash/1",
                                     "WorkspaceCsiCheckpointSnapshotStore.scope/1")),
@@ -319,7 +326,7 @@ class SessionRowLockOrderTest {
         // lockers no helper name would find, and the create entries, whose
         // session-row INSERT is the lock.
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
-                "insertTurnCommand", "insertCancelCommand",
+                "insertTurnCommand", "insertCancelCommand", "changeSessionModel",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
                 "insertChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
@@ -370,11 +377,11 @@ class SessionRowLockOrderTest {
                         "beginLifecycle", "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",
-                        "cancelBeforeAdmission", "claimTurn",
+                        "cancelBeforeAdmission", "changeSessionModel", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
                         "deferTurnRetry", "failTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
-                        "findReplayFloorTargets", "findTurn",
+                        "findReplayFloorTargets", "findTurn", "findTurnModelSelection",
                         "findTurnSummary", "hasActiveTurn",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertCsiSessionCommand",

@@ -120,8 +120,10 @@ class RuntimeBrokerServiceTest {
                     RuntimeBindingRepository.class.getClassLoader(), new Class<?>[] {RuntimeBindingRepository.class},
                     (proxy, method, args) -> {
                         if ("requireHarnessRecovery".equals(method.getName())) {
-                            observed.set((RuntimeLifecycleAuthority) args[2]);
-                            if (!authority.equals(args[2])) {
+                            assertEquals(4, args.length);
+                            assertEquals("harness", args[2]);
+                            observed.set((RuntimeLifecycleAuthority) args[3]);
+                            if (!authority.equals(args[3])) {
                                 throw new RuntimeBrokerException(409, "runtime_admission_closed", "Claim required", false);
                             }
                             return false;

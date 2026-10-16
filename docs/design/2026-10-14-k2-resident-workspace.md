@@ -37,7 +37,7 @@ Public callers cannot select a Pod, PVC, worker endpoint or runtime identity.
 A CSI registration alone does not enable execution.
 
 The mapping requires Workspace isolation, the files profile, no local mount
-mapping, and no child-sharing or local reboot/recovery mode. Shell, MCP, Hooks,
+mapping or local Workspace creation root, and no child-sharing or local reboot/recovery mode. Shell, MCP, Hooks,
 background execution and in-place Session cwd changes are unavailable. A cwd can
 be selected when creating the next Session.
 
@@ -54,7 +54,7 @@ reservation identity remain. An expiry, failed RPC or missing Pod cannot transfe
 storage to another Workspace or tenant.
 
 This change adds no database migration or schema extension. It uses main's
-canonical V1/V2/V3 catalog and millisecond timestamps. Existing refusal of legacy,
+canonical V1–V5 catalog and millisecond timestamps. Existing refusal of legacy,
 partial and foreign catalogs remains; it does not rewrite old persisted evidence.
 
 ## Admission and execution

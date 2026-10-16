@@ -780,6 +780,8 @@ class ManagedAgentPropertiesTest {
             assertThat(selected.command()).containsExactly("node", "/worker/cli.js");
         });
         context.withPropertyValues(TRUSTED_KEY + "=true").run(started -> assertThat(started).hasFailed());
+        context.withPropertyValues(prefix + "workspace-creation-root=/local-workspaces")
+                .run(started -> assertThat(started).hasFailed());
         context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-enabled=true")
                 .run(started -> assertThat(started).hasFailed());
     }
@@ -997,6 +999,26 @@ class ManagedAgentPropertiesTest {
         ManagedAgentProperties off = new ManagedAgentProperties();
         off.getAutomation().setMaxSlotsPerTick(0);
         assertThatCode(off::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    // #13753 I3: snapshots are read-only child Workspaces, so their own
+    // switch needs the capability's.
+    @Test
+    void childSnapshotsAreOffByDefaultAndNeedChildWorkspaces() {
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isChildSnapshotsEnabled()).isFalse();
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setChildSnapshotsEnabled(true);
+        assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Child snapshots require child Workspaces");
+        // Beside a valid child-Workspaces configuration, the switch boots.
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/workspace")));
+        if (ManagedAgentProperties.childWorkspacesSupportedOn(System.getProperty("os.name"))
+                && ManagedAgentProperties.utf8FileNames(System.getProperty("sun.jnu.encoding"))) {
+            assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        }
     }
 
     @Test

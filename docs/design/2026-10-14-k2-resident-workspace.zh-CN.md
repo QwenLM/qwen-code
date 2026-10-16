@@ -30,7 +30,7 @@ worker 镜像、命令及可选产物。重复 Workspace、存储 alias 或物�
 公开调用者不能选择 Pod、PVC、worker endpoint 或运行环境身份；只有 CSI 注册
 不会启用执行。
 
-映射要求 Workspace 隔离和 files 配置，不能同时使用本地 mount 映射、子 Session
+映射要求 Workspace 隔离和 files 配置，不能同时使用本地 mount 映射、本地 Workspace 创建根、子 Session
 共享或本地重启/恢复模式。Shell、MCP、Hooks、后台执行及 Session 内原地 cwd
 变更不可用；可在创建下一个 Session 时选择 cwd。
 
@@ -44,7 +44,7 @@ CSI reservation 保留原 binding、runtime generation 和物理 owner。逻辑�
 `csi_phase = RESERVED` 和原 reservation 身份。过期、RPC 失败或 Pod 缺失不能把
 存储转移给另一个 Workspace 或租户。
 
-本改动不新增数据库迁移或 schema 扩展，使用主干 canonical V1/V2/V3 目录和
+本改动不新增数据库迁移或 schema 扩展，使用主干 canonical V1–V5 目录和
 毫秒时间戳。已有的 legacy、部分或外来目录拒绝行为保持，不重写旧持久证据。
 
 ## 准入与执行
