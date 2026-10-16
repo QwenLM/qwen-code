@@ -184,18 +184,19 @@ class ToolPublicationLockOrderMySqlIT {
 
     /**
      * The CSI writer lane takes root → placement → retention on a pinned
-     * Session (#13800); the retention lane reaches the same rows through
-     * {@code ToolPublicationRetentionStore.lockSessionHead}. When the
-     * retention side reached the tenant CAS row before the Session root,
-     * the two orders closed an InnoDB cycle and one side lost to a
-     * deadlock (1213); with both sides root-first, the seal walk beside
-     * a paused retention owner completes (the seal's answer on the
-     * pinned original itself is csi_finalize_required). Swapping the two
-     * acquisitions back inside {@code lockSessionHead} turns this arm
-     * red again.
+     * Session (#13800), while every other lane, the retention lane through
+     * {@code ToolPublicationRetentionStore.lockSessionHead} among them,
+     * takes the tenant CAS row before the root. On one pinned Session the
+     * two orders close an InnoDB cycle (#13800 R1-1). The subject here is
+     * the heavier transaction, so InnoDB rolls back the retention owner at
+     * its root wait: that victim must answer the named, retryable
+     * tenant_guard_contended like the guard side, never a raw deadlock,
+     * and the seal then completes (its answer on the pinned original
+     * itself is csi_finalize_required). Dropping the root-side mapping
+     * turns the owner's failure back into a DeadlockLoserDataAccessException.
      */
     @Test
-    void sealWriterOnCsiSessionCompletesBesideARetentionOwner() throws Exception {
+    void pinnedSessionDeadlockNamesTheRetentionVictim() throws Exception {
         String url = System.getProperty("mysql.url");
         if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
             throw new IllegalArgumentException("A MySQL test database URL is required");
@@ -253,6 +254,10 @@ class ToolPublicationLockOrderMySqlIT {
             var sessions = new ManagedSessionStore(jdbc);
             transaction.executeWithoutResult(status -> sessions.acquireWriter("tenant", sessionId,
                     WRITER_TOKEN, new AcquireWriterRequest("workspace", "writer", 60_000L)));
+            // InnoDB rolls back the transaction with the smaller undo log;
+            // these rows make the seal the heavier side of the cycle.
+            jdbc.execute("CREATE TABLE deadlock_weight (id INT PRIMARY KEY)");
+            long deadlocksBefore = MySqlLockProbe.innodbDeadlocks(admin);
             var owners = Executors.newSingleThreadExecutor(task -> new Thread(task, "owner"));
             var subjects = Executors.newSingleThreadExecutor(task -> new Thread(task, "subject"));
             try {
@@ -261,17 +266,27 @@ class ToolPublicationLockOrderMySqlIT {
                 var owner = owners.submit(() -> transaction.executeWithoutResult(
                         status -> lockSessionHead(jdbc, "tenant", sessionId)));
                 assertThat(source.ownerFirstLock.await(10, TimeUnit.SECONDS))
-                        .as("Retention owner holds its first row").isTrue();
-                var subject = subjects.submit(() -> transaction.execute(status ->
-                        sessions.sealWriter("tenant", sessionId, WRITER_TOKEN,
-                                new SealWriterRequest("workspace", "writer", 1), null)));
+                        .as("Retention owner holds the tenant CAS row").isTrue();
+                var subject = subjects.submit(() -> transaction.execute(status -> {
+                    for (int row = 0; row < 200; row++) {
+                        jdbc.update("INSERT INTO deadlock_weight (id) VALUES (?)", row);
+                    }
+                    return sessions.sealWriter("tenant", sessionId, WRITER_TOKEN,
+                            new SealWriterRequest("workspace", "writer", 1), null);
+                }));
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                while (lockWaits(admin, schema) == 0 && !subject.isDone()) {
+                while (MySqlLockProbe.lockWaits(admin, schema) == 0 && !subject.isDone()) {
                     assertThat(System.nanoTime()).isLessThan(deadline);
                     Thread.sleep(200);
                 }
                 source.releaseOwner.countDown();
-                owner.get(30, TimeUnit.SECONDS);
+                assertThatThrownBy(() -> owner.get(30, TimeUnit.SECONDS))
+                        .as("The retention owner is the deadlock victim at its root wait")
+                        .isInstanceOf(ExecutionException.class)
+                        .cause().isInstanceOfSatisfying(ApiException.class, error -> {
+                            assertThat(error.getStatus().value()).isEqualTo(503);
+                            assertThat(error.getCode()).isEqualTo("tenant_guard_contended");
+                        });
                 assertThatThrownBy(() -> subject.get(30, TimeUnit.SECONDS))
                         .isInstanceOf(ExecutionException.class)
                         .cause().isInstanceOfSatisfying(ApiException.class, error ->
@@ -280,10 +295,71 @@ class ToolPublicationLockOrderMySqlIT {
                         .as("Sealed CSI writer walked root → placement → retention"
                             + " (the second placement is lockManagedSession's own domain)")
                         .containsExactly("root", "placement", "retention", "placement");
+                assertThat(MySqlLockProbe.innodbDeadlocks(admin) - deadlocksBefore)
+                        .as("The two orders formed an InnoDB cycle").isPositive();
             } finally {
                 source.releaseOwner.countDown();
                 source.enabled = false;
                 // Let both transactions end before the schema is dropped.
+                owners.shutdown();
+                subjects.shutdown();
+                assertThat(owners.awaitTermination(60, TimeUnit.SECONDS)
+                        && subjects.awaitTermination(60, TimeUnit.SECONDS)).isTrue();
+            }
+        } finally {
+            admin.execute("DROP DATABASE " + schema);
+        }
+    }
+
+    /**
+     * On an ordinary Session every lane that holds the tenant CAS row
+     * reaches the Session root only after it: a publication renew takes
+     * placement → CAS → root, and the retention lane takes CAS → root.
+     * Taking the root first on the retention side (an earlier answer to
+     * #13800 R1-1) closes a cycle with every such lane on every Session,
+     * not only on pinned ones: the paused retention owner would hold the
+     * root while the renew holds CAS. Here both complete with no deadlock.
+     */
+    @Test
+    void ordinaryPublicationBesideARetentionOwnerDoesNotDeadlock() throws Exception {
+        String url = System.getProperty("mysql.url");
+        if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
+            throw new IllegalArgumentException("A MySQL test database URL is required");
+        }
+        String user = System.getProperty("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        var admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        String schema = "retention_lock_order_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + schema);
+        try {
+            var source = new OwnerPauseDataSource(new DriverManagerDataSource(
+                    url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
+            Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+            var journal = PublicationJournalFixture.create(source, false);
+            JsonNode reserved = journal.reserve();
+            var transaction = new TransactionTemplate(journal.manager);
+            long deadlocksBefore = MySqlLockProbe.innodbDeadlocks(admin);
+            var owners = Executors.newSingleThreadExecutor(task -> new Thread(task, "owner"));
+            var subjects = Executors.newSingleThreadExecutor(task -> new Thread(task, "subject"));
+            try {
+                source.enabled = true;
+                source.pauseOwnerOnFirstInsert = true;
+                var owner = owners.submit(() -> transaction.executeWithoutResult(
+                        status -> lockSessionHead(journal.jdbc, "tenant-1", "session-1")));
+                assertThat(source.ownerFirstLock.await(10, TimeUnit.SECONDS))
+                        .as("Retention owner holds its first row").isTrue();
+                var subject = subjects.submit(() -> journal.store.apply(journal.request("renew"),
+                        WRITER_TOKEN, PUBLICATION_TOKEN));
+                MySqlLockProbe.awaitLockWaits(admin, schema, 1, "the publication renew");
+                source.releaseOwner.countDown();
+                owner.get(30, TimeUnit.SECONDS);
+                JsonNode renewed = subject.get(30, TimeUnit.SECONDS);
+                assertThat(renewed.path("state").asText()).isEqualTo(reserved.path("state").asText());
+                assertThat(MySqlLockProbe.innodbDeadlocks(admin) - deadlocksBefore)
+                        .as("Retention and publication agree on CAS before root").isZero();
+            } finally {
+                source.releaseOwner.countDown();
+                source.enabled = false;
                 owners.shutdown();
                 subjects.shutdown();
                 assertThat(owners.awaitTermination(60, TimeUnit.SECONDS)
@@ -379,7 +455,7 @@ class ToolPublicationLockOrderMySqlIT {
             var result = subjects.submit(subject);
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             int waiting;
-            while ((waiting = lockWaits(admin, schema)) == 0 && !result.isDone()) {
+            while ((waiting = MySqlLockProbe.lockWaits(admin, schema)) == 0 && !result.isDone()) {
                 assertThat(System.nanoTime()).isLessThan(deadline);
                 // InnoDB refreshes its transaction table only after 100 ms without a read.
                 Thread.sleep(200);
@@ -403,12 +479,6 @@ class ToolPublicationLockOrderMySqlIT {
             assertThat(owners.awaitTermination(60, TimeUnit.SECONDS)
                     && subjects.awaitTermination(60, TimeUnit.SECONDS)).isTrue();
         }
-    }
-
-    private static int lockWaits(JdbcTemplate admin, String schema) {
-        return admin.queryForObject("SELECT COUNT(*) FROM information_schema.innodb_trx t"
-                + " JOIN information_schema.processlist p ON p.id = t.trx_mysql_thread_id"
-                + " WHERE t.trx_state = 'LOCK WAIT' AND p.db = ?", Integer.class, schema);
     }
 
     private static final class OwnerPauseDataSource extends DelegatingDataSource {

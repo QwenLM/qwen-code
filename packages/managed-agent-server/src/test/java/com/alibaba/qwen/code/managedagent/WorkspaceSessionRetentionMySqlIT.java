@@ -321,7 +321,7 @@ class WorkspaceSessionRetentionMySqlIT {
                 var completed = pool.submit(() -> transaction(() -> completingStore.completeOperation(tenant,
                         session, deletion.operationId(), "delete-worker", deletion.claimGeneration(), false)));
                 awaitLatch(completingPublicLock);
-                awaitLockWaits(1);
+                MySqlLockProbe.awaitLockWaits(jdbc, schema, 1, "the queued writer renewal");
                 var renewal = pool.submit(() -> {
                     try {
                         return transaction(() -> new ManagedSessionStore(jdbc).renewWriter(tenant, session, TOKEN,
@@ -330,7 +330,7 @@ class WorkspaceSessionRetentionMySqlIT {
                         return rejected;
                     }
                 });
-                awaitLockWaits(2);
+                MySqlLockProbe.awaitLockWaits(jdbc, schema, 2, "both queued transactions");
                 assertThrows(TimeoutException.class, () -> renewal.get(100, TimeUnit.MILLISECONDS));
                 release.countDown();
                 assertThat(holder.get(5, TimeUnit.SECONDS)).isTrue();
@@ -341,20 +341,6 @@ class WorkspaceSessionRetentionMySqlIT {
                 release.countDown();
             }
         }
-    }
-
-    private void awaitLockWaits(int expected) throws InterruptedException {
-        // INNODB_TRX refreshes at most every ~100 ms; poll slower than that.
-        for (int attempt = 0; attempt < 60; attempt++) {
-            Integer waits = jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.INNODB_TRX t"
-                    + " JOIN information_schema.PROCESSLIST p ON p.ID = t.trx_mysql_thread_id"
-                    + " WHERE t.trx_state = 'LOCK WAIT' AND p.DB = ?", Integer.class, schema);
-            if (waits != null && waits >= expected) {
-                return;
-            }
-            Thread.sleep(150);
-        }
-        throw new AssertionError("Timed out waiting for " + expected + " queued transactions");
     }
 
     @Test

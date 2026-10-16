@@ -84,13 +84,13 @@ final class ManagedProjectionResourceCollector {
                                         String tenant = (String) candidate.get("tenant_id");
                                         String session = (String) candidate.get("session_id");
                                         String id = (String) candidate.get("snapshot_id");
+                                        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                                         if (ManagedLegacySessionGuard.isPrivate(
                                                 jdbc, tenant, session)) {
                                             return false;
                                         }
                                         ToolPublicationRetentionStore.lockSession(
                                                 jdbc, tenant, session);
-                                        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                                         var streams =
                                                 jdbc.queryForList(
                                                         "SELECT current_snapshot_id FROM"
@@ -146,11 +146,11 @@ final class ManagedProjectionResourceCollector {
     }
 
     private boolean collect(String tenant, String session, String key) {
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
         if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
             return false;
         }
         ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         var rows =
                 jdbc.queryForList(

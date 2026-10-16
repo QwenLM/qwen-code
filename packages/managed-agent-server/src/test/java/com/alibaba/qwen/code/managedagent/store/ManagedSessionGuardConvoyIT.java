@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
+import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -488,7 +489,7 @@ class ManagedSessionGuardConvoyIT {
         var lifecycle = manager.getTransaction(new DefaultTransactionDefinition());
         try {
             WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
-            long deadlocksBefore = innodbDeadlocks(jdbc);
+            long deadlocksBefore = MySqlLockProbe.innodbDeadlocks(jdbc);
             try (var pool = Executors.newSingleThreadExecutor()) {
                 var writer = pool.submit(() -> transactions.executeWithoutResult(ignored ->
                         store.acquireWriter(tenant, "victim", token,
@@ -508,7 +509,7 @@ class ManagedSessionGuardConvoyIT {
                 // parked on the placement row the hold owns. A deadlock victim
                 // or a lock-wait timeout surfaces here.
                 assertThatCode(() -> writer.get(30, TimeUnit.SECONDS)).doesNotThrowAnyException();
-                assertThat(innodbDeadlocks(jdbc) - deadlocksBefore)
+                assertThat(MySqlLockProbe.innodbDeadlocks(jdbc) - deadlocksBefore)
                         .as("no InnoDB deadlock must form between lifecycle placement and writer admission")
                         .isZero();
             }
@@ -588,7 +589,7 @@ class ManagedSessionGuardConvoyIT {
         var store = new ManagedSessionStore(jdbc);
         var grant = transactions.execute(ignored -> store.acquireWriter(TENANT, "victim", TOKEN,
                 new AcquireWriterRequest(WORKSPACE, "writer-victim", 60_000L)));
-        long deadlocksBefore = innodbDeadlocks(jdbc);
+        long deadlocksBefore = MySqlLockProbe.innodbDeadlocks(jdbc);
         try (var pausedThread = Executors.newSingleThreadExecutor(task -> new Thread(task, "paused"));
                 var ordinaryThread = Executors.newSingleThreadExecutor()) {
             pausing.enabled = true;
@@ -597,29 +598,16 @@ class ManagedSessionGuardConvoyIT {
             var ordinary = ordinaryThread.submit(() -> transactions.execute(ignored ->
                     store.blockRecovery(TENANT, "victim", TOKEN, new BlockRecoveryRequest(WORKSPACE,
                             "writer-victim", grant.writerGeneration(), "BLOCKED_RESOURCE", "root-order"))));
-            awaitLockWaitInSchema(jdbc);
+            MySqlLockProbe.awaitLockWaits(jdbc, schema, 1, "the ordinary writer");
             pausing.release.countDown();
             assertThatCode(() -> pausedCall.get(30, TimeUnit.SECONDS)).doesNotThrowAnyException();
             assertThatCode(() -> ordinary.get(30, TimeUnit.SECONDS)).doesNotThrowAnyException();
         } finally {
             pausing.release.countDown();
         }
-        assertThat(innodbDeadlocks(jdbc) - deadlocksBefore)
+        assertThat(MySqlLockProbe.innodbDeadlocks(jdbc) - deadlocksBefore)
                 .as("ordinary writers and the paused call must not form an InnoDB deadlock")
                 .isZero();
-    }
-
-    private void awaitLockWaitInSchema(JdbcTemplate jdbc) throws InterruptedException {
-        for (int attempt = 0; attempt < 100; attempt++) {
-            Integer waits = jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.INNODB_TRX t"
-                    + " JOIN information_schema.PROCESSLIST p ON p.ID = t.trx_mysql_thread_id"
-                    + " WHERE t.trx_state = 'LOCK WAIT' AND p.DB = ?", Integer.class, schema);
-            if (waits != null && waits > 0) {
-                return;
-            }
-            Thread.sleep(100);
-        }
-        throw new AssertionError("Timed out waiting for the ordinary writer to queue");
     }
 
     /** Pauses the thread named "paused" right after its first statement that starts with the trigger. */
@@ -691,22 +679,6 @@ class ManagedSessionGuardConvoyIT {
             Thread.sleep(100);
         }
         throw new AssertionError("Timed out waiting for a lock wait on " + table);
-    }
-
-    private static long innodbDeadlocks(JdbcTemplate jdbc) {
-        Long value = jdbc.query("SHOW GLOBAL STATUS LIKE 'Innodb_deadlocks'",
-                result -> result.next() ? result.getLong(2) : null);
-        if (value == null) {
-            // MySQL 8.4 has no Innodb_deadlocks status variable; its InnoDB
-            // metrics count the same events.
-            value = jdbc.query("SELECT `count` FROM information_schema.INNODB_METRICS"
-                            + " WHERE name = 'lock_deadlocks'",
-                    result -> result.next() ? result.getLong(1) : null);
-        }
-        if (value == null) {
-            throw new IllegalStateException("The server exposes no InnoDB deadlock counter");
-        }
-        return value;
     }
 
     private static void assertFastGuardFailure(Callable<Object> action) throws Exception {

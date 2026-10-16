@@ -28,6 +28,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
@@ -56,6 +57,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @Repository
@@ -258,6 +260,38 @@ public class ManagedSessionStore {
         } catch (PessimisticLockingFailureException | QueryTimeoutException error) {
             throw guardContended();
         }
+    }
+
+    /**
+     * The root-side half of {@link #lockBounded}'s mapping. A pinned CSI
+     * Session's continuation holds its root while it waits for the tenant
+     * guards, so a guard-first lane on that Session closes an InnoDB cycle
+     * when it reaches the root, and InnoDB may roll back either side
+     * (#13800 R1-1). The root acquisitions name that rollback the way the
+     * guard side does; an ordinary wait on the root stays unbounded and
+     * keeps its own failure. The default translator reports a deadlock
+     * (MySQL/MariaDB 1213, SQLState 40001) as CannotAcquireLockException,
+     * the error-code translator as DeadlockLoserDataAccessException, so the
+     * victim is recognized by its vendor code.
+     */
+    static <T> T namedRootDeadlock(Supplier<T> lock) {
+        try {
+            return lock.get();
+        } catch (PessimisticLockingFailureException error) {
+            if (error instanceof DeadlockLoserDataAccessException || deadlockVictim(error)) {
+                throw guardContended();
+            }
+            throw error;
+        }
+    }
+
+    private static boolean deadlockVictim(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.sql.SQLException sql && sql.getErrorCode() == 1213) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void requirePhysicalSessionOpen(String tenantId, String workspaceId, String sessionId) {
@@ -2225,9 +2259,12 @@ public class ManagedSessionStore {
         }
         // A pinned Session takes the tenant guards behind its root, bounded
         // and named like every other per-turn lane: on renew, commit and
-        // recovery state these are the first tenant-wide waits (#13800). A
-        // placement-first operation on that same Session meanwhile resolves
-        // as an InnoDB deadlock, which the same mapping names.
+        // recovery state these are the first tenant-wide waits (#13800).
+        // Every other lane takes the guards before the root, so a guard-first
+        // operation on this same Session meanwhile resolves as an InnoDB
+        // deadlock. Either side may be rolled back: this side's waits are
+        // named by lockBounded, the other side's root wait by
+        // namedRootDeadlock (#13800 R1-1).
         lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,

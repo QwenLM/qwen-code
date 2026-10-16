@@ -93,20 +93,26 @@ public final class ToolPublicationRetentionStore {
     private static boolean lockSessionRoot(
             JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
         long time = now(jdbc);
-        jdbc.update(
-                "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tenant_key = VALUES(tenant_key), session_key = VALUES(session_key), session_scope_key = VALUES(session_scope_key)",
-                tenant, session, hash(tenant), hash(session), ManagedSessionStore.sessionScopeKey(tenant, session), time, time);
-        return jdbc.query(
-                "SELECT tenant_id, session_id, csi_guard FROM ma_session WHERE tenant_id = ? AND"
-                        + " session_id = ? FOR UPDATE",
-                (row, index) -> {
-                    boolean guarded = row.getBoolean("csi_guard");
-                    if (legacyMutation) {
-                        ManagedLegacySessionGuard.requireLegacyMutation(guarded);
-                    }
-                    return guarded;
-                },
-                tenant, session).getFirst();
+        // Behind a tenant guard this root wait can close a cycle with a
+        // pinned CSI Session's continuation, which holds its root while it
+        // waits for that guard; a deadlock victim here answers
+        // tenant_guard_contended like the guard side (#13800 R1-1).
+        return ManagedSessionStore.namedRootDeadlock(() -> {
+            jdbc.update(
+                    "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tenant_key = VALUES(tenant_key), session_key = VALUES(session_key), session_scope_key = VALUES(session_scope_key)",
+                    tenant, session, hash(tenant), hash(session), ManagedSessionStore.sessionScopeKey(tenant, session), time, time);
+            return jdbc.query(
+                    "SELECT tenant_id, session_id, csi_guard FROM ma_session WHERE tenant_id = ? AND"
+                            + " session_id = ? FOR UPDATE",
+                    (row, index) -> {
+                        boolean guarded = row.getBoolean("csi_guard");
+                        if (legacyMutation) {
+                            ManagedLegacySessionGuard.requireLegacyMutation(guarded);
+                        }
+                        return guarded;
+                    },
+                    tenant, session).getFirst();
+        });
     }
 
     static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
@@ -115,14 +121,13 @@ public final class ToolPublicationRetentionStore {
 
     private static Map<String, Object> lockSessionHead(
             JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
-        // The root is taken before the tenant CAS row so retention matches
-        // the CSI lane's root-first order (#13800); the CAS row still runs
-        // bounded with the shared named-failure mapping: a held row answers
-        // tenant_guard_contended instead of out-waiting the caller's own
-        // request budget.
-        lockSessionRoot(jdbc, tenant, session, legacyMutation);
+        // Retention-read callers reach the tenant CAS row here before the
+        // head row, so the acquisition runs bounded with the shared
+        // named-failure mapping: a held row answers tenant_guard_contended
+        // instead of out-waiting the caller's own request budget (#13800).
         ManagedSessionStore.lockBounded(() -> lockTenant(jdbc, tenant,
                 ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockSessionRoot(jdbc, tenant, session, legacyMutation);
         var heads =
                 jdbc.query(
                         "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
