@@ -1866,7 +1866,13 @@ describe('Hosted Harness no-tool session', () => {
     await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
       .send({ prompt, promptId: PROMPT_ID, payloadDigest })
       .expect(202);
-    await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce());
+    await vi.waitFor(
+      () => expect(state.model).toHaveBeenCalledOnce(),
+      // #14101: the admission crosses fsync-backed journal commits before
+      // the model call; the default 1s waitFor window flaked on a loaded
+      // CI runner (#13219).
+      { timeout: 10_000 },
+    );
     const original =
       LocalManagedSessionAuthority.prototype.appendExecutionEvent;
     const append = vi
@@ -1890,12 +1896,18 @@ describe('Hosted Harness no-tool session', () => {
       append.mockRestore();
       finish();
     }
-    await vi.waitFor(async () => {
-      const status = await authorize(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      );
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      // #14101: the cancelled turn's settle crosses fsync-backed journal
+      // commits before the active flag clears; the default 1s waitFor
+      // window flaked on a loaded CI runner (#13219).
+      { timeout: 10_000 },
+    );
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/detach`),
     ).expect(204);
@@ -1932,7 +1944,13 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
         .send({ prompt, promptId: PROMPT_ID, payloadDigest })
         .expect(202);
-      await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+      await vi.waitFor(
+        () => expect(state.model).toHaveBeenCalledTimes(1),
+        // #14101: the admission crosses fsync-backed journal commits before
+        // the model call; the default 1s waitFor window flaked on a loaded
+        // CI runner (#13219).
+        { timeout: 10_000 },
+      );
       state.authorizeOrdinary.mockClear();
       state.authorizeOrdinary.mockRejectedValue(cause);
       try {
@@ -1948,12 +1966,18 @@ describe('Hosted Harness no-tool session', () => {
       } finally {
         finish();
       }
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.hasActivePrompt).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        // #14101: the cancelled turn's settle crosses fsync-backed journal
+        // commits before the active flag clears; the default 1s waitFor
+        // window flaked on a loaded CI runner (#13219).
+        { timeout: 10_000 },
+      );
       state.authorizeOrdinary.mockResolvedValue(undefined);
       await authorize(
         supertest(server).post(`/session/${SESSION_ID}/detach`),
@@ -9102,6 +9126,286 @@ describe('Hosted Harness no-tool session', () => {
     expect(release.mock.calls[1]).toEqual([{ drain: true }]);
   });
 
+  it('restores the held-Runtime drain obligation on a replacement load (#13930 R1-2)', async () => {
+    // A restart empties the in-memory held set; the close's drain
+    // obligation survives only when the load restores it from the Broker's
+    // durable hold rows. The prewritten Session below belongs to a process
+    // that died before any close could drain; the Broker still lists the
+    // held Runtime Session, so the load must restore the obligation and
+    // this process's close must hand the Runtime back through the drain
+    // arm. Without the load-time restore the final assertions are red:
+    // the fresh process's set is empty and its close drains nothing. The
+    // second id is digest-shaped: alongside the cardinality pin (every
+    // restored entry drains, not just the first) it carries the close's
+    // hostedRuntimeSessionId mapping end-to-end — an already path-safe
+    // answer must come back verbatim (#13986 R1-1).
+    await prewriteShellProfileSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockResolvedValue();
+    const restored = [PROMPT_ID, `wake-${'a'.repeat(64)}`];
+    const activeHolds = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
+      .mockResolvedValue(restored);
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    expect(activeHolds).toHaveBeenCalledTimes(1);
+    // The load is additive: it restores the obligation and never discharges
+    // it — only the close drains (#13986 R1-2).
+    expect(release).not.toHaveBeenCalled();
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
+        )
+      ).status,
+    ).toBe(204);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(release.mock.calls).toEqual([[{ drain: true }], [{ drain: true }]]);
+    expect(
+      (release.mock.contexts as HostedWorkspaceBroker[])
+        .map((broker) => broker.runtimeSessionId)
+        .sort(),
+    ).toEqual([...restored].sort());
+  });
+
+  it('closes a Session whose restored hold the restarted Broker cannot drain (#13986 R2-1)', async () => {
+    // A worker restart takes the Harness and the Broker down together. The
+    // replacement Broker no longer holds the Runtime Session in memory and
+    // cannot prove its release, so the drain of a restored hold answers the
+    // declared-retryable 503 runtime_reconciliation_required — the
+    // Workspace-level cascade owns the Runtime from there. The close must
+    // tolerate that answer and retire the Session: before the tolerance the
+    // same DELETE rethrew ahead of sessions.delete, answered 503 on every
+    // retry, and the reload re-seeded the id — the Session could never
+    // leave the registry. The unproven drain still parks the monitor-loop
+    // settle on runtime_lost rather than stop_requested.
+    await prewriteShellProfileSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(
+        503,
+        'runtime_reconciliation_required',
+      ),
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    ).mockResolvedValue([PROMPT_ID]);
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .expect(204);
+    // The Session left the registry: a second close finds nothing to close.
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .expect(404);
+  });
+
+  it('loads without the drain obligation when the restore query fails (#13930 R1-2)', async () => {
+    // The declared degrade: a failed active-holds query logs and loads
+    // without the obligation — never a failed load in the restart window
+    // this slice serves. The close then drains nothing.
+    await prewriteShellProfileSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockResolvedValue();
+    const activeHolds = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
+      .mockRejectedValue(new Error('broker unreachable'));
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    expect(activeHolds).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
+        )
+      ).status,
+    ).toBe(204);
+    // No obligation was restored, so the close drains nothing.
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('never queries the held-Runtime inventory on a fresh create (#13930 R1-2)', async () => {
+    // A created Session has no hold rows: the restore read is load-only.
+    const activeHolds = vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    );
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+      })
+      .expect(200);
+    expect(activeHolds).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    expect(activeHolds).not.toHaveBeenCalled();
+  });
+
+  it('never queries the held-Runtime inventory on a lifecycle-v2 load (#13986 R1-3)', async () => {
+    // The set's only reader is the close's drain loop, which sits in the
+    // v1-only close block: a v2 Session would restore an obligation its
+    // close never drains — a dead Broker round trip on every load plus
+    // in-memory state that reads as an armed drain and is not.
+    await prewriteShellProfileSession();
+    const activeHolds = vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    );
+    const server = await app(true);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        lifecycleProtocolVersion: 2,
+        lifecycleAuthority: { operationId: 'v2-load', claimGeneration: 1 },
+      })
+      .expect(200);
+    expect(activeHolds).not.toHaveBeenCalled();
+  });
+
+  it('never queries the held-Runtime inventory for an MCP-profile load (#13986 R3-1)', async () => {
+    // The 409 gate admits hosted-workspace-mcp/1 beside the workspace
+    // profiles whenever brokerOptions is present, but an MCP-profile
+    // Session has no tool turn and can never hold a background Runtime:
+    // the restore read would be a dead Broker round trip on every load,
+    // and a misleading could-not-restore line whenever the Broker is down.
+    await prewriteShellProfileSession('hosted-workspace-mcp/1');
+    const activeHolds = vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    );
+    const server = await app(true);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-mcp/1',
+        mcpServers: [
+          {
+            serverId: 'demo',
+            serverRevision: 1,
+            definitionDigest: 'a'.repeat(64),
+          },
+        ],
+      })
+      .expect(200);
+    expect(activeHolds).not.toHaveBeenCalled();
+  });
+
+  /** A Session whose process died before any close could drain: the
+   * durable definition exists and the writer is free again. */
+  async function prewriteShellProfileSession(
+    toolProfile = 'hosted-workspace-shell/1',
+  ): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile,
+              ...(toolProfile === 'hosted-workspace-mcp/1'
+                ? {
+                    mcpServers: [
+                      {
+                        serverId: 'demo',
+                        serverRevision: 1,
+                        definitionDigest: 'a'.repeat(64),
+                      },
+                    ],
+                  }
+                : {}),
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    // The open above only mints the durable definition; closing here frees
+    // the writer so the replacement process may open the Session — the
+    // death itself is that no close ever drained.
+    await managed.close();
+  }
+
   type DetachedFamily = 'child_run' | 'monitor_run';
 
   async function prewriteDetachedOutput(
@@ -11057,6 +11361,68 @@ describe('Hosted Harness no-tool session', () => {
       (await authorize(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
     ).toBe(204);
+  });
+
+  it('deregisters the Session when the close sealed the writer but the release failed', async () => {
+    // A plain Session (no hooks): the close reaches managed.close()
+    // directly, so the boundary release fails inside it, after its finally
+    // sealed the writer (review round 11, R11-3).
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'releaseActivation',
+    ).mockRejectedValue(new Error('resource store unavailable'));
+    const failed = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(failed.status).toBe(503);
+    expect(failed.body.code).toBe('managed_session_close_failed');
+    // The sealed-but-rejected session is deregistered: a follow-up gets a
+    // clean 404 instead of a stranded entry answering against a dead
+    // journal. A retried DELETE does not re-run the release either.
+    const followUp = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(followUp.status).toBe(404);
+    expect(followUp.body.code).toBe('hosted_session_not_found');
+  });
+
+  it('keeps the Session when the close rejected before the writer seal landed', async () => {
+    // A pre-seal seal() rejection leaves the writer open: the Session must
+    // stay registered so a retry can reach it (review round 13, R13-1).
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+    vi.spyOn(
+      LocalJsonlManagedSessionJournalHandle.prototype,
+      'seal',
+    ).mockRejectedValue(new Error('seal candidate already exists'));
+    const failed = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(failed.status).toBe(503);
+    expect(failed.body.code).toBe('managed_session_close_failed');
+    // The pre-seal rejection keeps the Session: a follow-up DELETE reaches
+    // the same entry and fails the same way instead of answering 404.
+    const followUp = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(followUp.status).toBe(503);
+    expect(followUp.body.code).toBe('managed_session_close_failed');
   });
 
   it('names a retained Hook hold when DELETE cannot release its owner', async () => {
@@ -30586,6 +30952,223 @@ describe('Hosted Harness stored definitions', () => {
         supertest(server).delete(`/session/${SESSION_ID}`),
       );
       expect(response.status).toBe(204);
+    });
+  });
+
+  it('loads published Skills from the saved resource after detach and rejects unbound Skill definitions', async () => {
+    const server = await app(true);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const skillsRef = await resources.publish(
+      'managed-agent-skills',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'published',
+            description: 'Published instructions',
+            body: 'ORIGINAL_SKILL_BODY',
+            base_directory: 'docs',
+          },
+        ]),
+      ),
+    );
+    const identity = {
+      agentId: `agent_${'a'.repeat(32)}`,
+      revision: '1',
+      digest: 'b'.repeat(64),
+    };
+    const definition = { ...identity, skillsRef };
+    const request = {
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      agentDefinition: definition,
+    };
+    await headers(supertest(server).post('/session')).send(request).expect(400);
+    const created = await headers(supertest(server).post('/session'))
+      .send({ ...request, toolProfile: 'hosted-workspace-files/1' })
+      .expect(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .expect(204);
+    const replacement = await app(true);
+    const loaded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store(), agentDefinition: identity })
+      .expect(200);
+    state.model.mockImplementationOnce(async (input) => {
+      const call = {
+        name: 'skill',
+        callId: 'call-skill',
+        args: { skill: 'published' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      expect(await input.toolTurn!.declarations(input.signal)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: 'skill' })]),
+      );
+      const result = await input.toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { name: call.name, id: call.callId, args: call.args },
+          },
+        ],
+        'test-model',
+        input.signal,
+      );
+      expect(JSON.stringify(result)).toContain('ORIGINAL_SKILL_BODY');
+      expect(JSON.stringify(result)).toContain('docs');
+      return { text: 'Skill loaded', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'Use the published skill' }];
+    await headers(supertest(replacement).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(replacement).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(false);
+    });
+
+    expect(state.model).toHaveBeenCalledOnce();
+    await expect(state.model.mock.results[0].value).resolves.toMatchObject({
+      text: 'Skill loaded',
+    });
+  });
+
+  it('recovers a pure Skill call whose assistant committed before its response', async () => {
+    const server = await app(true);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const skillsRef = await resources.publish(
+      'managed-agent-skills',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'published',
+            description: 'Instructions',
+            body: 'RECOVERED_ORIGINAL_SKILL',
+          },
+        ]),
+      ),
+    );
+    const identity = {
+      agentId: `agent_${'a'.repeat(32)}`,
+      revision: '1',
+      digest: 'b'.repeat(64),
+    };
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        agentDefinition: { ...identity, skillsRef },
+        toolProfile: 'hosted-workspace-files/1',
+      })
+      .expect(200);
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    const write = vi
+      .spyOn(ManagedSessionRecordSink.prototype, 'write')
+      .mockImplementation(async function (
+        this: ManagedSessionRecordSink,
+        record,
+      ) {
+        if (
+          record.type === 'tool_result' &&
+          record.message?.parts?.some(
+            (part) => part.functionResponse?.name === 'skill',
+          )
+        )
+          throw new Error('Simulated Skill response commit failure');
+        return originalWrite.call(this, record);
+      });
+    state.model.mockImplementationOnce(async (input) => {
+      const call = {
+        name: 'skill',
+        callId: 'call-recover-skill',
+        args: { skill: 'published' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await input.toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { name: call.name, id: call.callId, args: call.args },
+          },
+        ],
+        'test-model',
+        input.signal,
+      );
+      return { text: 'unreached', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'Load instructions' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', created.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(true);
+    });
+    write.mockRestore();
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId,
+    );
+    let recovered: readonly unknown[] | undefined;
+    state.model.mockImplementationOnce(async (input) => {
+      recovered = input.resumeFromToolResults;
+      return { text: 'continued', model: 'test-model' };
+    });
+    const replacement = await app(true);
+    const loaded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        agentDefinition: identity,
+        driveRuntimeRecovery: true,
+      })
+      .expect(200);
+    await vi.waitFor(() =>
+      expect(JSON.stringify(recovered)).toContain('RECOVERED_ORIGINAL_SKILL'),
+    );
+    expect(JSON.stringify(recovered)).not.toContain('never ran');
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(replacement).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(false);
     });
   });
 });
