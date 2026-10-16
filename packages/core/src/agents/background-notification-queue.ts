@@ -265,7 +265,7 @@ export class DroppedNotificationTally {
     const detail = clauses.join(', ');
     const droppedClause =
       droppedTotal > 0
-        ? `Dropped ${droppedTotal} ${totalNoun} (queue full): ${detail}.`
+        ? `${droppedTotal} ${totalNoun} not delivered to the model (queue full): ${detail}.`
         : undefined;
     const displayText = [
       droppedClause,
