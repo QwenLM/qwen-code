@@ -688,6 +688,7 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     // has already passed, and pipefail keeps a failing left-hand tar from
     // being masked by the extractor's exit 0.
     expect(verify.run).toContain('set -o pipefail');
+    expect(verify.run).toContain('mkdir -p "${HOME}/.m2/repository"');
     expect(verify.run).toContain(
       'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
     );

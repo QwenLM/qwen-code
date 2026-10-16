@@ -637,6 +637,11 @@ jobs:
           # seed: the warning arm keeps a copy failure from reddening the
           # gate after mvn has already passed, and pipefail keeps a
           # failing left-hand tar from being masked by the extractor.
+          # On a fresh ECS host nothing creates ~/.m2/repository anymore
+          # (the hosted-only cache no longer restores it), so create it
+          # before the write-back or every job re-resolves through the
+          # egress proxy instead of bootstrapping the shared repository.
+          mkdir -p "${HOME}/.m2/repository"
           tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
             | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - \
             || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
