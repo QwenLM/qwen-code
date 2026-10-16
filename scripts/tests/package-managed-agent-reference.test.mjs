@@ -10,6 +10,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { parse } from 'yaml';
 
 import { createReferenceDistribution } from '../package-managed-agent-reference.mjs';
 
@@ -199,6 +200,68 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
         await rm(temporary, { recursive: true, force: true });
       }
     });
+  }
+});
+
+test('verifies archives in fresh directories on a reused runner', async () => {
+  const workflow = parse(
+    await readFile(
+      new URL(
+        '../../.github/workflows/release-managed-agent-reference.yml',
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  );
+  const script = workflow.jobs.build.steps.find(
+    (step) => step.name === 'Verify and boot the exact archive',
+  ).run;
+  const boundary = script.indexOf('server_port=');
+  assert.ok(boundary > 0);
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-reference pool-'),
+  );
+  try {
+    const root = path.join(temporary, 'repo');
+    const output = path.join(temporary, 'managed-agent-reference');
+    const version = '0.1.0-alpha.1';
+    const name = `qwen-managed-agent-reference-${version}`;
+    await fixture(root);
+    await createReferenceDistribution({
+      repoRoot: root,
+      outputDirectory: output,
+      version,
+      sourceRevision: 'a'.repeat(40),
+    });
+    const legacy = path.join(output, 'extracted', name, 'stale.txt');
+    await mkdir(path.dirname(legacy), { recursive: true });
+    await writeFile(legacy, 'previous job');
+    const bundles = [];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = execFileSync(
+        'bash',
+        ['-c', `${script.slice(0, boundary)}\nprintf '%s\\n' "$PWD"`],
+        {
+          env: {
+            ...process.env,
+            RUNNER_TEMP: temporary,
+            RELEASE_VERSION: version,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const bundle = result.trim().split('\n').at(-1);
+      assert.equal(path.basename(bundle), name);
+      assert.ok(!bundles.includes(bundle));
+      await assert.rejects(readFile(path.join(bundle, 'stale.txt')), {
+        code: 'ENOENT',
+      });
+      await writeFile(path.join(bundle, 'stale.txt'), 'current job');
+      bundles.push(bundle);
+    }
+    assert.equal(await readFile(legacy, 'utf8'), 'previous job');
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
   }
 });
 
