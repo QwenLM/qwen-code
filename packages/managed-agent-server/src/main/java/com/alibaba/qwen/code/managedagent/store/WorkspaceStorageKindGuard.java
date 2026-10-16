@@ -23,6 +23,13 @@ final class WorkspaceStorageKindGuard {
     }
 
     static void requireLocalAlias(JdbcTemplate jdbc, String tenantId, String storageId) {
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('CSI', 'SSH_LOCAL')",
+                Long.class, WorkspaceCsiRegistration.aliasKey(tenantId, storageId)) != 0) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    static void requireExecutionAlias(JdbcTemplate jdbc, String tenantId, String storageId) {
         if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'CSI'",
                 Long.class, WorkspaceCsiRegistration.aliasKey(tenantId, storageId)) != 0) {
             throw WorkspaceExecutionStore.unavailable();

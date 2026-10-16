@@ -10,6 +10,73 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('preserves Workspace registration keys and validates directory and operation identities', async () => {
+    const operation = {
+      operationId: 'registration-a',
+      type: 'workspace_create',
+      status: 'running',
+      replayed: false,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(operation));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    const registration = provider.workspaceBinding!.registration!;
+    expect(
+      await registration.create(
+        { nodeId: 'mac', path: '/project', displayName: 'Project' },
+        { clientId: 'client', idempotencyKey: 'original' },
+      ),
+    ).toEqual(operation);
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
+      nodeId: 'mac',
+      path: '/project',
+      displayName: 'Project',
+      idempotencyKey: 'original',
+      requestId: expect.any(String),
+    });
+    expect(
+      await registration.query('registration-a', { clientId: 'client' }),
+    ).toEqual(operation);
+    fetchImpl.mockImplementation(async () =>
+      jsonResponse({ ...operation, operationId: 'wrong' }),
+    );
+    await expect(
+      registration.query('registration-a', { clientId: 'client' }),
+    ).rejects.toThrow('identity mismatch');
+    fetchImpl.mockImplementation(async () =>
+      jsonResponse({ ...operation, type: 'cwd_change' }),
+    );
+    await expect(
+      registration.create(
+        { nodeId: 'mac', path: '/project', displayName: 'Project' },
+        { clientId: 'client', idempotencyKey: 'original' },
+      ),
+    ).rejects.toThrow('identity mismatch');
+    fetchImpl.mockImplementation(async () =>
+      jsonResponse({
+        nodeId: 'different',
+        canonicalPath: '/project',
+        platform: 'darwin',
+      }),
+    );
+    await expect(
+      registration.checkDirectory(
+        { nodeId: 'mac', path: '/project' },
+        { clientId: 'client' },
+      ),
+    ).rejects.toThrow('identity mismatch');
+    expect(
+      createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
+        .workspaceBinding,
+    ).toBeUndefined();
+  });
+
   it('uses the WebShell approval contract and preserves the exact request id and idempotency key', async () => {
     const selection = {
       approvalMode: 'default',

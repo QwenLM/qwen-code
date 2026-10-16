@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
@@ -83,7 +84,22 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         Context context = context(lease, session, true);
         // Reject a missing directory before a new claim can strand storage ownership.
         if (!ResidentWorkspaceProfile.selects(session.getScope())) {
-            WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
+            if (LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
+                WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
+            } else if (SshRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
+                try {
+                    resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
+                } catch (RuntimeBrokerException error) {
+                    // Nothing is claimed yet, so the probe verdict is a definite
+                    // refusal: surface the workspace_unavailable contract the
+                    // Hosted tool turn recognizes instead of the ssh_runtime_*
+                    // verdict an unrecognized code would park into Session
+                    // recovery. The original verdict stays as the cause.
+                    throw WorkspaceExecutionStore.unavailable(error);
+                }
+            } else {
+                throw WorkspaceExecutionStore.unavailable();
+            }
         }
         ownership.claim(context.binding(), context.session());
         // Failure retains ownership: a missing response cannot prove the worker did nothing.
@@ -196,6 +212,13 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Void> acknowledgeV2(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> reference) {
+        requireOriginalRuntime(lease, session);
+        return delegate.acknowledgeV2(lease, session, reference);
+    }
+
+    @Override
     public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> receipt) {
@@ -302,7 +325,8 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static Context requireLocalCapture(Context context) {
-        if (!LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
+        if (!java.util.Set.of(LocalProcessRuntimeProvisioner.KIND, com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND)
+                .contains(context.runtime().getRequest().getProvisionerKind())) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return context;
@@ -331,6 +355,14 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
+        if (managed(session)) {
+            Context selected = context(lease, session, false);
+            if (com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND.equals(selected.runtime().getRequest().getProvisionerKind())
+                    && !java.util.Set.of("history", "raw-file-history", "workspace-context").contains(operation.get("kind"))) {
+                throw new RuntimeBrokerException(501, "ssh_runtime_control_unsupported",
+                        "SSH Runtime supports files and foreground Shell only.", false);
+            }
+        }
         if (JdbcCsiFilesRetirementGuard.isProfile(session.getScope())) {
             throw new RuntimeBrokerException(501, "csi_control_not_qualified",
                     "Generic CSI runtime controls are not qualified.", false);
