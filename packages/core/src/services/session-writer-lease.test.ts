@@ -2316,6 +2316,21 @@ describe('SessionWriterLease', () => {
       await lease.release().catch(() => undefined);
     });
 
+    it('retries a retryable seal failure instead of memoizing the rejection', async () => {
+      const fixture = await createFixture('retryable-seal-session');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      await lease.appendJsonLine({ record: 'a' });
+      // A transient store fault fails the seal once (review round 14, R14-4).
+      vi.spyOn(lease, 'sealForHandoffOnce' as never).mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+      await expect(lease.sealForHandoff()).rejects.toThrow('disk full');
+      // The retryable failure cleared the memoized promise, so a later seal
+      // retries rather than replaying the rejection.
+      await lease.sealForHandoff();
+      expect(lease.isReleased).toBe(true);
+    });
+
     it('blocks a baseline writer from a sealed managed lock', async () => {
       const fixture = await createFixture('managed-takeover-guard-session');
       const first = await SessionWriterLease.acquire({

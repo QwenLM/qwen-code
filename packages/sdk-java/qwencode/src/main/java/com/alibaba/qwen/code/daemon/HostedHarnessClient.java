@@ -279,21 +279,37 @@ public final class HostedHarnessClient implements AutoCloseable {
         // window must open atomically with the registration it belongs to.
         // A same-identity retry joins the earlier registration; the server
         // deduplicates its replay against it.
-        ActivePrompt registered = activePrompts.compute(
-                session.getHarnessSessionId(), (sessionId, existing) -> {
-                    if (existing != null
-                            && (!existing.promptId.equals(candidate.promptId)
-                                    || !existing.payloadDigest.equals(
-                                            candidate.payloadDigest))) {
-                        throw new DaemonException(
-                                "Hosted Harness session already has a"
-                                        + " running turn");
-                    }
-                    ActivePrompt entry = existing != null
-                            ? existing : candidate;
-                    entry.beginSend();
-                    return entry;
-                });
+        ActivePrompt admitted = registerAdmission(
+                session.getHarnessSessionId(), candidate);
+        if (!admitted.matches(candidate)) {
+            // A prompt whose admission outcome was never learned (an
+            // ambiguous answer, then a terminal coordinator failure) must
+            // not pin the Session for every later Turn: ask the Harness,
+            // which drops the entry when nothing is running there. The
+            // probe is fail-closed — only a successful idle read clears the
+            // entry, and only while no send attempt is open on it — and its
+            // own failure must not leak the probe's exception types: the
+            // dispatcher maps DaemonHttpException and
+            // DaemonProtocolException to a terminal Turn failure, while the
+            // plain busy-turn refusal below retries. A generation change
+            // still propagates, so the dispatcher adopts the new
+            // generation instead of flattening it into a busy retry.
+            try {
+                getStatus(session);
+            } catch (HostedHarnessGenerationException generationChange) {
+                throw generationChange;
+            } catch (DaemonException probeFailure) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
+            admitted = registerAdmission(session.getHarnessSessionId(),
+                    candidate);
+            if (!admitted.matches(candidate)) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
+        }
+        ActivePrompt registered = admitted;
         boolean ownsActivePrompt = registered == candidate;
         AtomicBoolean dispatched = new AtomicBoolean();
         // Set by a non-owning attempt whose conclusion was a definitive
@@ -1075,7 +1091,15 @@ public final class HostedHarnessClient implements AutoCloseable {
                 request, ref.getHarnessSessionId(), ref.getHarnessClientId(),
                 operation);
         requireMutationStatus(response, 200, operation);
-        Map<String, Object> receipt = JsonSupport.parseObject(response.getBody(), operation);
+        // Past this point the Harness has answered 200: a failure to decode
+        // or match the receipt is a post-answer failure, which the
+        // coordinator must not read as "the settle never happened".
+        Map<String, Object> receipt;
+        try {
+            receipt = JsonSupport.parseObject(response.getBody(), operation);
+        } catch (DaemonProtocolException error) {
+            throw new HostedHarnessSettleAnsweredException(error.getMessage(), error);
+        }
         if (!java.util.Objects.equals(request.get("sessionKey"), receipt.get("sessionKey"))
                 || !java.util.Objects.equals(request.get("kind"), receipt.get("kind"))
                 || v2 && (!java.util.Objects.equals(request.get("phase"), receipt.get("phase"))
@@ -1083,7 +1107,8 @@ public final class HostedHarnessClient implements AutoCloseable {
                         || !java.util.Objects.equals(request.get("toolProfile"), receipt.get("toolProfile"))
                         || !java.util.Objects.equals(JsonSupport.requiredObject(request, "authority", operation).get("operationId"),
                                 receipt.get("operationId")))) {
-            throw new DaemonProtocolException("Hosted lifecycle receipt identity differs");
+            throw new HostedHarnessSettleAnsweredException(
+                    "Hosted lifecycle receipt identity differs", null);
         }
         return receipt;
     }
@@ -1401,6 +1426,23 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (observedLedger != null) {
             activePrompts.remove(sessionId, observedLedger);
         }
+    }
+
+    // Publish (or join) the admission marker and open the caller's send
+    // attempt on it under one bin lock. A different prompt holding the slot
+    // is returned untouched, with no attempt opened on it, so the caller
+    // tells a veto (the returned entry does not match its candidate) from
+    // a registration.
+    private ActivePrompt registerAdmission(String sessionId,
+            ActivePrompt candidate) {
+        return activePrompts.compute(sessionId, (id, existing) -> {
+            if (existing != null && !existing.matches(candidate)) {
+                return existing;
+            }
+            ActivePrompt entry = existing != null ? existing : candidate;
+            entry.beginSend();
+            return entry;
+        });
     }
 
     // Owning release of an admission marker: drop the shared entry only
@@ -2381,6 +2423,11 @@ public final class HostedHarnessClient implements AutoCloseable {
 
         long sendClock() {
             return sendClock.get();
+        }
+
+        boolean matches(ActivePrompt other) {
+            return promptId.equals(other.promptId)
+                    && payloadDigest.equals(other.payloadDigest);
         }
     }
 

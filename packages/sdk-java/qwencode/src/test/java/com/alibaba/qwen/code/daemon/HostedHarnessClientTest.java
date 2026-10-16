@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,7 +42,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import java.util.stream.Stream;
 
 class HostedHarnessClientTest {
     private static final String BOOT_ID =
@@ -201,7 +201,7 @@ class HostedHarnessClientTest {
                 // A completed old prompt permits the replacement's new prompt before the old detach returns.
                 server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
                     exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    sendJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID + "\",\"hasActivePrompt\":false}", false);
+                    sendJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID + "\",\"hasActivePrompt\":" + (calls.get() >= 2) + "}", false);
                 });
                 client.getStatus(next);
             }
@@ -284,7 +284,9 @@ class HostedHarnessClientTest {
                     "authority", Map.of("operationId", "close-2", "claimGeneration", 3));
             assertEquals("close-2", client.settleLifecycle(session, request).get("operationId"));
             wrongPhase.set(true);
-            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, request));
+            // The Harness answered 200 with a mismatched receipt: a
+            // post-answer failure, not a pre-send protocol refusal.
+            assertThrows(HostedHarnessSettleAnsweredException.class, () -> client.settleLifecycle(session, request));
             var unsupported = new java.util.LinkedHashMap<>(request);
             unsupported.put("toolProfile", "hosted-workspace-shell/2");
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
@@ -533,6 +535,12 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        // The busy-turn probe gets a real answer: the Harness reports the
+        // first prompt still running, so the second is refused.
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"sessionId\":\"" + SESSION_ID
+                                + "\",\"hasActivePrompt\":true}"));
         AtomicReference<String> lastEventId = new AtomicReference<>();
         AtomicReference<String> eventEpoch = new AtomicReference<>();
         server.createContext("/session/" + SESSION_ID + "/events",
@@ -628,6 +636,134 @@ class HostedHarnessClientTest {
         }
 
         assertEquals(2, promptCalls.get());
+    }
+
+    @Test
+    void releasesAnOutcomeUnknownPromptOnlyOnceTheHarnessReportsItIdle() {
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        AtomicBoolean harnessActive = new AtomicBoolean(true);
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    if (promptCalls.incrementAndGet() == 1) {
+                        sendSessionJson(exchange, 503,
+                                "{\"code\":\"temporarily_unavailable\"}");
+                        return;
+                    }
+                    sendSessionJson(exchange, 202,
+                            "{\"promptId\":\"" + SECOND_PROMPT_ID
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"sessionId\":\"" + SESSION_ID
+                                + "\",\"hasActivePrompt\":"
+                                + harnessActive.get() + "}"));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "retry");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(PromptAdmissionUnknownException.class,
+                    () -> client.submitTurn(requestForSession(block,
+                            session)));
+            SubmitHarnessTurn next = SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(SECOND_PROMPT_ID)
+                    .addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
+                            List.of(block)))
+                    .build();
+            // The Harness may still run the earlier prompt: refused.
+            assertThrows(DaemonException.class,
+                    () -> client.submitTurn(next));
+            assertEquals(1, promptCalls.get());
+            // Once the Harness reports nothing running, the stale entry no
+            // longer pins the Session.
+            harnessActive.set(false);
+            assertEquals(SECOND_PROMPT_ID,
+                    client.submitTurn(next).getPromptId());
+        }
+        assertEquals(2, promptCalls.get());
+    }
+
+    // A status probe the Harness refuses (the Session is gone there) must
+    // stay fail-closed: the pinned entry is kept, the next Turn is refused
+    // with the plain busy-turn DaemonException the dispatcher retries, and
+    // no second prompt is submitted. Letting the probe's
+    // DaemonHttpException escape would map to a terminal Turn failure for a
+    // prompt that was never submitted (review round 7, R7-2).
+    @Test
+    void aRefusedStatusProbeKeepsTheRetryableBusyTurnRefusal() {
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    promptCalls.incrementAndGet();
+                    sendSessionJson(exchange, 503,
+                            "{\"code\":\"temporarily_unavailable\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 404,
+                        "{\"code\":\"session_not_found\"}"));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "retry");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(PromptAdmissionUnknownException.class,
+                    () -> client.submitTurn(requestForSession(block,
+                            session)));
+            DaemonException refusal = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertFalse(refusal instanceof DaemonHttpException);
+            assertFalse(refusal instanceof DaemonProtocolException);
+        }
+        assertEquals(1, promptCalls.get());
+    }
+
+    // The same fail-closed shape for a probe that answers 200 without the
+    // hasActivePrompt field: the malformed read must surface as the
+    // retryable busy-turn refusal, not as a DaemonProtocolException.
+    @Test
+    void aShapelessStatusProbeKeepsTheRetryableBusyTurnRefusal() {
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    promptCalls.incrementAndGet();
+                    sendSessionJson(exchange, 503,
+                            "{\"code\":\"temporarily_unavailable\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "retry");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(PromptAdmissionUnknownException.class,
+                    () -> client.submitTurn(requestForSession(block,
+                            session)));
+            DaemonException refusal = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertFalse(refusal instanceof DaemonHttpException);
+            assertFalse(refusal instanceof DaemonProtocolException);
+        }
+        assertEquals(1, promptCalls.get());
     }
 
     @Test
@@ -772,6 +908,27 @@ class HostedHarnessClientTest {
                 .withChildWorkspaces(true).toJson();
         assertEquals(Boolean.TRUE, reversed.get("childWorkspaces"));
         assertEquals(lifecycle.get("lifecycleAuthority"), reversed.get("lifecycleAuthority"));
+    }
+
+    @Test
+    void extensionPinsSurviveCreateAndEveryLoadCopy() {
+        var mcp = java.util.List.<Map<String, Object>>of(Map.of("serverId", "docs", "serverRevision", 1,
+                "definitionDigest", "a".repeat(64)));
+        Map<String, Object> hooks = Map.of("catalogId", "review", "catalogRevision", 1,
+                "definitionDigest", "b".repeat(64));
+        Map<String, Object> created = CreateHarnessSession.builder().harnessSessionId(SESSION_ID)
+                .mcpServers(mcp).hookCatalog(hooks).build().toJson();
+        assertEquals(mcp, created.get("mcpServers"));
+        assertEquals(hooks, created.get("hookCatalog"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID).withMcpServers(mcp).withHookCatalog(hooks);
+        for (LoadHarnessSession copy : java.util.List.of(load, load.withChildWorkspaces(true),
+                load.forLifecycle("op-1", 3, 2), load.withStoppedMessages(),
+                load.withStoppedMessages().forLifecycle("op-1", 3, 2).withChildWorkspaces(true))) {
+            assertEquals(mcp, copy.toJson().get("mcpServers"));
+            assertEquals(hooks, copy.toJson().get("hookCatalog"));
+        }
+        assertFalse(new LoadHarnessSession(SESSION_ID).toJson().containsKey("mcpServers"));
+        assertFalse(CreateHarnessSession.builder().harnessSessionId(SESSION_ID).build().toJson().containsKey("hookCatalog"));
     }
 
     @Test
@@ -1581,6 +1738,7 @@ class HostedHarnessClientTest {
         server.createContext("/session/" + SESSION_ID + "/events",
                 exchange -> sendSse(exchange, terminalEvent(1, PROMPT_ID),
                         EVENT_EPOCH, BOOT_ID));
+        AtomicBoolean harnessActive = new AtomicBoolean();
         CountDownLatch statusEntered = new CountDownLatch(1);
         CountDownLatch statusRelease = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/status",
@@ -1593,7 +1751,8 @@ class HostedHarnessClientTest {
                     }
                     sendSessionJson(exchange, 200,
                             "{\"sessionId\":\"" + SESSION_ID
-                                    + "\",\"hasActivePrompt\":false}");
+                                    + "\",\"hasActivePrompt\":"
+                                    + harnessActive.get() + "}");
                 });
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "race");
@@ -1644,6 +1803,11 @@ class HostedHarnessClientTest {
             }
             // The stale snapshot may only clear P1's entry: P2 is still the
             // registered identity, so a third one is vetoed client-side.
+            // From here on the Harness reports the admitted prompt running,
+            // as it would: the busy-turn probe in the veto below reads that
+            // live answer, so only a marker the earlier read wrongly
+            // cleared lets the different identity through.
+            harnessActive.set(true);
             assertThrows(DaemonException.class,
                     () -> client.submitTurn(SubmitHarnessTurn.builder()
                             .session(session)
@@ -1689,10 +1853,12 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        AtomicBoolean harnessActive = new AtomicBoolean();
         server.createContext("/session/" + SESSION_ID + "/status",
                 exchange -> sendSessionJson(exchange, 200,
                         "{\"sessionId\":\"" + SESSION_ID
-                                + "\",\"hasActivePrompt\":false}"));
+                                + "\",\"hasActivePrompt\":"
+                                + harnessActive.get() + "}"));
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "status-race");
         String digest = SubmitHarnessTurn.computePayloadDigest(
@@ -1721,6 +1887,11 @@ class HostedHarnessClientTest {
                 // The in-flight submission was admitted after the status
                 // answer: its marker must have survived, so a different
                 // identity is vetoed locally and never reaches the wire.
+                // From here on the Harness reports the admitted prompt running,
+                // as it would: the busy-turn probe in the veto below reads that
+                // live answer, so only a marker the earlier read wrongly
+                // cleared lets the different identity through.
+                harnessActive.set(true);
                 DaemonException veto = assertThrows(DaemonException.class,
                         () -> client.submitTurn(SubmitHarnessTurn.builder()
                                 .session(session)
@@ -3169,10 +3340,12 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        AtomicBoolean harnessActive = new AtomicBoolean(true);
         server.createContext("/session/" + SESSION_ID + "/status",
                 exchange -> sendSessionJson(exchange, 200,
                         "{\"sessionId\":\"" + SESSION_ID
-                                + "\",\"hasActivePrompt\":false}"));
+                                + "\",\"hasActivePrompt\":"
+                                + harnessActive.get() + "}"));
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "unknown-then-recovered");
 
@@ -3187,7 +3360,9 @@ class HostedHarnessClientTest {
                                     SubmitHarnessTurn.computePayloadDigest(
                                             List.of(block)))
                             .build()));
-            // Retained marker: a different identity is vetoed locally.
+            // Retained marker: while the Harness reports a prompt running,
+            // the busy-turn probe keeps it, so a different identity is
+            // vetoed locally.
             DaemonException veto = assertThrows(DaemonException.class,
                     () -> client.submitTurn(SubmitHarnessTurn.builder()
                             .session(session)
@@ -3202,6 +3377,7 @@ class HostedHarnessClientTest {
             assertEquals(1, promptCalls.get());
             // The status-read recovery: settled marker, no active prompt
             // server-side, so the read clears it.
+            harnessActive.set(false);
             assertFalse(client.getStatus(session).hasActivePrompt());
             PromptReceipt receipt = client.submitTurn(
                     SubmitHarnessTurn.builder()
@@ -4262,6 +4438,7 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        AtomicBoolean harnessActive = new AtomicBoolean();
         CountDownLatch statusSeen = new CountDownLatch(1);
         CountDownLatch releaseStatus = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/status",
@@ -4274,7 +4451,8 @@ class HostedHarnessClientTest {
                     }
                     sendSessionJson(exchange, 200,
                             "{\"sessionId\":\"" + SESSION_ID
-                                    + "\",\"hasActivePrompt\":false}");
+                                    + "\",\"hasActivePrompt\":"
+                                    + harnessActive.get() + "}");
                 });
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "readmission-race");
@@ -4310,6 +4488,11 @@ class HostedHarnessClientTest {
             assertNull(statusRead.get(5, TimeUnit.SECONDS));
             // The stale snapshot must not clear the live marker: a
             // different identity is still vetoed locally.
+            // From here on the Harness reports the admitted prompt running,
+            // as it would: the busy-turn probe in the veto below reads that
+            // live answer, so only a marker the earlier read wrongly
+            // cleared lets the different identity through.
+            harnessActive.set(true);
             DaemonException veto = assertThrows(DaemonException.class,
                     () -> client.submitTurn(SubmitHarnessTurn.builder()
                             .session(session)
@@ -5736,10 +5919,12 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        AtomicBoolean harnessActive = new AtomicBoolean();
         server.createContext("/session/" + SESSION_ID + "/status",
                 exchange -> sendSessionJson(exchange, 200,
                         "{\"sessionId\":\"" + SESSION_ID
-                                + "\",\"hasActivePrompt\":false}"));
+                                + "\",\"hasActivePrompt\":"
+                                + harnessActive.get() + "}"));
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "republish-race");
         String digest = SubmitHarnessTurn.computePayloadDigest(
@@ -5770,6 +5955,11 @@ class HostedHarnessClientTest {
             retry.get(5, TimeUnit.SECONDS);
             // The re-admitted marker is live: a different identity is
             // vetoed locally and never reaches the wire.
+            // From here on the Harness reports the admitted prompt running,
+            // as it would: the busy-turn probe in the veto below reads that
+            // live answer, so only a marker the earlier read wrongly
+            // cleared lets the different identity through.
+            harnessActive.set(true);
             DaemonException veto = assertThrows(DaemonException.class,
                     () -> client.submitTurn(SubmitHarnessTurn.builder()
                             .session(session)
@@ -5821,10 +6011,12 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        AtomicBoolean harnessActive = new AtomicBoolean();
         server.createContext("/session/" + SESSION_ID + "/status",
                 exchange -> sendSessionJson(exchange, 200,
                         "{\"sessionId\":\"" + SESSION_ID
-                                + "\",\"hasActivePrompt\":false}"));
+                                + "\",\"hasActivePrompt\":"
+                                + harnessActive.get() + "}"));
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "status-snapshot-race");
         String digest = SubmitHarnessTurn.computePayloadDigest(
@@ -5866,6 +6058,11 @@ class HostedHarnessClientTest {
             retry.get().get(5, TimeUnit.SECONDS);
             // The re-admitted marker is live: a different identity is
             // vetoed locally and never reaches the wire.
+            // From here on the Harness reports the admitted prompt running,
+            // as it would: the busy-turn probe in the veto below reads that
+            // live answer, so only a marker the earlier read wrongly
+            // cleared lets the different identity through.
+            harnessActive.set(true);
             DaemonException veto = assertThrows(DaemonException.class,
                     () -> client.submitTurn(SubmitHarnessTurn.builder()
                             .session(session)
@@ -7894,10 +8091,12 @@ class HostedHarnessClientTest {
                     sendSessionJson(exchange, 202, paddedAdmission);
                     retryWritten.get().countDown();
                 });
+        AtomicBoolean harnessActive = new AtomicBoolean();
         server.createContext("/session/" + SESSION_ID + "/status",
                 exchange -> sendSessionJson(exchange, 200,
                         "{\"sessionId\":\"" + SESSION_ID
-                                + "\",\"hasActivePrompt\":false}"));
+                                + "\",\"hasActivePrompt\":"
+                                + harnessActive.get() + "}"));
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "republish-window");
         String digest = SubmitHarnessTurn.computePayloadDigest(
@@ -7923,6 +8122,7 @@ class HostedHarnessClientTest {
             for (int round = 0; round < 60; round++) {
                 // Clear last round's settled marker through the documented
                 // recovery path.
+                harnessActive.set(false);
                 assertFalse(client.getStatus(session).hasActivePrompt());
                 ownerSeen.set(new CountDownLatch(1));
                 ownerRelease.set(new CountDownLatch(1));
@@ -7954,6 +8154,9 @@ class HostedHarnessClientTest {
                 assertTrue(ownerFailure instanceof DaemonHttpException,
                         String.valueOf(ownerFailure));
                 assertNull(retry.get(10, TimeUnit.SECONDS));
+                // The busy-turn probe in the veto below reads a Harness
+                // that reports the re-admitted prompt running.
+                harnessActive.set(true);
                 try {
                     client.submitTurn(second);
                     vetoFailures++;
