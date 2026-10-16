@@ -11,9 +11,7 @@
     "metadata"
   ],
   "properties": {
-    "schemaVersion": {
-      "const": 1
-    },
+    "schemaVersion": { "const": 1 },
     "rendererVersion": {
       "type": "string",
       "minLength": 1,
@@ -23,9 +21,7 @@
     "blocks": {
       "type": "array",
       "maxItems": 1000,
-      "items": {
-        "$ref": "#/$defs/block"
-      }
+      "items": { "$ref": "#/$defs/block" }
     },
     "diagnostics": {
       "type": "array",
@@ -40,9 +36,7 @@
             "minLength": 1,
             "maxLength": 128
           },
-          "severity": {
-            "enum": ["info", "warning", "error"]
-          },
+          "severity": { "enum": ["info", "warning", "error"] },
           "count": {
             "type": "integer",
             "minimum": 0,
@@ -51,9 +45,7 @@
         }
       }
     },
-    "metadata": {
-      "$ref": "#/$defs/metadata"
-    }
+    "metadata": { "$ref": "#/$defs/metadata" }
   },
   "$defs": {
     "author": {
@@ -61,49 +53,21 @@
       "additionalProperties": false,
       "required": ["name"],
       "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "kind": {
-          "enum": ["root", "subagent", "teammate"],
-          "description": "Which kind of agent produced the block when the identity came from the wire agent field: the session root, a delegated subagent, or an Agent Team teammate."
-        }
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 }
       }
     },
     "block": {
       "oneOf": [
-        {
-          "$ref": "#/$defs/userBlock"
-        },
-        {
-          "$ref": "#/$defs/assistantBlock"
-        },
-        {
-          "$ref": "#/$defs/thoughtBlock"
-        },
-        {
-          "$ref": "#/$defs/toolBlock"
-        },
-        {
-          "$ref": "#/$defs/shellBlock"
-        },
-        {
-          "$ref": "#/$defs/userShellBlock"
-        },
-        {
-          "$ref": "#/$defs/permissionBlock"
-        },
-        {
-          "$ref": "#/$defs/statusBlock"
-        },
-        {
-          "$ref": "#/$defs/errorBlock"
-        },
-        {
-          "$ref": "#/$defs/promptCancelledBlock"
-        }
+        { "$ref": "#/$defs/userBlock" },
+        { "$ref": "#/$defs/assistantBlock" },
+        { "$ref": "#/$defs/thoughtBlock" },
+        { "$ref": "#/$defs/toolBlock" },
+        { "$ref": "#/$defs/shellBlock" },
+        { "$ref": "#/$defs/userShellBlock" },
+        { "$ref": "#/$defs/permissionBlock" },
+        { "$ref": "#/$defs/statusBlock" },
+        { "$ref": "#/$defs/errorBlock" },
+        { "$ref": "#/$defs/promptCancelledBlock" }
       ]
     },
     "userBlock": {
@@ -118,36 +82,15 @@
         "text"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "user"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "author": {
-          "$ref": "#/$defs/author"
-        },
-        "streaming": {
-          "const": false
-        },
-        "collapsed": {
-          "type": "boolean"
-        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "user" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
+        "text": { "type": "string", "maxLength": 409600 },
+        "author": { "$ref": "#/$defs/author" },
+        "streaming": { "const": false },
+        "collapsed": { "type": "boolean" },
         "parentToolCallId": {
           "type": "string",
           "minLength": 1,
@@ -156,9 +99,7 @@
         "images": {
           "type": "array",
           "maxItems": 1000,
-          "items": {
-            "$ref": "#/$defs/rasterImage"
-          }
+          "items": { "$ref": "#/$defs/rasterImage" }
         }
       }
     },
@@ -174,36 +115,15 @@
         "text"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "assistant"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "author": {
-          "$ref": "#/$defs/author"
-        },
-        "streaming": {
-          "const": false
-        },
-        "collapsed": {
-          "type": "boolean"
-        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "assistant" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
+        "text": { "type": "string", "maxLength": 409600 },
+        "author": { "$ref": "#/$defs/author" },
+        "streaming": { "const": false },
+        "collapsed": { "type": "boolean" },
         "parentToolCallId": {
           "type": "string",
           "minLength": 1,
@@ -212,13 +132,9 @@
         "images": {
           "type": "array",
           "maxItems": 1000,
-          "items": {
-            "$ref": "#/$defs/rasterImage"
-          }
+          "items": { "$ref": "#/$defs/rasterImage" }
         },
-        "usage": {
-          "$ref": "#/$defs/usage"
-        }
+        "usage": { "$ref": "#/$defs/usage" }
       }
     },
     "thoughtBlock": {
@@ -233,33 +149,14 @@
         "text"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "thought"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "streaming": {
-          "const": false
-        },
-        "collapsed": {
-          "type": "boolean"
-        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "thought" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
+        "text": { "type": "string", "maxLength": 409600 },
+        "streaming": { "const": false },
+        "collapsed": { "type": "boolean" },
         "parentToolCallId": {
           "type": "string",
           "minLength": 1,
@@ -268,9 +165,7 @@
         "images": {
           "type": "array",
           "maxItems": 1000,
-          "items": {
-            "$ref": "#/$defs/rasterImage"
-          }
+          "items": { "$ref": "#/$defs/rasterImage" }
         }
       }
     },
@@ -281,15 +176,11 @@
         {
           "if": {
             "properties": {
-              "status": {
-                "enum": ["completed", "failed"]
-              }
+              "status": { "enum": ["completed", "failed"] }
             },
             "required": ["status"]
           },
-          "then": {
-            "required": ["resultPreview"]
-          }
+          "then": { "required": ["resultPreview"] }
         }
       ],
       "required": [
@@ -304,54 +195,21 @@
         "preview"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "tool"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
-        "toolCallId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "title": {
-          "type": "string",
-          "maxLength": 409600
-        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "tool" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
+        "toolCallId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "title": { "type": "string", "maxLength": 409600 },
         "status": {
           "enum": ["completed", "failed", "cancelled", "canceled"]
         },
-        "background": {
-          "type": "boolean"
-        },
-        "toolName": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "toolKind": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "preview": {
-          "$ref": "#/$defs/toolPreview"
-        },
-        "resultPreview": {
-          "$ref": "#/$defs/toolResultPreview"
-        },
+        "background": { "type": "boolean" },
+        "toolName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "toolKind": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "preview": { "$ref": "#/$defs/toolPreview" },
+        "resultPreview": { "$ref": "#/$defs/toolResultPreview" },
         "parentToolCallId": {
           "type": "string",
           "minLength": 1,
@@ -381,30 +239,13 @@
         "text"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "shell"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "stream": {
-          "enum": ["stdout", "stderr"]
-        }
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "shell" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
+        "text": { "type": "string", "maxLength": 409600 },
+        "stream": { "enum": ["stdout", "stderr"] }
       }
     },
     "userShellBlock": {
@@ -420,38 +261,15 @@
         "command"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "user_shell"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "command": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "cwd": {
-          "type": "string",
-          "maxLength": 400
-        },
-        "stream": {
-          "enum": ["stdout", "stderr"]
-        }
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "user_shell" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
+        "text": { "type": "string", "maxLength": 409600 },
+        "command": { "type": "string", "maxLength": 409600 },
+        "cwd": { "type": "string", "maxLength": 400 },
+        "stream": { "enum": ["stdout", "stderr"] }
       }
     },
     "permissionBlock": {
@@ -469,57 +287,30 @@
         "preview"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "permission"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "permission" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
         "requestId": {
           "type": "string",
           "minLength": 1,
           "maxLength": 200
         },
-        "title": {
-          "type": "string",
-          "maxLength": 409600
-        },
+        "title": { "type": "string", "maxLength": 409600 },
         "options": {
           "type": "array",
           "maxItems": 1000,
-          "items": {
-            "$ref": "#/$defs/permissionOption"
-          }
+          "items": { "$ref": "#/$defs/permissionOption" }
         },
-        "preview": {
-          "$ref": "#/$defs/toolPreview"
-        },
+        "preview": { "$ref": "#/$defs/toolPreview" },
         "toolCallId": {
           "type": "string",
           "minLength": 1,
           "maxLength": 200
         },
-        "toolName": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "toolKind": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
+        "toolName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "toolKind": { "type": "string", "minLength": 1, "maxLength": 200 },
         "resolved": {
           "enum": ["approved", "rejected", "cancelled", "expired", "resolved"]
         }
@@ -537,32 +328,13 @@
         "text"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "status"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "code": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "status" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
+        "text": { "type": "string", "maxLength": 409600 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
         "errorKind": {
           "enum": [
             "missing_binary",
@@ -583,11 +355,7 @@
             "loop_detected"
           ]
         },
-        "source": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        }
+        "source": { "type": "string", "minLength": 1, "maxLength": 128 }
       }
     },
     "errorBlock": {
@@ -602,32 +370,13 @@
         "text"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "error"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "code": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "error" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
+        "text": { "type": "string", "maxLength": 409600 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
         "errorKind": {
           "enum": [
             "missing_binary",
@@ -648,11 +397,7 @@
             "loop_detected"
           ]
         },
-        "source": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        }
+        "source": { "type": "string", "minLength": 1, "maxLength": 128 }
       }
     },
     "promptCancelledBlock": {
@@ -660,27 +405,12 @@
       "additionalProperties": false,
       "required": ["id", "kind", "clientReceivedAt", "createdAt", "updatedAt"],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "kind": {
-          "const": "prompt_cancelled"
-        },
-        "clientReceivedAt": {
-          "const": 0
-        },
-        "createdAt": {
-          "const": 0
-        },
-        "updatedAt": {
-          "const": 0
-        },
-        "reason": {
-          "type": "string",
-          "maxLength": 409600
-        }
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "const": "prompt_cancelled" },
+        "clientReceivedAt": { "const": 0 },
+        "createdAt": { "const": 0 },
+        "updatedAt": { "const": 0 },
+        "reason": { "type": "string", "maxLength": 409600 }
       }
     },
     "rasterImage": {
@@ -725,22 +455,10 @@
       "additionalProperties": false,
       "required": ["optionId", "label", "raw"],
       "properties": {
-        "optionId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "label": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "description": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "raw": {
-          "const": null
-        }
+        "optionId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "label": { "type": "string", "maxLength": 409600 },
+        "description": { "type": "string", "maxLength": 409600 },
+        "raw": { "const": null }
       }
     },
     "questionOption": {
@@ -748,17 +466,9 @@
       "additionalProperties": false,
       "required": ["label", "raw"],
       "properties": {
-        "label": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "description": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "raw": {
-          "const": null
-        }
+        "label": { "type": "string", "maxLength": 409600 },
+        "description": { "type": "string", "maxLength": 409600 },
+        "raw": { "const": null }
       }
     },
     "question": {
@@ -766,25 +476,14 @@
       "additionalProperties": false,
       "required": ["question", "options", "raw"],
       "properties": {
-        "header": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "question": {
-          "type": "string",
-          "maxLength": 409600
-        },
+        "header": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "question": { "type": "string", "maxLength": 409600 },
         "options": {
           "type": "array",
           "maxItems": 1000,
-          "items": {
-            "$ref": "#/$defs/questionOption"
-          }
+          "items": { "$ref": "#/$defs/questionOption" }
         },
-        "raw": {
-          "const": null
-        }
+        "raw": { "const": null }
       }
     },
     "todoEntry": {
@@ -792,29 +491,14 @@
       "additionalProperties": false,
       "required": ["id", "content", "status"],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "content": {
-          "type": "string",
-          "maxLength": 409600
-        },
-        "status": {
-          "enum": ["pending", "in_progress", "completed"]
-        },
-        "priority": {
-          "enum": ["high", "medium", "low"]
-        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "content": { "type": "string", "maxLength": 409600 },
+        "status": { "enum": ["pending", "in_progress", "completed"] },
+        "priority": { "enum": ["high", "medium", "low"] },
         "blockedBy": {
           "type": "array",
           "maxItems": 1000,
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          }
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
         }
       }
     },
@@ -823,24 +507,14 @@
       "additionalProperties": false,
       "required": ["kind", "entries"],
       "properties": {
-        "kind": {
-          "const": "todo_list"
-        },
+        "kind": { "const": "todo_list" },
         "entries": {
           "type": "array",
           "maxItems": 1000,
-          "items": {
-            "$ref": "#/$defs/todoEntry"
-          }
+          "items": { "$ref": "#/$defs/todoEntry" }
         },
-        "truncated": {
-          "type": "boolean"
-        },
-        "planId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
+        "truncated": { "type": "boolean" },
+        "planId": { "type": "string", "minLength": 1, "maxLength": 128 },
         "revision": {
           "type": "integer",
           "minimum": 0,
@@ -855,15 +529,11 @@
           "additionalProperties": false,
           "required": ["kind", "questions"],
           "properties": {
-            "kind": {
-              "const": "ask_user_question"
-            },
+            "kind": { "const": "ask_user_question" },
             "questions": {
               "type": "array",
               "maxItems": 1000,
-              "items": {
-                "$ref": "#/$defs/question"
-              }
+              "items": { "$ref": "#/$defs/question" }
             }
           }
         },
@@ -872,17 +542,9 @@
           "additionalProperties": false,
           "required": ["kind", "command"],
           "properties": {
-            "kind": {
-              "const": "command"
-            },
-            "command": {
-              "type": "string",
-              "maxLength": 409600
-            },
-            "cwd": {
-              "type": "string",
-              "maxLength": 400
-            }
+            "kind": { "const": "command" },
+            "command": { "type": "string", "maxLength": 409600 },
+            "cwd": { "type": "string", "maxLength": 400 }
           }
         },
         {
@@ -890,25 +552,11 @@
           "additionalProperties": false,
           "required": ["kind", "path"],
           "properties": {
-            "kind": {
-              "const": "file_diff"
-            },
-            "path": {
-              "type": "string",
-              "maxLength": 400
-            },
-            "oldText": {
-              "type": "string",
-              "maxLength": 409600
-            },
-            "newText": {
-              "type": "string",
-              "maxLength": 409600
-            },
-            "patch": {
-              "type": "string",
-              "maxLength": 409600
-            }
+            "kind": { "const": "file_diff" },
+            "path": { "type": "string", "maxLength": 400 },
+            "oldText": { "type": "string", "maxLength": 409600 },
+            "newText": { "type": "string", "maxLength": 409600 },
+            "patch": { "type": "string", "maxLength": 409600 }
           }
         },
         {
@@ -916,13 +564,8 @@
           "additionalProperties": false,
           "required": ["kind", "path"],
           "properties": {
-            "kind": {
-              "const": "file_read"
-            },
-            "path": {
-              "type": "string",
-              "maxLength": 400
-            },
+            "kind": { "const": "file_read" },
+            "path": { "type": "string", "maxLength": 400 },
             "range": {
               "type": "array",
               "minItems": 2,
@@ -940,18 +583,9 @@
           "additionalProperties": false,
           "required": ["kind", "url"],
           "properties": {
-            "kind": {
-              "const": "web_fetch"
-            },
-            "url": {
-              "type": "string",
-              "maxLength": 409600
-            },
-            "method": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 16
-            }
+            "kind": { "const": "web_fetch" },
+            "url": { "type": "string", "maxLength": 409600 },
+            "method": { "type": "string", "minLength": 1, "maxLength": 16 }
           }
         },
         {
@@ -959,21 +593,10 @@
           "additionalProperties": false,
           "required": ["kind", "serverId", "toolName"],
           "properties": {
-            "kind": {
-              "const": "mcp_invocation"
-            },
-            "serverId": {
-              "type": "string",
-              "maxLength": 128
-            },
-            "toolName": {
-              "type": "string",
-              "maxLength": 128
-            },
-            "argsSummary": {
-              "type": "string",
-              "maxLength": 409600
-            }
+            "kind": { "const": "mcp_invocation" },
+            "serverId": { "type": "string", "maxLength": 128 },
+            "toolName": { "type": "string", "maxLength": 128 },
+            "argsSummary": { "type": "string", "maxLength": 409600 }
           }
         },
         {
@@ -981,23 +604,14 @@
           "additionalProperties": false,
           "required": ["kind", "code"],
           "properties": {
-            "kind": {
-              "const": "code_block"
-            },
+            "kind": { "const": "code_block" },
             "language": {
               "type": "string",
               "minLength": 1,
               "maxLength": 64
             },
-            "code": {
-              "type": "string",
-              "maxLength": 409600
-            },
-            "origin": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 400
-            }
+            "code": { "type": "string", "maxLength": 409600 },
+            "origin": { "type": "string", "minLength": 1, "maxLength": 400 }
           }
         },
         {
@@ -1005,13 +619,8 @@
           "additionalProperties": false,
           "required": ["kind", "query"],
           "properties": {
-            "kind": {
-              "const": "search"
-            },
-            "query": {
-              "type": "string",
-              "maxLength": 409600
-            },
+            "kind": { "const": "search" },
+            "query": { "type": "string", "maxLength": 409600 },
             "resultCount": {
               "type": "integer",
               "minimum": 0,
@@ -1020,10 +629,7 @@
             "top": {
               "type": "array",
               "maxItems": 1000,
-              "items": {
-                "type": "string",
-                "maxLength": 409600
-              }
+              "items": { "type": "string", "maxLength": 409600 }
             }
           }
         },
@@ -1032,16 +638,11 @@
           "additionalProperties": false,
           "required": ["kind", "columns", "rows"],
           "properties": {
-            "kind": {
-              "const": "tabular"
-            },
+            "kind": { "const": "tabular" },
             "columns": {
               "type": "array",
               "maxItems": 1000,
-              "items": {
-                "type": "string",
-                "maxLength": 409600
-              }
+              "items": { "type": "string", "maxLength": 409600 }
             },
             "rows": {
               "type": "array",
@@ -1049,10 +650,7 @@
               "items": {
                 "type": "array",
                 "maxItems": 1000,
-                "items": {
-                  "type": "string",
-                  "maxLength": 409600
-                }
+                "items": { "type": "string", "maxLength": 409600 }
               }
             },
             "totalRows": {
@@ -1067,23 +665,14 @@
           "additionalProperties": false,
           "required": ["kind", "prompt"],
           "properties": {
-            "kind": {
-              "const": "image_generation"
-            },
-            "prompt": {
-              "type": "string",
-              "maxLength": 409600
-            },
+            "kind": { "const": "image_generation" },
+            "prompt": { "type": "string", "maxLength": 409600 },
             "thumbnailUrl": {
               "type": "string",
               "maxLength": 11184835,
               "pattern": "^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]*={0,2}$"
             },
-            "model": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            }
+            "model": { "type": "string", "minLength": 1, "maxLength": 128 }
           }
         },
         {
@@ -1091,17 +680,9 @@
           "additionalProperties": false,
           "required": ["kind", "agentName", "task"],
           "properties": {
-            "kind": {
-              "const": "subagent_delegation"
-            },
-            "agentName": {
-              "type": "string",
-              "maxLength": 128
-            },
-            "task": {
-              "type": "string",
-              "maxLength": 409600
-            },
+            "kind": { "const": "subagent_delegation" },
+            "agentName": { "type": "string", "maxLength": 128 },
+            "task": { "type": "string", "maxLength": 409600 },
             "parentDelegationId": {
               "type": "string",
               "minLength": 1,
@@ -1114,9 +695,7 @@
           "additionalProperties": false,
           "required": ["kind", "rows"],
           "properties": {
-            "kind": {
-              "const": "key_value"
-            },
+            "kind": { "const": "key_value" },
             "rows": {
               "type": "array",
               "maxItems": 1000,
@@ -1125,55 +704,35 @@
                 "additionalProperties": false,
                 "required": ["label", "value"],
                 "properties": {
-                  "label": {
-                    "type": "string",
-                    "maxLength": 409600
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 409600
-                  }
+                  "label": { "type": "string", "maxLength": 409600 },
+                  "value": { "type": "string", "maxLength": 409600 }
                 }
               }
             }
           }
         },
-        {
-          "$ref": "#/$defs/todoPreview"
-        },
+        { "$ref": "#/$defs/todoPreview" },
         {
           "type": "object",
           "additionalProperties": false,
           "required": ["kind"],
           "properties": {
-            "kind": {
-              "const": "generic"
-            },
-            "summary": {
-              "type": "string",
-              "maxLength": 409600
-            }
+            "kind": { "const": "generic" },
+            "summary": { "type": "string", "maxLength": 409600 }
           }
         }
       ]
     },
     "toolResultPreview": {
       "oneOf": [
-        {
-          "$ref": "#/$defs/todoPreview"
-        },
+        { "$ref": "#/$defs/todoPreview" },
         {
           "type": "object",
           "additionalProperties": false,
           "required": ["kind", "text", "answers"],
           "properties": {
-            "kind": {
-              "const": "question_answers"
-            },
-            "text": {
-              "type": "string",
-              "maxLength": 409600
-            },
+            "kind": { "const": "question_answers" },
+            "text": { "type": "string", "maxLength": 409600 },
             "answers": {
               "type": "array",
               "maxItems": 1000,
@@ -1182,14 +741,8 @@
                 "additionalProperties": false,
                 "required": ["question", "answer"],
                 "properties": {
-                  "question": {
-                    "type": "string",
-                    "maxLength": 409600
-                  },
-                  "answer": {
-                    "type": "string",
-                    "maxLength": 409600
-                  }
+                  "question": { "type": "string", "maxLength": 409600 },
+                  "answer": { "type": "string", "maxLength": 409600 }
                 }
               }
             }
@@ -1200,13 +753,8 @@
           "additionalProperties": false,
           "required": ["kind", "text"],
           "properties": {
-            "kind": {
-              "const": "text"
-            },
-            "text": {
-              "type": "string",
-              "maxLength": 409600
-            }
+            "kind": { "const": "text" },
+            "text": { "type": "string", "maxLength": 409600 }
           }
         },
         {
@@ -1214,9 +762,7 @@
           "additionalProperties": false,
           "required": ["kind", "summary"],
           "properties": {
-            "kind": {
-              "const": "generic"
-            },
+            "kind": { "const": "generic" },
             "summary": {
               "type": "string",
               "minLength": 1,
@@ -1233,29 +779,17 @@
       "allOf": [
         {
           "if": {
-            "properties": {
-              "complete": {
-                "const": true
-              }
-            },
+            "properties": { "complete": { "const": true } },
             "required": ["complete"]
           },
           "then": {
-            "properties": {
-              "truncated": {
-                "const": false
-              }
-            }
+            "properties": { "truncated": { "const": false } }
           }
         }
       ],
       "required": ["exportedAt", "complete", "truncated"],
       "properties": {
-        "title": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "startedAt": {
           "type": "string",
           "format": "date-time",
@@ -1266,12 +800,8 @@
           "format": "date-time",
           "maxLength": 32
         },
-        "complete": {
-          "type": "boolean"
-        },
-        "truncated": {
-          "type": "boolean"
-        },
+        "complete": { "type": "boolean" },
+        "truncated": { "type": "boolean" },
         "projectName": {
           "type": "string",
           "minLength": 1,
@@ -1287,16 +817,8 @@
           "minLength": 1,
           "maxLength": 200
         },
-        "model": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "channel": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
+        "model": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "channel": { "type": "string", "minLength": 1, "maxLength": 100 },
         "promptCount": {
           "type": "integer",
           "minimum": 0,
