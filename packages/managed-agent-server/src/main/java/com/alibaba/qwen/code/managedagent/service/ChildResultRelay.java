@@ -499,8 +499,20 @@ public class ChildResultRelay {
                     prompt = continuationPrompt(pending,
                             predecessor.textValue(), prompt);
                 }
-                boolean isolated = worktree(body);
-                if (isolated && !childWorkspaceReady(row, now)) {
+                String workspaceMode = childWorkspaceMode(body);
+                String declared = body.path("workspaceMode").asText();
+                if (workspaceMode == null && !declared.isEmpty()
+                        && !"shared".equals(declared)) {
+                    // A mode this relay does not know is never run as
+                    // shared: a child meant to be isolated must not get
+                    // the parent's tree.
+                    failCreation(row, "child workspace mode " + declared
+                            + " is not served here", now);
+                    return;
+                }
+                boolean isolated = workspaceMode != null;
+                if (isolated && !childWorkspaceReady(row, workspaceMode,
+                        now)) {
                     return;
                 }
                 try {
@@ -628,13 +640,20 @@ public class ChildResultRelay {
                 new String[] {"&amp;", "&lt;", "&gt;"});
     }
 
-    /** #13753 I2: the run's fixed `workspaceMode` names a child Workspace. */
-    private static boolean worktree(JsonNode body) {
-        return "worktree".equals(body.path("workspaceMode").asText());
+    /**
+     * The run's fixed `workspaceMode`, when it names a child Workspace: a
+     * `worktree` that merges back (#13753 I2) or a read-only `snapshot`
+     * that is always discarded (I3). Null for a `shared` run.
+     */
+    private static String childWorkspaceMode(JsonNode body) {
+        String mode = body.path("workspaceMode").asText();
+        return ChildWorkspaceStore.WORKTREE.equals(mode)
+                || ChildWorkspaceStore.SNAPSHOT.equals(mode) ? mode : null;
     }
 
     /**
-     * A worktree run's child Workspace before its child exists (#13753 I2):
+     * An isolated run's child Workspace before its child exists (#13753 I2),
+     * a worktree or a snapshot alike (I3):
      * the preparation is requested, never run here — the child Workspace
      * scan runs its Git — and looked at again on the heartbeat at no cost.
      * A ready Workspace lets the creation go on. One that can never become
@@ -642,11 +661,12 @@ public class ChildResultRelay {
      * capability, a parent without a binding) settles the run as a
      * creation that never started, and its row is asked to discard.
      */
-    private boolean childWorkspaceReady(RelayRow row, long now) {
+    private boolean childWorkspaceReady(RelayRow row, String workspaceMode,
+            long now) {
         ChildWorkspaceStore.Row workspace;
         try {
             workspace = childWorkspaces.request(row.tenantId(),
-                    row.parentSessionId(), row.childRunId());
+                    row.parentSessionId(), row.childRunId(), workspaceMode);
         } catch (ApiException refused) {
             if (!"child_workspace_unsupported".equals(refused.getCode())
                     && !"child_parent_unavailable".equals(refused.getCode())) {
@@ -742,7 +762,8 @@ public class ChildResultRelay {
      * Settles a finished run's child Workspace (#13753 I2): a merge already
      * asked keeps its place, a child that completed a Turn has its work
      * merged (as a shared child's writes would stay), and any other end
-     * discards. Refusals meaning the row already settled are not owed.
+     * discards. A snapshot has no work to keep and always discards (I3).
+     * Refusals meaning the row already settled are not owed.
      * Answers whether the run may settle now: a merge holds it until the
      * row records the outcome, so the merge never lands after the parent
      * was told the run ended; a discard is never waited for.
@@ -757,7 +778,8 @@ public class ChildResultRelay {
             try {
                 workspace = childWorkspaces.requestFinish(row.tenantId(),
                         row.parentSessionId(), row.childRunId(),
-                        completed ? ChildWorkspaceStore.MERGE
+                        completed && !workspace.snapshot()
+                                ? ChildWorkspaceStore.MERGE
                                 : ChildWorkspaceStore.DISCARD);
             } catch (ApiException refused) {
                 if (!SETTLED_FINISH_REFUSALS.contains(refused.getCode())) {
@@ -800,12 +822,14 @@ public class ChildResultRelay {
      * seen completed (#13753 I2), even while message turns still run:
      * whatever ends the run later merges that work, so a parent's close
      * meanwhile pins it instead of discarding it. Only recorded, never
-     * waited for here; the row runs it once the child is closed.
+     * waited for here; the row runs it once the child is closed. A snapshot
+     * never merges (I3).
      */
     private void askMerge(RelayRow row) {
         ChildWorkspaceStore.Row workspace = childWorkspaces.find(
                 row.tenantId(), row.parentSessionId(), row.childRunId());
-        if (workspace == null || workspace.finishRequest() != null
+        if (workspace == null || workspace.snapshot()
+                || workspace.finishRequest() != null
                 || !ChildWorkspaceStore.READY.equals(workspace.state())) {
             return;
         }
@@ -1092,12 +1116,18 @@ public class ChildResultRelay {
                 .put("turnId", turnId)
                 .put("status", status)
                 .put("completedAt", completedAt);
-        if (worktree(body)) {
+        String workspaceMode = childWorkspaceMode(body);
+        if (ChildWorkspaceStore.WORKTREE.equals(workspaceMode)) {
             JsonNode workspace = mergedChildWorkspace(row, now);
             if (workspace == null) {
                 return;
             }
             receiptJson.set("workspace", workspace);
+        } else if (ChildWorkspaceStore.SNAPSHOT.equals(workspaceMode)) {
+            // A snapshot changed nothing (#13753 I3): its copy is discarded
+            // once the child closes, nothing waits for that, and the
+            // receipt has nothing to report.
+            discardChildWorkspace(row);
         }
         String receipt = receiptJson.toString();
         Map<String, Object> commit = new LinkedHashMap<>();
