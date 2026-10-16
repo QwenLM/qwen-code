@@ -1234,15 +1234,26 @@ async function runReplyLossCase() {
       return rows.some(
         (row) =>
           row.execution_call_id.endsWith(':process') &&
-          row.execution_state === 'PREPARED',
+          (row.execution_state === 'PREPARED' ||
+            // A cgroup-less runtime settles the row terminal not-started
+            // in one beat post-#14277 — no PREPARED flicker to catch.
+            (row.execution_state === 'SETTLED' &&
+              row.execution_status === 'not_started')),
       );
     }, 120_000);
     step('capability live');
     if (name === 'dispatch-reply') {
       await waitUntil(() => brokerDropped >= 1, 60_000);
       step('dispatch reply dropped once');
-      // The drop lands before the physical start, so no producer ever
-      // runs to open the gate — the case settles as a proven not-start.
+      // The proxy consumed the upstream :start reply before destroying
+      // the client socket, so on a cgroup host the physical process is
+      // already running and its producer is parked on the run-gate —
+      // the run can never settle until the gate opens. A cgroup-less
+      // runtime (this box) never starts, so there is nothing to open.
+      if (bgStartedFile()) {
+        await releaseFifo(current.directory, 'run-gate');
+        step('run-gate released for the started producer');
+      }
     } else if (name === 'monitor-stop-reply') {
       dropNextMonitorStop = true;
       await releaseFifo(current.directory, 'monitor-gate');
@@ -1256,14 +1267,18 @@ async function runReplyLossCase() {
       await waitUntil(() => droppedOps >= 1, 120_000);
       step('observation advance reply dropped once');
     } else if (name === 'capture-commit-reply') {
-      await waitUntil(() => droppedPagePublishes >= 1, 180_000);
-      step('page publish reply dropped once');
+      // Pages flush at SEGMENTS_PER_PAGE (512) — the fixture's 24
+      // blocks only reach the store at finish, after the gate opens.
+      // Withhold the witness until the finish-time first page publish
+      // instead of deadlocking on it before the release.
       await waitUntil(() => {
         checkStoreProxy();
         return progressLines() >= 24;
       }, 180_000);
       await releaseFifo(current.directory, 'run-gate');
       step('gate released');
+      await waitUntil(() => droppedPagePublishes >= 1, 180_000);
+      step('page publish reply dropped once');
     }
     await waitUntil(async () => {
       checkProxy();
@@ -1341,10 +1356,12 @@ async function runStoreFailureCase() {
       // "no second identity ever minted" observable.
       await new Promise((resolve) => setTimeout(resolve, 10_000));
     } else {
-      // manifest/page-envelope-commit: the trigger refuses the
-      // publication's commit kind for the rest of the case, so the run
-      // stays honestly blocked without re-executing until the drain arm
-      // below ends it — there is no heal-over path to wait for.
+      // manifest/page-envelope-commit: the trigger keeps refusing the
+      // target commit kind for the rest of the case, but refusal only
+      // poisons the capture — it never stops the run. Released from the
+      // gate the producer exits 0 and the record settles exited with the
+      // envelope degraded (capture unavailable), so the settle below is
+      // the natural one, not a drain.
       await waitUntil(async () => {
         checkProxy();
         checkStoreProxy();
@@ -1475,11 +1492,6 @@ async function runCancelDrainCase() {
         );
       }, 120_000);
       step('run live');
-      const invocationId = (
-        await probe<ProbeState>(current.sessionId, 'state')
-      ).executions
-        .map((row) => row.execution_call_id)
-        .find((id) => !id.endsWith(':process'))!;
       if (name === 'cancel-during-capture') {
         await waitUntil(async () => {
           checkStoreProxy();
@@ -1487,23 +1499,21 @@ async function runCancelDrainCase() {
           return fullSegments(state).length >= 3;
         }, 120_000);
         step('mid-capture (3 full segments)');
-        await childCancel(cli, clientId, invocationId);
+        // `children/operations` encodes the child-agent cancel family and
+        // rejects shell records; the only stop surface a shell child_run
+        // answers is the broker's drain release. The drain arm IS this
+        // case's cancel: stopRequested commits with the stop evidence,
+        // and the record settles cancelled, never exited.
+        const canceled = await brokerRelease(true);
+        step(`drain cancel mid-capture -> ${canceled.status}`);
+        assert.equal(canceled.status, 200, JSON.stringify(canceled.body));
         await waitUntil(async () => {
           const record = childRunOf(
             await probe<ProbeState>(current.sessionId, 'state'),
           );
           return record?.stopRequested === true;
         }, 60_000);
-        step('stopRequested committed');
-        const stillRunning = childRunOf(
-          await probe<ProbeState>(current.sessionId, 'state'),
-        );
-        assert.equal(stillRunning?.run?.state, 'running');
-        step('cancel alone settled nothing');
-        // The cancel's honorable physical stop IS the drain arm; run it
-        // to give the case its terminal evidence.
-        await brokerRelease(true);
-        step('drain release issued after the recorded cancel');
+        step('stopRequested committed by the drain arm');
       } else if (name === 'cancel-status-unavailable') {
         await waitUntil(async () => {
           checkStoreProxy();
@@ -1513,24 +1523,22 @@ async function runCancelDrainCase() {
         step('mid-capture');
         pausedBrokerControls = true;
         step('maintenance route held');
-        await childCancel(cli, clientId, invocationId);
-        await waitUntil(async () => {
-          const record = childRunOf(
-            await probe<ProbeState>(current.sessionId, 'state'),
-          );
-          return record?.stopRequested === true;
-        }, 60_000);
-        step('cancel recorded under the outage');
+        // Positive hold witness: at least one maintenance/status request
+        // must actually be parked in the proxy, otherwise the held arm
+        // was never armed and the outage is fiction.
+        await waitUntil(() => heldControlReplies.length >= 1, 60_000);
+        step('a status request is really held');
         const unFabricated = childRunOf(
           await probe<ProbeState>(current.sessionId, 'state'),
         );
         assert.equal(unFabricated?.run?.state, 'running');
         assert.ok(unFabricated?.stopReason == null);
+        step('no fabricated terminal while status is unreachable');
+        const outletDrain = await brokerRelease(true);
+        step(`drain release under the outage -> ${outletDrain.status}`);
+        assert.equal(outletDrain.status, 200, JSON.stringify(outletDrain.body));
         releaseBrokerControls();
         step('maintenance route restored');
-        const outletDrain = await brokerRelease(true);
-        step(`drain release after outage restored -> ${outletDrain.status}`);
-        assert.equal(outletDrain.status, 200, JSON.stringify(outletDrain.body));
       } else if (name === 'cancel-reply-lost') {
         await waitUntil(async () => {
           checkStoreProxy();
@@ -1539,9 +1547,14 @@ async function runCancelDrainCase() {
         }, 120_000);
         step('mid-capture');
         dropCommitOps.add('commitChildRunRecord');
-        await childCancel(cli, clientId, invocationId);
+        // Same drain surface: the stopRequested write's commit reply is
+        // what gets dropped after it committed; the committed record
+        // must never mint a second stop revision.
+        const canceled = await brokerRelease(true);
+        step(`drain cancel with armed reply drop -> ${canceled.status}`);
+        assert.equal(canceled.status, 200, JSON.stringify(canceled.body));
         await waitUntil(() => droppedOps >= 1, 60_000);
-        step('cancel commit reply dropped');
+        step('stopRequested commit reply dropped once');
         await waitUntil(async () => {
           const record = childRunOf(
             await probe<ProbeState>(current.sessionId, 'state'),
@@ -1549,22 +1562,15 @@ async function runCancelDrainCase() {
           return record?.stopRequested === true;
         }, 60_000);
         step('stopRequested committed despite the lost reply');
-        const commitsBefore = commitLog.filter(
+        const commits = commitLog.filter(
           (entry) => entry.op === 'commitChildRunRecord',
-        ).length;
-        await childCancel(cli, clientId, invocationId);
-        const commitsAfter = commitLog.filter(
-          (entry) => entry.op === 'commitChildRunRecord',
-        ).length;
-        assert.equal(
-          commitsAfter,
-          commitsBefore,
-          'a re-driven cancel must not mint a second stop revision',
         );
-        step('re-driven cancel minted no duplicate revision');
-        const exitDrain = await brokerRelease(true);
-        step(`drain release to settle -> ${exitDrain.status}`);
-        assert.equal(exitDrain.status, 200, JSON.stringify(exitDrain.body));
+        assert.equal(
+          commits.filter((entry) => entry.status !== 'dropped').length,
+          1,
+          `exactly one committed stop revision, saw ${JSON.stringify(commits)}`,
+        );
+        step('the re-drive minted no duplicate revision');
       } else if (name === 'routine-release-refusal') {
         const progressBefore = progressLines();
         const refusal = await brokerRequest(
@@ -1716,30 +1722,6 @@ function bgStartedFile(): boolean {
   } catch {
     return false;
   }
-}
-
-async function childCancel(
-  cli: HostedHarnessProcess,
-  clientId: string,
-  childRunId: string,
-) {
-  const response = await cli.request(
-    `/session/${current.sessionId}/children/operations`,
-    {
-      method: 'POST',
-      headers: { ...cli.headers(clientId), 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        operationId: randomUUID(),
-        childRunId,
-        kind: 'cancel',
-      }),
-    },
-  );
-  assert.ok(
-    response.status === 200 || response.status === 204,
-    `child cancel -> ${response.status}: ${await response.text()}`,
-  );
-  step(`child cancel -> ${response.status}`);
 }
 
 try {

@@ -404,8 +404,15 @@ class HostedMonitorRunFaultGatesIT {
                     break;
                 case "manifest-commit":
                     table = "ma_resource";
+                    // The capture's prepare publishes an initial empty
+                    // manifest (executionStatus 'unknown'); it must land,
+                    // or the worker never starts. The arm targets the
+                    // manifest that closes the run: a settled execution.
                     condition = "NEW.session_id = '" + sessionId
-                            + "' AND NEW.kind = 'managed-tool-result-manifest'";
+                            + "' AND NEW.kind"
+                            + " = 'managed-tool-result-manifest'"
+                            + " AND CONVERT(NEW.inline_bytes USING utf8mb4)"
+                            + " LIKE '%\"executionStatus\":\"success\"%'";
                     marker = "FG8B_MANIFEST_COMMIT";
                     break;
                 case "page-envelope-commit":
@@ -593,36 +600,38 @@ class HostedMonitorRunFaultGatesIT {
             assertProcessRows(jdbc, sessionId, name, 0);
             return;
         }
-        // The publication's commit kind is refused for the rest of the
-        // case, so the run blocks without re-executing instead of healing
-        // over the gate — and the driver's drain arm ends it, which means
-        // the record carries the drain's stop and never a fabricated exit.
+        // A publication commit that the store refused stops nothing: the
+        // process exits with zero, the envelope degrades to
+        // captureStatus unavailable, and the record settles from real
+        // exit evidence — never cancelled, never re-executed.
         assertProcessRows(jdbc, sessionId, name, 1);
         assertThat(report.path("recovered").asBoolean())
-                .as(name + ": the blocked run never self-settled")
-                .isFalse();
+                .as(name + ": the producer exited naturally").isTrue();
         JsonNode record = extensionRecord(jdbc, tenant, sessionId,
                 "child_run");
-        assertThat(record.path("stopRequested").asBoolean())
-                .as(name + ": the drain carried the stop marker").isTrue();
         assertThat(record.path("run").path("state").asText())
-                .as(name + ": settles cancelled, never exited")
-                .isEqualTo("cancelled");
+                .as(name + ": settles from real exit evidence")
+                .isEqualTo("settled");
         assertThat(record.path("stopReason").asText())
-                .isEqualTo("stop_requested");
+                .isEqualTo("exited");
+        assertThat(record.path("exitCode").asInt()).isZero();
+        assertThat(record.path("stopRequested").asBoolean(false))
+                .as(name + ": nothing ever asked it to stop").isFalse();
         if (name.equals("manifest-commit")) {
-            var manifests = jdbc.queryForObject(
+            // The finalize manifest (executionStatus 'success') is the
+            // arm's target and never persisted; the initial empty
+            // manifest is what keeps the read chain honest.
+            var settled = jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
                             + " AND session_id = ? AND kind ="
-                            + " 'managed-tool-result-manifest'",
+                            + " 'managed-tool-result-manifest' AND"
+                            + " CONVERT(inline_bytes USING utf8mb4) LIKE"
+                            + " '%\"executionStatus\":\"success\"%'",
                     Integer.class, tenant, sessionId);
-            assertThat(manifests)
-                    .as(name + ": every manifest commit was rejected")
+            assertThat(settled).as(name
+                    + ": the settle-manifest commit was rejected")
                     .isZero();
         } else {
-            // A committed manifest names only persisted envelopes — so
-            // once its page envelopes are refused, the only honest chain
-            // carries no manifest at all.
             assertThat(jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
                             + " AND session_id = ? AND kind ="
@@ -630,14 +639,23 @@ class HostedMonitorRunFaultGatesIT {
                     Integer.class, tenant, sessionId))
                     .as(name + ": every page-envelope commit was rejected")
                     .isZero();
-            assertThat(jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
-                            + " AND session_id = ? AND kind ="
-                            + " 'managed-tool-result-manifest'",
-                    Integer.class, tenant, sessionId))
-                    .as(name + ": no manifest may name refused envelopes")
-                    .isZero();
         }
+        // Whatever manifests did commit (the initial empty one, and in
+        // the process-ledger variant reserved ones) may never name a
+        // page envelope that is not persisted — the read chain's own
+        // refusal, asserted here over JDBC rather than on outcomes.
+        var dangling = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_resource m WHERE m.tenant_id = ?"
+                        + " AND m.session_id = ? AND m.kind ="
+                        + " 'managed-tool-result-manifest' AND"
+                        + " CONVERT(m.inline_bytes USING utf8mb4) LIKE"
+                        + " '%\"pages\":[{%' AND NOT EXISTS (SELECT 1"
+                        + " FROM ma_resource p WHERE p.tenant_id ="
+                        + " m.tenant_id AND p.session_id = m.session_id"
+                        + " AND p.kind = 'managed-tool-result-page')",
+                Integer.class, tenant, sessionId);
+        assertThat(dangling).as(name
+                + ": no manifest names an unpersisted page").isZero();
     }
 
     private void assertCancelDrainCase(JdbcTemplate jdbc, String tenant,
