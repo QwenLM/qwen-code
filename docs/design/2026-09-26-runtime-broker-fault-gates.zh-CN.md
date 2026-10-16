@@ -2,7 +2,7 @@
 
 [English](2026-09-26-runtime-broker-fault-gates.md) | [简体中文](2026-09-26-runtime-broker-fault-gates.zh-CN.md)
 
-状态：以测试形式实现于 `packages/sdk-java/runtime-broker`；没有修改生产代码
+状态：以测试形式实现于 `packages/managed-agent-server`；没有修改生产代码
 
 相关：#12748（FG1–FG4）、#12380 的 Stage F，以及门禁所检验的设计：
 [进程收养](2026-09-23-managed-runtime-process-adoption.zh-CN.md)、
@@ -112,14 +112,14 @@ FG4 存储门禁还钉住：数据库恢复后，没有任何东西重试失败�
 
 ### 3.5 对开放问题的取舍
 
-1. **CI 位置。** 门禁运行在 `sdk-java.yml` 的 `Hosted no-tool processes / MySQL 8.4 / Java 21` 任务中（#12733）。这条 Java 21 线已经为 Hosted 进程门禁安装、构建并打包 CLI。在那些门禁之后新增一步，在 `packages/sdk-java/runtime-broker` 中以 `-Dqwen.cli.entry=$GITHUB_WORKSPACE/dist/cli.js` 运行 `mvn -Pfault-gates test`，上限 10 分钟。
+1. **CI 位置。** 门禁运行在 `sdk-java.yml` 的 `Hosted no-tool processes / MySQL 8.4 / Java 21` 任务中（#12733）。这条 Java 21 线已经为 Hosted 进程门禁安装、构建并打包 CLI。在那些门禁之后新增一步，在 `packages/managed-agent-server` 中以 `-Dqwen.cli.entry=$GITHUB_WORKSPACE/dist/cli.js` 运行 `mvn -Pfault-gates test`，上限 10 分钟。
 2. **数据库。** 使用 TCP server 之后的文件型 H2，所有 Broker 进程共用。门禁暂不在 MySQL 或 MariaDB 上运行；它们所在的线已经带有 MySQL 8.4 服务，这项后续工作因此很小。
 3. **测试台语言。** 围绕 Broker 服务用 Java 实现，让每个故障都有确定的注入点。TypeScript 故障转移脚本保持独立。
 4. **#12670。** 按 §3.4 钉住。
 
 ## 4. 验证
 
-在仓库根目录构建好打包产物（`npm run build && npm run bundle`）后，在 `packages/sdk-java/runtime-broker` 中运行：
+在仓库根目录构建好打包产物（`npm run build && npm run bundle`）后，在 `packages/managed-agent-server` 中运行：
 
 ```bash
 mvn -Pfault-gates test   # 全部门禁（目前 44 个），约 4 分钟
