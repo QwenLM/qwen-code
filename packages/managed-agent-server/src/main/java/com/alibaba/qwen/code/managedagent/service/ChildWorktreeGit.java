@@ -539,33 +539,66 @@ public final class ChildWorktreeGit {
      * merge adds where the parent holds content its snapshot does not
      * carry: an ignored file or directory at the path, or an ignored file
      * or link where one of its directories must be, and a path the merge
-     * deletes that the parent's HEAD does not commit. That last is
-     * content the working tree alone holds (a child that untracks it, for
-     * one: the snapshot the child started from committed it as its own,
-     * so removing it there is no statement about the parent's copy):
-     * the only other copy sits under the row's base pin, which is swept
-     * when the row retires, so writing the deletion would leave none.
+     * deletes whose content the parent keeps nowhere else (see
+     * {@link #unkept}).
      */
     private List<String> unwritable(Path root, Repository repository, String parentTree, String mergedTree) {
         Map<String, Change> changes = diffTree(root, repository, parentTree, mergedTree);
+        Set<String> unkept = unkept(root, repository, parentTree, changes);
         List<String> unwritable = new ArrayList<>();
         for (Map.Entry<String, Change> change : changes.entrySet()) {
             Change record = change.getValue();
             // A name that is not UTF-8 decodes to U+FFFD and cannot be
             // written back byte for byte.
             if (record.gitlink() || change.getKey().indexOf('\uFFFD') >= 0 || ABSENT.equals(record.fromMode())
-                    && occupied(repository.top(), change.getKey(), changes)
-                    || ABSENT.equals(record.toMode()) && !committedAtHead(root, repository, change.getKey())) {
+                    && occupied(repository.top(), change.getKey(), changes) || unkept.contains(change.getKey())) {
                 unwritable.add(change.getKey());
             }
         }
         return unwritable;
     }
 
-    /** Whether the parent's HEAD commits content at {@code path}. */
-    private boolean committedAtHead(Path root, Repository repository, String path) {
-        Result found = run(repository.top(), root, null, List.of("cat-file", "-t", "HEAD:" + path));
-        return found.exit == 0 && "blob".equals(firstLine(found.out));
+    /**
+     * The paths the merge deletes whose content the parent keeps nowhere
+     * else: neither its index nor its HEAD holds that content at the path,
+     * and the merge writes it at no other path. Such content was the
+     * working tree's alone (a child that untracks a file the parent never
+     * committed, for one: the snapshot the child started from committed
+     * it as its own, so removing it there says nothing about the parent's
+     * copy), and its only other copy is the base snapshot, whose pin goes
+     * when the row ends.
+     */
+    private Set<String> unkept(Path root, Repository repository, String parentTree, Map<String, Change> changes) {
+        Set<String> written = new HashSet<>();
+        Set<String> deleted = new LinkedHashSet<>();
+        for (Map.Entry<String, Change> change : changes.entrySet()) {
+            if (ABSENT.equals(change.getValue().toMode())) {
+                deleted.add(change.getKey());
+            } else {
+                written.add(change.getValue().toObjectId());
+            }
+        }
+        deleted.removeIf(path -> written.contains(changes.get(path).fromObjectId()));
+        if (deleted.isEmpty()) {
+            return deleted;
+        }
+        Map<String, Change> staged = diff(root, repository, List.of("diff-index", "--cached", "-z",
+                "--no-renames", "--no-ext-diff", "--no-textconv", parentTree));
+        String head = head(root, repository.top());
+        Map<String, Change> committed = head == null ? null : diffTree(root, repository, parentTree, head);
+        deleted.removeIf(path -> keeps(staged, path, changes.get(path).fromObjectId())
+                || committed != null && keeps(committed, path, changes.get(path).fromObjectId()));
+        return deleted;
+    }
+
+    /**
+     * Whether the other side of a diff from the parent tree holds
+     * {@code object} at {@code path}; a path the diff does not list holds
+     * the parent tree's own.
+     */
+    private static boolean keeps(Map<String, Change> fromParent, String path, String object) {
+        Change change = fromParent.get(path);
+        return change == null || object.equals(change.toObjectId());
     }
 
     /**
@@ -608,7 +641,9 @@ public final class ChildWorktreeGit {
      * version. A path holding anything else was changed outside the lease
      * and is never overwritten. Each owed path is judged by what is on
      * disk, ignored or not, so resuming after an interruption writes only
-     * what is still owed; the index and HEAD are never touched.
+     * what is still owed; the index and HEAD are never touched. A deletion
+     * still owed is judged again as the merge judged it: if the parent no
+     * longer keeps that content elsewhere, it is never written.
      */
     public void apply(Path root, Repository repository, String parentTree, String mergedTree) {
         Map<String, Change> recorded = diffTree(root, repository, parentTree, mergedTree);
@@ -631,6 +666,11 @@ public final class ChildWorktreeGit {
                 toWrite.put(path, change.getValue());
             } else if (differsFromMerged.contains(path)) {
                 throw ChildWorkspaceException.diverged("The parent's tree changed outside the lease at " + path);
+            }
+        }
+        for (String path : unkept(root, repository, parentTree, recorded)) {
+            if (toWrite.containsKey(path)) {
+                throw ChildWorkspaceException.diverged("The parent no longer keeps the content deleted at " + path);
             }
         }
         if (!toWrite.isEmpty()) {
@@ -951,7 +991,7 @@ public final class ChildWorktreeGit {
     private record Entry(String mode, String objectId) {
     }
 
-    private record Change(String fromMode, String toMode, String toObjectId) {
+    private record Change(String fromMode, String toMode, String fromObjectId, String toObjectId) {
         boolean gitlink() {
             return GITLINK.equals(fromMode) || GITLINK.equals(toMode);
         }
@@ -959,16 +999,21 @@ public final class ChildWorktreeGit {
 
     /** Every path that differs between two trees, gitlinks included. */
     private Map<String, Change> diffTree(Path root, Repository repository, String from, String to) {
-        List<String> tokens = tokens(git(repository.top(), root, null, List.of("diff-tree", "-r", "-z",
-                "--no-renames", "--no-ext-diff", "--no-textconv", from, to)));
+        return diff(root, repository, List.of("diff-tree", "-r", "-z",
+                "--no-renames", "--no-ext-diff", "--no-textconv", from, to));
+    }
+
+    /** The records of a raw, NUL-separated diff command. */
+    private Map<String, Change> diff(Path root, Repository repository, List<String> args) {
+        List<String> tokens = tokens(git(repository.top(), root, null, args));
         Map<String, Change> changes = new LinkedHashMap<>();
         for (int index = 0; index + 1 < tokens.size(); index += 2) {
             String[] fields = tokens.get(index).split(" ");
             if (fields.length != 5 || !fields[0].startsWith(":")) {
                 throw new ChildWorkspaceException(ChildWorkspaceException.GIT, false,
-                        "diff-tree answered an unexpected record");
+                        args.getFirst() + " answered an unexpected record");
             }
-            changes.put(tokens.get(index + 1), new Change(fields[0].substring(1), fields[1], fields[3]));
+            changes.put(tokens.get(index + 1), new Change(fields[0].substring(1), fields[1], fields[2], fields[3]));
         }
         return changes;
     }
