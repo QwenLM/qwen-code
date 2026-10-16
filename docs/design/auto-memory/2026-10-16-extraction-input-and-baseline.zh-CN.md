@@ -22,15 +22,17 @@
 
 ## 2. 当前行为与证据边界
 
-| 位置         | 源码基线上的当前行为                                                                                                                                                                                                                 |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 普通模型循环 | 开启托管记忆时，`LlmClient.runManagedAutoMemoryBackgroundTasks()` 为符合条件的已完成用户请求调度提取；排除内部 session-agent 对话。                                                                                                  |
-| ACP          | `Session.#recordPromptCompletionEffects()` 在新的、成功的逻辑用户轮次后调度；重试、取消和循环保护停止不触发。                                                                                                                        |
-| Manager      | `MemoryManager.scheduleExtract()` 检查主 agent 直接写记忆并串行化、排队提取；`runExtract()` 检查内存压力。                                                                                                                           |
-| 游标         | 每个项目只有一份游标，保存 `{ sessionId, processedOffset }`。切换到其他会话时偏移清零；历史缩短时，只有旧偏移超过新长度才清零。`runAutoMemoryExtract()` 用这个原始历史偏移检测新的非空用户文本，但没有把这段未处理输入交给 planner。 |
-| 提取输入     | `captureCacheSafeParams()` 捕获最近 40 条 curated 历史并做精简。`runAutoMemoryExtractionByAgent()` 再清洗捕获的历史，作为 `extraHistory` 传入。因此原始历史、curated/精简历史和清洗后的提取输入，位置互不相同。                      |
-| 实际执行     | planner 调用 `runForkedAgent()` 时没有传 `cacheSafeParams`，因此走 headless-agent 分支的 `initialMessages`。另一处 `createForkedChat()` 的 40 条上限属于 cache 分支，不是本提取路径的第二次截断。                                    |
-| 成功与失败   | 写入或带路径的工具活动可以推进游标；零次带路径工具调用会保留游标，错误保留重试行为。工具活动不等于成功读过记忆。                                                                                                                     |
+| 位置         | 源码基线上的当前行为                                                                                                                                                                                                                            |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 普通模型循环 | 开启托管记忆时，`LlmClient.runManagedAutoMemoryBackgroundTasks()` 为符合条件的已完成用户请求调度提取；排除内部 session-agent 对话。                                                                                                             |
+| ACP          | `Session.#recordPromptCompletionEffects()` 在新的、成功的逻辑用户轮次后调度；重试、取消和循环保护停止不触发。                                                                                                                                   |
+| Manager      | `MemoryManager.scheduleExtract()` 检查主 agent 直接写记忆并串行化、排队提取；`runExtract()` 检查内存压力。                                                                                                                                      |
+| 游标         | 每个项目只有一份游标，保存 `{ sessionId, processedOffset, updatedAt }`。切换到其他会话时偏移清零；历史缩短时，只有旧偏移超过新长度才清零。`runAutoMemoryExtract()` 用这个原始历史偏移检测新的非空用户文本，但没有把这段未处理输入交给 planner。 |
+| 提取输入     | `captureCacheSafeParams()` 捕获最近 40 条 curated 历史并做精简。`runAutoMemoryExtractionByAgent()` 再清洗捕获的历史，作为 `extraHistory` 传入。因此原始历史、curated/精简历史和清洗后的提取输入，位置互不相同。                                 |
+| 实际执行     | planner 调用 `runForkedAgent()` 时没有传 `cacheSafeParams`，因此走 headless-agent 分支的 `initialMessages`。另一处 `createForkedChat()` 的 40 条上限属于 cache 分支，不是本提取路径的第二次截断。                                               |
+| 成功与失败   | 写入或带路径的工具活动可以推进游标；零次带路径工具调用会保留游标，错误保留重试行为。工具活动不等于成功读过记忆。                                                                                                                                |
+
+同目录的 [memory-system.md](memory-system.md) 记录同一子系统，但其「提取游标」一节仍把 `processedOffset` 记为每次提取后都推进到 `params.history.length`。这只在未处理切片中没有新的非空用户文本、因而提前返回时成立；完成提取的路径只有在本次运行确实有进展时才推进该偏移——本文的验收标准与必须失败的回归用例都以此为准。
 
 已配置快速模型时，提取器默认使用它，并有自己的系统提示，因此不能假设与主对话共享前缀缓存。历史超过 40 条后，提取窗口也会逐轮滑动。重复读取上下文仍可能命中 provider 缓存；换成移动的增量片段，可能减少原始输入，也会改变缓存复用。headless 结果只汇总输入、输出和总 token，没有缓存读写字段，缓存统计必须来自 provider 响应或请求捕获。仅靠源码分析，不能推导出降本或安全默认开启的结论。
 
@@ -142,4 +144,4 @@ payload 字符数不是精确的组件 token 数。可用时采用与 provider �
 
 实现 PR 前须决定：精确输入预算、单个超长轮次的表示、归属/generation 游标形态与迁移、写入串行化，以及生命周期边界保留输入的安全归属。这些未决项不能表述成已经实现的保证。
 
-格式与相对引用检查只能验证本文档。本文不宣称完成 build、单测、受控 provider 运行、真实模型基线、降本估算、commit、push 或新 PR。
+格式与相对引用检查只能验证本文档。本文不宣称完成 build、单测、受控 provider 运行、真实模型基线、降本估算，也不宣称已有实现 PR。
