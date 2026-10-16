@@ -165,6 +165,17 @@ export function useManagedSession(
         modelContext: previous.modelContext,
       };
     }
+    if (
+      previous?.sessionId === incoming.sessionId &&
+      (previous.approvalRevision ?? 0) > (incoming.approvalRevision ?? 0)
+    ) {
+      next = {
+        ...next,
+        approvalMode: previous.approvalMode,
+        approvalRevision: previous.approvalRevision,
+        initialApprovalMode: previous.initialApprovalMode,
+      };
+    }
     summaryRef.current = next;
     return next;
   }, []);

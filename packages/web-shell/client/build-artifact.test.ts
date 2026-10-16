@@ -519,12 +519,16 @@ describe('build artifact — transcript entry (#11031)', () => {
     // enter the shared table. With main 17d5f774 this branch measures
     // 1,334,173 UTF-16 units; the unchanged 1,336,000 ceiling retains 1,827
     // units of margin. Managed interactive code remains excluded here.
+    // Approval-policy copy (#14323) measures 1,336,282 at ebf1607d8f,
+    // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
+    // increase is shared i18n copy; substituting main's table restores the
+    // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_336_000);
+    expect(js.length).toBeLessThan(1_338_000);
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {
@@ -534,6 +538,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       'writeWorkspaceFile',
       'createWorkspaceDirectory',
       'deleteWorkspaceDirectory',
+      'deleteWorkspaceFile',
       'uploadWorkspaceFile',
     ]) {
       expect(packaged).toContain(method);
@@ -559,6 +564,10 @@ describe('build artifact — transcript entry (#11031)', () => {
       'files.sourceTooLarge',
     ] as const)
       expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
+    for (const key of Object.keys(FILES_MESSAGES_EN)) {
+      expect(bundle).not.toContain(`"${key}"`);
+      expect(bundle).not.toContain(`'${key}'`);
+    }
   });
 
   it('carries no Live Voice strings and looks none up', () => {

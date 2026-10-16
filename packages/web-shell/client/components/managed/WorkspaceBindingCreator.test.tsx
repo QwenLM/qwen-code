@@ -483,6 +483,22 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.props?.visibleToolbarActions).toContain('approvalMode');
   });
 
+  it('confirms creation against the immutable initial policy after a later switch', async () => {
+    approvalSelection();
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      approvalMode: 'yolo',
+      initialApprovalMode: 'default',
+      approvalRevision: 2,
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    const commit = await sendInitial('Preserve the initial selection');
+    expect(onCreated).toHaveBeenCalled();
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
   it('keeps explicit policy frozen when Session read-back reports another mode', async () => {
     const { createSession } = approvalSelection();
     getSession.mockResolvedValue({

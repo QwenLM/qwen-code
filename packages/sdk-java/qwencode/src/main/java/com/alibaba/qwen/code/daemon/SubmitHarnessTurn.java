@@ -20,6 +20,7 @@ public final class SubmitHarnessTurn {
     private final String payloadDigest;
     private final Long deadlineMillis;
     private final Map<String, Object> modelSelection;
+    private final Map<String, Object> approvalSelection;
 
     private SubmitHarnessTurn(Builder builder) {
         if (builder.session == null) {
@@ -46,6 +47,7 @@ public final class SubmitHarnessTurn {
         }
         this.deadlineMillis = builder.deadlineMillis;
         this.modelSelection = builder.modelSelection;
+        this.approvalSelection = builder.approvalSelection;
     }
 
     public static Builder builder() {
@@ -87,6 +89,8 @@ public final class SubmitHarnessTurn {
 
     Map<String, Object> getModelSelection() { return modelSelection; }
 
+    Map<String, Object> getApprovalSelection() { return approvalSelection; }
+
     Map<String, Object> toJson() {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("prompt", promptContent);
@@ -97,6 +101,9 @@ public final class SubmitHarnessTurn {
         }
         if (modelSelection != null) {
             result.put("modelSelection", modelSelection);
+        }
+        if (approvalSelection != null) {
+            result.put("approvalSelection", approvalSelection);
         }
         return result;
     }
@@ -109,6 +116,7 @@ public final class SubmitHarnessTurn {
         private String payloadDigest;
         private Long deadlineMillis;
         private Map<String, Object> modelSelection;
+        private Map<String, Object> approvalSelection;
 
         private Builder() {
         }
@@ -157,6 +165,16 @@ public final class SubmitHarnessTurn {
             }
             modelSelection = Collections.unmodifiableMap(new LinkedHashMap<>(
                     Map.of("modelId", modelId, "revision", revision)));
+            return this;
+        }
+
+        public Builder approvalSelection(String mode, long revision) {
+            if (mode == null || !List.of("default", "auto-edit", "yolo").contains(mode)
+                    || revision < 0 || revision > 9_007_199_254_740_991L) {
+                throw new IllegalArgumentException("Invalid Hosted approval selection");
+            }
+            approvalSelection = Collections.unmodifiableMap(new LinkedHashMap<>(
+                    Map.of("mode", mode, "revision", revision)));
             return this;
         }
 

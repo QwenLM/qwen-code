@@ -77,6 +77,8 @@ import {
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 
 const broker = vi.hoisted(() => ({
+  capabilityDigest:
+    'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91',
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
@@ -105,6 +107,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    readonly capabilityDigest = broker.capabilityDigest;
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
@@ -678,6 +681,7 @@ async function shellReceiptScenario(
     | 'sentinel'
     | 'lost-admission'
     | 'lost-reserve',
+  approval?: { mode: HostedApprovalMode },
 ) {
   const shellCall = {
     ...calls[0],
@@ -847,6 +851,10 @@ async function shellReceiptScenario(
       mode !== 'large' ||
       Buffer.byteLength(JSON.stringify(messageParts)) <= 64 * 1024,
     { owner, captureBytes: 1024 * 1024 },
+    undefined,
+    approval
+      ? { settings: { mode: approval.mode, timeoutMs: 1000 }, waiters }
+      : undefined,
   );
   const execution = shellTurn.execute(
     [shellCall],
@@ -947,6 +955,11 @@ async function shellReceiptScenario(
   ).toHaveLength(1);
 }
 
+it('runs Full Access Shell without ordinary Actions through durable result and replay acceptance', async () => {
+  await shellReceiptScenario('normal', { mode: 'yolo' });
+  expect(actionIds()).toEqual([]);
+});
+
 it.each([
   'normal',
   'abandoned',
@@ -958,7 +971,7 @@ it.each([
   'lost-reserve',
 ] as const)(
   'uses only the original Shell publication after Broker %s',
-  shellReceiptScenario,
+  (mode) => shellReceiptScenario(mode),
 );
 
 it('records a durable receipt for a proven unstarted Shell', async () => {

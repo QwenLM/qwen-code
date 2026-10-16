@@ -707,6 +707,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_file_write',
   // Binary file upload (never overwrites; auto-numbers occupied names).
   'workspace_file_upload',
+  'workspace_file_delete',
   'workspace_directory_create',
   'workspace_directory_delete',
   // Mutation control routes (approval mode, workspace tool/skill toggles,
