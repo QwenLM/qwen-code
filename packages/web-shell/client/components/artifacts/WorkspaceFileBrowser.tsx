@@ -138,6 +138,7 @@ export function WorkspaceFileBrowser({
   }>();
   const deletedRef = useRef<((path: string) => void) | undefined>(undefined);
   const [deletePath, setDeletePath] = useState<string>();
+  const [deleteKind, setDeleteKind] = useState<'file' | 'directory'>('file');
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
   const [createName, setCreateName] = useState('');
@@ -358,7 +359,7 @@ export function WorkspaceFileBrowser({
       const child = `${path}/`;
       deletedPaths.add(path);
       for (const key of entries.keys()) {
-        if (key === child || key.startsWith(child)) {
+        if (key === path || key === child || key.startsWith(child)) {
           entries.delete(key);
           createdEntries.delete(key);
         }
@@ -370,6 +371,7 @@ export function WorkspaceFileBrowser({
         }
       }
       if (tree.getItem(child)) tree.remove(child, { recursive: true });
+      else if (tree.getItem(path)) tree.remove(path);
       const parent = path.split('/').slice(0, -1).join('/');
       const directory = cache.get(parent);
       if (directory)
@@ -610,17 +612,23 @@ export function WorkspaceFileBrowser({
   };
 
   const confirmDelete = async () => {
-    if (!deletePath || deleting || isBusy || !actions.deleteDirectory) return;
+    const remove =
+      deleteKind === 'directory'
+        ? actions.deleteDirectory
+        : actions.deleteWorkspaceFile;
+    if (!deletePath || deleting || isBusy || !remove) return;
     const path = deletePath;
     const lifetime = lifetimeRef.current;
     setDeleting(true);
     setDeleteError(undefined);
     try {
-      await actions.deleteDirectory(path);
+      await remove(path);
       if (lifetimeRef.current !== lifetime) return;
       deletedRef.current?.(path);
       setSelectedPath((selected) =>
-        selected?.startsWith(`${path}/`) ? undefined : selected,
+        selected === path || selected?.startsWith(`${path}/`)
+          ? undefined
+          : selected,
       );
       setDeletePath(undefined);
     } catch (error) {
@@ -723,6 +731,7 @@ export function WorkspaceFileBrowser({
                       const path = menu.path.replace(/\/$/, '');
                       void runMenuAction(() => {
                         setDeleteError(undefined);
+                        setDeleteKind('directory');
                         setDeletePath(path);
                       }, true);
                     }}
@@ -783,6 +792,22 @@ export function WorkspaceFileBrowser({
                 >
                   {t('common.download')}
                 </DropdownMenuItem>
+                {menu.kind === 'file' && actions.deleteWorkspaceFile && (
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => {
+                      captureDialogFocus();
+                      const path = menu.path;
+                      void runMenuAction(() => {
+                        setDeleteError(undefined);
+                        setDeleteKind('file');
+                        setDeletePath(path);
+                      }, true);
+                    }}
+                  >
+                    {t('files.deleteMenu')}
+                  </DropdownMenuItem>
+                )}
               </>
             )}
           </DropdownMenuContent>
@@ -883,11 +908,25 @@ export function WorkspaceFileBrowser({
           }}
         >
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('files.deleteFolderTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t(
+                deleteKind === 'directory'
+                  ? 'files.deleteFolderTitle'
+                  : 'files.deleteTitle',
+              )}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              {t('files.deleteFolderWarning')}
+              {t(
+                deleteKind === 'directory'
+                  ? 'files.deleteFolderWarning'
+                  : 'files.deleteWarning',
+              )}
               <span className="mt-2 block break-all font-medium text-foreground">
-                {safeDisplayText(deletePath)}
+                {safeDisplayText(
+                  deleteKind === 'file'
+                    ? absolutePath(deletePath ?? '')
+                    : deletePath,
+                )}
               </span>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -908,7 +947,13 @@ export function WorkspaceFileBrowser({
                 void confirmDelete();
               }}
             >
-              {t(deleting ? 'files.deleting' : 'files.deleteMenu')}
+              {t(
+                deleting
+                  ? 'files.deleting'
+                  : deleteKind === 'file'
+                    ? 'files.delete'
+                    : 'files.deleteMenu',
+              )}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

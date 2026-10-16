@@ -223,6 +223,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `workspace_file_read`). The advertised upload byte cap is surfaced via
   // `limits.maxWorkspaceFileUploadBytes`.
   workspace_file_upload: { since: 'v1' },
+  // Qualified-only deletion of regular files in trusted local workspaces.
+  workspace_file_delete: { since: 'v1' },
   workspace_directory_create: { since: 'v1' },
   workspace_directory_delete: { since: 'v1' },
   // Daemon hosts the session-level approval-mode
@@ -492,7 +494,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // surfacing a guaranteed launch failure.
   workspace_local_terminal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
-  // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
+  // Covers core file read/write/upload/delete, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings

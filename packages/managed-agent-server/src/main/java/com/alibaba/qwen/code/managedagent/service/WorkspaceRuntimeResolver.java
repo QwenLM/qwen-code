@@ -85,7 +85,7 @@ final class WorkspaceRuntimeResolver {
             authority.authorizeLifecycle(session, lifecycle);
         }
         ContextBinding binding = session.workspace();
-        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        Mount mount = mount(binding);
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -107,7 +107,7 @@ final class WorkspaceRuntimeResolver {
      * feature exists for.
      */
     void verifyInstallable(ContextBinding binding, String targetCwdRelative) {
-        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        Mount mount = mount(binding);
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -134,12 +134,28 @@ final class WorkspaceRuntimeResolver {
      * continuity check as an acquisition.
      */
     java.nio.file.Path storageRoot(ContextBinding binding) {
-        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        Mount mount = mount(binding);
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
         return mount.root();
+    }
+
+    private Mount mount(ContextBinding binding) {
+        Mount configured = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        if (configured != null) {
+            return configured;
+        }
+        Path root = authority.createdStorageRoot(binding.getTenantId(), binding.getStorageId());
+        if (root == null) {
+            return null;
+        }
+        try {
+            return new Mount(root, Files.readAttributes(root, BasicFileAttributes.class).fileKey());
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable(error);
+        }
     }
 
     // The acquire-path mount check: every I/O anomaly is the terminal

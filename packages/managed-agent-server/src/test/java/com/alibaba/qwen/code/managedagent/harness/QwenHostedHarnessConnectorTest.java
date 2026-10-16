@@ -319,7 +319,7 @@ class QwenHostedHarnessConnectorTest {
             assertThat(created).doesNotContainKey("suppressChildAgents");
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
-                .doesNotContainKeys("childWorkspaces", "captureBytes");
+                .doesNotContainKeys("childWorkspaces", "captureBytes", "childSnapshots");
         properties.getToolPublication().setExecutionBytes(2097152L);
         QwenHostedHarnessConnector restarted = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(restarted, "client", client);
@@ -413,15 +413,38 @@ class QwenHostedHarnessConnectorTest {
                 .containsEntry("childWorkspaces", true)
                 .containsEntry("toolProfile", profile)
                 .containsEntry("approvalMode", "yolo")
-                .doesNotContainKey("suppressChildAgents");
+                .doesNotContainKey("suppressChildAgents")
+                .doesNotContainKey("childSnapshots");
         for (LoadHarnessSession request : load.getAllValues()) {
             assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(request, "toJson"))
                     .containsEntry("childWorkspaces", true)
                     .containsEntry("toolProfile", profile)
-                    .doesNotContainKey("suppressChildAgents");
+                    .doesNotContainKey("suppressChildAgents")
+                    .doesNotContainKey("childSnapshots");
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getAllValues().get(2), "toJson"))
                 .containsEntry("lifecycleAuthority", Map.of("operationId", "close-1", "claimGeneration", 2L));
+
+        // #13753 I3: the snapshot switch adds its flag to the same requests.
+        properties.getRuntimeBroker().setChildSnapshotsEnabled(true);
+        org.mockito.Mockito.clearInvocations(client);
+        fresh.get().createOrLoad("tenant-a", SESSION_ID, false);
+        fresh.get().createOrLoad("tenant-a", SESSION_ID, true);
+        fresh.get().recoverManagedRuntime("tenant-a", SESSION_ID, false);
+        fresh.get().settleLifecycle(operation);
+        fresh.get().rename("tenant-a", SESSION_ID, "internal lead");
+        ArgumentCaptor<CreateHarnessSession> snapshotCreate = ArgumentCaptor.forClass(CreateHarnessSession.class);
+        ArgumentCaptor<LoadHarnessSession> snapshotLoad = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).createSession(snapshotCreate.capture());
+        verify(client, times(4)).loadSession(snapshotLoad.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(snapshotCreate.getValue(), "toJson"))
+                .containsEntry("childWorkspaces", true)
+                .containsEntry("childSnapshots", true);
+        for (LoadHarnessSession request : snapshotLoad.getAllValues()) {
+            assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(request, "toJson"))
+                    .containsEntry("childWorkspaces", true)
+                    .containsEntry("childSnapshots", true);
+        }
     }
 
     @ParameterizedTest
@@ -1127,6 +1150,9 @@ class QwenHostedHarnessConnectorTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        // #13753 I3: this load restates the host's capabilities too.
+        properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        properties.getRuntimeBroker().setChildSnapshotsEnabled(true);
         // The child's task Turn already ended, so there is no CANCELLING
         // Turn for a cancellation grant: the stop must not need one, nor
         // the mount a new-work grant verifies.
@@ -1146,6 +1172,8 @@ class QwenHostedHarnessConnectorTest {
                 .containsEntry("stopMessages", true)
                 .containsEntry("passiveManagedRuntimeRecovery", true)
                 .containsEntry("suppressChildAgents", true)
+                .containsEntry("childWorkspaces", true)
+                .containsEntry("childSnapshots", true)
                 .doesNotContainKey("driveRuntimeRecovery");
         verify(execution).authorizeCommittedStop(session);
         verify(execution, never()).authorize(session);

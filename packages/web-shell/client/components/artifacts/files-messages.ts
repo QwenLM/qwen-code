@@ -1,4 +1,8 @@
 export const FILES_MESSAGES_EN = {
+  'files.delete': 'Delete file',
+  'files.deleteTitle': 'Delete file?',
+  'files.deleteWarning':
+    'This will permanently delete the file. This cannot be undone.',
   'files.copyRelativePath': 'Copy relative path',
   'files.copyAbsolutePath': 'Copy absolute path',
   'files.reference': 'Reference',
@@ -33,6 +37,9 @@ export const FILES_MESSAGES_EN = {
 };
 
 export const FILES_MESSAGES_ZH = {
+  'files.delete': '删除文件',
+  'files.deleteTitle': '删除文件？',
+  'files.deleteWarning': '此操作将永久删除该文件。删除后不可恢复。',
   'files.copyRelativePath': '复制相对路径',
   'files.copyAbsolutePath': '复制绝对路径',
   'files.reference': '引用',
