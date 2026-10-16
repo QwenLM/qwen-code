@@ -174,7 +174,8 @@ source installs do not have.
      `process.execPath`.
   2. Within that trusted root every declaration is validated before use:
      `runtime` must be exactly `'bun'` or `'node'`, and the interpreter —
-     the `interpreter` field resolved against the package root, else the
+     the `interpreter` field resolved against the package root (absolute paths
+     are used as-is; no containment is enforced), else the
      standard `bun/bin/bun` / `node/bin/node` location — must be an existing
      regular file. POSIX additionally requires execute permission; Windows
      checks regular-file existence only, not PE validity or launchability.
@@ -185,7 +186,16 @@ source installs do not have.
      `process.execPath`, the interpreter running this process (host Node,
      bundled Node, or the private bundled Bun). The resolution never
      guesses at a different binary and never throws.
-- Result memoized per process; `resetJsInterpreterCacheForTests()` clears it.
+- `runtime` is metadata with no current production read site: the three
+  migrated callers consume only `command`. Runtime-specific consumers,
+  including any future S3 use of this field, are not implemented here.
+- Result memoized per process: the first caller's URL determines resolution;
+  later caller URLs are ignored. Current production callers share one
+  installation root. `resetJsInterpreterCacheForTests()` clears the cache.
+- The sandbox file-worker selects this interpreter, but bwrap/landlock still
+  stage `realpathSync(process.execPath)` in their allowlists. That coupling
+  remains an unimplemented S3 migration; this PR does not establish support
+  for layouts where the resolved interpreter differs from the staged binary.
 - Supported scope: **interpreter-based Node/Bun distributions**. Rejection
   returns `process.execPath`, which would be the application binary in a
   compiled build. This PR does not support compiled applications or provide

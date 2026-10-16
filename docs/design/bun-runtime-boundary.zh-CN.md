@@ -132,9 +132,11 @@ S1 已接入选择器的三处是 `core/src/code-mode/host-client.ts`、`core/sr
 - `isBunRuntime(): boolean` —— 唯一的运行时检测点。
 - `getJsInterpreterCommand(importMetaUrl): { command, runtime }` —— 解析任意 JS 子进程使用的解释器：
   1. 唯一可信位置是 **standalone 包根**：调用方 bundle 目录（`resolveBundleDir`）的父目录，必须同时存在 `manifest.json` 与 standalone 入口标记 `lib/cli-entry.js`。**不做向上遍历** —— 无关祖先清单（例如 npm 宿主工程的构建 manifest）永远不会被读取，npm、源码与 SDK 布局因此始终使用 `process.execPath`。
-  2. 在该可信包根内，所有声明先校验后使用：`runtime` 必须恰为 `'bun'` 或 `'node'`；解释器 —— `interpreter` 字段相对包根解析，否则取标准位置 `bun/bin/bun` / `node/bin/node` —— 必须是已存在的普通文件。POSIX 还要求执行权限；Windows 只检查普通文件存在，不验证 PE 格式或实际可启动性，默认路径为 `bun/bun.exe` / `node/node.exe`。
+  2. 在该可信包根内，所有声明先校验后使用：`runtime` 必须恰为 `'bun'` 或 `'node'`；解释器 —— `interpreter` 字段相对包根解析（绝对路径原样采用，不强制限制在包根内），否则取标准位置 `bun/bin/bun` / `node/bin/node` —— 必须是已存在的普通文件。POSIX 还要求执行权限；Windows 只检查普通文件存在，不验证 PE 格式或实际可启动性，默认路径为 `bun/bun.exe` / `node/node.exe`。
   3. 任何无效或缺失的声明 —— 非对象清单、未知 `runtime`、非字符串 `interpreter`、二进制缺失、目录、POSIX 不可执行文件、入口标记缺失 —— 一律回退 `process.execPath`（运行当前进程的解释器：宿主 Node、内置 Node，或 standalone Bun 形态的私有内置 Bun）。解析绝不猜测其他二进制，也绝不抛出异常。
-- 结果按进程记忆；`resetJsInterpreterCacheForTests()` 清除。
+- `runtime` 是当前没有生产读点的元数据：三处已迁移调用方仅消费 `command`。按运行时区分的消费逻辑（包括未来 S3 对该字段的任何用途）尚未在此实现。
+- 结果按进程记忆：首次调用方的 URL 决定解析结果，后续调用方 URL 被忽略；当前生产调用方共享一个安装根。`resetJsInterpreterCacheForTests()` 清除缓存。
+- 沙箱 file-worker 选择此解释器，但 bwrap/landlock 的 allowlist 仍暂存 `realpathSync(process.execPath)`。这项衔接仍是尚未实现的 S3 迁移；本 PR 不证明解析出的解释器与暂存二进制不同时的布局已受支持。
 - 支持范围：**基于解释器的 Node/Bun 分发**。拒绝声明时返回 `process.execPath`，它在编译形态下会是应用二进制。本 PR 不支持编译应用，也没有提供编译制品生产路径。未来该形态必须显式打包解释器并独立验证失败行为后才能采用；当前回退不保证在编译形态下得到可用解释器。
 
 迁移规则：任何新增的、以子进程方式运行 JS 文件或 `-e` 片段的代码必须走 `getJsInterpreterCommand`；再唤起应用的位置走 `QWEN_CODE_CLI` / 入口回退。
