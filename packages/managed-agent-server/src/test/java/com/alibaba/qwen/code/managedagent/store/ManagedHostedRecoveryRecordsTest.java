@@ -101,6 +101,43 @@ class ManagedHostedRecoveryRecordsTest {
     }
 
     @Test
+    void validatesAgentSkillReferencesInsideTheManagedDefinitionClosure() {
+        byte[] bytes = "[{\"name\":\"review\",\"description\":\"Review\",\"body\":\"Read the diff.\"}]"
+                .getBytes(StandardCharsets.UTF_8);
+        var skills = new ManagedSessionStoreModels.StoredResource("skills", "managed-agent-skills", 1,
+                bytes.length, ToolPublicationContract.sha256(bytes), bytes);
+        ObjectNode agent = json.createObjectNode();
+        agent.set("skillsRef", reference(skills));
+        ObjectNode body = json.createObjectNode();
+        body.set("agentDefinition", agent);
+        var definition = stored("definition", "managed-definition", body);
+        var ref = reference(definition);
+        java.util.function.Function<String, ManagedSessionStoreModels.StoredResource> reader = id -> {
+            if (id.equals(definition.resourceId())) {
+                return definition;
+            }
+            if (id.equals(skills.resourceId())) {
+                return skills;
+            }
+            throw new IllegalStateException("Missing nested resource");
+        };
+        assertThatCode(() -> ManagedHostedRecoveryRecords.reference(ref, "managed-definition",
+                "tenant", "workspace", "session", reader)).doesNotThrowAnyException();
+        assertThatThrownBy(() -> ManagedHostedRecoveryRecords.reference(ref, "managed-definition",
+                "tenant", "workspace", "session", id -> {
+                    if (id.equals(definition.resourceId())) {
+                        return definition;
+                    }
+                    throw new IllegalStateException("Missing skills");
+                })).hasMessageContaining("Missing skills");
+        assertThatThrownBy(() -> ManagedHostedRecoveryRecords.reference(ref, "managed-definition",
+                "tenant", "workspace", "session", id -> id.equals(definition.resourceId()) ? definition
+                        : new ManagedSessionStoreModels.StoredResource("skills", skills.kind(), 1,
+                                skills.byteLength(), "0".repeat(64), bytes)))
+                .hasMessageContaining("Hosted nested resource conflicts");
+    }
+
+    @Test
     void acceptsDigestCleanupIdentityForTheMaximumStablePrompt() {
         String prompt = "a".repeat(512);
         String original = "hosted-cleanup:" + prompt + ":" + prompt;

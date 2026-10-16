@@ -210,8 +210,17 @@ public class SessionMessageRelay {
     private boolean olderOwedOnRun(MessageRow row, String childRunId) {
         for (String resource : store.olderOwedMessages(row.tenantId(),
                 row.senderSessionId(), row.messageId())) {
-            JsonNode older = readJson(records.readResource(row.tenantId(),
-                    row.senderSessionId(), resource), "older message body");
+            String text = records.readResource(row.tenantId(),
+                    row.senderSessionId(), resource);
+            JsonNode older;
+            try {
+                older = readJson(text, "older message body");
+            } catch (IllegalStateException unreadable) {
+                // A body not readable yet cannot prove its run: it holds
+                // like one to this run, at no attempt to this message. Its
+                // own step fails the same read, so its give-up ends this.
+                return true;
+            }
             if (childRunId.equals(older.path("childRunId").textValue())) {
                 return true;
             }

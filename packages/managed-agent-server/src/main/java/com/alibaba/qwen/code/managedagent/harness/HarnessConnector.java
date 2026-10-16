@@ -9,6 +9,10 @@ import java.util.Map;
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
 
+    default boolean supportsApprovalSelection() { return false; }
+
+    default boolean supportsModelSelection() { return false; }
+
     default boolean isWorkspaceFilesAvailable() {
         return false;
     }
