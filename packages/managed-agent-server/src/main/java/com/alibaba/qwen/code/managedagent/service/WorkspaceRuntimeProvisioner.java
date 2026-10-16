@@ -35,12 +35,18 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         if (!resolved.scope().equals(scope)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        return new RuntimeProvisionRequest(scope, isolationKey, kind(), resolved.binding().getStorageId());
+        var selected = delegate.createRequest(scope, isolationKey);
+        return new RuntimeProvisionRequest(scope, isolationKey, selected.getProvisionerKind(), resolved.binding().getStorageId());
     }
 
     @Override
     public String kind() {
         return delegate.kind();
+    }
+
+    @Override
+    public boolean supportsKind(String kind) {
+        return delegate.supportsKind(kind);
     }
 
     @Override
@@ -87,6 +93,11 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     @Override
     public boolean supportsDrainedStop() {
         return delegate.supportsDrainedStop();
+    }
+
+    @Override
+    public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
+        return delegate.supportsDrainedStop(binding);
     }
 
     @Override
