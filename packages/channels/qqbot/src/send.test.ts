@@ -2836,3 +2836,127 @@ describe('replyMsgId cleanup timer', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Per-turn streaming identity (turn generation + per-session reply anchor)
+// ---------------------------------------------------------------------------
+describe('per-turn streaming identity', () => {
+  function makeIdentityChannel(): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  it('bumps the turn generation and records the triggering message id at prompt start', () => {
+    const ch = makeIdentityChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const onPromptStart = (
+      ch as unknown as {
+        onPromptStart: (
+          chatId: string,
+          sessionId: string,
+          messageId?: string,
+        ) => void;
+      }
+    ).onPromptStart.bind(ch);
+
+    onPromptStart('test-chat', 'sess-1', 'msg-A');
+
+    expect((chp['turnCounter'] as Map<string, number>).get('sess-1')).toBe(1);
+    const anchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    expect(anchors.get('sess-1')?.msgId).toBe('msg-A');
+
+    // The next prompt is a new generation, and its anchor replaces the old one.
+    onPromptStart('test-chat', 'sess-1', 'msg-B');
+
+    expect((chp['turnCounter'] as Map<string, number>).get('sess-1')).toBe(2);
+    expect(anchors.get('sess-1')?.msgId).toBe('msg-B');
+  });
+
+  it('bumps the generation for a proactive prompt and records no anchor', () => {
+    const ch = makeIdentityChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    (
+      ch as unknown as {
+        onPromptStart: (
+          chatId: string,
+          sessionId: string,
+          messageId?: string,
+        ) => void;
+      }
+    ).onPromptStart('test-chat', 'sess-1');
+
+    // No triggering message: the counter still moves so stale-state detection
+    // can engage, but there is nothing to anchor to.
+    expect((chp['turnCounter'] as Map<string, number>).get('sess-1')).toBe(1);
+    expect(
+      (chp['sessionReplyMsgId'] as Map<string, unknown>).has('sess-1'),
+    ).toBe(false);
+  });
+
+  it('keeps a msg_seq counter while another session still anchors it', () => {
+    const ch = makeIdentityChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const anchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const release = (
+      ch as unknown as {
+        releaseSessionReplyAnchor: (
+          sessionId: string,
+          expectedMsgId?: string,
+        ) => void;
+      }
+    ).releaseSessionReplyAnchor.bind(ch);
+
+    msgSeqMap.set('msg-A', 3);
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+
+    // Another session releases: s1's anchor still holds the counter.
+    release('s2', 'msg-A');
+    expect(msgSeqMap.get('msg-A')).toBe(3);
+
+    // The holding session releases: the counter is reclaimed.
+    release('s1', 'msg-A');
+    expect(msgSeqMap.has('msg-A')).toBe(false);
+  });
+
+  it('does not release a successor anchor when the expectation does not match', () => {
+    const ch = makeIdentityChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const anchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    anchors.set('s1', { msgId: 'msg-successor', timestamp: Date.now() });
+
+    (
+      ch as unknown as {
+        releaseSessionReplyAnchor: (
+          sessionId: string,
+          expectedMsgId?: string,
+        ) => void;
+      }
+    ).releaseSessionReplyAnchor('s1', 'msg-old');
+
+    expect(anchors.get('s1')?.msgId).toBe('msg-successor');
+  });
+});
