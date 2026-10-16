@@ -2115,6 +2115,10 @@ export default {
   'to retry last request': 'чтобы повторить последний запрос',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Недействительный API Key. Coding Plan API Keys начинаются с "sk-sp-". Проверьте.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Недействительный API Key. Ключи с оплатой по использованию начинаются с "sk-" или "sk-ws-". Для ключей Token Plan ("sk-sp-") используйте запись Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Недействительный API Key. Token Plan API Keys начинаются с "sk-sp-". Создайте ключ в консоли Token Plan или используйте запись Standard API Key для ключа с оплатой по использованию.',
   'Lock release warning': 'Предупреждение о снятии блокировки',
   'Metadata write warning': 'Предупреждение о записи метаданных',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
