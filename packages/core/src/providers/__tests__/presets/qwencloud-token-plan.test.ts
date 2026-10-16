@@ -49,19 +49,29 @@ describe('qwencloudTokenPlanProvider', () => {
     );
   });
 
-  it('seeds only models the Token Plan endpoint serves', () => {
-    // A live GET /models on the China Token Plan route (real subscription key,
-    // 2026-10-16) serves neither kimi-k3 nor deepseek-v4-pro-0813; the Standard
-    // catalog keeps both for the pay-as-you-go endpoint.
+  it('keeps callable DeepSeek metadata while excluding the unavailable Kimi default', () => {
     expect(
       (qwencloudTokenPlanProvider.models ?? []).map((model) => model.id),
     ).toEqual([
       'qwen3.8-max',
       'qwen3.7-plus',
       'qwen3.8-flash',
+      'deepseek-v4-pro-0813',
       'deepseek-v4.1-flash',
       'glm-5.3',
     ]);
+    const plan = buildInstallPlan(qwencloudTokenPlanProvider, {
+      baseUrl: QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL,
+      apiKey: 'sk-sp-test',
+      modelIds: ['deepseek-v4-pro-0813'],
+    });
+    expect(plan.modelProviders?.[0].models[0]).toMatchObject({
+      id: 'deepseek-v4-pro-0813',
+      capabilities: {
+        reasoning: { efforts: ['low', 'high', 'max'], defaultEffort: 'high' },
+      },
+      generationConfig: { contextWindowSize: 1000000 },
+    });
   });
 
   it('requires the dedicated sk-sp- key prefix', () => {

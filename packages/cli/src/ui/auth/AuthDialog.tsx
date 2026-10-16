@@ -25,10 +25,7 @@ import {
   THIRD_PARTY_PROVIDERS,
 } from '@qwen-code/qwen-code-core/providers/all-providers.js';
 import { customProvider } from '@qwen-code/qwen-code-core/providers/presets/custom-provider.js';
-import {
-  findExistingProviderModels,
-  getDefaultModelIds,
-} from '@qwen-code/qwen-code-core/providers/provider-config.js';
+import { findExistingProviderModels } from '@qwen-code/qwen-code-core/providers/provider-config.js';
 import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.js';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -222,8 +219,7 @@ export function AuthDialog(): React.JSX.Element {
   const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
     const saved = findSavedModels(providerConfig);
     if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+    return saved.models.map((m) => m.id);
   };
 
   const handleProviderSelect = (providerId: string) => {

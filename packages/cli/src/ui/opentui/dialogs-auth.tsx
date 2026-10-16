@@ -48,7 +48,6 @@ import {
   findExistingProviderModels,
   findProviderByCredentials,
   findProviderById,
-  getDefaultModelIds,
   getErrorMessage,
   logAuth,
 } from '@qwen-code/qwen-code-core';
@@ -1409,8 +1408,7 @@ function AuthDialogFlow({
   const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
     const saved = findSavedModels(providerConfig);
     if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+    return saved.models.map((m) => m.id);
   };
 
   const handleProviderSelect = useCallback(
