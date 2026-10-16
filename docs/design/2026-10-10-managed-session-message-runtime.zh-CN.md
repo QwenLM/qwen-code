@@ -95,7 +95,7 @@ child 发往父的消息走同样的步骤,只是两个 journal 互换;其第 2 
 - `packages/cli/src/serve/hosted-workspace-tool-turn.ts`:两个 `send_message` 声明及其准入与执行。
 - `packages/cli/src/serve/hosted-harness-session.ts`:funnel 接线、wake 来源、wake turn 之后的消费、关闭时的结算、恢复白名单,以及 `/messages/operations` 路由。
 - `packages/sdk-java/qwencode`:`HostedHarnessClient.runMessageOperation`。
-- `packages/sdk-java/managed-agent-server`:`V64__managed_session_message_relay.sql`、`SessionMessageRelayStore`、`SessionMessageRelay`、其调度器、`HarnessConnector.runMessageOperation`、`ChildResultRelay` 中的完成判据与续跑组合、`ChildResultRelayStore` 中的 journal 读取,以及 `PREVIEW_TOOLS`。
+- `packages/managed-agent-server`:`V64__managed_session_message_relay.sql`、`SessionMessageRelayStore`、`SessionMessageRelay`、其调度器、`HarnessConnector.runMessageOperation`、`ChildResultRelay` 中的完成判据与续跑组合、`ChildResultRelayStore` 中的 journal 读取,以及 `PREVIEW_TOOLS`。
 - 两种语言中各文件旁的测试;两种语言的本设计;H4d-a 与 H4b 设计中的指引。
 
 ## 验证
