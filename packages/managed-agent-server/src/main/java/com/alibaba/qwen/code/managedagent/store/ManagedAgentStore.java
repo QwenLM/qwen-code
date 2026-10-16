@@ -1,6 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelChangeResult;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelContext;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelOption;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelSelection;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.EventIdentity.Identity;
@@ -57,6 +62,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -128,12 +134,14 @@ public class ManagedAgentStore implements AgentStateStore {
     private final String agentRevision;
     private final List<String> definitionToolProfiles;
     private final List<String> definitionModels;
+    private final List<WebShellModelOption> modelCatalog;
     private ManagedAgentDefinitionStore definitions;
     private static final Pattern DEFINITION_REVISION = Pattern.compile(
             "^[1-9][0-9]{0,17}$");
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
+    private final WorkspaceCreationRoots createdRoots;
     private static final String SESSION_WITH_STREAM =
             "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
     private final RowMapper<SessionRecord> sessionMapper = (result, row) -> {
@@ -290,9 +298,22 @@ public class ManagedAgentStore implements AgentStateStore {
         this.agentRevision = properties.getAgentRevision();
         this.definitionToolProfiles = properties.getDefinitionToolProfiles();
         this.definitionModels = properties.getDefinitionModels();
+        var modelIds = new HashSet<String>();
+        this.modelCatalog = properties.getModelCatalog().stream().map(option -> {
+            String id = option.getModelId();
+            String label = option.getLabel() == null ? id : option.getLabel();
+            if (StringUtils.isBlank(id) || id.getBytes(StandardCharsets.UTF_8).length > 512
+                    || id.chars().anyMatch(Character::isISOControl) || !modelIds.add(id)
+                    || StringUtils.isBlank(label) || label.length() > 512
+                    || label.chars().anyMatch(Character::isISOControl)) {
+                throw new IllegalArgumentException("Invalid or duplicate Managed model catalog entry");
+            }
+            return new WebShellModelOption(id, label);
+        }).toList();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
+        this.createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         if (StringUtils.isBlank(agentRevision)
                 || agentRevision.length() > 128) {
             throw new IllegalArgumentException(
@@ -322,6 +343,18 @@ public class ManagedAgentStore implements AgentStateStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest,
             WorkspaceSelection selection) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input,
+                payloadDigest, selection, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection, String requestedApprovalMode) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -333,8 +366,8 @@ public class ManagedAgentStore implements AgentStateStore {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst(), false);
         }
-        AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
-                true);
+        AgentPin pin = selectApprovalMode(resolveAgentPin(tenantId, agentId,
+                requestedRevision, true), requestedApprovalMode);
         if (!input.isEmpty() && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
                 && !workspaceShellEnabled) {
             throw workspaceExecutionUnavailable();
@@ -348,14 +381,17 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || workspaceMounts.stream().noneMatch(mount ->
-                                tenantId.equals(mount.tenantId())
-                                        && workspace.binding().getStorageId().equals(mount.storageId())))) {
+                        || !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw workspaceExecutionUnavailable();
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 workspace, actorId, pin);
+    }
+
+    private boolean configuredStorage(String tenant, String storage) {
+        return workspaceMounts.stream().anyMatch(mount -> tenant.equals(mount.tenantId())
+                && storage.equals(mount.storageId())) || createdRoots.resolve(tenant, storage, false) != null;
     }
 
     /** Trusted internal creation; public requests and definitions cannot select this policy. */
@@ -378,8 +414,7 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
         if (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                 || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                || workspaceMounts.stream().noneMatch(mount -> tenantId.equals(mount.tenantId())
-                        && workspace.binding().getStorageId().equals(mount.storageId()))) {
+                || !configuredStorage(tenantId, workspace.binding().getStorageId())) {
             throw workspaceExecutionUnavailable();
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
@@ -843,6 +878,33 @@ public class ManagedAgentStore implements AgentStateStore {
      */
     private record AgentPin(String revision, String digest,
             String approvalMode, String toolProfile) {
+    }
+
+    @Override
+    @Transactional
+    public WebShellSessionOptions workspaceSessionOptions(
+            String tenantId, String agentId) {
+        AgentPin pin = resolveAgentPin(tenantId, agentId, null, true);
+        return new WebShellSessionOptions(
+                pin.approvalMode(), availableApprovalModes(pin));
+    }
+
+    private static List<String> availableApprovalModes(AgentPin pin) {
+        return pin.digest() != null ? List.of(pin.approvalMode())
+                : WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
+                        ? List.of("default", "auto-edit")
+                        : List.of("default", "auto-edit", "yolo");
+    }
+
+    private static AgentPin selectApprovalMode(AgentPin pin, String requested) {
+        if (requested == null) {
+            return pin;
+        }
+        if (!availableApprovalModes(pin).contains(requested)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "unsupported_approval_mode",
+                    "The selected approval mode is not available for this Agent.");
+        }
+        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile());
     }
 
     // Called only for a new admission; a retry has already replayed and
@@ -3367,6 +3429,135 @@ public class ManagedAgentStore implements AgentStateStore {
         return result;
     }
 
+    @Override
+    public Map<String, WebShellModelContext> findModelContexts(
+            String tenantId, List<String> sessionIds) {
+        return ManagedExtensionRecordStore.findModelContexts(jdbc, tenantId, sessionIds);
+    }
+
+    @Override
+    public List<WebShellModelOption> modelOptions() { return modelCatalog; }
+
+    @Override
+    public Map<String, WebShellModelSelection> findModelSelections(String tenantId,
+            List<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Map.of();
+        }
+        List<Object> args = new ArrayList<>();
+        args.add(tenantId);
+        args.addAll(sessionIds);
+        Map<String, WebShellModelSelection> result = new HashMap<>();
+        jdbc.query("SELECT session_id, model_id, model_revision FROM ma_session WHERE tenant_id = ?"
+                + " AND session_id IN (" + placeholders(sessionIds.size())
+                + ") AND session_kind = 'PUBLIC' AND workspace_id IS NOT NULL AND model_id IS NOT NULL",
+                row -> {
+                    result.put(row.getString("session_id"), new WebShellModelSelection(
+                            row.getString("model_id"), row.getLong("model_revision")));
+                }, args.toArray());
+        return result;
+    }
+
+    @Override
+    public WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
+            String promptId) {
+        var rows = jdbc.query("SELECT model_id, model_revision FROM ma_turn WHERE tenant_id = ?"
+                + " AND session_id = ? AND prompt_id = ?", (row, index) -> row.getString("model_id") == null
+                        ? null : new WebShellModelSelection(row.getString("model_id"),
+                                row.getLong("model_revision")), tenantId, sessionId, promptId);
+        if (rows.size() != 1) {
+            throw new ApiException(HttpStatus.CONFLICT, "turn_not_found", "The model snapshot Turn was not found");
+        }
+        return rows.getFirst();
+    }
+
+    @Override
+    @Transactional
+    public WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
+            String sessionId, String key, String digest, String modelId, long expectedRevision,
+            boolean supported) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "unsupported_feature",
+                    "Model selection requires a Workspace Session");
+        }
+        WorkspaceAccess access = workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId());
+        if (!access.canRead()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found");
+        }
+        String scope = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
+                .key("SET_MODEL", sessionId, actorId);
+        var namespace = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND;
+        var scopeKind = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope.ACTOR;
+        ManagedReceipts.Receipt replay = ManagedReceipts.find(jdbc, namespace, tenantId,
+                scopeKind, scope, key, false);
+        if (replay != null) {
+            if (!digest.equals(replay.requestDigest())
+                    || !sessionId.equals(replay.sessionId())
+                    || !"SET_MODEL".equals(replay.operation())
+                    || !java.util.Arrays.equals(actorId.getBytes(StandardCharsets.UTF_8),
+                            replay.actorKey())) {
+                throw new ApiException(HttpStatus.CONFLICT, "idempotency_conflict",
+                        "The idempotency key was reused with different content");
+            }
+            Map<String, Object> result = readMap(replay.resultJson());
+            return new WebShellModelChangeResult(sessionId, new WebShellModelSelection(
+                    (String) result.get("modelId"), ((Number) result.get("revision")).longValue()), true);
+        }
+        if (!access.atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
+                    "Only a Workspace operator may change the model");
+        }
+        if (!supported || modelCatalog.isEmpty() || !workspaceFilesEnabled) {
+            throw new ApiException(HttpStatus.CONFLICT, "unsupported_feature", "Model selection is unavailable");
+        }
+        if (modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId))) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "unsupported_model", "The model is not published by this host");
+        }
+        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+        requireSessionStatus(session.status(), "ACTIVE");
+        requireCwdChangeRegistryFacts(session);
+        if (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session)) {
+            throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval");
+        }
+        if (hasOpenOperation(tenantId, sessionId) || hasPendingRenameDelivery(tenantId, sessionId)
+                || hasRetainedRuntimeSession(tenantId, sessionId)
+                || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                        + " AND status = 'RECOVERY_BLOCKED' LIMIT 1", tenantId, sessionId).isEmpty()
+                || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ?"
+                        + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND"
+                        + " (state <> 'ACTIVE' OR recovery_status <> 'READY')", tenantId, sessionId).isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT, "session_context_busy", "The Session requires settlement");
+        }
+        long current = jdbc.queryForObject("SELECT model_revision FROM ma_session WHERE tenant_id = ?"
+                + " AND session_id = ?", Long.class, tenantId, sessionId);
+        if (current != expectedRevision || current >= 9_007_199_254_740_991L) {
+            throw new ApiException(HttpStatus.CONFLICT, "model_selection_conflict", "The model revision changed");
+        }
+        long revision = current + 1;
+        long now = clock.millis();
+        jdbc.update("UPDATE ma_session SET model_id = ?, model_revision = ?, gmt_modified = ?,"
+                + " version = version + 1 WHERE tenant_id = ? AND session_id = ? AND model_revision = ?",
+                modelId, revision, now, tenantId, sessionId, current);
+        ManagedReceipts.insert(jdbc, namespace, tenantId, scopeKind, scope, key, digest,
+                "SET_MODEL", actorId.getBytes(StandardCharsets.UTF_8), sessionId, null,
+                "COMPLETED", session.status(), true, now);
+        jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?",
+                writeJson(Map.of("modelId", modelId, "revision", revision)),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.receiptKey(
+                        namespace, tenantId, scopeKind, scope, key));
+        String sessionScope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String observation = ManagedExtensionProjection.recordKey(sessionId, "hosted_context_usage", "latest");
+        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
+                + " 'SESSION_RECORD' AND owner_key = ?", sessionScope, observation);
+        jdbc.update("DELETE FROM ma_session_record WHERE session_scope_key = ? AND record_key = ?",
+                sessionScope, observation);
+        appendEvent(tenantId, sessionId, null, "session.model.changed",
+                Map.of("modelId", modelId, "revision", revision), false, null, now);
+        return new WebShellModelChangeResult(sessionId, new WebShellModelSelection(modelId, revision), false);
+    }
+
     // Reads leave the Turn's input out; the public view never shows it.
     @Override
     public TurnPage listTurns(String tenantId, String sessionId,
@@ -5108,10 +5299,12 @@ public class ManagedAgentStore implements AgentStateStore {
             String payloadDigest, long now) {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, gmt_create, gmt_modified) VALUES"
-                        + " (?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?)",
+                        + " status, gmt_create, gmt_modified, model_id, model_revision) SELECT"
+                        + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
+                        + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END"
+                        + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, writeJson(input),
-                payloadDigest, now, now);
+                payloadDigest, now, now, tenantId, sessionId);
     }
 
     private void insertCommand(String tenantId, String operation,

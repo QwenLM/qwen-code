@@ -232,16 +232,7 @@ async function openFiles(
   await expect(
     page.getByText('Workspace ready.', { exact: true }),
   ).toBeVisible();
-  await page
-    .getByRole('button', { name: 'Toggle right panel', exact: true })
-    .click();
-  await expect(
-    page.getByRole('button', { name: /Files.*Browse workspace files/ }),
-  ).toBeVisible();
-
-  await page
-    .getByRole('button', { name: /Files.*Browse workspace files/ })
-    .click();
+  await page.getByTestId('chat-header-workspace').click();
   await afterOpen?.();
   const browser = page.getByTestId('workspace-file-browser');
   await expect(
