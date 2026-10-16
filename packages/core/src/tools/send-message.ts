@@ -502,10 +502,8 @@ class SendMessageInvocation extends BaseToolInvocation<
       // The team's "not found" is only half the answer once the peer
       // directory was searched too.
       if (!inProcessRecipient && /not found/i.test(errMsg)) {
-        // Branch, do not suppress: with messaging off the team's "not
-        // found" was the whole answer the model got, so it never learned
-        // that the name it wants could belong to a session this setting
-        // is hiding.
+        // With peer lookup unavailable, the team's result cannot rule out
+        // a recipient in another session.
         errMsg += this.peerMessagingOff
           ? ` Cross-session peer lookup is unavailable in this session (${peerMessagingOffReason(this.config)}), so another session with that name could not be checked.`
           : ` No reachable session has that name either${
