@@ -107,6 +107,24 @@ public interface RuntimeBindingRepository {
         requireHarnessAdmission(scope, harnessSessionId, authority);
     }
 
+    /** As the scope-only check, for a Runtime Session on {@code binding}; see {@link HarnessOwnership}. */
+    default void requireHarnessAdmission(RuntimeProvisionRequest binding, RuntimeScope scope,
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        requireHarnessAdmission(scope, harnessSessionId, authority);
+    }
+
+    /** As the scope-only check, for a Runtime Session on {@code binding}; see {@link HarnessOwnership}. */
+    default boolean requireHarnessRecovery(RuntimeProvisionRequest binding, RuntimeScope scope,
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        return requireHarnessRecovery(scope, harnessSessionId, authority);
+    }
+
+    /** As the scope-only check, for a Runtime Session on {@code binding}; see {@link HarnessOwnership}. */
+    default void requireHookAdmission(RuntimeProvisionRequest binding, RuntimeScope scope,
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        requireHookAdmission(scope, harnessSessionId, authority);
+    }
+
     default List<RuntimeBindingRecord> verifyHarnessResources(java.sql.Connection connection,
             String tenantId, String harnessSessionId) throws java.sql.SQLException {
         throw new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Resource verification is unavailable", false);

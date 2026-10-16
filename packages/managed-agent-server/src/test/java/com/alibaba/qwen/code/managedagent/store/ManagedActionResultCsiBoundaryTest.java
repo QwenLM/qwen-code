@@ -152,7 +152,7 @@ class ManagedActionResultCsiBoundaryTest {
         seedOperation(privateSession, "private-op", "LEASED", 0);
         var op = managed.findOperation("tenant", privateSession, "private-op").orElseThrow();
         var before = tables();
-        assertPrivate(() -> transaction.executeWithoutResult(status -> actions.complete(op, "owner", null, "decision", 1)));
+        assertPrivate(() -> transaction.executeWithoutResult(status -> actions.complete(op, "owner", null, "decision", true, 1)));
         assertPrivate(() -> transaction.executeWithoutResult(status -> actions.admit("tenant", privateSession,
                 "actor", "actor-digest", "response", "request", "action", JSON.createObjectNode(), 1)));
         byte[] changed = "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":{\"kind\":\"action.changed\"}}\n"

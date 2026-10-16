@@ -8,10 +8,12 @@ import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import {
   LlmRequestPreparationError,
+  llmPreparedProviderPin,
   type LlmPreparedRequest,
   type LlmPreparedRequestCallback,
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
+import type { HostedModelSelection } from './hosted-model-selection.js';
 
 import type { Content, Part } from '@google/genai';
 import { createHash } from 'node:crypto';
@@ -30,6 +32,7 @@ import {
 } from './hosted-agent-definition.js';
 
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import type { HostedSkillCatalog } from './hosted-skill-catalog.js';
 import {
   HostedHookRecoveryRequiredError,
   type HostedHookSession,
@@ -156,7 +159,9 @@ export async function runHostedHarnessTextTurn(input: {
     >;
   workspaceContext?: { read(): string | undefined };
   agentDefinition?: HostedAgentDefinition;
+  modelSelection?: HostedModelSelection;
   agentInstructions?: string;
+  skills?: HostedSkillCatalog;
   textDeltas?: HostedHarnessTextDeltas;
   completeFinalOutput?: (
     attempt: ManagedMainModelAttempt,
@@ -193,11 +198,14 @@ export async function runHostedHarnessTextTurn(input: {
       input.agentInstructions
         ? `# Agent instructions\n\n${input.agentInstructions}`
         : undefined,
+      input.skills?.instructions(),
       context,
     ]
       .filter(Boolean)
       .join('\n\n');
-  const model = input.agentDefinition?.model;
+  const model = input.modelSelection
+    ? { id: input.modelSelection.modelId }
+    : input.agentDefinition?.model;
   await applyHostedModelPin(config, model);
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
@@ -304,7 +312,7 @@ export async function runHostedHarnessTextTurn(input: {
     await input.hooks?.ensureReady(input.signal);
     // Seed instructions when memory reload is skipped; restore them after
     // initialize() when its hierarchical memory refresh replaces user memory.
-    if (input.agentInstructions)
+    if (input.agentInstructions || input.skills)
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -320,7 +328,7 @@ export async function runHostedHarnessTextTurn(input: {
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
       throw new Error('Hosted Harness model authentication is unavailable.');
-    if (input.agentInstructions) {
+    if (input.agentInstructions || input.skills) {
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -331,7 +339,7 @@ export async function runHostedHarnessTextTurn(input: {
       if (model) throw new HostedModelUnavailableError(cause);
       throw cause;
     }
-    if (input.agentInstructions)
+    if (input.agentInstructions || input.skills)
       await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
@@ -522,10 +530,17 @@ export async function runHostedHarnessTextTurn(input: {
         : await input.modelScope?.beginMainAttempt(config.getModel());
       let modelOccurrence =
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
+      let contextWindowSize =
+        config.getContentGeneratorConfig()?.contextWindowSize;
       const prepare: LlmPreparedRequestCallback = async (
         prepared,
         captureUnsupported,
       ) => {
+        const activeConfig = config.getContentGeneratorConfig();
+        contextWindowSize =
+          prepared.providerPin === llmPreparedProviderPin(activeConfig)
+            ? activeConfig?.contextWindowSize
+            : undefined;
         if (completeAttempt) {
           const previous = completeAttempt;
           completeAttempt = undefined;
@@ -582,7 +597,18 @@ export async function runHostedHarnessTextTurn(input: {
             await textDeltas?.delta(event.value);
           } else if (event.type === LlmEventType.Finished) {
             finished = true;
-            usage.push(event.value?.usageMetadata ?? null);
+            const reported = event.value?.usageMetadata;
+            if (reported) {
+              const snapshot: Record<string, unknown> = { ...reported };
+              delete snapshot['contextWindowSize'];
+              if (
+                typeof contextWindowSize === 'number' &&
+                Number.isSafeInteger(contextWindowSize) &&
+                contextWindowSize > 0
+              )
+                snapshot['contextWindowSize'] = contextWindowSize;
+              usage.push(snapshot);
+            } else usage.push(null);
           } else if (event.type === LlmEventType.Retry) {
             calls = [];
             if (!event.isContinuation) {
@@ -593,6 +619,18 @@ export async function runHostedHarnessTextTurn(input: {
               text = '';
             }
           } else if (event.type === LlmEventType.ModelFallback) {
+            contextWindowSize = undefined;
+            if (!input.prepareModel && input.modelScope) {
+              const previous = completeAttempt;
+              completeAttempt = undefined;
+              await previous?.(false, usage);
+              finished = false;
+              usage.length = 0;
+              completeAttempt = await input.modelScope.beginMainAttempt(
+                event.toModel,
+              );
+              modelOccurrence = completeAttempt.attemptId ?? modelOccurrence;
+            }
             await textDeltas?.retract();
             calls = [];
             text = '';

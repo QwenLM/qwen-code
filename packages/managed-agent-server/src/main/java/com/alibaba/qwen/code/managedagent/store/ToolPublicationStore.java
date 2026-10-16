@@ -23,6 +23,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -94,6 +95,8 @@ public final class ToolPublicationStore {
             boolean journalHeadAuthorization) {
         this.jdbc = Objects.requireNonNull(jdbc);
         this.transactions = new TransactionTemplate(manager);
+        // Discovery precedes the head lock; evidence must see the commits observed by that lock.
+        this.transactions.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.sessions = Objects.requireNonNull(sessions);
         this.executions = Objects.requireNonNull(executions);
         this.bindings = Objects.requireNonNull(bindings);

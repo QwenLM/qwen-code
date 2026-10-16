@@ -308,6 +308,47 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
+    void retainedOwnerScanChecksTheWholeOriginalHolderWithoutReleasingIt() throws Exception {
+        var expected = WorkspaceCsiPhysicalHistoryImage.owner(inspect());
+        var persisted = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]))
+                .findById(binding.getBindingId());
+        var original = new JdbcCsiFilesRetirementGuard.Original(binding.getRequest(), binding.getBindingId(), 1,
+                persisted.getState(), persisted.isDrainRequested(), persisted.getVersion(), null);
+        var queries = new java.util.ArrayList<String>();
+        try (var target = source.getConnection()) {
+            target.setAutoCommit(false);
+            target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            try {
+                var read = new WorkspaceCsiApplicationInventory.HistoricalScan(observedRead(target, queries), System.nanoTime(),
+                        (scan, carrier) -> { throw new AssertionError("Data component must not claim an unrelated frozen owner"); });
+                var result = WorkspaceCsiApplicationInventory.readRetainedReferencedKeys(read, expected, original, intent);
+                assertThat(result.blockers()).isEmpty();
+                assertThat(result.bytes()).isEqualTo(expected.bytes());
+                assertThat(WorkspaceCsiApplicationImage.sole(result, "ma_runtime_binding").text("binding_state"))
+                        .isEqualTo("DRAINING");
+                assertThat(WorkspaceCsiApplicationImage.sole(result, "ma_storage_owner").bytes())
+                        .isEqualTo(WorkspaceCsiApplicationImage.sole(expected, "ma_storage_owner").bytes());
+                assertThat(queries).noneMatch(sql -> sql.contains("FOR UPDATE") || !sql.startsWith("SELECT"));
+            } finally {
+                target.rollback();
+            }
+        }
+        jdbc.update("UPDATE ma_storage_owner SET mount_host_id = 'changed'");
+        try (var target = source.getConnection()) {
+            target.setAutoCommit(false);
+            target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            try {
+                var read = new WorkspaceCsiApplicationInventory.HistoricalScan(observedRead(target, queries), System.nanoTime());
+                var changed = WorkspaceCsiApplicationInventory.readRetainedReferencedKeys(read, expected, original, intent);
+                assertThat(changed.blockers()).anyMatch(blocker -> blocker.table().equals("ma_storage_owner")
+                        && blocker.code().equals("historical_row_changed"));
+            } finally {
+                target.rollback();
+            }
+        }
+    }
+
+    @Test
     void foreignOwnerAuditUsesLocalStrongRootsAndNeverReopensTheParentCarrierScan() throws Exception {
         var owner = WorkspaceCsiPhysicalHistoryImage.owner(inspect());
         var empty = WorkspaceCsiApplicationInventory.expectedImage(owner.tables().stream().map(table ->
@@ -554,6 +595,9 @@ class WorkspaceCsiApplicationInventoryTest {
                 var expected = historicalKeys();
                 WorkspaceCsiApplicationInventory.historicalScan(read, expected, references);
                 var row = WorkspaceCsiApplicationInventory.readForeignPhysical(read, progress.retirementId(), progress.bindingId(), progress.physicalKey()).getFirst();
+                var retained = WorkspaceCsiApplicationInventory.retainedProgress(row, plan, association);
+                assertThat(retained.bytes()).isEqualTo(progress.bytes());
+                assertThat(WorkspaceCsiPhysicalStore.status(retained).stage()).isEqualTo(progress.stage());
                 WorkspaceCsiApplicationInventory.verifyForeignProgress(read, row, plan, association);
                 assertThat(expected.bytes()).isEqualTo(historicalKeys().bytes());
             } finally {
@@ -863,7 +907,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(33);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(738);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(745);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -875,6 +919,38 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(snapshot.table("ma_tenant_guard").rows()).hasSize(2);
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_head")
                 && blocker.code().equals("missing_or_extra_original"));
+    }
+
+    @Test
+    void mainModelAndRetryColumnsRetainTheirActualTypedValues() throws Exception {
+        var before = inspect();
+        var owner = before.table("ma_session").rows().getFirst();
+        assertThat(owner.cell("model_id").isNull()).isTrue();
+        assertThat(owner.number("model_revision")).isZero();
+        assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
+        assertThat(before.table("ma_operation").rows().getFirst().number("budget_exempt_attempt")).isZero();
+        jdbc.update("UPDATE ma_session SET model_id = ?, model_revision = 3", "reviewed-model");
+        jdbc.update("UPDATE ma_operation SET budget_exempt_attempt = 7");
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest,"
+                + " status, gmt_create, gmt_modified, consecutive_failures, budget_exempt_failures)"
+                + " VALUES ('tenant', ?, 'turn', 'prompt', '[]', 'digest', 'COMPLETED', 1, 1, 4, 2)", session);
+        var after = inspect();
+        assertThat(after.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
+        assertThat(after.table("ma_session").rows().getFirst().text("model_id")).isEqualTo("reviewed-model");
+        assertThat(after.table("ma_session").rows().getFirst().number("model_revision")).isEqualTo(3);
+        assertThat(after.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
+                && blocker.code().equals("invalid_original_association"));
+        assertThat(after.table("ma_operation").rows().getFirst().number("budget_exempt_attempt")).isEqualTo(7);
+        var turn = after.table("ma_turn").rows().getFirst();
+        assertThat(turn.number("consecutive_failures")).isEqualTo(4);
+        assertThat(turn.number("budget_exempt_failures")).isEqualTo(2);
+        assertThat(turn.cell("model_id").isNull()).isTrue();
+        assertThat(turn.cell("model_revision").isNull()).isTrue();
+        assertThat(after.blockers()).anyMatch(blocker -> blocker.table().equals("ma_turn"));
+        assertThat(after.bytes()).isNotEqualTo(before.bytes());
+        jdbc.update("UPDATE ma_session SET model_id = ?", new byte[] {(byte) 0xff});
+        assertThatThrownBy(this::inspect).isInstanceOf(IllegalStateException.class)
+                .hasMessage("Identity is not valid UTF-8");
     }
 
     @Test

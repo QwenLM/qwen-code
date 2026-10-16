@@ -37,8 +37,8 @@ public enum ManagedSchemaProjection {
                     + "target_cwd_relative, expected_context_revision, result_context_revision, "
                     + "payload_version, request_json, result_json, state, phase, admission_stage, "
                     + "delivery_state, session_status_before, receipt_id, claim_owner, claim_generation, "
-                    + "claim_until, available_at, attempt_count, deadline, recovery_deadline, "
-                    + "execution_mode, verification_request_json, verification_ready, "
+                    + "claim_until, available_at, attempt_count, budget_exempt_attempt, deadline, "
+                    + "recovery_deadline, execution_mode, verification_request_json, verification_ready, "
                     + "verification_next_at, publication_id, publication_command_id, slot_key, "
                     + "execution_key, item_id, policy_version, failure_status, failure_code, gmt_create, "
                     + "gmt_modified, completed_at, progress_format, progress_version, progress_stage, "
@@ -121,7 +121,7 @@ public enum ManagedSchemaProjection {
                     + "root_session_id, parent_child_run_id, child_depth, agent_definition_digest, "
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, recovery_protected, "
-                    + "resource_gc_completed, runtime_request_key, csi_guard"),
+                    + "resource_gc_completed, runtime_request_key, csi_guard, model_id, model_revision"),
     SESSION_HEAD(
             "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
@@ -175,7 +175,8 @@ public enum ManagedSchemaProjection {
             "tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status, "
                     + "submission_attempted, harness_event_epoch, harness_last_event_id, dispatch_owner, "
                     + "dispatch_lease_until, error_code, error_message, gmt_create, gmt_modified, "
-                    + "completed_at, version, retry_count, retry_after");
+                    + "completed_at, version, retry_count, consecutive_failures, "
+                    + "budget_exempt_failures, retry_after, model_id, model_revision");
 
     private final String columns;
 

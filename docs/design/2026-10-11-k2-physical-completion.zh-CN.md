@@ -33,7 +33,7 @@ Plan 还固定 `historicalReleaseInventorySha256`，它从该 ownership 投影�
 
 读取时除核对已保存 hash，还要求 saved plan bytes 等于已验证 expected plan 的精确编码。JSON 值相同但 whitespace、字段顺序或 escaping 改变，也必须拒绝，不能在重试时据此建立新 plan hash 或 stop-intent 依赖。
 
-Physical 表具有独立显式 typed catalog 和 validator，在同 Connection 的 application closure 之后读取。当前 application catalog 为 inventory/2 的 33 表 738 列，见[标准结构适配](k2-canonical-schema-port.zh-CN.md)。DRAINED 前，companion 必须具有精确六列 schema，并且不存在匹配 retirement、binding 或 physical-key 的行。完整 DRAINED image 验证后，任何 companion row 必须匹配原 plan 与 exact stored bytes/hash/version；foreign/duplicate row 或 schema drift 均拒绝进度。当前 expected image 只允许声明的 insert、append 或一次 pending-outcome replacement，不向已部署 DB 回填 positive state。原 worker-ACK 表在本 lane 中不支持，不提供物理资格；qualified release 需要另外实现的 format 与 validator。
+Physical 表具有独立显式 typed catalog 和 validator，在同 Connection 的 application closure 之后读取。当前 application catalog 为 inventory/2 的 33 表 745 列，见[标准结构适配](k2-canonical-schema-port.zh-CN.md)。DRAINED 前，companion 必须具有精确六列 schema，并且不存在匹配 retirement、binding 或 physical-key 的行。完整 DRAINED image 验证后，任何 companion row 必须匹配原 plan 与 exact stored bytes/hash/version；foreign/duplicate row 或 schema drift 均拒绝进度。当前 expected image 只允许声明的 insert、append 或一次 pending-outcome replacement，不向已部署 DB 回填 positive state。原 worker-ACK 表在本 lane 中不支持，不提供物理资格；qualified release 需要另外实现的 format 与 validator。
 
 ## Stop intent 与精确正常 DELETE
 
@@ -155,3 +155,11 @@ Ownership 投影已独立编译，并使用此前封存的真实 application DRA
 6. 在获准的原 ACK lane 资格化 actual artifacts，完成 normal stop/unpublish/release/reuse。Public selection 启用前完成 required checks、两次 clean full-diff audit 和 maintainer review。
 
 本地 API、SQL、Linux process fixtures 只支持声明的边界。原 ACK addon exclusion、实际 LSM/Pod admission、driver 接线尚未解决，不能由本地通过推断，也不能转移其他 artifacts 的资格。
+
+## 保留物理进度读取
+
+私有 operator 现有 `physical status` 命令从保存状态读取进度，不依赖活动 writer lease。保留读端在精确同一 DataSource 上新开十秒、有真实只读属性的 repeatable-read 事务；已有事务或忽略只读属性的驱动在该读端发出 SQL 前拒绝。Operator 仍先执行原有选择预检查询，读端在 snapshot 内重新核对完整 owner。读端核对历史凭据与 frozen writer hash、原 DRAINING binding/generation/version、DRAINED/4 应用像、完整保存的 native execution/journal/resource 前缀、原 holder 及引用候选闭包，不 acquire/renew 权限。
+
+原 owner 投影保留未改变的 DRAINING binding、slot 和完整原 holder，不能使用未来 RELEASED 投影。专用保留 owner 扫描要求恰好一个原 holder，以同一组原强引用根核对其完整固定键 bytes。独立六列 physical catalog 只允许至多一条与原 retirement/binding/physical 身份相符的记录，以原严格 progress decoder 恢复 plan、raw bytes、digest 和 version；完整物理候选扫描只豁免已验证且 bytes 精确相同的原记录。外来行继续执行原 owner/reference 检查。没有进度时也必须完整验证原应用闭包后才能报告 UNPLANNED。
+
+读结果仅供查看。plan/intent/delete/observe 继续使用原活动权限事务。该读端不写进度、不生成 source、不联系 worker/Kubernetes 节点、不授予 RELEASED/复用权限。实际 RELEASED binding 和未资格化最终结果仍拒绝。H2 控制不证明真实 MySQL snapshot：真实 H2 忽略 read-only，必须拒绝；任何建模只读夹具均须明确标注。

@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.AbstractDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -38,8 +40,9 @@ class WorkspaceCsiApplicationHistoryTest {
         verifyNoInteractions(manager);
     }
 
-    @Test
-    void refusesAmbientTransactionsBeforeObtainingAnotherConnection() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void refusesAmbientTransactionsBeforeObtainingAnotherConnection(boolean progress) {
         var source = new JdbcDataSource();
         var jdbc = new JdbcTemplate(source);
         var manager = mock(PlatformTransactionManager.class);
@@ -49,7 +52,7 @@ class WorkspaceCsiApplicationHistoryTest {
         boolean previous = TransactionSynchronizationManager.isActualTransactionActive();
         TransactionSynchronizationManager.setActualTransactionActive(true);
         try {
-            assertThatThrownBy(() -> reader.readApplication("tenant", "workspace", "session", UUID.randomUUID().toString(), "token"))
+            assertThatThrownBy(() -> read(reader, progress))
                     .isInstanceOf(IllegalArgumentException.class);
             verifyNoInteractions(manager);
         } finally {
@@ -57,8 +60,9 @@ class WorkspaceCsiApplicationHistoryTest {
         }
     }
 
-    @Test
-    void requestsFreshReadOnlyRepeatableReadAndRefusesADriverIgnoringReadOnly() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void requestsFreshReadOnlyRepeatableReadAndRefusesADriverIgnoringReadOnly(boolean progress) {
         var h2 = new JdbcDataSource();
         h2.setURL("jdbc:h2:mem:history-fresh-" + UUID.randomUUID());
         var opens = new AtomicInteger();
@@ -105,7 +109,7 @@ class WorkspaceCsiApplicationHistoryTest {
                 new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
                 new ManagedSessionStore(jdbc), new ObjectMapper());
         // H2 ignores setReadOnly; the production guard must reject that actual Connection before SQL.
-        assertThatThrownBy(() -> reader.readApplication("tenant", "workspace", "session", UUID.randomUUID().toString(), "token"))
+        assertThatThrownBy(() -> read(reader, progress))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(opens.get()).isEqualTo(1);
         assertThat(closes.get()).isEqualTo(1);
@@ -114,5 +118,12 @@ class WorkspaceCsiApplicationHistoryTest {
         assertThat(queries.get()).isZero();
         assertThat(TransactionSynchronizationManager.hasResource(source)).isFalse();
         assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+    }
+
+    private static Object read(WorkspaceCsiApplicationHistory reader, boolean progress) {
+        String retirement = UUID.randomUUID().toString();
+        return progress ? reader.readRetainedProgress(new WorkspaceCsiPhysicalStore.Original(
+                "tenant", "session", "workspace", retirement), "token")
+                : reader.readApplication("tenant", "workspace", "session", retirement, "token");
     }
 }

@@ -398,7 +398,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 || !request.isManagedContext()
                 || !request.getScope().equals(session.getScope())
                 || !(ResidentWorkspaceProfile.selects(request)
-                        || session.getHarnessSessionId().equals(request.getIsolationKey())
+                        || (HarnessOwnership.sharesRuntimeSessions(request)
+                                || session.getHarnessSessionId().equals(request.getIsolationKey()))
                             && WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(session.getScope().getCapabilityDigest()))
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {

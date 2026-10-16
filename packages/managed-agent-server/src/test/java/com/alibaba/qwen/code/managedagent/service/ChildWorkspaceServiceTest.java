@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.Row;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -559,6 +560,99 @@ class ChildWorkspaceServiceTest {
         assertApi(() -> bindChild(parent, "run-1", ready.childCwdRelative()), "child_workspace_not_ready");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE parent_session_id = ?",
                 Integer.class, parent.sessionId())).isZero();
+    }
+
+    // #13753 I3: a snapshot is the same copy a worktree is, bound with the
+    // read profile, and nothing of it ever merges.
+    @Test
+    void aSnapshotIsAReadOnlyCopyThatOnlyEverDiscards() throws Exception {
+        var parent = createSession("project");
+        Files.writeString(project.resolve("f.txt"), "uncommitted\n");
+        Files.writeString(project.resolve("untracked.txt"), "untracked\n");
+        Files.writeString(project.resolve(".gitignore"), "ignored.txt\n");
+        Files.writeString(project.resolve("ignored.txt"), "ignored\n");
+        Row requested = service.request(parent.tenantId(), parent.sessionId(), "run-1",
+                ChildWorkspaceStore.SNAPSHOT);
+        assertThat(requested.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
+        assertThat(requested.workspaceMode()).isEqualTo(ChildWorkspaceStore.SNAPSHOT);
+        service.scan();
+        Row ready = service.find(parent.tenantId(), parent.sessionId(), "run-1");
+        assertThat(ready.state()).isEqualTo(ChildWorkspaceStore.READY);
+        assertThat(ready.snapshot()).isTrue();
+        // The frozen view: the parent's working tree as it was, ignored files left out.
+        Path copy = root.resolve(ready.childCwdRelative());
+        assertThat(copy.resolve("f.txt")).hasContent("uncommitted");
+        assertThat(copy.resolve("untracked.txt")).hasContent("untracked");
+        assertThat(copy.resolve("ignored.txt")).doesNotExist();
+
+        String child = bindChild(parent, "run-1", ready.childCwdRelative());
+        var profiles = jdbc.queryForMap("SELECT tool_profile, approval_mode FROM ma_session"
+                + " WHERE session_id = ?", child);
+        var parentProfiles = jdbc.queryForMap("SELECT tool_profile, approval_mode FROM ma_session"
+                + " WHERE session_id = ?", parent.sessionId());
+        // The exact profile the hosted side declares read-only (read_file and glob).
+        assertThat(WorkspaceToolProfiles.READ).isEqualTo("hosted-workspace-read/1");
+        assertThat(parentProfiles.get("tool_profile")).isNotEqualTo("hosted-workspace-read/1");
+        assertThat(profiles.get("tool_profile")).isEqualTo("hosted-workspace-read/1");
+        assertThat(profiles.get("approval_mode")).isEqualTo(parentProfiles.get("approval_mode"));
+
+        // A merge asked of a snapshot is recorded as the discard it is.
+        Row asked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        assertThat(asked.finishRequest()).isEqualTo(ChildWorkspaceStore.DISCARD);
+        assertThat(asked.state()).isEqualTo(ChildWorkspaceStore.READY);
+        Files.writeString(copy.resolve("stray.txt"), "stray\n");
+        close(child);
+        clock.addAndGet(ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
+        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+
+        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.outcomeCode()).isEqualTo("discarded");
+        assertThat(discarded.resultCommit()).isNull();
+        assertThat(project.resolve("stray.txt")).doesNotExist();
+        assertThat(project.resolve("f.txt")).hasContent("uncommitted");
+        assertThat(root.resolve(ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
+        assertPinsGone(ready);
+    }
+
+    // A worktree's request names no mode, as every row admitted before
+    // snapshots did: such a row is a worktree, merged as before, and its
+    // child keeps the parent's profile.
+    @Test
+    void aRequestNamingNoModeIsAWorktree() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        String request = jdbc.queryForObject("SELECT request_json FROM ma_operation"
+                + " WHERE operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?", String.class,
+                ready.childWorkspaceId().getBytes(StandardCharsets.UTF_8));
+        assertThat(request).doesNotContain("workspaceMode");
+        assertThat(ready.workspaceMode()).isEqualTo(ChildWorkspaceStore.WORKTREE);
+        assertThat(ready.snapshot()).isFalse();
+        String child = bindChild(parent, "run-1", ready.childCwdRelative());
+        assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE session_id = ?",
+                String.class, child)).isNotEqualTo("hosted-workspace-read/1");
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE)
+                .finishRequest()).isEqualTo(ChildWorkspaceStore.MERGE);
+    }
+
+    @Test
+    void aRunsWorkspaceModeIsFixedAndAWorktreeKeepsItsParentsProfile() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        assertThat(ready.workspaceMode()).isEqualTo(ChildWorkspaceStore.WORKTREE);
+        assertThat(ready.snapshot()).isFalse();
+        assertApi(() -> service.request(parent.tenantId(), parent.sessionId(), "run-1",
+                ChildWorkspaceStore.SNAPSHOT), "child_workspace_conflict");
+        service.request(parent.tenantId(), parent.sessionId(), "run-2", ChildWorkspaceStore.SNAPSHOT);
+        assertApi(() -> service.request(parent.tenantId(), parent.sessionId(), "run-2",
+                ChildWorkspaceStore.WORKTREE), "child_workspace_conflict");
+
+        String child = bindChild(parent, "run-1", ready.childCwdRelative());
+        assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE session_id = ?",
+                String.class, child)).isEqualTo(jdbc.queryForObject(
+                        "SELECT tool_profile FROM ma_session WHERE session_id = ?", String.class,
+                        parent.sessionId()));
+        Row asked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        assertThat(asked.finishRequest()).isEqualTo(ChildWorkspaceStore.MERGE);
     }
 
     @Test

@@ -8,20 +8,16 @@ Implementation and compatibility verification are in progress. This document
 describes the K2 port to main's fresh canonical managed-agent schema. It does
 not qualify application retirement, physical release, or safe volume reuse.
 
-Main consolidates the legacy tables into 32 `ma_*` tables with 704 columns.
+Main consolidates the legacy tables into 32 `ma_*` tables with 707 columns.
 K2's old table names, row ownership rules, journal keys, and component snapshot
 format cannot be retained through aliases. The fresh initializer rejects a
 legacy database; the additive K2 migration provides no legacy backfill or compatibility view.
 
 ## Schema and row identity
 
-Main's published V1 remains exactly 32 tables and 704 columns. V2 adds four
-private CSI authority columns; K2 V3 adds eleven application progress columns,
-`ma_csi_source` (19 columns), and `ma_csi_physical` (six columns), without
-rewriting V1 or V2. The effective schema has 34 tables and 744 columns.
-Application inventory covers 33 tables and 738 columns; the physical companion
-is inspected separately. `ma_session.csi_guard` is generated from the private
-tool profile or the durable runtime request pin.
+Preserve the current main V1–V5 bytes. V1 has 32 tables and 707 columns, including the retry-budget fields; V2 adds four private CSI authority columns, V3 changes the list index, V4 extends the Workspace creation receipt namespace, and V5 adds four model-selection columns. The K2 retirement increment moves to V6, adding eleven application progress columns, `ma_csi_source` (19 columns) and `ma_csi_physical` (six columns). The effective schema has 34 tables and 751 columns. Application inventory covers 33 tables and 745 columns; the physical companion is inspected separately. `ma_session.csi_guard` is generated from the private tool profile or durable runtime request pin.
+
+All seven new main fields participate in typed whole-row comparison, including Session model `(NULL,0)`, both NULL Turn model fields and three retry-budget fields. `model_id` uses strict UTF-8 identity decoding without becoming a new strong reference root. The private first lane keeps its fixed native model policy: only the actual Session defaults `(NULL,0)` are supported; a nondefault selection is captured in full and blocks retirement. Ordinary public model selection remains unchanged. An older inventory/2 baseline missing these columns still refuses: no default-value backfill, header/hash rewrite or saved-byte upgrade. Unpublished K2 V4 is not relabeled as main V4 and Flyway history is not repaired.
 
 Native resource read evidence uses the existing `ma_request_receipt`, namespace
 `SESSION_COMMAND`, operation `CSI_RESOURCE_READ`, and the actual
@@ -102,3 +98,9 @@ and confinement qualification, atomic physical release, retained old
 credential validation, monotonic safe reuse, and public selection remain
 separate K2 work. Passive ownership support for remaining canonical artifact and secondary domains is still incomplete; unknown rows remain blocked. Public selection stays closed until those prerequisites
 have passed their required checks.
+
+## New main ordinary mutation isolation
+
+Lifecycle failure settlement checks the actual private fence before operation/head DML. Ordinary model-usage UI projection requires `csi_guard=FALSE`; private journal model events and original resources remain intact without adding a `hosted_context_usage` domain/ref. Action dispatch and ended-action settlement scans exclude private Sessions before LIMIT and recheck inside the claim/settlement transaction; tool-result capture retains its method-level private refusal. The new approvalMode creation overload still checks resident registration or LOCAL storage.
+
+Ordinary H2 data-component controls verify these boundaries, without establishing MySQL locking, native producer, physical stop or volume-reuse qualification.

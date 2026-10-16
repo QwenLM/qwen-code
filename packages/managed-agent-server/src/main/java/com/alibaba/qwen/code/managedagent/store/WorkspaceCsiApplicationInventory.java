@@ -110,7 +110,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "result_context_revision:BIGINT,payload_version:INT,request_json:LONGTEXT,result_json:LONGTEXT,"
                     + "state:VARCHAR,phase:VARCHAR,admission_stage:VARCHAR,delivery_state:VARCHAR,"
                     + "session_status_before:VARCHAR,receipt_id:VARBINARY,claim_owner:VARBINARY,claim_generation:BIGINT,"
-                    + "claim_until:BIGINT,available_at:BIGINT,attempt_count:INT,deadline:BIGINT,"
+                    + "claim_until:BIGINT,available_at:BIGINT,attempt_count:INT,budget_exempt_attempt:INT,deadline:BIGINT,"
                     + "recovery_deadline:BIGINT,execution_mode:VARCHAR,verification_request_json:LONGTEXT,"
                     + "verification_ready:BOOLEAN,verification_next_at:BIGINT,publication_id:VARBINARY,"
                     + "publication_command_id:VARBINARY,slot_key:VARBINARY,execution_key:CHAR,item_id:VARBINARY,"
@@ -215,7 +215,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "agent_definition_digest:VARCHAR,session_kind:VARCHAR,tenant_key:CHAR,session_key:CHAR,"
                     + "session_scope_key:CHAR,title_revision:BIGINT,retirement_operation_id:VARBINARY,"
                     + "retirement_generation:BIGINT,retired_at:BIGINT,recovery_protected:BOOLEAN,"
-                    + "resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,csi_guard:BOOLEAN"),
+                    + "resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,csi_guard:BOOLEAN,"
+                    + "model_id:VARBINARY,model_revision:BIGINT"),
             declaration("ma_session_head", "tenant_key,harness_key",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,storage_version:INT,state:VARCHAR,"
                     + "writer_generation:BIGINT,writer_id:VARBINARY,writer_lease_until:BIGINT,lease_token_hash:CHAR,"
@@ -278,7 +279,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "payload_digest:VARCHAR,status:VARCHAR,submission_attempted:BOOLEAN,harness_event_epoch:VARBINARY,"
                     + "harness_last_event_id:BIGINT,dispatch_owner:VARBINARY,dispatch_lease_until:BIGINT,error_code:VARCHAR,"
                     + "error_message:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,completed_at:BIGINT,version:BIGINT,"
-                    + "retry_count:INT,retry_after:BIGINT"),
+                    + "retry_count:INT,consecutive_failures:INT,budget_exempt_failures:INT,retry_after:BIGINT,"
+                    + "model_id:VARBINARY,model_revision:BIGINT"),
             declaration("ma_workspace", "tenant_id,workspace_id",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:BIGINT,storage_id:VARBINARY,"
                     + "display_name:VARCHAR,config_ref:VARBINARY,policy_ref:VARBINARY,state:VARCHAR,workspace_kind:VARCHAR,"
@@ -337,6 +339,7 @@ final class WorkspaceCsiApplicationInventory {
             "lease_id",
             "lease_owner",
             "loss_evidence_id",
+            "model_id",
             "object_key",
             "object_version_id",
             "occurrence_key",
@@ -1038,6 +1041,16 @@ final class WorkspaceCsiApplicationInventory {
             WorkspaceCsiNodeSourceStore.Association source) {
         requireEncoded(read != null && read.imageRead && read.frozenReader != null && companion != null && expectedPlan != null
                 && source != null);
+        var progress = retainedProgress(companion, expectedPlan, source);
+        if (physicalReference(progress, source, read.references, read.started)) {
+            read.block(PHYSICAL.name(), companion, "extra_historical_reference");
+        }
+        requireEncoded(read.blockers.isEmpty());
+    }
+
+    static WorkspaceCsiPhysicalProgress retainedProgress(Row companion, JsonNode expectedPlan,
+            WorkspaceCsiNodeSourceStore.Association source) {
+        requireEncoded(companion != null && expectedPlan != null && source != null);
         for (String field : List.of("retirement_id", "binding_id", "physical_key")) {
             String name = switch (field) {
                 case "retirement_id" -> "retirementId";
@@ -1047,12 +1060,8 @@ final class WorkspaceCsiApplicationInventory {
             requireEncoded(Objects.equals(companion.text(field), expectedPlan.path(name).textValue()));
         }
         requireEncoded(companion.number("record_version") != null);
-        var progress = WorkspaceCsiPhysicalProgress.restore(companion.number("record_version"), companion.binary("record_bytes"),
+        return WorkspaceCsiPhysicalProgress.restore(companion.number("record_version"), companion.binary("record_bytes"),
                 companion.text("record_sha256"), expectedPlan, source);
-        if (physicalReference(progress, source, read.references, read.started)) {
-            read.block(PHYSICAL.name(), companion, "extra_historical_reference");
-        }
-        requireEncoded(read.blockers.isEmpty());
     }
 
     private static boolean physicalReference(WorkspaceCsiPhysicalProgress progress, WorkspaceCsiNodeSourceStore.Association source,
@@ -1107,10 +1116,18 @@ final class WorkspaceCsiApplicationInventory {
 
     /** The known foreign domain is a fully proved DRAINED owner with its sole validated progress record. */
     static Snapshot auditPhysicalCandidates(HistoricalScan read, Snapshot current) throws SQLException {
+        return auditPhysicalCandidates(read, current, null);
+    }
+
+    static Snapshot auditPhysicalCandidates(HistoricalScan read, Snapshot current, Row retainedProgress) throws SQLException {
         requireEncoded(read != null && read.imageRead && read.frozenReader != null && current != null
                 && current.blockers().isEmpty() && !read.references.isEmpty());
         for (Row companion : read.query(PHYSICAL, "1 = 1", List.of())) {
             try {
+                if (retainedProgress != null && key(companion).equals(key(retainedProgress))) {
+                    requireEncoded(Arrays.equals(companion.bytes(), retainedProgress.bytes()));
+                    continue;
+                }
                 if (savedOriginalReference(PHYSICAL.name(), companion, read.references)) {
                     read.block(PHYSICAL.name(), companion, "unsupported_original_physical_outcome");
                     continue;
@@ -1140,6 +1157,19 @@ final class WorkspaceCsiApplicationInventory {
 
     static Snapshot readHistoricalReferencedKeys(HistoricalScan read, Snapshot expected,
             JdbcCsiFilesRetirementGuard.Original original, WorkspaceCsiReservationStore.Retirement intent) throws SQLException {
+        return readReferencedKeys(read, expected, original, intent, false);
+    }
+
+    static Snapshot readRetainedReferencedKeys(HistoricalScan read, Snapshot expected,
+            JdbcCsiFilesRetirementGuard.Original original, WorkspaceCsiReservationStore.Retirement intent) throws SQLException {
+        requireEncoded(original != null && original.state() == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.DRAINING
+                && expected != null && expected.table("ma_storage_owner").rows().size() == 1);
+        return readReferencedKeys(read, expected, original, intent, true);
+    }
+
+    private static Snapshot readReferencedKeys(HistoricalScan read, Snapshot expected,
+            JdbcCsiFilesRetirementGuard.Original original, WorkspaceCsiReservationStore.Retirement intent,
+            boolean retainHolder) throws SQLException {
         requireEncoded(expected != null && original != null && original.request() != null && original.generation() == 1 && intent != null
                 && original.bindingId().equals(WorkspaceCsiApplicationImage.sole(expected, "ma_runtime_binding").text("binding_id")));
         expected = restoreCanonical(expected.bytes());
@@ -1151,7 +1181,7 @@ final class WorkspaceCsiApplicationInventory {
                 && Objects.equals(binding.number("runtime_generation"), original.generation())
                 && intent.reservation() != null && original.bindingId().equals(intent.reservation().bindingId())
                 && Objects.equals(intent.reservation().runtimeGeneration(), original.generation()));
-        return historicalScan(read, expected, originalReferences(original, intent, expected));
+        return scanHistoricalImage(read, expected, originalReferences(original, intent, expected), retainHolder);
     }
 
     private static Snapshot historicalScan(Connection target, Snapshot expected, Map<String, Set<String>> references,
@@ -1160,9 +1190,16 @@ final class WorkspaceCsiApplicationInventory {
     }
 
     static Snapshot historicalScan(HistoricalScan read, Snapshot expected, Map<String, Set<String>> references) throws SQLException {
+        return scanHistoricalImage(read, expected, references, false);
+    }
+
+    private static Snapshot scanHistoricalImage(HistoricalScan read, Snapshot expected, Map<String, Set<String>> references,
+            boolean retainHolder) throws SQLException {
         requireEncoded(read != null && !read.imageRead && expected != null && references != null);
         expected = restoreCanonical(expected.bytes());
-        requireEncoded(expected.blockers().isEmpty() && expected.table("ma_storage_owner").rows().isEmpty()
+        requireEncoded(expected.blockers().isEmpty() && (retainHolder ? expected.table("ma_storage_owner").rows().size() == 1
+                        && expected.table("ma_storage_owner").rows().getFirst().membership() == Membership.ORIGINAL
+                        : expected.table("ma_storage_owner").rows().isEmpty())
                 && expected.tables().stream().flatMap(table -> table.rows().stream()).noneMatch(row -> row.membership() == Membership.OTHER));
         var pinnedReferences = new LinkedHashMap<String, Set<String>>();
         references.forEach((namespace, values) -> pinnedReferences.put(namespace, Set.copyOf(values)));
@@ -2673,6 +2710,7 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_session" -> {
                     expect(table, row, rawSession(row) && "ACTIVE".equals(row.text("status")) && row.cell("deleted_at").isNull()
                             && CsiFilesRetirementProfile.PROFILE.equals(row.text("tool_profile"))
+                            && row.cell("model_id").isNull() && Objects.equals(0L, row.number("model_revision"))
                             && original.request().requestKey().equals(row.text("runtime_request_key"))
                             && workspace.equals(row.text("workspace_id")) && storage.equals(row.text("workspace_storage_id"))
                             && original.request().getScope().getWorkspaceGeneration().equals(String.valueOf(row.number("workspace_generation")))

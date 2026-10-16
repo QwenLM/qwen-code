@@ -18,10 +18,13 @@ public final class ManagedSchema {
     public static final String PRIVATE_AUTHORITY =
             "/db/managed-schema/V2__private_csi_authority.sql";
     public static final String K2_RETIREMENT =
-            "/db/managed-schema/V4__k2_retirement_evidence.sql";
+            "/db/managed-schema/V6__k2_retirement_evidence.sql";
     public static final String SESSION_LIST =
             "/db/managed-schema/V3__session_list_created_at.sql";
-    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, K2_RETIREMENT);
+    public static final String WORKSPACE_CREATION = "/db/managed-schema/V4__workspace_creation.sql";
+    public static final String MODEL_SELECTION = "/db/managed-schema/V5__session_model_selection.sql";
+    // Additive migrations over the published V1 baseline, in version order.
+    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION, K2_RETIREMENT);
     private static final int CURRENT = EXTENSIONS.size() + 1;
 
     private ManagedSchema() {}
@@ -89,6 +92,15 @@ public final class ManagedSchema {
         for (String raw : extension.replaceAll("(?m)^--[^\\n]*", "").split(";")) {
             String command = raw.trim();
             if (command.isEmpty()) {
+                continue;
+            }
+            if (command.equals("ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace")) {
+                var constraint = Pattern.compile("(?m)^    CONSTRAINT ck_ma_request_namespace CHECK[^\\n]+\\n?")
+                        .matcher(ddl);
+                if (!constraint.find()) {
+                    throw new IllegalStateException("Receipt namespace constraint is absent from the baseline");
+                }
+                ddl = constraint.replaceFirst("");
                 continue;
             }
             var drop = Pattern.compile("DROP INDEX ([a-z_]+) ON (ma_[a-z_]+)").matcher(command);

@@ -83,10 +83,56 @@ final class WorkspaceCsiApplicationHistory {
             var envelope = WorkspaceCsiApplicationJson.object(frozen, WorkspaceCsiApplicationInventory.MAX_BYTES);
             nativeStore.requireCsiHistoricalCredential(tenant, workspace, session, token,
                     envelope.path("writerTokenSha256").textValue());
-            var result = readSavedApplication(read, binding, owner.retirement(), identityJson);
+            var result = readSavedApplication(read, binding, owner.retirement(), identityJson, false).current();
             result = WorkspaceCsiApplicationInventory.auditPhysicalCandidates(read, result);
             require(result.blockers().isEmpty());
             require(Arrays.equals(owner.binding().bytes(), WorkspaceCsiApplicationImage.sole(result, "ma_runtime_binding").bytes()));
+            require(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(10));
+            return result;
+        }));
+    }
+
+    WorkspaceCsiPhysicalStore.Status readRetainedProgress(WorkspaceCsiPhysicalStore.Original original, String token) {
+        require(original != null && !TransactionSynchronizationManager.isActualTransactionActive());
+        long started = System.nanoTime();
+        return transaction.execute(status -> jdbc.execute((ConnectionCallback<WorkspaceCsiPhysicalStore.Status>) current -> {
+            var target = DataSourceUtils.getTargetConnection(current);
+            require(!target.getAutoCommit() && target.isReadOnly()
+                    && target.getTransactionIsolation() == Connection.TRANSACTION_REPEATABLE_READ
+                    && DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource()));
+            var connection = WorkspaceCsiApplicationStore.bounded(target, started);
+            var read = new WorkspaceCsiApplicationInventory.HistoricalScan(connection, started, this::readFrozenOwner);
+            var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(read, original.tenantId(), original.retirementId());
+            var binding = bindings.findByIdInReadOnlySnapshot(connection, owner.binding().text("binding_id"));
+            require(binding != null && binding.getState() == RuntimeBindingRecord.State.DRAINING
+                    && binding.isDrainRequested() && binding.getGeneration() == 1
+                    && Objects.equals(binding.getVersion(), owner.binding().number("record_version"))
+                    && binding.getBindingId().equals(owner.retirement().text("target_id"))
+                    && binding.getRequest().getScope().getTenantId().equals(original.tenantId())
+                    && binding.getRequest().getScope().getWorkspaceId().equals(original.workspaceId())
+                    && binding.getRequest().getIsolationKey().equals(original.sessionId())
+                    && "DRAINED".equals(owner.retirement().text("progress_stage"))
+                    && Objects.equals(owner.retirement().number("progress_version"), 4L));
+            byte[] frozen = payload(owner.retirement(), "frozen_request");
+            var envelope = WorkspaceCsiApplicationJson.object(frozen, WorkspaceCsiApplicationInventory.MAX_BYTES);
+            nativeStore.requireCsiHistoricalCredential(original.tenantId(), original.workspaceId(), original.sessionId(), token,
+                    envelope.path("writerTokenSha256").textValue());
+            var saved = readSavedApplication(read, binding, owner.retirement(), identityJson, true);
+            require(Arrays.equals(owner.binding().bytes(), WorkspaceCsiApplicationImage.sole(saved.current(), "ma_runtime_binding").bytes()));
+            var intent = WorkspaceCsiApplicationInventory.retirement(owner.retirement());
+            var companions = WorkspaceCsiApplicationInventory.readForeignPhysical(read, original.retirementId(), binding.getBindingId(), intent.physicalKey());
+            require(companions.size() <= 1);
+            Row companion = companions.isEmpty() ? null : companions.getFirst();
+            WorkspaceCsiPhysicalStore.Status result;
+            if (companion == null) {
+                result = new WorkspaceCsiPhysicalStore.Status(original.retirementId(), "UNPLANNED", 0, null, 0);
+            } else {
+                var source = WorkspaceCsiApplicationInventory.publishedSource(saved.stageImage());
+                var plan = WorkspaceCsiPhysicalStore.retainedPlan(binding, intent, saved.stageImage(), frozen,
+                        payload(owner.retirement(), "cut"), payload(owner.retirement(), "finalize_receipt"), source);
+                result = WorkspaceCsiPhysicalStore.status(WorkspaceCsiApplicationInventory.retainedProgress(companion, plan, source));
+            }
+            require(WorkspaceCsiApplicationInventory.auditPhysicalCandidates(read, saved.current(), companion).blockers().isEmpty());
             require(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(10));
             return result;
         }));
@@ -371,12 +417,14 @@ final class WorkspaceCsiApplicationHistory {
         var binding = bindings.findByIdInReadOnlySnapshot(read.connection, owner.binding().text("binding_id"));
         require(binding != null && binding.getState() == RuntimeBindingRecord.State.DRAINING
                 && Objects.equals(binding.getVersion(), owner.binding().number("record_version")));
-        readSavedApplication(read, binding, owner.retirement(), identityJson);
+        readSavedApplication(read, binding, owner.retirement(), identityJson, false);
         return WorkspaceCsiApplicationImage.baseline(payload(owner.retirement(), "frozen_request"));
     }
 
-    private static Snapshot readSavedApplication(WorkspaceCsiApplicationInventory.HistoricalScan read,
-            RuntimeBindingRecord binding, Row retirement, ObjectMapper identityJson) throws SQLException {
+    private record SavedApplication(Snapshot current, Snapshot stageImage) { }
+
+    private static SavedApplication readSavedApplication(WorkspaceCsiApplicationInventory.HistoricalScan read,
+            RuntimeBindingRecord binding, Row retirement, ObjectMapper identityJson, boolean retainedProgress) throws SQLException {
         var target = read.connection;
         long started = read.started;
         require(target != null && !target.getAutoCommit() && target.isReadOnly()
@@ -410,7 +458,9 @@ final class WorkspaceCsiApplicationHistory {
         var envelope = WorkspaceCsiApplicationStore.savedEnvelope(binding, context, intent.operationId(), intent.sealedBindingVersion(), frozen);
         byte[] body = WorkspaceCsiApplicationJson.base64(envelope.path("commitBodyBase64"), 128 * 1024);
         var terminal = preparedTerminal(baseline, binding.getRequest(), body);
-        var members = released ? read.originalExecutions(actual) : read.foreignExecutions(actual);
+        require(!retainedProgress || !released && stage == Stage.DRAINED);
+        boolean originalOwner = released || retainedProgress;
+        var members = originalOwner ? read.originalExecutions(actual) : read.foreignExecutions(actual);
         var observe = WorkspaceCsiApplicationStore.workerRequest(binding, context, intent.operationId(), "observe", hash(body), null, null);
         WorkspaceCsiApplicationWorkerMatch.verify(baseline, terminal,
                 WorkspaceCsiApplicationJson.base64(envelope.path("preCutObservationBase64"), CsiFileFinalizeProtocol.RESPONSE_LIMIT), observe);
@@ -423,8 +473,9 @@ final class WorkspaceCsiApplicationHistory {
         var stageImage = WorkspaceCsiApplicationImage.expected(baseline, stage, frozen, cut, receipt);
         var expected = released ? WorkspaceCsiPhysicalHistoryImage.expected(stageImage) : WorkspaceCsiPhysicalHistoryImage.owner(stageImage);
         Snapshot current;
-        if (released) {
-            current = WorkspaceCsiApplicationInventory.readHistoricalReferencedKeys(read, expected, actual, intent);
+        if (originalOwner) {
+            current = retainedProgress ? WorkspaceCsiApplicationInventory.readRetainedReferencedKeys(read, expected, actual, intent)
+                    : WorkspaceCsiApplicationInventory.readHistoricalReferencedKeys(read, expected, actual, intent);
             WorkspaceCsiApplicationImage.verify(current, expected);
         } else {
             WorkspaceCsiApplicationInventory.auditForeignOwner(read, expected, actual, intent);
@@ -456,7 +507,7 @@ final class WorkspaceCsiApplicationHistory {
             require(commits.size() == 1 && writerHash.equals(commits.getFirst().text("writer_token_hash")));
         }
         require(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(10));
-        return current;
+        return new SavedApplication(current, stageImage);
     }
 
     private static byte[] stagePayload(Row row, String field, boolean present) {

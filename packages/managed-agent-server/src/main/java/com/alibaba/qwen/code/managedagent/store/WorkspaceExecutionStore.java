@@ -53,6 +53,10 @@ public class WorkspaceExecutionStore {
         this.residents = new ResidentWorkspaces(List.of());
     }
 
+    public java.nio.file.Path createdStorageRoot(String tenantId, String storageId) {
+        return storageGuard == null ? null : storageGuard.createdStorageRoot(tenantId, storageId);
+    }
+
     public boolean verifiedRecoveryEnabled() {
         return storageGuard != null && storageGuard.enabled();
     }

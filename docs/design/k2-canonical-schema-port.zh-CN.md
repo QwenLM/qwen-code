@@ -7,17 +7,15 @@
 实现和兼容验证正在进行。本文描述 K2 对主干全新标准托管数据库结构的适配，
 不授予应用退役、物理释放或安全卷复用资格。
 
-主干将旧表合并为 32 张 `ma_*` 表、704 个字段。K2 的旧表名、行归属规则、
+主干将旧表合并为 32 张 `ma_*` 表、707 个字段。K2 的旧表名、行归属规则、
 日志键和组件快照格式不能通过别名保留。全新初始化器拒绝旧数据库；本次变更
 新增 K2 迁移不提供旧结构回填或兼容视图。
 
 ## 数据库结构与行身份
 
-主干已发布的 V1 保持原始字节，包含 32 张表、704 个字段。V2 增加四个私有
-CSI 权限字段；K2 的 V3 增加十一个应用进度字段、`ma_csi_source`（19 字段）
-及 `ma_csi_physical`（六字段），不重写 V1 或 V2。最终结构包含 34 张表、
-744 个字段。应用清单覆盖 33 张表、738 个字段，物理伴随表单独检查。
-`ma_session.csi_guard` 由私有工具配置或持久运行时请求固定值生成。
+保留当前主干 V1–V5 的原始字节。V1 为 32 表 707 列，包含新增重试预算字段；V2 增加四个私有 CSI 权限字段，V3 调整列表索引，V4 扩展 Workspace 创建 receipt namespace，V5 增加四个模型选择字段。K2 退役增量顺延为 V6，增加十一个应用进度字段、`ma_csi_source`（19 列）和 `ma_csi_physical`（6 列）。有效结构为 34 表 751 列，应用清单为 33 表 745 列，物理伴随表单独检查。`ma_session.csi_guard` 由私有工具 profile 或持久 runtime request pin 生成。
+
+七个主干新增字段均进入原始 typed whole-row 比较，包括 Session 模型 `(NULL,0)`、Turn 模型双 NULL 及三项重试预算字段。`model_id` 使用严格 UTF-8 identity 解码，但不成为新的强引用根。私有首条路径保持固定 native 模型策略，只支持实际 Session 默认 `(NULL,0)`；非默认选择完整进入清单并阻塞退役，普通公开模型选择保持不变。旧 inventory/2 baseline 缺列时仍被拒绝，不补默认值、不改 header/hash 或已存 bytes。旧未发布 K2 V4 不伪装为主干 V4，也不修改 Flyway 历史。
 
 原生资源读取证据使用现有 `ma_request_receipt`，namespace 为 `SESSION_COMMAND`，
 operation 为 `CSI_RESOURCE_READ`，真实主键为 `key("csi-read", readId)`。
@@ -78,3 +76,9 @@ checkpoint 协议检查、精确应用像和回滚/重试行为、同步读端�
 本适配不安装 collector 或创建付费节点。来源安装与约束资格化、原子物理释放、
 历史旧凭据验证、单调安全复用及公开选择仍是独立的 K2 工作。剩余标准 artifact 和 secondary domain 的被动归属支持尚未完成，未知行继续阻塞。在这些前置条件
 通过所需检查前，公开选择保持关闭。
+
+## 主干新增普通写入隔离
+
+生命周期失败结算必须在任何 operation/head DML 之前核对实际 private fence。模型用量的普通界面投影仅接受 `csi_guard=FALSE`；私有 journal 的原模型事件与原资源不变，不额外生成 `hosted_context_usage` domain/ref。Action 扫描及已结束 action 的恢复结算都在 LIMIT 前排除 private Session，claim/结算事务内再核；工具结果采集保留方法级 private 早退。新 approvalMode 创建重载仍核对 resident 注册或 LOCAL storage。
+
+普通 H2 数据组件控制验证这些边界，不证明 MySQL 锁、原生 producer、物理停止或卷复用。

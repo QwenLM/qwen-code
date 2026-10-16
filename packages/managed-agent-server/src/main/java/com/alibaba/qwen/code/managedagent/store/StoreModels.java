@@ -62,9 +62,11 @@ public final class StoreModels {
             String status, boolean submissionAttempted,
             String harnessEventEpoch,
             Long harnessLastEventId, String dispatchOwner,
-            Long dispatchLeaseUntil, int retryCount, Long retryAfter,
-            String errorCode, String errorMessage, long createdAt,
-            long updatedAt, Long completedAt, long version) {
+            Long dispatchLeaseUntil, int retryCount, int consecutiveFailures,
+            int budgetExemptFailures, Long retryAfter, String errorCode,
+            String errorMessage,
+            long createdAt, long updatedAt, Long completedAt,
+            long version) {
     }
 
     public record EventRecord(String tenantId, String sessionId,
@@ -167,7 +169,14 @@ public final class StoreModels {
      * A durable lifecycle operation. {@code sessionStatusBefore} is the
      * Session status when it was admitted; only an operation admitted on an
      * active Session closes the Harness. The cwd fields, {@code taskId} and
-     * {@code failureCode} are set only for the kinds that populate them.
+     * {@code failureCode} are set only for the kinds that populate
+     * them. {@code budgetExemptAttempt} counts the attempts that never
+     * consumed the terminal retry budget:
+     * failures that waited on an external condition (a live journal
+     * writer, or Java's stale view of a restarted Harness) and, for
+     * an action response, every attempt once the Harness has
+     * answered — the decision is committed then and only Java's
+     * projection lag remains.
      */
     public record OperationRecord(String tenantId, String sessionId,
             String operationId, OperationKind kind, String requestDigest,
@@ -175,8 +184,8 @@ public final class StoreModels {
             String sessionStatusBefore, String receiptId, String leaseOwner,
             long claimGeneration, int attemptCount, String targetCwdRelative,
             Long expectedContextRevision, Long resultContextRevision,
-            String failureCode, int lifecycleProtocolVersion,
-            byte[] actorKey, String taskId) {
+            String failureCode, int budgetExemptAttempt,
+            int lifecycleProtocolVersion, byte[] actorKey, String taskId) {
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
                 String requestDigest, String state, String admissionStage, String deliveryState,
                 String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration,
@@ -184,8 +193,8 @@ public final class StoreModels {
                 Long resultContextRevision, String failureCode, int lifecycleProtocolVersion, byte[] actorKey) {
             this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
                     sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
-                    expectedContextRevision, resultContextRevision, failureCode, lifecycleProtocolVersion, actorKey,
-                    null);
+                    expectedContextRevision, resultContextRevision, failureCode, 0, lifecycleProtocolVersion,
+                    actorKey, null);
         }
 
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
@@ -194,7 +203,7 @@ public final class StoreModels {
                 Long expectedContextRevision, Long resultContextRevision, String failureCode) {
             this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
                     sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
-                    expectedContextRevision, resultContextRevision, failureCode, 0, null);
+                    expectedContextRevision, resultContextRevision, failureCode, 0, 0, null, null);
         }
 
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
@@ -203,7 +212,7 @@ public final class StoreModels {
                 int lifecycleProtocolVersion) {
             this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
                     sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, null, null,
-                    failureCode, lifecycleProtocolVersion, null);
+                    failureCode, 0, lifecycleProtocolVersion, null, null);
         }
 
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,

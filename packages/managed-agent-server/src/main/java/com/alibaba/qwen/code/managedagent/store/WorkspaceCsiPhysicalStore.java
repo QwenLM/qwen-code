@@ -268,7 +268,7 @@ public final class WorkspaceCsiPhysicalStore {
         }));
     }
 
-    private static Status status(WorkspaceCsiPhysicalProgress value) {
+    static Status status(WorkspaceCsiPhysicalProgress value) {
         require(value != null);
         return new Status(value.retirementId(), value.stage(), value.version(), value.planSha256(), value.attempts());
     }

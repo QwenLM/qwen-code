@@ -69,7 +69,8 @@ public final class WorkspaceCsiPhysicalMain {
                 binding.getRequest().getScope().getWorkspaceId(), args[4]);
         String token = credentials.issue(original.tenantId(), original.workspaceId(), original.sessionId());
         if ("status".equals(args[1])) {
-            System.out.println(json.writeValueAsString(store.status(original, token)));
+            System.out.println(json.writeValueAsString(new WorkspaceCsiApplicationHistory(jdbc, manager, bindings, nativeStore, json)
+                    .readRetainedProgress(original, token)));
             return;
         }
         var node = nodeRequest.node();
