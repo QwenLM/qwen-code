@@ -3434,7 +3434,7 @@ describe('WeComChannel', () => {
 
   // The read-only parent only blocks removal where permission bits bind:
   // Windows ignores them and root with its DAC capabilities bypasses them.
-  // Ask the kernel, as the cli and core permission-bits helpers do, so a
+  // Ask the kernel, as the permission-bits helpers in other packages do, so a
   // root lane that drops those capabilities still runs this case. A probe
   // that cannot measure answers false too, and says so on stderr, as a
   // warning under GitHub Actions.

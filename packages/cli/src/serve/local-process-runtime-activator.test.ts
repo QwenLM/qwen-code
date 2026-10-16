@@ -14,6 +14,7 @@ import {
 } from './local-process-runtime-activator.js';
 import { ProcessRegistry } from '@qwen-code/acp-bridge';
 import type { WorkspaceRuntime } from './workspace-registry.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const fixture = `
 process.on('message', b => {
@@ -492,7 +493,7 @@ process.on('SIGTERM', () => process.exit(0));
     }
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'aggregates a settled rm-class cleanup failure into close()',
     async () => {
       const { activator, stateDir } = await setup(1);
