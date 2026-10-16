@@ -5,7 +5,7 @@
  */
 import type { Application, Request, Response, RequestHandler } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
-import type { MemoryImportProposal } from '@qwen-code/qwen-code-core/memory/import-model.js';
+import type { MemoryImportBatchProposal } from '@qwen-code/qwen-code-core/memory/import-model.js';
 import { runWithMemoryProjectScope } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { previewSource } from '../memory-import/source.js';
 import { MemoryImportService } from '../memory-import/service.js';
@@ -72,7 +72,7 @@ export function mountMemoryImportRoutes(
           signal.throwIfAborted();
           active(runtime);
           const response =
-            await runtime.bridge.invokeWorkspaceCommand<MemoryImportProposal>(
+            await runtime.bridge.invokeWorkspaceCommand<MemoryImportBatchProposal>(
               SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan,
               { ...input },
               { timeoutMs: 130_000 },

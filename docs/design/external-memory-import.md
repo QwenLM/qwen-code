@@ -49,6 +49,39 @@ worktree-scoped. Native scanning, search, fetch, recall and forget include the
 imported layer. Source snapshots never enter native scanning. Native writers are
 not granted arbitrary access to retained sources.
 
+## Batching and cost limits
+
+Each runtime groups selected sections by confirmed scope and original project group,
+then sorts content IDs and packs at most eight sections / 64 KiB of source per model
+request. A response must contain exactly one native-validated decision per source ID.
+Per-source identity and publication ledgers remain unchanged. Before the first write,
+the complete batch response and baseline document hashes are journaled. Later items
+accept only that baseline plus this batch's verified publications; external edits,
+deletions or additions cause conflicts. Recovery reuses journaled responses.
+
+The model receives a bounded metadata index and relevant complete documents, not a
+copy of every existing body. The local full snapshot still protects against edits
+and forgetting. If the index or relevant evidence cannot fit, fail with an actionable
+context-limit result rather than silently dropping relevant evidence. Index-only
+entries are explicitly identified; uncertain overlap must produce a conflict.
+
+Offline preview estimates calls and input/output tokens by source project group,
+reserving the maximum existing-context allowance because preview does not read native
+memory. Unassigned groups remain estimates until mapped. These are estimates, not
+provider billing quotes. Each task permits at most 32 logical model invocations and
+512,000 reserved token units; reservations include request bytes (including prompt
+and schema) plus an 8,192-token output allowance. Reserve durably before each call;
+failed calls, cancellation and retries never refund or reset the allowance. Budget
+exhaustion leaves unfinished items visible without making more calls. Model output
+is capped and import disables unattended outer retries. Provider-internal retries
+and tokenizer overhead mean this is not a guaranteed billed-token or currency cap.
+
+Repository identity lookup uses a bounded memo cache, cleared by the existing memory
+root-cache reset, with runtime paths resolved separately. Ordinary scans skip this
+lookup entirely when the runtime has no imported-project-memory directory. Import
+writes refresh Git identity so cached recall paths cannot authorize stale targets.
+Git-layout changes require the same root-cache reset as ordinary project memory.
+
 ## Interfaces
 
 Workspace-qualified HTTP routes provide preview, batch submission, listing,

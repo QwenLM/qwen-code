@@ -59,11 +59,16 @@ async function setup(nested = false) {
         ? path.join(root, 'repository', id)
         : path.join(root, id);
     await fs.mkdir(cwd);
-    const invoke = vi.fn(async () => ({
-      decision: 'new',
-      reason: 'durable',
-      documents: [document],
-    }));
+    const invoke = vi.fn(
+      async (_method: string, input: { sources: Array<{ id: string }> }) => ({
+        items: input.sources.map(({ id }) => ({
+          id,
+          decision: 'new',
+          reason: 'durable',
+          documents: [document],
+        })),
+      }),
+    );
     return {
       workspaceId: id,
       workspaceCwd: cwd,

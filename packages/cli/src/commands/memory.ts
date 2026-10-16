@@ -81,6 +81,16 @@ export const memoryCommand: CommandModule = {
                 writeStdoutLine(
                   `[${group.sectionIds.length} sections] ${group.scope}: ${JSON.stringify(group.sourceProject ?? 'No project hint')}`,
                 );
+              writeStdoutLine(
+                `Estimated usage (all selectable sections): ${preview.estimate.modelCalls} model calls, ${preview.estimate.sourceTokens} source tokens, up to ${preview.estimate.maxOutputTokens} output tokens; ${preview.estimate.reservedTokens} reserved token units including context.`,
+              );
+              writeStdoutLine(
+                `Task limits: ${preview.estimate.limits.maxCalls} calls / ${preview.estimate.limits.maxReservedTokens} reserved token units. Estimates are not billing quotes; explicit selection and existing context affect usage.`,
+              );
+              if (preview.estimate.exceedsBudget)
+                writeStdoutLine(
+                  'Warning: the full selection may exceed the task budget; select fewer sections before confirming.',
+                );
               for (const warning of preview.warnings)
                 writeStdoutLine(`Warning: ${JSON.stringify(warning)}`);
               writeStdoutLine(

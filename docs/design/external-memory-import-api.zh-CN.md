@@ -8,7 +8,7 @@
 
 ## 来源与离线预览
 
-来源结构为 `{version:1, source:"codex", files:[{path,content}]}`。路径相对于选中的 Codex memories 文件夹。接受 `MEMORY.md`、`memory_summary.md` 及被引用的 `rollout_summaries/*.md`；这些是整理后的 Markdown，不是原始会话 JSONL。排除符号链接、路径穿越、凭证、配置和技能。限制为 256 个文件、单文件 512 KiB、解码后来源总计 8 MiB、单个可选章节 64 KiB、总计 4,096 个标题；HTTP 还受现有 10 MiB JSON 请求体限制。选中上下文快照限制为序列化后 16 MiB JSON；每次整理输入（选中章节及同范围已有记忆）限制为 512 KiB。超限会拒绝，不静默截断。
+来源结构为 `{version:1, source:"codex", files:[{path,content}]}`。路径相对于选中的 Codex memories 文件夹。接受 `MEMORY.md`、`memory_summary.md` 及被引用的 `rollout_summaries/*.md`；这些是整理后的 Markdown，不是原始会话 JSONL。排除符号链接、路径穿越、凭证、配置和技能。限制为 256 个文件、单文件 512 KiB、解码后来源总计 8 MiB、单个可选章节 64 KiB、总计 4,096 个标题；HTTP 还受现有 10 MiB JSON 请求体限制。选中上下文快照限制为序列化后 16 MiB JSON；每次整理请求最多包含 8 个章节／64 KiB 来源及 32 KiB 同范围上下文。超限会拒绝，不静默截断。
 
 `POST /preview` 接受来源结构，不保留文件、不启动模型、不创建记忆或任务记录。发送到服务端本身会传输内容；需要浏览器本地预览的宿主应先提供本地文件预览。Qwen 解析器由 CLI 和服务端复用，不作为浏览器库分发。这不意味着外部界面完全不发生网络传输。
 
@@ -58,3 +58,11 @@ const status = await authenticatedJson(`${base}/batches/${task.id}`);
 `qwen memory import codex --source <folder> --dry-run --json` 完全离线，不加载模型认证、不写记忆。省略 `--source` 时使用 `$CODEX_HOME/memories`，否则回退 `~/.codex/memories`。
 
 授权整理需传入 `--apply --selection <selection.json> --idempotency-key <key>`。选择文件是明确的章节 ID 与范围数组。当前可信本地项目为目标；映射其他项目组时在对应项目运行。使用 Qwen 已配置模型。`--apply` 与 `--dry-run` 互斥。`--retry` 重试同一键的未完成项。CLI 确认导入会等待任务并打印 JSON 结果；冲突、部分失败和取消返回非零退出码。bare/safe 模式支持离线预览，但拒绝确认导入，与原生托管记忆的可用性一致。
+
+## 用量估算与任务预算
+
+预览包含 `estimate` 与 `groups[].estimate`，字段为 `modelCalls`、`sourceTokens`、`maxOutputTokens`、`reservedTokens`、`exceedsBudget`、`limits`。估算覆盖全部可选来源，待映射组仅供预估。离线预览不读取原生记忆、不调用模型；每批预留最多 32 KiB 已有上下文及有界提示词/schema。实际选择、已处理来源和相关已有上下文可能降低预留量；这不是计费报价。
+
+任务公开 `usage.modelCalls`、`usage.reservedTokens` 和 `budget`。上限为 32 次逻辑调用及 512,000 个预留 token 单位，每次含 8,192 个输出 token 额度。调用前持久化预留；失败、重启、取消和重试均不重置。`partial` 结果通过 `items[].reason` 标明预算耗尽或元数据/相关证据超限。耗尽任务的重试不会补充额度；需显式确认更小的新选择，跨任务仍按原始来源去重。缺少预算记录的旧任务模型预算和已记录用量均为零，历史用量未知。
+
+模型上下文包含有界的同 scope 完整元数据索引和相关全文，明确标记仅索引条目。索引或相关证据超过 32 KiB 时在调用模型前失败。原生快照仍检查全部已有内容，包括未发送给模型的正文。供应商内部重试与 token 统计可能不同；逻辑调用/预留量限制不保证实际计费 token 或金额上限。普通记忆及认证策略不变。

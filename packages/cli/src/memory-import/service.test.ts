@@ -13,7 +13,10 @@ import { getImportedProjectMemoryRoot } from '@qwen-code/qwen-code-core/memory/i
 import { getUserAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { MemoryImportService } from './service.js';
 import { previewSource } from './source.js';
-import type { MemoryImportProposal } from '@qwen-code/qwen-code-core/memory/import-model.js';
+import type {
+  MemoryImportProposal,
+  MemoryImportModelInput,
+} from '@qwen-code/qwen-code-core/memory/import-model.js';
 vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>()),
 }));
@@ -60,7 +63,10 @@ function service(
   return new MemoryImportService({
     projectRoot: project,
     assertActive: () => {},
-    propose,
+    propose: async (input) => {
+      const result = await propose();
+      return { items: input.sources.map(({ id }) => ({ id, ...result })) };
+    },
   });
 }
 const selection = () => [
@@ -397,5 +403,311 @@ describe('durable memory import', () => {
         (await scanAutoMemorySnapshot(project, { scopes: ['user'] })).docs,
       ).toHaveLength(1);
       expect(await fs.stat(getUserAutoMemoryRoot())).toBeDefined();
+    }));
+});
+
+describe('bounded project batches', () => {
+  const many = (count: number, separate = false) => ({
+    ...source,
+    files: [
+      {
+        path: 'MEMORY.md',
+        content: Array.from(
+          { length: count },
+          (_, i) =>
+            `# Topic ${i}\ncwd: /synthetic/${separate ? `project-${i}` : 'project'}\nIndependent durable fact number ${i}.`,
+        ).join('\n\n'),
+      },
+    ],
+  });
+  const selections = (input: ReturnType<typeof many>) =>
+    previewSource(input).sections.map(({ id }) => ({ id, scope: 'project' }));
+  const skipped = (input: { sources: Array<{ id: string }> }) => ({
+    items: input.sources.map(({ id }) => ({
+      id,
+      decision: 'skip' as const,
+      reason: 'No new facts.',
+      documents: [],
+    })),
+  });
+  it('packs same-project sources, separates projects and exposes deterministic offline estimates', () =>
+    context(async () => {
+      const propose = vi.fn(async (input: MemoryImportModelInput) =>
+        skipped(input),
+      );
+      const svc = new MemoryImportService({
+        projectRoot: project,
+        assertActive: () => {},
+        propose,
+      });
+      const input = many(12);
+      expect(previewSource(input).estimate.modelCalls).toBe(2);
+      await expect(fs.stat(runtime)).rejects.toMatchObject({ code: 'ENOENT' });
+      const task = await svc.submit(input, selections(input), 'packed');
+      const result = await svc.idle(task.id);
+      expect(result.status).toBe('completed');
+      expect(propose.mock.calls.map(([input]) => input.sources.length)).toEqual(
+        [8, 4],
+      );
+      expect(result.usage.modelCalls).toBe(2);
+      const separate = many(3, true);
+      expect(
+        previewSource(separate).groups.map(
+          (group) => group.estimate.modelCalls,
+        ),
+      ).toEqual([1, 1, 1]);
+      const second = await svc.submit(
+        separate,
+        selections(separate),
+        'separate',
+      );
+      await svc.idle(second.id);
+      expect(
+        propose.mock.calls.slice(2).map(([input]) => input.sources.length),
+      ).toEqual([1, 1, 1]);
+    }));
+  it('finishes each project batch before another group can change its baseline', () =>
+    context(async () => {
+      const input = {
+        ...source,
+        files: [
+          {
+            path: 'MEMORY.md',
+            content: Array.from(
+              { length: 16 },
+              (_, i) =>
+                `# Source ${i}\ncwd: /synthetic/${i % 2 ? 'alpha' : 'beta'}\nIndependent durable fact ${i}.`,
+            ).join('\n\n'),
+          },
+        ],
+      };
+      const sorted = [...previewSource(input).sections].sort((a, b) =>
+        a.id.localeCompare(b.id),
+      );
+      const groups = sorted.map((item) => item.groupId);
+      expect(
+        groups.some(
+          (group, i) =>
+            i > 1 &&
+            group !== groups[i - 1] &&
+            groups.slice(0, i - 1).includes(group),
+        ),
+      ).toBe(true);
+      const propose = vi.fn(async (input: MemoryImportModelInput) => ({
+        items: input.sources.map(({ id }) => ({
+          id,
+          decision: 'new' as const,
+          reason: 'Independent fact',
+          documents: [
+            doc.replace(
+              'Validate rollback paths for every schema migration.',
+              `Independent fact ${id}.`,
+            ),
+          ],
+        })),
+      }));
+      const svc = new MemoryImportService({
+        projectRoot: project,
+        assertActive: () => {},
+        propose,
+      });
+      const task = await svc.submit(input, selections(input), 'interleaved');
+      const result = await svc.idle(task.id);
+      expect(result.items.map((item) => item.status)).toEqual(
+        Array(16).fill('added'),
+      );
+      expect(propose).toHaveBeenCalledTimes(2);
+    }));
+  it('sends metadata instead of unrelated full bodies and rejects excessive evidence before calling the model', () =>
+    context(async () => {
+      const memory = getUserAutoMemoryRoot();
+      await fs.mkdir(memory, { recursive: true });
+      const unrelated = doc
+        .replaceAll('Review migrations', 'Aquamarine palette')
+        .replaceAll(
+          'Validate database migrations before rollout',
+          'Preferred visual colors',
+        )
+        .replaceAll(
+          'database migrations, rollback checks',
+          'color palette, paint settings',
+        )
+        .replaceAll('Reviewing schema migrations', 'Selecting colors')
+        .replace(
+          'Validate rollback paths for every schema migration.',
+          'HIDDEN_FULL_BODY '.repeat(100),
+        );
+      await fs.writeFile(
+        path.join(memory, 'unrelated.md'),
+        unrelated.replace('type: project', 'type: user'),
+      );
+      const propose = vi.fn(async (input: MemoryImportModelInput) =>
+        skipped(input),
+      );
+      const svc = new MemoryImportService({
+        projectRoot: project,
+        assertActive: () => {},
+        propose,
+      });
+      const input = many(1);
+      const task = await svc.submit(
+        input,
+        selections(input).map((item) => ({ ...item, scope: 'user' })),
+        'compact',
+      );
+      await svc.idle(task.id);
+      expect(propose).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(propose.mock.calls[0][0])).not.toContain(
+        'HIDDEN_FULL_BODY',
+      );
+      expect(propose.mock.calls[0][0].existing[0].indexOnly).toBe(true);
+      await fs.writeFile(
+        path.join(memory, 'large.md'),
+        unrelated
+          .replace('Aquamarine palette', 'Independent durable')
+          .replace('HIDDEN_FULL_BODY '.repeat(100), 'x'.repeat(40_000)),
+      );
+      const second = await svc.submit(
+        input,
+        selections(input).map((item) => ({ ...item, scope: 'user' })),
+        'too-large',
+      );
+      // A processed source skips the model; a different source must evaluate the context.
+      await svc.idle(second.id);
+      const changed = many(2);
+      const third = await svc.submit(
+        changed,
+        selections(changed).map((item) => ({ ...item, scope: 'user' })),
+        'large-context',
+      );
+      const done = await svc.idle(third.id);
+      expect(done.items.some((item) => item.reason?.includes('32 KiB'))).toBe(
+        true,
+      );
+      expect(propose).toHaveBeenCalledTimes(1);
+    }));
+  it('persists reservations across failed calls, restart and retry and stops at the total limit', () =>
+    context(async () => {
+      const propose = vi.fn(async () => {
+        throw new Error('provider unavailable');
+      });
+      const create = () =>
+        new MemoryImportService({
+          projectRoot: project,
+          assertActive: () => {},
+          propose,
+        });
+      const input = many(40, true);
+      const svc = create();
+      const task = await svc.submit(input, selections(input), 'budget');
+      const first = await svc.idle(task.id);
+      expect(first.status).toBe('partial');
+      expect(first.usage.modelCalls).toBeLessThanOrEqual(first.budget.maxCalls);
+      expect(first.usage.reservedTokens).toBeLessThanOrEqual(
+        first.budget.maxReservedTokens,
+      );
+      expect(
+        first.items.some((item) => item.reason?.includes('budget exhausted')),
+      ).toBe(true);
+      const calls = propose.mock.calls.length;
+      const restarted = create();
+      await restarted.retry(task.id);
+      const retried = await restarted.idle(task.id);
+      expect(retried.usage).toEqual(first.usage);
+      expect(propose).toHaveBeenCalledTimes(calls);
+    }));
+  it('does not replenish legacy tasks with unknown historical usage', () =>
+    context(async () => {
+      const propose = vi.fn(async () => {
+        throw new Error('unavailable');
+      });
+      const svc = service(propose);
+      const task = await svc.submit(source, selection(), 'legacy-budget');
+      await svc.idle(task.id);
+      const owners = await fs.readdir(
+        path.join(runtime, 'memory-import', 'batches'),
+      );
+      const file = path.join(
+        runtime,
+        'memory-import',
+        'batches',
+        owners[0],
+        task.id,
+        'task.json',
+      );
+      const stored = JSON.parse(await fs.readFile(file, 'utf8'));
+      delete stored.usage;
+      delete stored.budget;
+      await fs.writeFile(file, JSON.stringify(stored));
+      const restarted = service(propose);
+      await restarted.retry(task.id);
+      const result = await restarted.idle(task.id);
+      expect(propose).toHaveBeenCalledTimes(1);
+      expect(result.budget).toEqual({ maxCalls: 0, maxReservedTokens: 0 });
+      expect(result.usage).toEqual({ modelCalls: 0, reservedTokens: 0 });
+      expect(result.items[0].reason).toContain('budget exhausted');
+    }));
+  it('journals a complete batch before publication and resumes remaining sources without another model call', () =>
+    context(async () => {
+      const input = many(2);
+      const propose = vi.fn(async (input: MemoryImportModelInput) => ({
+        items: input.sources.map(({ id }: { id: string }) => ({
+          id,
+          decision: 'new' as const,
+          reason: 'new',
+          documents: [
+            doc.replace(
+              'Validate rollback paths for every schema migration.',
+              `Distinct fact ${id}.`,
+            ),
+          ],
+        })),
+      }));
+      const create = () =>
+        new MemoryImportService({
+          projectRoot: project,
+          assertActive: () => {},
+          propose,
+        });
+      const original = fs.rename;
+      let publications = 0;
+      const rename = vi
+        .spyOn(fs, 'rename')
+        .mockImplementation(async (from, to) => {
+          if (String(from).includes('stage-') && ++publications === 2)
+            throw new Error('synthetic crash before second publication');
+          return original(from, to);
+        });
+      const svc = create();
+      const task = await svc.submit(input, selections(input), 'resume-batch');
+      const first = await svc.idle(task.id);
+      expect(first.items.map((item) => item.status)).toEqual([
+        'added',
+        'failed',
+      ]);
+      rename.mockRestore();
+      const restarted = create();
+      await restarted.retry(task.id);
+      const done = await restarted.idle(task.id);
+      expect(done.items.map((item) => item.status)).toEqual(['added', 'added']);
+      expect(propose).toHaveBeenCalledTimes(1);
+      expect(done.usage).toEqual(first.usage);
+    }));
+  it('rejects missing response IDs as a whole batch without repeated calls', () =>
+    context(async () => {
+      const input = many(3);
+      const propose = vi.fn(async (input: MemoryImportModelInput) => ({
+        items: [skipped(input).items[0]],
+      }));
+      const svc = new MemoryImportService({
+        projectRoot: project,
+        assertActive: () => {},
+        propose,
+      });
+      const task = await svc.submit(input, selections(input), 'bad-ids');
+      const done = await svc.idle(task.id);
+      expect(done.items.every((item) => item.status === 'failed')).toBe(true);
+      expect(propose).toHaveBeenCalledTimes(1);
+      expect((await scanAutoMemorySnapshot(project)).docs).toEqual([]);
     }));
 });

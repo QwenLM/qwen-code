@@ -14,7 +14,10 @@ import {
   resolvePath,
   sanitizeCwd,
 } from '../utils/paths.js';
-import { getImportedProjectMemoryRoot } from './import-paths.js';
+import {
+  getImportedProjectMemoryRoot,
+  clearMemoryImportIdentityCache,
+} from './import-paths.js';
 import type { AutoMemoryType } from './types.js';
 import { MEMORY_PROJECT_SCOPES } from './scopes.js';
 
@@ -163,6 +166,7 @@ export function getAutoMemoryRoot(projectRoot: string): string {
 /** Clear the memoization caches (for tests that change environment or git layout). */
 export function clearAutoMemoryRootCache(): void {
   _autoMemoryRootCache.clear();
+  clearMemoryImportIdentityCache();
   _teamAutoMemoryRootCache.clear();
   warnedUnknownMemoryProjectScope = false;
 }
@@ -200,7 +204,12 @@ export function getProjectAutoMemoryRoots(
       : trustedProject
         ? [configuredRoot, localRoot]
         : [configuredRoot];
-  if (trustedProject) {
+  if (
+    trustedProject &&
+    fs.existsSync(
+      path.join(Storage.getRuntimeBaseDir(), 'imported-project-memory'),
+    )
+  ) {
     try {
       const imported = getImportedProjectMemoryRoot(projectRoot);
       if (fs.existsSync(imported)) roots.push(imported);

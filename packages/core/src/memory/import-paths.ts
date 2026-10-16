@@ -61,10 +61,24 @@ export function memoryImportRepositoryIdentity(projectRoot: string): string {
     current = parent;
   }
 }
-export function getImportedProjectMemoryRoot(projectRoot: string): string {
-  const identity = createHash('sha256')
-    .update(memoryImportRepositoryIdentity(projectRoot))
-    .digest('hex');
+const identities = new Map<string, string>();
+export function clearMemoryImportIdentityCache(): void {
+  identities.clear();
+}
+export function getImportedProjectMemoryRoot(
+  projectRoot: string,
+  refresh = false,
+): string {
+  const key = path.resolve(projectRoot);
+  let repository = refresh ? undefined : identities.get(key);
+  if (!repository) {
+    identities.delete(key);
+    repository = memoryImportRepositoryIdentity(projectRoot);
+    if (identities.size >= 256)
+      identities.delete(identities.keys().next().value!);
+    identities.set(key, repository);
+  }
+  const identity = createHash('sha256').update(repository).digest('hex');
   return path.join(
     Storage.getRuntimeBaseDir(),
     'imported-project-memory',

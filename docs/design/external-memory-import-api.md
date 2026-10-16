@@ -20,7 +20,7 @@ Paths are relative to the selected Codex memories folder. Accepted resources are
 These are distilled Markdown resources, not raw session JSONL. Symlinks,
 traversal, credentials, configuration and skills are excluded. Limits are 256
 files, 512 KiB per file, 8 MiB total decoded source and 64 KiB per selectable
-section and 4,096 headings in total; HTTP's existing 10 MiB JSON-body limit also applies. Selected contextual snapshots are limited to 16 MiB serialized JSON, and each consolidation input (selected section plus existing same-scope memory) to 512 KiB. Oversized input is rejected, never silently truncated.
+section and 4,096 headings in total; HTTP's existing 10 MiB JSON-body limit also applies. Selected contextual snapshots are limited to 16 MiB serialized JSON, and each consolidation request to eight sections / 64 KiB of source plus 32 KiB of same-scope context. Oversized input is rejected, never silently truncated.
 
 `POST /preview` accepts the source envelope. It does not retain files, start a
 model or create memory/task records. Sending it to a server does transmit its
@@ -107,3 +107,28 @@ project to map another group. Qwen uses its configured model. `--apply` and
 `--dry-run` are mutually exclusive. `--retry` retries unfinished items for that
 same key. CLI confirmed imports wait for the task and print its JSON result;
 conflicts, partial results and cancellation produce a nonzero exit status. Bare/safe mode supports offline preview but rejects confirmed import, consistently with native managed memory availability.
+
+## Cost estimates and task budget
+
+Preview includes `estimate` and `groups[].estimate`: `modelCalls`, `sourceTokens`,
+`maxOutputTokens`, `reservedTokens`, `exceedsBudget`, and `limits`. Estimates cover
+all selectable sources; unmapped groups are provisional. Offline preview neither
+reads native memory nor invokes a model; it reserves up to 32 KiB context and a
+bounded prompt/schema allowance per batch. Actual selected groups, previous imports
+and relevant existing context can reduce the reservation. This is not a billing quote.
+
+Each task exposes `usage.modelCalls`, `usage.reservedTokens` and `budget`. Limits are
+32 logical invocations and 512,000 reserved token units, including an 8,192-token
+output allowance per request. Reservations persist before requests and survive
+failure, restart, cancellation and retry. `partial` results identify budget exhaustion
+or oversized metadata/relevant evidence in `items[].reason`. Retrying an exhausted
+task does not replenish its allowance. Confirm a smaller new selection explicitly;
+previously processed per-source identities still deduplicate across tasks. Legacy
+tasks lacking reservation records have a zero model budget and zero recorded usage; their historical usage is unknown.
+
+The model context contains the complete bounded same-scope metadata index and relevant
+full bodies; index-only entries are marked. An index or relevant evidence exceeding
+32 KiB fails before invoking a model. Native snapshot checks still cover all existing
+content, including bodies not sent to the model. Provider-internal retries and token
+accounting differ; logical-call/reservation limits are not guaranteed billed-token
+or monetary caps. Normal memories and authentication policy are unchanged.

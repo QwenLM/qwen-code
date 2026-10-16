@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { estimateMemoryImport } from '@qwen-code/qwen-code-core/memory/import-budget.js';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -49,9 +50,11 @@ export interface ImportPreview {
     scope: ImportSection['suggestedScope'];
     sourceProject?: string;
     sectionIds: string[];
+    estimate: ReturnType<typeof estimateMemoryImport>;
   }>;
   sections: ImportSection[];
   warnings: string[];
+  estimate: ReturnType<typeof estimateMemoryImport>;
 }
 export function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -299,7 +302,10 @@ export function previewSource(input: unknown): ImportPreview {
       });
     }
   }
-  const groups = new Map<string, ImportPreview['groups'][number]>();
+  const groups = new Map<
+    string,
+    Omit<ImportPreview['groups'][number], 'estimate'>
+  >();
   for (const section of sections) {
     const group = groups.get(section.groupId) ?? {
       id: section.groupId,
@@ -314,9 +320,19 @@ export function previewSource(input: unknown): ImportPreview {
     version: 1,
     kind: 'preview',
     digest: digest(JSON.stringify(source)),
-    groups: [...groups.values()],
+    groups: [...groups.values()].map((group) => ({
+      ...group,
+      estimate: estimateMemoryImport(
+        sections.filter(
+          (section) => section.selectable && section.groupId === group.id,
+        ),
+      ),
+    })),
     sections,
     warnings,
+    estimate: estimateMemoryImport(
+      sections.filter((section) => section.selectable),
+    ),
   };
 }
 export async function readLocalSource(

@@ -20,10 +20,16 @@ import {
 } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import { rebuildAutoMemoryIndexAtRoot } from '@qwen-code/qwen-code-core/memory/indexer.js';
 import {
-  validateMemoryImportProposal,
+  validateMemoryImportBatchProposal,
+  memoryImportReservation,
+  type MemoryImportBatchProposal,
   type MemoryImportModelInput,
   type MemoryImportProposal,
 } from '@qwen-code/qwen-code-core/memory/import-model.js';
+import {
+  MEMORY_IMPORT_BUDGET,
+  packMemoryImportSections,
+} from '@qwen-code/qwen-code-core/memory/import-budget.js';
 import { resolveTrustedMemoryFile } from '@qwen-code/qwen-code-core/memory/trusted-memory-filesystem.js';
 import { digest, previewSource, type ImportSection } from './source.js';
 
@@ -47,6 +53,8 @@ export interface ImportTask {
   createdAt: string;
   updatedAt: string;
   items: ImportItemResult[];
+  usage: { modelCalls: number; reservedTokens: number };
+  budget: { maxCalls: number; maxReservedTokens: number };
   result?: {
     sourceSections: number;
     newDocuments: number;
@@ -58,6 +66,14 @@ export interface ImportTask {
 interface StoredTask extends ImportTask {
   requestDigest: string;
 }
+interface PreparedBatch {
+  baseline: Array<{ ref: string; digest: string }>;
+  scope: Scope;
+  sections: Array<{ id: string; key: string }>;
+  proposal: MemoryImportBatchProposal;
+}
+class ImportBudgetError extends Error {}
+class ImportContextError extends Error {}
 interface RetainedSource {
   sections: Array<ImportSection & { scope: Scope }>;
 }
@@ -76,7 +92,7 @@ export interface ImportServiceOptions {
   propose: (
     input: MemoryImportModelInput,
     signal: AbortSignal,
-  ) => Promise<MemoryImportProposal>;
+  ) => Promise<MemoryImportBatchProposal>;
 }
 const exists = async (file: string) =>
   fs.lstat(file).then(
@@ -153,6 +169,8 @@ function publicTask(task: StoredTask): ImportTask {
   const { requestDigest: _requestDigest, ...result } = task;
   return structuredClone({
     ...result,
+    usage: task.usage ?? { modelCalls: 0, reservedTokens: 0 },
+    budget: task.budget ?? { maxCalls: 0, maxReservedTokens: 0 },
     result: {
       sourceSections: task.items.length,
       newDocuments: task.items
@@ -168,6 +186,51 @@ function publicTask(task: StoredTask): ImportTask {
     },
   });
 }
+function selectImportContext(
+  existing: MemoryImportModelInput['existing'],
+  source: string,
+): MemoryImportModelInput['existing'] {
+  const terms = new Set(
+    source.toLowerCase().match(/[\p{L}\p{N}_-]{4,}/gu) ?? [],
+  );
+  const context = existing.map((item) => {
+    const parsed = parseAutoMemoryTopicDocument('existing.md', item.content);
+    // Keep the complete native metadata as the discovery index; never truncate it.
+    const metadata = item.content.match(
+      /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
+    )?.[0];
+    if (!parsed || !metadata)
+      throw new ImportContextError(
+        'Existing memory has no bounded metadata index. Repair its native metadata before importing.',
+      );
+    const words = new Set(
+      [
+        parsed.title,
+        parsed.description,
+        ...parsed.keywords,
+        ...parsed.usageScenarios,
+      ]
+        .join(' ')
+        .toLowerCase()
+        .match(/[\p{L}\p{N}_-]{4,}/gu) ?? [],
+    );
+    const relevant = [...words].filter((word) => terms.has(word)).length >= 2;
+    return {
+      ref: item.ref,
+      content: relevant ? item.content : metadata,
+      indexOnly: !relevant,
+    };
+  });
+  if (
+    Buffer.byteLength(JSON.stringify(context)) >
+    MEMORY_IMPORT_BUDGET.contextBytes
+  )
+    throw new ImportContextError(
+      'Existing memory index or relevant evidence exceeds the 32 KiB import context budget. Select a narrower source group or consolidate existing memory before retrying. No model call was made.',
+    );
+  return context;
+}
+
 export class MemoryImportService {
   private readonly base = Storage.getRuntimeBaseDir();
   private readonly state = path.join(this.base, 'memory-import');
@@ -332,6 +395,11 @@ export class MemoryImportService {
           createdAt: now,
           updatedAt: now,
           requestDigest,
+          usage: { modelCalls: 0, reservedTokens: 0 },
+          budget: {
+            maxCalls: MEMORY_IMPORT_BUDGET.maxCalls,
+            maxReservedTokens: MEMORY_IMPORT_BUDGET.maxReservedTokens,
+          },
           items: selected.map((section) => ({
             id: section.id,
             scope: section.scope,
@@ -455,23 +523,37 @@ export class MemoryImportService {
         const source = await this.readState<RetainedSource>(
           path.join(dir, 'source.json'),
         );
+        if (!task.usage) {
+          task.usage = { modelCalls: 0, reservedTokens: 0 };
+          task.budget = { maxCalls: 0, maxReservedTokens: 0 };
+        }
+        task.budget ??= { maxCalls: 0, maxReservedTokens: 0 };
         task.status = 'running';
         await writeJson(path.join(dir, 'task.json'), task);
-        for (const item of task.items) {
+        for (const section of packMemoryImportSections(
+          source.sections,
+        ).flat()) {
+          const item = task.items.find((item) => item.id === section.id)!;
           if (item.status !== 'pending') continue;
           if (await exists(path.join(dir, 'cancel.json'))) controller.abort();
           if (controller.signal.aborted) break;
           try {
             this.options.assertActive();
-            const section = source.sections.find(
-              (section) => section.id === item.id,
-            )!;
             Object.assign(
               item,
               await this.importSection(
                 section,
                 id,
                 controller.signal,
+                (before, ledger) =>
+                  this.prepareProposal(
+                    section,
+                    source,
+                    task,
+                    before,
+                    ledger,
+                    controller.signal,
+                  ),
                 async () => {
                   if (await exists(path.join(dir, 'cancel.json')))
                     controller.abort();
@@ -480,11 +562,14 @@ export class MemoryImportService {
                 },
               ),
             );
-          } catch {
+          } catch (error) {
             if (controller.signal.aborted) break;
             item.status = 'failed';
             item.reason =
-              'Import could not finish. Existing memories were preserved; retry after resolving runtime, model or storage availability.';
+              error instanceof ImportBudgetError ||
+              error instanceof ImportContextError
+                ? error.message
+                : 'Import could not finish. Existing memories were preserved; retry after resolving runtime, model or storage availability.';
           }
           task.updatedAt = new Date().toISOString();
           await writeJson(path.join(dir, 'task.json'), task);
@@ -499,6 +584,124 @@ export class MemoryImportService {
       },
       controller.signal,
     );
+  }
+  private async prepareProposal(
+    section: ImportSection & { scope: Scope },
+    source: RetainedSource,
+    task: StoredTask,
+    before: { existing: MemoryImportModelInput['existing'] },
+    ledger: Ledger,
+    signal: AbortSignal,
+  ): Promise<MemoryImportProposal> {
+    const dir = this.taskDir(task.id);
+    const journalFile = path.join(dir, 'proposals.json');
+    const journals = (await exists(journalFile))
+      ? await this.readState<PreparedBatch[]>(journalFile)
+      : [];
+    let journal = journals.find(
+      (entry) =>
+        entry.scope === section.scope &&
+        entry.sections.some((item) => item.id === section.id),
+    );
+    if (!journal) {
+      const eligible = source.sections.filter(
+        (candidate) =>
+          candidate.scope === section.scope &&
+          candidate.groupId === section.groupId &&
+          task.items.some(
+            (item) => item.id === candidate.id && item.status === 'pending',
+          ) &&
+          !ledger[digest(candidate.content)] &&
+          !journals.some((entry) =>
+            entry.sections.some((item) => item.id === candidate.id),
+          ),
+      );
+      const batch = packMemoryImportSections(eligible).find((items) =>
+        items.some((item) => item.id === section.id),
+      );
+      if (!batch) throw new Error('Source batch is unavailable.');
+      const input: MemoryImportModelInput = {
+        scope: section.scope,
+        sources: batch.map(({ id, content }) => ({ id, content })),
+        existing: selectImportContext(
+          before.existing,
+          batch.map((item) => item.content).join('\n'),
+        ),
+      };
+      const reserved = memoryImportReservation(input);
+      if (
+        task.usage.modelCalls >=
+          Math.min(task.budget.maxCalls, MEMORY_IMPORT_BUDGET.maxCalls) ||
+        task.usage.reservedTokens + reserved >
+          Math.min(
+            task.budget.maxReservedTokens,
+            MEMORY_IMPORT_BUDGET.maxReservedTokens,
+          )
+      )
+        throw new ImportBudgetError(
+          'Import budget exhausted. Retry preserves this budget; split remaining sources into an explicitly confirmed new task.',
+        );
+      signal.throwIfAborted();
+      task.usage.modelCalls++;
+      task.usage.reservedTokens += reserved;
+      await writeJson(path.join(dir, 'task.json'), task);
+      let proposal: MemoryImportBatchProposal;
+      try {
+        proposal = validateMemoryImportBatchProposal(
+          await abortable(signal, () => this.options.propose(input, signal)),
+          batch.map((item) => item.id),
+        );
+      } catch (error) {
+        if (!signal.aborted)
+          for (const item of task.items)
+            if (batch.some((section) => section.id === item.id)) {
+              item.status = 'failed';
+              item.reason =
+                'Model batch failed validation or execution; explicit retry retains its consumed budget.';
+            }
+        throw error;
+      }
+      signal.throwIfAborted();
+      journal = {
+        scope: section.scope,
+        sections: batch.map((item) => ({
+          id: item.id,
+          key: digest(item.content),
+        })),
+        baseline: before.existing.map((item) => ({
+          ref: item.ref,
+          digest: digest(item.content),
+        })),
+        proposal,
+      };
+      journals.push(journal);
+      await writeJson(journalFile, journals);
+    }
+    const expected = new Map(
+      journal.baseline.map((item) => [item.ref, item.digest]),
+    );
+    for (const item of journal.sections) {
+      const record = ledger[item.key];
+      if (record?.batchId === task.id && record.phase === 'committed')
+        for (const output of record.outputs)
+          expected.set(
+            `${section.scope}:${output.relativePath}`,
+            output.digest,
+          );
+    }
+    if (
+      expected.size !== before.existing.length ||
+      before.existing.some(
+        (item) => expected.get(item.ref) !== digest(item.content),
+      )
+    )
+      return {
+        decision: 'conflict',
+        reason:
+          'Existing memory changed since this batch was consolidated; retained proposals cannot overwrite edits or restore forgotten knowledge.',
+        documents: [],
+      };
+    return journal.proposal.items.find((item) => item.id === section.id)!;
   }
   private async snapshot(scope: Scope): Promise<{
     version: string;
@@ -524,12 +727,16 @@ export class MemoryImportService {
     section: ImportSection & { scope: Scope },
     batchId: string,
     signal: AbortSignal,
+    propose: (
+      before: { existing: MemoryImportModelInput['existing'] },
+      ledger: Ledger,
+    ) => Promise<MemoryImportProposal>,
     assertCommit: () => Promise<void>,
   ): Promise<ImportItemResult> {
     const root =
       section.scope === 'user'
         ? getUserAutoMemoryRoot()
-        : getImportedProjectMemoryRoot(this.options.projectRoot);
+        : getImportedProjectMemoryRoot(this.options.projectRoot, true);
     const scopeState = path.join(this.state, 'scopes', digest(root));
     return this.locked(
       scopeState,
@@ -612,18 +819,7 @@ export class MemoryImportService {
           );
         }
         const before = await this.snapshot(section.scope);
-        const proposal = validateMemoryImportProposal(
-          await abortable(signal, () =>
-            this.options.propose(
-              {
-                scope: section.scope,
-                source: section.content,
-                existing: before.existing,
-              },
-              signal,
-            ),
-          ),
-        );
+        const proposal = await propose(before, ledger);
         signal.throwIfAborted();
         this.options.assertActive();
         if ((await this.snapshot(section.scope)).version !== before.version)
