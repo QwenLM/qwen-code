@@ -73,6 +73,35 @@ export function isHostedFileHistoryRefusal(
   );
 }
 
+/** The execution states the Broker can report: the four live states it
+ * answers for a record it tracks, `unknown` for a still-reconcilable
+ * outcome gap, and `abandoned` for a record it fenced terminally (see
+ * isTerminalUnknownRejection). The hosted recovery wire vocabulary is the
+ * closed subset without `unknown` (see HostedRuntimeRecoveryExecutionState):
+ * a new state here must be folded deliberately, or the client-side
+ * validator rejects the whole report. */
+export type HostedBrokerExecutionState =
+  | 'prepared'
+  | 'executing'
+  | 'cancel_requested'
+  | 'settled'
+  | 'abandoned'
+  | 'unknown';
+
+/** The Broker fences a record ABANDONED on loss evidence alone and marks the
+ * terminal answer with details.terminal; the record proves no stop, it only
+ * proves the outcome can never be observed again. */
+export function isTerminalUnknownRejection(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    cause.code === 'runtime_broker_execution_unknown' &&
+    cause.details?.['terminal'] === true
+  );
+}
+
 export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
   private leaseAcquired = false;
@@ -148,7 +177,7 @@ export class HostedWorkspaceBroker {
   }
 
   async warm(): Promise<void> {
-    const response = await this.request('/runtimes:warm', {});
+    const response = await this.harnessRequest('/runtimes:warm', {});
     if (response['runtime'] !== undefined) this.readRuntime(response);
   }
 
@@ -446,7 +475,7 @@ export class HostedWorkspaceBroker {
             (cause instanceof HostedWorkspaceBrokerRejection &&
               cause.status === 409 &&
               cause.code === 'runtime_broker_execution_unknown' &&
-              cause.details?.['terminal'] !== true) ||
+              !isTerminalUnknownRejection(cause)) ||
             transportFailed
           )
         )
@@ -581,9 +610,13 @@ export class HostedWorkspaceBroker {
 
   /**
    * Read-only execution state. Only a definitive not-found resolves to
-   * undefined; an unknown outcome is not proof that execution stopped.
+   * undefined; an unknown outcome is not proof that execution stopped, and a
+   * terminally abandoned record reaches the caller as the distinct
+   * `abandoned` state rather than folding into that sentinel.
    */
-  async status(id: string): Promise<{ state: string } | undefined> {
+  async status(
+    id: string,
+  ): Promise<{ state: HostedBrokerExecutionState } | undefined> {
     let response: Record<string, unknown>;
     try {
       response = await this.request(`/executions/${encodeURIComponent(id)}`);
@@ -598,7 +631,11 @@ export class HostedWorkspaceBroker {
           cause.status === 409 &&
           cause.code === 'runtime_broker_execution_unknown'
         )
-          return { state: 'unknown' };
+          // The terminal marker distinguishes a fenced ABANDONED record from
+          // a still-reconcilable UNKNOWN; only the latter may yet be running.
+          return {
+            state: isTerminalUnknownRejection(cause) ? 'abandoned' : 'unknown',
+          };
       }
       throw cause;
     }
@@ -611,16 +648,14 @@ export class HostedWorkspaceBroker {
       !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
     )
       throw new Error('Runtime execution outcome is unknown.');
-    return { state };
+    return { state: state as HostedBrokerExecutionState };
   }
 
   /**
-   * Read-only never-started proof for one background dispatch: the Broker
-   * admits the `<executionCallId>:process` ledger row only at the
-   * execute-admission of an `is_background` dispatch, so this probe's
-   * definitive not-found is the absence read that proves the dispatch
-   * never began. The ledger-key suffix lives here, with every other
-   * Broker identity, so a key change cannot drift a caller's proof open.
+   * Read-only never-started proof component for one background dispatch. A
+   * definitive not-found is terminal evidence only after the caller has
+   * established that no pending start can still admit the process row, such
+   * as a reload boundary or a successful Broker cancellation barrier.
    */
   async backgroundProcessStatus(
     executionCallId: string,
@@ -662,6 +697,32 @@ export class HostedWorkspaceBroker {
     }
   }
 
+  /**
+   * #13930 R1-2: the read-only inventory of this Harness Session's Runtime
+   * Sessions that a live hold row still pins — the read a reloaded Harness
+   * makes to restore the close's drain obligation after a restart.
+   */
+  async activeHoldRuntimeSessionIds(): Promise<string[]> {
+    const response = await this.harnessRequest(
+      '/tool-sessions:active-holds',
+      {},
+    );
+    const ids = response['heldRuntimeSessionIds'];
+    if (
+      !Array.isArray(ids) ||
+      ids.some(
+        // The close's drain re-maps each entry through
+        // hostedRuntimeSessionId, so the answer must already sit in its
+        // idempotent path-safe shape; anything else would drain wrong. The
+        // fixed-point check asks that mapping directly rather than copying
+        // its predicate, so the two can never drift apart (#13986 R1-6).
+        (id) => typeof id !== 'string' || hostedRuntimeSessionId(id) !== id,
+      )
+    )
+      throw new Error('Runtime Broker active-holds answer is invalid.');
+    return ids;
+  }
+
   async release(
     options?:
       | { bindingId: string; generation: string; readonly drain?: boolean }
@@ -685,15 +746,30 @@ export class HostedWorkspaceBroker {
     this.leaseAcquired = false;
   }
 
+  /**
+   * Harness-scoped routes carry and answer no Runtime Session identity:
+   * the request omits the id and the response check skips its echo, so a
+   * new harness-scoped caller cannot forget to exempt itself (#13986 R1-5).
+   */
+  private harnessRequest(
+    path: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request(path, body, true);
+  }
+
   private async request(
     path: string,
     body?: Record<string, unknown>,
+    harnessScoped = false,
   ): Promise<Record<string, unknown>> {
     const url = new URL(`/internal/runtime-broker/v1${path}`, this.baseUrl);
     const fields = {
       protocolVersion: 1,
       requestId: randomUUID(),
-      ...this.identity,
+      ...(harnessScoped
+        ? { harnessSessionId: this.identity.harnessSessionId }
+        : this.identity),
       ...body,
     };
     if (!body)
@@ -751,7 +827,8 @@ export class HostedWorkspaceBroker {
     if (
       parsed['protocolVersion'] !== 1 ||
       parsed['harnessSessionId'] !== this.key.sessionId ||
-      (path !== '/runtimes:warm' &&
+      // Harness-scoped routes answer no Runtime Session identity.
+      (!harnessScoped &&
         parsed['runtimeSessionId'] !== this.identity.runtimeSessionId)
     )
       throw new Error('Runtime Broker response identity changed.');
