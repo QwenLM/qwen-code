@@ -32,6 +32,18 @@ export interface ManagedSessionOptions {
   availableApprovalModes: ManagedApprovalMode[];
 }
 
+export interface ManagedSessionApproval extends ManagedSessionOptions {
+  approvalRevision: number;
+  supported: boolean;
+}
+
+export interface ManagedApprovalChangeResult {
+  sessionId: string;
+  approvalMode: ManagedApprovalMode;
+  approvalRevision: number;
+  replayed: boolean;
+}
+
 export interface ManagedModelContext {
   modelId: string;
   inputTokens?: number;
@@ -60,6 +72,8 @@ export interface ManagedAgentSessionSummary {
   sessionId: string;
   agentId?: string;
   approvalMode?: ManagedApprovalMode;
+  initialApprovalMode?: ManagedApprovalMode;
+  approvalRevision?: number;
   modelContext?: ManagedModelContext;
   modelSelection?: ManagedModelSelection;
   activeTurnId?: string;
@@ -87,6 +101,7 @@ export interface ManagedAgentSessionSummary {
     workspaceTurns?: boolean;
     cwdChange?: boolean;
     modelChange?: boolean;
+    approvalModeChange?: boolean;
   };
   failure?: { code: string; message: string };
 }
@@ -229,6 +244,17 @@ export interface ManagedAgentProvider {
       operationId: string,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedCwdOperation>;
+  };
+  readonly approvalChange?: {
+    queryOptions(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionApproval>;
+    submit(
+      sessionId: string,
+      request: { approvalMode: ManagedApprovalMode; expectedRevision: number },
+      options: ManagedAgentCommandOptions & { requestId: string },
+    ): Promise<ManagedApprovalChangeResult>;
   };
   readonly modelChange?: {
     queryOptions(
