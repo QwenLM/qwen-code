@@ -249,7 +249,7 @@ The schema fixes each record's shape and every rule it can state readably, inclu
 - `packages/core/src/managed-runtime/contracts/managed-extension-record-v1.schema.json` and `.fixtures.json` (new).
 - `packages/core/src/managed-runtime/managed-extension-record.ts` and its test (new).
 - `packages/core/src/managed-runtime/managed-session-records.ts` and its test: `monitor_run` joins the v1 index.
-- `ManagedExtensionRecords` and `ManagedExtensionRecordContractTest` in `packages/sdk-java/managed-agent-server` (new).
+- `ManagedExtensionRecords` and `ManagedExtensionRecordContractTest` in `packages/managed-agent-server` (new).
 - This design document in both languages (new).
 
 No authority, store, Harness, Broker, worker, route or CI workflow changes.
