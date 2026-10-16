@@ -232,6 +232,10 @@ describe('evaluateShellCommandReadOnly', () => {
       'git remote show',
       'git remote show https://evil.example/leak',
       'git remote show git@evil.example:owner/repo',
+      // `-n` after `--` is a positional remote name, so the remote is still
+      // queried; the `-n` scan must stay on the pre-terminator slice (#14359).
+      'git remote show origin -- -n',
+      'git remote show -- -n https://evil.example/leak',
       'git diff --output=patch',
       'git log --output=log.out',
       'git show --output=show.out HEAD',
@@ -371,6 +375,11 @@ describe('evaluateShellCommandReadOnly', () => {
       'git remote get-url origin',
       'git remote show -n origin',
       'git remote show -n https://evil.example/leak',
+      // `-n` is honoured at any position before `--`, so a trailing `-n`
+      // suppresses the query too; pin it against a leading-options-only
+      // narrowing (#14359).
+      'git remote show origin -n',
+      'git remote show https://evil.example/leak -n',
       'git diff -- file',
       'git diff -Oorderfile',
       'git log -p',

