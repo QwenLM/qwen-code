@@ -28,8 +28,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -255,7 +255,7 @@ public class ManagedSessionStore {
     static void lockBounded(Runnable lock) {
         try {
             lock.run();
-        } catch (CannotAcquireLockException | QueryTimeoutException error) {
+        } catch (PessimisticLockingFailureException | QueryTimeoutException error) {
             throw guardContended();
         }
     }
@@ -2791,7 +2791,7 @@ public class ManagedSessionStore {
         long now = epochMillis(databaseNow());
         String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
-        jdbc.update(
+        int inserted = jdbc.update(
                 "INSERT IGNORE INTO ma_session (tenant_id, session_id, session_kind, tenant_key,"
                     + " session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?,"
                     + " 'CONTROL', ?, ?, ?, ?, ?)",
