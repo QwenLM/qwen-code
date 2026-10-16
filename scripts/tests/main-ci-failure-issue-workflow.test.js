@@ -25,13 +25,16 @@ describe('main CI failure issue workflow', () => {
     // 'SDK Java' and 'Desktop Checks' joined when #14205 moved both suites
     // off pull_request/push onto a daily schedule: a red scheduled run is now
     // their only failure signal, so both ride the same deduplicated issue and
-    // autofix route as the nightly CLI checks.
+    // autofix route as the nightly CLI checks. 'Java Compile Gate' joined for
+    // the opposite reason: it runs on a push to `main`, so it is the one Java
+    // lane whose red push run is attributable to the merge that broke `main`.
     const watchedFiles = {
       'E2E Tests': 'e2e',
       'SDK Java': 'sdk-java',
       'SDK Python': 'sdk-python',
       'Qwen Code CI': 'ci',
       'Desktop Checks': 'desktop-packaging-check',
+      'Java Compile Gate': 'java-compile-gate',
     };
     // workflow_run matches the list as a set, so its order is not pinned.
     expect([...yml.on.workflow_run.workflows].sort()).toEqual(

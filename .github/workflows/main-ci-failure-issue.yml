@@ -15,12 +15,17 @@ on:
     # one per red merge, not per red nightly only.
     # Daily Java and Desktop checks report main regressions through the same
     # deduplicated issue and autofix route as the nightly CLI checks.
+    # 'Java Compile Gate' is the push arm's other half: it runs per pull
+    # request AND on a push to `main`, so a merge that leaves `main`
+    # uncompilable files its own issue instead of waiting for the daily Java
+    # batch or for an unrelated pull request to trip over the tree.
     workflows:
       - 'E2E Tests'
       - 'SDK Java'
       - 'SDK Python'
       - 'Qwen Code CI'
       - 'Desktop Checks'
+      - 'Java Compile Gate'
     types: ['completed']
     # Trigger-level branch filter, not only the `if` below: 'Qwen Code CI'
     # completes on every pull request, and without this each of those would

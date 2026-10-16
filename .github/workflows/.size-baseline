@@ -28,6 +28,7 @@
 10005 dsw-swe-verified-release.yml
 40188 e2e.yml
 11634 finalize-release.yml
+3825 java-compile-gate.yml
 16647 live-host-release.yml
 5950 live-host.yml
 15549 main-ci-failure-issue.yml

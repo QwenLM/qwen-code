@@ -2,6 +2,7 @@
 # Update the corresponding entry when intentionally increasing a budget.
 1 5 0 assign-pr-owner.yml
 8 180 5 ci.yml
+1 30 0 java-compile-gate.yml
 4 90 1 live-host-release.yml
 1 30 0 live-host.yml
 2 45 0 mobile-shell.yml

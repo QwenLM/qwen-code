@@ -1,0 +1,92 @@
+# .github/workflows/java-compile-gate.yml
+
+name: 'Java Compile Gate'
+
+# Nothing compiled the Java sources on a push to `main`. `sdk-java.yml` — the
+# only suite that builds them — runs on a daily schedule and on manual
+# dispatch, and the one build that runs per pull request
+# (`release-managed-agent-reference.yml`) sits behind path filters. A refactor
+# that breaks compilation therefore merges green and leaves `main`
+# uncompilable: #14370 renamed a store method without the inline test fixture
+# #13918 had just added, so `main` failed testCompile from 11:46Z to 13:21Z on
+# 2026-10-16, and the first signal came from unrelated pull requests whose tree
+# merged the broken `main`.
+#
+# This is the cheap half of the Java suite — compile, test-compile and
+# checkstyle — at both places the breakage is created: the pull request and the
+# push to `main`. The MariaDB/MySQL integration lanes, RocketMQ gates, daemon
+# E2E and hosted fault gates stay on `sdk-java.yml`'s daily batch and manual
+# dispatch; this gate does not run the Java 11/17 matrix either.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/managed-agent-server/**'
+      - 'packages/sdk-java/**'
+      - '.github/workflows/java-compile-gate.yml'
+  push:
+    branches:
+      - 'main'
+    paths:
+      - 'packages/managed-agent-server/**'
+      - 'packages/sdk-java/**'
+      - '.github/workflows/java-compile-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  # Same policy as ci.yml and e2e.yml: never cancel a run on `main`. Its
+  # verdict has to name the merge that produced it, and the starvation
+  # measurement behind that policy (67 of 100 push runs cancelled, 25
+  # reported) applies to this lane too. A pull request still supersedes its own
+  # older run.
+  group: 'java-compile-gate-${{ github.ref }}'
+  cancel-in-progress: |-
+    ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  compile:
+    name: 'Compile and checkstyle the Java modules'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 30
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+
+      # Plain `mvn` on a fresh hosted runner, matching the Java build in
+      # `release-managed-agent-reference.yml`: the settings/toolchains
+      # indirection `sdk-java.yml` carries exists for shared self-hosted
+      # hosts, which this job does not use.
+      - name: 'Set up Java 21'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+          cache-dependency-path: |-
+            packages/sdk-java/qwencode/pom.xml
+            packages/managed-agent-server/pom.xml
+
+      # The SDK installs first: the server resolves it from the local
+      # repository rather than from a released jar.
+      - name: 'Install the Java SDK'
+        working-directory: 'packages/sdk-java/qwencode'
+        run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true clean install'
+
+      # `-DskipTests` still compiles the test sources, which is where the
+      # #14370 breakage landed.
+      - name: 'Compile the Managed Agent Server'
+        working-directory: 'packages/managed-agent-server'
+        run: 'mvn --batch-mode --no-transfer-progress -DskipTests clean package'
+
+      - name: 'Run Java SDK Checkstyle'
+        working-directory: 'packages/sdk-java/qwencode'
+        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
+
+      - name: 'Run Managed Agent Server Checkstyle'
+        working-directory: 'packages/managed-agent-server'
+        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle'
