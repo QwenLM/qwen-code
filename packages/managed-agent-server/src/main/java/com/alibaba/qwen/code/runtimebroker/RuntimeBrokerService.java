@@ -1005,19 +1005,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
         Map<String, Object> immutable = immutableMap(deferred, "reference");
         byte[] input = inputBytes.clone();
         byte[] definition = definitionBytes.clone();
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
-            context.lock();
-            try {
-                JdbcRuntimeBindingRepository jdbc = privateCsiRepository(context);
-                ToolExecutionRecord candidate = ToolExecutionRecord.prepared(nextExecutionId(), key,
-                        context.binding().getBindingId(), context.binding().getGeneration(), harnessSessionId, runtimeSessionId,
-                        referenceString(immutable, "promptId"), referenceString(immutable, "callId"),
-                        referenceString(immutable, "argsDigest"), immutable);
-                return jdbc.prepareCsiExecution(sessionRepository, executionRepository, context.binding(), candidate, input, definition);
-            } finally {
-                context.unlock();
-            }
-        });
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenApply(context -> {
+                    context.lock();
+                    try {
+                        JdbcRuntimeBindingRepository jdbc = privateCsiRepository(context);
+                        ToolExecutionRecord candidate = ToolExecutionRecord.prepared(nextExecutionId(), key,
+                                context.binding().getBindingId(), context.binding().getGeneration(), harnessSessionId, runtimeSessionId,
+                                referenceString(immutable, "promptId"), referenceString(immutable, "callId"),
+                                referenceString(immutable, "argsDigest"), immutable);
+                        return jdbc.prepareCsiExecution(sessionRepository, executionRepository, context.binding(), candidate, input, definition);
+                    } finally {
+                        context.unlock();
+                    }
+                })));
     }
 
     public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
@@ -1025,15 +1026,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         BrokerValues.requireId(promptId, "promptId");
         BrokerValues.requireId(batchId, "batchId");
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
-            context.lock();
-            try {
-                return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
-                        context.binding(), promptId, batchId);
-            } finally {
-                context.unlock();
-            }
-        });
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenApply(context -> {
+                    context.lock();
+                    try {
+                        return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
+                                context.binding(), promptId, batchId);
+                    } finally {
+                        context.unlock();
+                    }
+                })));
     }
 
     private JdbcRuntimeBindingRepository privateCsiRepository(SessionContext context) {
@@ -1228,8 +1230,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         context.unlock();
                     }
                 });
-        return unknownWhenAdmissionClosed(started, harnessSessionId,
-                runtimeSessionId, executionId);
+        return mapStoreFailure(unknownWhenAdmissionClosed(started,
+                harnessSessionId, runtimeSessionId, executionId));
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
@@ -1255,14 +1257,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         context.unlock();
                     }
                 });
-        return unknownWhenAdmissionClosed(started, harnessSessionId,
-                runtimeSessionId, executionId);
+        return mapStoreFailure(unknownWhenAdmissionClosed(started,
+                harnessSessionId, runtimeSessionId, executionId));
     }
 
     private CompletionStage<ToolExecutionRecord> createExecutionReceipt(
             String harnessSessionId, String runtimeSessionId, String key,
             Map<String, Object> reference, boolean dispatch) {
-        return safeStage(() -> {
+        // Clients replay an idempotent prepare once on retryable failure; an
+        // unmapped store outage must read as that class, not as a terminal
+        // 500 carrying an unclassified retryable flag.
+        return mapStoreFailure(safeStage(() -> {
             ToolExecutionRecord receipt = executionRepository.findByIdempotencyKey(key);
             if (receipt != null && receipt.isTerminal()) {
                 requireOwnedExecution(harnessSessionId, runtimeSessionId,
@@ -1280,7 +1285,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             return requireReadySession(harnessSessionId, runtimeSessionId)
                     .thenApply(context -> createExecution(context, key, reference, dispatch));
-        });
+        }));
     }
 
     public CompletionStage<ToolExecutionRecord> getExecution(
@@ -1289,7 +1294,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return safeStage(() -> {
+        return mapStoreFailure(safeStage(() -> {
             ToolExecutionRecord saved = requireOwnedExecution(harnessSessionId,
                     runtimeSessionId, executionId);
             if (saved.isTerminal()) {
@@ -1310,7 +1315,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             .thenApply(context -> requireExecution(context,
                                     executionId)),
                     harnessSessionId, runtimeSessionId, executionId);
-        });
+        }));
     }
 
     /**
@@ -1365,21 +1370,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String runtimeSessionId, Map<String, Object> publisher) {
         requireOpen();
         Map<String, Object> descriptor = immutableMap(publisher, "publisher");
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
-            context.lock();
-            try {
-                requireReadySessionRecord(context);
-                context.beginControl();
-            } finally {
-                context.unlock();
-            }
-            return safeStage(() -> {
-                requireUsableLease(context);
-                return transport.installPublisher(context.lease(), context.session(), descriptor);
-            }).thenApply(ignored -> Map.<String, Object>of("installed", true,
-                    "bindingGeneration", Long.toString(context.binding().getGeneration())))
-                    .whenComplete((ignored, error) -> context.endControl());
-        });
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenCompose(context -> {
+                    context.lock();
+                    try {
+                        requireReadySessionRecord(context);
+                        context.beginControl();
+                    } finally {
+                        context.unlock();
+                    }
+                    return safeStage(() -> {
+                        requireUsableLease(context);
+                        return transport.installPublisher(context.lease(), context.session(), descriptor);
+                    }).thenApply(ignored -> Map.<String, Object>of("installed", true,
+                            "bindingGeneration", Long.toString(context.binding().getGeneration())))
+                            .whenComplete((ignored, error) -> context.endControl());
+                })));
     }
 
     private CompletionStage<Map<String, Object>> acknowledgeLocalExecution(String harnessSessionId,
@@ -1418,7 +1424,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String executionCallId, Map<String, Object> receipt) {
         requireOpen();
         String id = BrokerValues.requireId(executionCallId, "executionCallId");
-        return requireReadySession(harnessSessionId, runtimeSessionId)
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     ToolExecutionRecord execution = requireExecution(context, id);
                     if (!"deferred_v3".equals(execution.getReference().get("dispatchMode"))) {
@@ -1473,7 +1479,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 original.getReference(), saved);
                     }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
                             .whenComplete((ignored, error) -> context.endControl());
-                });
+                })));
     }
 
     private static boolean sameReceipt(Map<String, Object> expected,
@@ -1520,7 +1526,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return safeStage(() -> {
+        return mapStoreFailure(safeStage(() -> {
             OwnedExecution owned = requireOwnership(harnessSessionId,
                     runtimeSessionId, executionId);
             ToolExecutionRecord stored = owned.record();
@@ -1659,7 +1665,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 });
                     }),
                     harnessSessionId, runtimeSessionId, executionId);
-        });
+        }));
     }
 
     private static boolean isPreparedProviderCancellation(ToolExecutionRecord record) {
@@ -5195,6 +5201,31 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             throw new CompletionException(
                     unavailable(code, message, cause));
+        });
+    }
+
+    /**
+     * Only a genuine store outage maps to a retryable 503 here: client-input
+     * errors, permanent invariant violations, and JVM errors keep the
+     * non-retryable mapping the HTTP layer gives them.
+     */
+    private static <T> CompletionStage<T> mapStoreFailure(
+            CompletionStage<T> stage) {
+        return stage.handle((value, error) -> {
+            if (error == null) {
+                return value;
+            }
+            Throwable cause = unwrap(error);
+            if (cause instanceof RuntimeBrokerException) {
+                throw new CompletionException(cause);
+            }
+            if (cause instanceof JdbcRepositorySupport.StoreFailureException) {
+                throw new CompletionException(unavailable(
+                        "runtime_broker_store_unavailable",
+                        "Managed Runtime execution store is unavailable.",
+                        cause));
+            }
+            throw new CompletionException(cause);
         });
     }
 
