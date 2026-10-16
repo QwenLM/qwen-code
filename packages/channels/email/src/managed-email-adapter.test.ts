@@ -649,6 +649,7 @@ describe('managed email inbound', () => {
     expect(stalled).toHaveLength(1);
     expect(stalled[0]).toContain('--workspace');
     expect(lines.join('\n')).toContain('the message is skipped');
+    expect(state(adapter).instanceRefusals).toBeGreaterThan(1);
     // The binding answers again: the held claim converges and the
     // mailbox behind it flows in the same poll, no restart.
     plane.submitInbound = submit;
@@ -659,6 +660,9 @@ describe('managed email inbound', () => {
       'third',
       'fourth',
     ]);
+    // The held claim's fresh admission proves the binding: the streak
+    // resets, so the next episode starts clean.
+    expect(state(adapter).instanceRefusals).toBe(0);
   });
 
   it.each([
@@ -956,13 +960,18 @@ describe('managed email inbound', () => {
     append(raw('two', 'second'));
     await adapter.tick();
     expect(state(adapter).pending).toHaveLength(1);
+    expect(state(adapter).instanceRefusals).toBe(2);
     // The mailbox re-keys under the stall; the new epoch's mail must
     // meet a fresh streak, not the old one's gate.
     box.epoch = 2n;
     box.messages.clear();
     box.next = 1;
     await adapter.tick();
-    expect(state(adapter)).toMatchObject({ uidValidity: '2', pending: [] });
+    expect(state(adapter)).toMatchObject({
+      uidValidity: '2',
+      pending: [],
+      instanceRefusals: 0,
+    });
     const uid = append(raw('three', 'new epoch'));
     await adapter.tick();
     expect(plane.events.at(-1)).toMatchObject({
@@ -1072,9 +1081,10 @@ describe('managed email inbound', () => {
     await adapter.tick();
     expect(state(adapter).pending).toHaveLength(1);
     // The re-drive settles the claim as a replay: the stall lifts and
-    // the settled event leaves the cache.
+    // the settled event leaves the cache, but the streak stands.
     await adapter.tick();
     expect(state(adapter).pending).toEqual([]);
+    expect(state(adapter).instanceRefusals).toBe(2);
     expect(
       (adapter as unknown as { pendingEvents: Map<number, unknown> })
         .pendingEvents.size,
