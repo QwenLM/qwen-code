@@ -183,7 +183,7 @@ interface QQStreamState {
    * front of whatever the entry already carries (the stash head is the OLDER
    * text — see handOffSealedPre, "the older first"), so the result already
    * *contains* the `carriedSeal` that send captured, as its suffix. The
-   * carried-seal backstop in the re-buffer path must then stay out of the way —
+   * carried-seal backstop in resealOnRebuffer must then stay out of the way —
    * prepending again would seal the carried head twice — and the success arm
    * must strip exactly the delivered suffix, since only the prepended stash
    * head is still undelivered. A flag, not a string test: the
@@ -201,7 +201,7 @@ interface QQStreamState {
    * in-flight payload is newer than that head, and any chunk that arrived
    * after the merge is newer still. `buffer.slice(0, staleStashPrefix)` is
    * therefore the stashed head and the remainder is the newer text, so the
-   * reconstruction is `head + payload + newer` (see the re-buffer path).
+   * reconstruction is `head + payload + newer` (see rebufferAfterStashMerge).
    * Only an explicit length can express that: the failed payload's text may
    * contain either portion, so no comparison against the buffer can locate the
    * boundary, and a blanket prepend or append expresses neither case. Consumed
@@ -505,6 +505,22 @@ export class QQChannel extends ChannelBase {
    * next onPromptStart, onSessionDied, or disconnect.
    */
   private completedTurns: Map<string, number> = new Map();
+  /**
+   * Bridge-side `responseBoundary` observer. ChannelBase's own listener returns
+   * early while a cancel is pending, so onResponseBoundary can miss a boundary
+   * even though the bridge still cleared its chunk collection — the stash's
+   * `pre` would then never be sealed and the diverted head would be absent from
+   * both state.buffer and fullText. Observing the bridge event directly (the
+   * same emit the bridge's clearChunks listens to) is ungated.
+   */
+  private _bridgeBoundarySeal = (sessionId: string): void => {
+    this.sealOrphanStash(sessionId);
+    // Ungated: ChannelBase suppresses the adapter hook while a cancel is
+    // pending, but the bridge still clears its collection, so this path must
+    // reach the same seal the hook would.
+    this.captureBoundaryClear(sessionId);
+  };
+  private bridgeBoundarySealAttached = false;
   private readonly qqStatePath: string;
   /**
    * Path to the global sessions.json managed by start.ts.
@@ -580,6 +596,9 @@ export class QQChannel extends ChannelBase {
       this._cronTextHandler = (sid, t) => this.handleCronTextChunk(sid, t);
       this.attachCronHandler();
     }
+    // Seal a stashed head on every bridge boundary, including the ones
+    // ChannelBase suppresses while a cancel is pending.
+    this.attachBridgeBoundarySeal();
   }
 
   private handleCronTextChunk(sessionId: string, text: string): void {
@@ -859,8 +878,10 @@ export class QQChannel extends ChannelBase {
    */
   override setBridge(bridge: ChannelAgentBridge): void {
     this.detachCronHandler();
+    this.detachBridgeBoundarySeal();
     super.setBridge(bridge);
     this.attachCronHandler();
+    this.attachBridgeBoundarySeal();
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
@@ -1014,8 +1035,9 @@ export class QQChannel extends ChannelBase {
   /**
    * The reply context a session's next response would carry: the inbound
    * message the turn is answering, resolved through the turn-scoped
-   * activePrompts entry. Read by sendResponseMessage and by the streaming
-   * paths that need the session's current reply context.
+   * activePrompts entry. Read by sendResponseMessage and captured once by
+   * deliverCancelledStash, which re-attempts a delivery after that entry may
+   * already belong to a successor turn.
    */
   private resolveResponseReplyContext(
     sessionId: string,
@@ -1452,6 +1474,7 @@ export class QQChannel extends ChannelBase {
       this.connectReject = null;
     }
     this.detachCronHandler();
+    this.detachBridgeBoundarySeal();
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
     this.replyContextByMessageId.clear();
@@ -1467,8 +1490,13 @@ export class QQChannel extends ChannelBase {
       );
     }
     this._inCronFlow = 0;
-    for (const [, state] of this.streamState) {
+    for (const [sessionId, state] of this.streamState) {
       if (state.timer) clearTimeout(state.timer);
+      if (state.buffer) {
+        process.stderr.write(
+          `[QQ:${this.name}] dropping ${state.buffer.length} chars of buffered stream text on disconnect for ${sanitizeLogText(sessionId, 64)}\n`,
+        );
+      }
     }
     this.streamState.clear();
     this.sessionReplyMsgId.clear();
@@ -1477,7 +1505,6 @@ export class QQChannel extends ChannelBase {
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
     this.activePromptSessions.clear();
-    this.completedTurns.clear();
     // Report every divert-cap episode's cumulative total before dropping the
     // map: disconnect is the last release point for these sessions, so an
     // episode that accumulated drops after its first overflow line would
@@ -1493,6 +1520,7 @@ export class QQChannel extends ChannelBase {
       }
     }
     this.streamOrphanBuffer.clear();
+    this.completedTurns.clear();
   }
 
   /**
@@ -1533,6 +1561,15 @@ export class QQChannel extends ChannelBase {
     // turn that has already finished. The number carries no generation of its
     // own, so this clear is the only guard against that alias.
     this.completedTurns.delete(sessionId);
+    // A previous turn may have stashed chunks in the orphan buffer while its
+    // deferred chain still owned the streamState entry; a fresh turn can
+    // never own an existing entry, so anything left is dead text and must not
+    // prepend to this turn's HEAD. The drop is logged so the loss is
+    // observable rather than silent.
+    const stashed = this.streamOrphanBuffer.get(sessionId);
+    if (stashed) {
+      this.dropOrphanStash(sessionId, stashed);
+    }
     // Release the previous turn's reply anchor through the single release
     // path before overwriting: a raw set/delete here would skip the msgSeqMap
     // cascade and orphan the old msgId's msg_seq counter. No identity
@@ -2071,15 +2108,16 @@ export class QQChannel extends ChannelBase {
       state = undefined;
     }
     if (!state) {
-      // The previous turn's deferred chain has settled and freed the
-      // streamState entry: drain the stash so this turn's reply HEAD is
-      // delivered in order. A turn-mismatched leftover is dropped with its
-      // cap total reported instead of being silently overwritten.
+      // createStreamState below reuses this session's reply anchor across
+      // buffer windows and drops it past its TTL — the rationale lives there.
       const held = this.streamOrphanBuffer.get(sessionId);
       let sealedPre: string | undefined;
       let stashedLabel: string | undefined;
       if (held !== undefined) {
         if (held.turn === currentTurn) {
+          // The previous turn's deferred chain has settled and freed the
+          // streamState entry — prepend the stashed chunks so this turn's
+          // reply HEAD is delivered in order.
           this.reportOrphanStashCap(sessionId, held);
           this.streamOrphanBuffer.delete(sessionId);
           // The sealed pre-boundary head has no other copy (the bridge cleared
@@ -2210,6 +2248,7 @@ export class QQChannel extends ChannelBase {
     // this send is in flight (chunks keep arriving into state.buffer), and that
     // seal describes the residual, not this payload — read it once here so the
     // success path below clears only what this send actually delivered.
+    const carriedSeal = state.sealedPre;
     // Scoped to this flight: the boundary hooks set this if a boundary clears
     // the bridge's collection before this send settles. A stale value from an
     // earlier flight would re-seal text this payload never carried.
@@ -2224,6 +2263,7 @@ export class QQChannel extends ChannelBase {
     // set makes releaseSessionReplyAnchor's in-flight guard return early, and
     // the state entry is dropped just below, so the msg_seq counter would
     // otherwise leak forever.
+    let deferredRelease: string | undefined;
     // sendMessage throws DeliveryError for delivery failures.
     // RETRY_EXHAUSTED, ACTIVE_MSG_DISABLED, and FALLBACK_FAILED are
     // permanent. RATE_LIMITED is transient and falls through to re-buffer/retry.
@@ -2232,6 +2272,8 @@ export class QQChannel extends ChannelBase {
       buffer,
       state.replyContext,
       state.sourceLabel,
+      state.msgId,
+      state.msgIdTimestamp,
     )
       .then((blocked) => {
         // A route-blocked send resolves without throwing and never reached the
@@ -2251,25 +2293,107 @@ export class QQChannel extends ChannelBase {
               )
             : new Error('outgoing route unresolved');
         }
+        // This send carried the sealed pre-boundary head (the drain folded it
+        // into this buffer), so it must not be re-stashed by a later permanent
+        // failure — onResponseComplete would prepend it and deliver a second
+        // standalone copy. Clear it on both success paths (state current and
+        // session died) because the head is out either way. Guarded on identity
+        // and on the per-flight marker: a boundary that re-sealed the live
+        // turn's residual during the flight wrote a seal that was never in this
+        // payload and is that residual's only copy, so clearing it here would
+        // drop the text when the residual's own flush fails permanently. The
+        // seal text alone cannot tell the two apart — the residual may repeat
+        // the carried seal byte for byte. 'payload' is not a re-seal: the
+        // boundary stripped the delivery from fullText without rewriting
+        // sealedPre, so this send still carried that seal.
+        if (
+          state.sealedPre === carriedSeal &&
+          state.boundaryClearedInFlight !== 'residual'
+        ) {
+          state.sealedPre = undefined;
+        } else if (
+          state.sealWidenedInFlight === true &&
+          state.boundaryClearedInFlight !== 'residual' &&
+          carriedSeal !== undefined &&
+          (state.sealedPre?.length ?? 0) >= carriedSeal.length
+        ) {
+          // onPromptEnd's stash merge prepended the older stash head in front
+          // of the seal this send captured, so the delivered head is the
+          // widened value's suffix: strip exactly the delivered length and keep
+          // the prepended head, which is the merged stash's only copy. The gate
+          // is the per-flight flag, not a comparison of seal text (see
+          // sealClearedPayload): the prepended head may repeat the delivered
+          // head byte for byte, and a 'residual' marker still means the seal is
+          // the undelivered residual's only copy, so it is never narrowed. The
+          // length check keeps a seal a boundary overwrote shorter than the
+          // carried one from being chopped at all.
+          // Non-null: the length test above proved the seal exists and is at
+          // least as long as the carried seal.
+          state.sealedPre =
+            state.sealedPre!.slice(
+              0,
+              state.sealedPre!.length - carriedSeal.length,
+            ) || undefined;
+        }
         // #3: Guard — if session died during in-flight send, touch nothing
+        // of the entry's, but do release the anchor: no later settle can run
+        // for this state, so otherwise its msg_seq counter is stranded.
         const current = this.streamState.get(sessionId);
-        if (current !== state) return;
+        if (current !== state) {
+          if (state.msgId !== undefined) {
+            this.releaseSessionReplyAnchor(sessionId, state.msgId);
+          }
+          return;
+        }
         current.retryCount = 0;
         this.flushedSessions.add(sessionId);
 
         if (this.pendingStreamDelete.has(sessionId)) {
           this.pendingStreamDelete.delete(sessionId);
           // #2: Flush immediately — idle timer would add unnecessary delay
+          // onResponseComplete already fired. When a residual buffer is still
+          // queued, do NOT release the per-session reply anchor here: the
+          // re-flush's sendMessage reads msg_seq from msgSeqMap, and dropping
+          // the counter now would reset msg_seq to 1 (QQ dedupes on msg_id +
+          // msg_seq and silently drops the tail). Re-arm the pending flag so
+          // whichever branch settles the re-flush chain (its .then() success
+          // path, or .catch() retry/exhaustion) performs the release exactly
+          // once.
           const s = this.streamState.get(sessionId);
           if (s === state && s.buffer) {
+            this.pendingStreamDelete.add(sessionId);
             // Don't clear buffer or retryCount — idleFlush will pick them up.
+            // Clear any stale timer handle first so idleFlush's blocked-branch
+            // re-arm is unconditional.
+            if (s.timer) {
+              clearTimeout(s.timer);
+              s.timer = null;
+            }
             this.idleFlush(sessionId, this._reconnectId);
             // Don't return — let .finally() clear flushingSessions
             // so deferred idleFlush can proceed.
+          } else {
+            // No own anchor (proactive turn / expired TTL) — nothing to
+            // release, and an unconditional release here would delete a
+            // successor turn's anchor. See .catch() release points.
+            deferredRelease = state.msgId;
+            if (s === state) {
+              // Terminal settle of a deferred/cancelled turn while this state
+              // is still current: the turn is fully over, so drop the flush
+              // record and turn counter that onResponseComplete/onPromptEnd
+              // would otherwise have cleaned. Guarded by `s === state` — a
+              // successor turn that replaced the state owns its own
+              // turnCounter/flushedSessions and must be left untouched.
+              this.flushedSessions.delete(sessionId);
+              this.deleteTurnGenerationIfOwned(state, sessionId);
+            }
           }
         }
 
-        // #8: Clean up streamState only if no content arrived during send
+        // #8: Clean up streamState only if no content arrived during send.
+        // NOTE: does NOT release sessionReplyMsgId here — a mid-response
+        // window gap (no onResponseComplete yet) must keep the anchor so the
+        // next window's fresh state entry reuses it.
         const s = this.streamState.get(sessionId);
         if (s === state && !s.buffer) {
           this.streamState.delete(sessionId);
@@ -2282,18 +2406,211 @@ export class QQChannel extends ChannelBase {
             e.code === 'ACTIVE_MSG_DISABLED' ||
             e.code === 'FALLBACK_FAILED')
         ) {
+          // The text that accumulated into state.buffer while this send was in
+          // flight is dropped with the entry below, so the loss log must report
+          // it too: the payload count alone under-reports what the operator
+          // loses. Except the residual a boundary captured: captureBoundaryClear
+          // copies exactly that text into sealedPre and flags the flight
+          // 'residual', and the handoff seal below preserves and delivers it
+          // separately, so counting it here would report the same characters
+          // twice. Only the buffer beyond the captured residual is lost here.
+          //
+          // The same holds for the payload itself in the branch below that
+          // folds it into the handoff seal (`boundaryClearedInFlight` set while
+          // this entry still owns the live turn): the seal is then delivered or
+          // re-stashed, so those characters are preserved, not dropped, and
+          // counting them would report the payload as lost while the operator
+          // still receives it. Only the in-flight text beyond the captured
+          // residual is genuinely lost in that branch. Gated on ownsSession
+          // like the handoff itself: an unowned entry's seal is dropped (and
+          // logged) by handOffSealedPre, so its whole payload is a real loss.
+          const payloadFoldedIntoSeal =
+            state.boundaryClearedInFlight !== undefined &&
+            this.ownsLiveTurn(sessionId, state) &&
+            this.ownsSession(sessionId, state);
+          // The else arm of the handoff below preserves the seal this send
+          // carried: the payload's own head when the drain folded the stash's
+          // `pre` in front of its text (a boundary between a chunk and the idle
+          // flush is a normal sequence, and it leaves exactly that seal on the
+          // entry). handOffSealedPre re-stashes or delivers it, so those
+          // characters are preserved while the rest of the payload is not —
+          // charging the whole payload reports delivered text as lost. No
+          // carried seal preserves nothing, so the whole payload stays a real
+          // loss. Gated on ownsSession like the handoff itself: an unowned
+          // entry's seal is dropped (and logged) by handOffSealedPre.
+          const payloadPreservedBySeal =
+            !payloadFoldedIntoSeal &&
+            carriedSeal !== undefined &&
+            this.ownsSession(sessionId, state)
+              ? Math.min(carriedSeal.length, buffer.length)
+              : 0;
+          // The widened reconstruction below (else arm) rebuilds the whole
+          // undelivered window from this flight's payload, so every character
+          // of `buffer` is preserved even when the entry is superseded — a
+          // carried seal is not required for that and the old gate on it made
+          // the arm report a loss it no longer causes. Gated on ownsSession
+          // like the handoff itself: an unowned entry's reconstruction is
+          // dropped (and logged) by handOffSealedPre.
+          //
+          // It is owed whenever a boundary cleared the bridge's collection
+          // during the widened flight AND the widened seal does not already
+          // hold the payload: 'residual' means the boundary overwrote the
+          // widened value, and `carriedSeal === undefined` means the flight
+          // started with no seal at all, so onPromptEnd's merge could only
+          // prepend the older head. With a carried seal and marker 'payload'
+          // the live seal already ends with the widened value, so rebuilding
+          // there would duplicate the payload.
+          const widenedWindowReconstructionOwed =
+            !payloadFoldedIntoSeal &&
+            state.sealWidenedInFlight === true &&
+            state.boundaryClearedInFlight !== undefined &&
+            (state.boundaryClearedInFlight === 'residual' ||
+              carriedSeal === undefined);
+          const payloadReconstructedIntoSeal =
+            widenedWindowReconstructionOwed &&
+            this.ownsSession(sessionId, state);
+          const preservedInFlight =
+            payloadFoldedIntoSeal || payloadReconstructedIntoSeal
+              ? buffer.length
+              : payloadPreservedBySeal;
+          // A widened in-flight seal already folds the whole `state.buffer`
+          // window into the handoff below, so every character counted here is
+          // delivered (or re-stashed) and the subtraction would report them as
+          // lost: the widened reconstruction is `head + payload + residual`, of
+          // which only the residual is the captured, separately-preserved part.
+          // Nothing is dropped in flight on that arm, so report zero. Without a
+          // widening the subtraction is the pre-existing arithmetic and every
+          // un-widened log line stays byte for byte what it was.
+          const droppedInFlight =
+            state.sealWidenedInFlight === true
+              ? 0
+              : state.buffer.length - this.capturedResidual(state).length;
+          const droppedParts: string[] = [];
+          const lostInFlight = buffer.length - preservedInFlight;
+          if (lostInFlight > 0) {
+            droppedParts.push(`${lostInFlight} chars`);
+          }
+          if (droppedInFlight > 0) {
+            droppedParts.push(`${droppedInFlight} chars buffered in flight`);
+          }
           process.stderr.write(
-            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${buffer.length} chars\n`,
+            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, ` +
+              (droppedParts.length > 0
+                ? `dropping ${droppedParts.join(' plus ')}`
+                : preservedInFlight > 0
+                  ? `dropping nothing (${preservedInFlight} chars preserved in the handoff seal)`
+                  : 'dropping nothing') +
+              '\n',
           );
           // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED = permanent failure.
           // Drop everything — including any residual buffer that arrived concurrently.
           const current = this.streamState.get(sessionId);
+          // Hand the sealed pre-boundary head off BEFORE any delete and outside
+          // the identity guard below: this entry carries the only copy,
+          // and the boundary cleared the bridge's collection so it is absent
+          // from fullText. The handoff is itself gated on session ownership
+          // inside handOffSealedPre (ownsSession), which drops the seal when the
+          // session was torn down or replaced outright. A superseded state
+          // reached here precisely because the superseded branch left the head
+          // in place for the in-flight owner — when this send is that owner and
+          // it fails permanently, this arm is the only remaining chance to
+          // re-stash it; a parked turn with no successor delivers it on its own
+          // anchor. handOffSealedPre is idempotent (it clears sealedPre at
+          // its top), so a state that already handed off is a no-op. The seal
+          // this send carried is passed too: a boundary may have re-sealed the
+          // state while it was in flight, and only this chain knows the older
+          // head ever existed. When such a boundary cleared the collection
+          // during the flight, the entry's seal is widened to the whole payload
+          // first (folded in, so the merge below is not applied twice) — but
+          // only while this state still owns the live turn: a superseded
+          // entry's text is abandoned with its permanent failure and must not
+          // be injected into a successor's reply.
+          if (payloadFoldedIntoSeal) {
+            // A boundary cleared the bridge's collection, so the whole
+            // undelivered window must be re-sealed. When onPromptEnd's stash
+            // merge widened the seal during this flight, that window is the
+            // reconstruction rebufferAfterStashMerge builds from the entry —
+            // the OLDER stashed head, then this payload, then whatever
+            // accumulated since — exactly what the transient re-buffer arm
+            // seals. sealClearedPayload would instead put the payload in front
+            // of the head and drop the head with the entry. Both arms ask the
+            // same rule (sealForClearedWindow) so they cannot drift.
+            state.sealedPre = this.sealForClearedWindow(state, buffer, () =>
+              this.rebufferAfterStashMerge(state, buffer),
+            );
+            this.handOffSealedPre(state, sessionId);
+          } else {
+            // onPromptEnd's stash merge already folded the carried head into
+            // the live seal as its suffix (sealWidenedInFlight), so passing it
+            // again would prepend the delivered head a second time in
+            // handOffSealedPre's merge. Same rule resealOnRebuffer applies.
+            //
+            // EXCEPT when the widened seal does not already hold the payload.
+            // Two explicit states say so, and neither is a text comparison:
+            //
+            //  * marker 'residual' — the boundary overwrote the widened seal
+            //    with its own live residual, which is the OLDER stashed head
+            //    plus whatever arrived since the boundary. The in-flight payload
+            //    belongs BETWEEN those two portions: the exact
+            //    `head + payload + newer` window rebufferAfterStashMerge
+            //    rebuilds. Suppressing `carriedSeal` would drop the payload (it
+            //    is on no wire and in no seal) while a plain prepend would
+            //    transpose it in front of the older head ('PA').
+            //
+            //  * `carriedSeal === undefined` with any boundary marker — the
+            //    flight started with no seal, so onPromptEnd's merge could only
+            //    prepend the older head; the widened seal is the head alone and
+            //    misses the payload the boundary stripped from the collection.
+            //
+            // With a carried seal and marker 'payload' (or no marker) the live
+            // seal still ends with the widened value and already holds the
+            // carried head as its suffix, so rebuilding there would duplicate
+            // the payload (the very 'PAP' this branch prevents). No marker at
+            // all means no boundary cleared the collection, so the payload is
+            // still in fullText and must not be welded into the seal.
+            //
+            // The window is rebuilt from THIS FLIGHT's payload, not from
+            // `carriedSeal`: the send may have started with no seal at all, and
+            // `buffer` is what the wire was asked to carry either way. Both arms
+            // therefore ask sealForClearedWindow with the same payload, so they
+            // cannot drift — the payloadFoldedIntoSeal arm above uses exactly
+            // the same expression.
+            if (widenedWindowReconstructionOwed) {
+              state.sealedPre = this.sealForClearedWindow(state, buffer, () =>
+                this.rebufferAfterStashMerge(state, buffer),
+              );
+            }
+            this.handOffSealedPre(
+              state,
+              sessionId,
+              undefined,
+              state.sealWidenedInFlight ? undefined : carriedSeal,
+            );
+          }
           if (current === state) {
             this.streamState.delete(sessionId);
           }
-          if (this.pendingStreamDelete.has(sessionId)) {
+          // Release only when the settle is terminal (the session was parked
+          // for teardown) or this entry was superseded by a later turn. While
+          // this state is still the session's live turn, the anchor belongs to
+          // the reply still streaming: releasing it now cascades the
+          // msgSeqMap counter away, and the next chunk re-resolves the same
+          // msg_id from replyContextByMessageId and restarts msg_seq at 1 —
+          // a pair QQ already accepted, which it dedupes and silently drops.
+          // onResponseComplete's terminal release reclaims it at turn end.
+          const turnStillLive =
+            this.ownsLiveTurn(sessionId, state) &&
+            !this.pendingStreamDelete.has(sessionId);
+          if (!turnStillLive && state.msgId !== undefined) {
+            this.releaseSessionReplyAnchor(sessionId, state.msgId);
+          }
+          // Only consume the park/flush records when this chain still owns
+          // the session's entry: a successor turn that parked its own
+          // residual must keep its flags.
+          if (current === state && this.pendingStreamDelete.has(sessionId)) {
             this.pendingStreamDelete.delete(sessionId);
             this.flushedSessions.delete(sessionId);
+            this.deleteTurnGenerationIfOwned(state, sessionId);
           }
           return;
         }
@@ -2302,31 +2619,103 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] ${logLabel} send failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
         );
         // #1: Never undo previously-succeeded flush records on failure
+        //
+        // The sealed pre-boundary head must be handed off exactly when
+        // this chain gives up on delivering it, and the chain gives up when it
+        // neither succeeded nor scheduled a retry FOR THIS STATE. The predicate
+        // is therefore "scheduled a retry", NOT "msgId present": a state with
+        // no msgId (session anchor expired mid-turn, or a proactive turn) still
+        // carries a head, and gating the handoff on msgId drops it. Every
+        // branch below that arms a retry for `current === state` sets this
+        // flag; every other transient path falls through to the handoff at the
+        // end of this arm, which covers pending/non-pending x current/not.
+        let retryScheduled = false;
 
         if (this.pendingStreamDelete.has(sessionId)) {
-          // Session is ending - retry up to MAX_FLUSH_RETRIES
-          this.pendingStreamDelete.delete(sessionId);
+          // Session is ending - retry up to MAX_FLUSH_RETRIES. When a retry is
+          // scheduled, re-arm the pending flag so whichever branch settles the
+          // retry chain (its .then() success path, or exhaustion below)
+          // performs the anchor release exactly once — releasing earlier would
+          // reset msg_seq for the retried tail send (see .then() above).
           const current = this.streamState.get(sessionId);
+          // Only consume the park flag when this chain still owns the
+          // session's entry: a successor turn that parked its own residual
+          // must keep its flag.
           if (current === state) {
-            current.buffer = buffer;
+            this.pendingStreamDelete.delete(sessionId);
+            // Restore the failed send's text to the buffer in the order the
+            // seal states: the stashed head onPromptEnd merged during this
+            // flight sits at the front of the buffer and is OLDER than the
+            // payload, which in turn is older than any chunk that arrived since
+            // (see rebufferAfterStashMerge). Without a widening this is the
+            // plain prepend: the payload predates the text that accumulated
+            // during the flight.
+            current.buffer = this.rebufferAfterStashMerge(current, buffer);
+            // The failed payload is buffer-resident again and must be sealed.
+            // A boundary that cleared the bridge's collection while this send
+            // was in flight removed the payload's whole text from fullText —
+            // the seal it carried may cover only a prefix — so the whole
+            // payload is re-sealed, plus the residual it sealed itself (flagged
+            // deterministically, not by comparing seal text). Only a chain that
+            // still owns the live turn may write the seal: a superseded
+            // entry's payload is abandoned with its failure and must not be
+            // injected into a successor's reply. The carried-seal
+            // branch is the backstop for a re-seal whose boundary marker was
+            // missed.
+            this.resealOnRebuffer(
+              sessionId,
+              state,
+              current,
+              buffer,
+              carriedSeal,
+            );
+            this.carryWidenedWindowIntoSeal(current);
             current.retryCount++;
             if (
               this.maxFlushRetries <= 0 ||
               current.retryCount < this.maxFlushRetries
             ) {
+              this.pendingStreamDelete.add(sessionId);
               const reconnectId = this._reconnectId;
               const delay =
                 current.retryCount > 1
                   ? QQChannel.IDLE_FLUSH_BACKOFF_MS
                   : QQChannel.IDLE_FLUSH_MS;
+              // onPromptEnd parks BEFORE it clears the entry's timer, so a
+              // chunk that arrived while this send was in flight can still
+              // hold a live idle handle here. Overwriting it without clearing
+              // would orphan that timer: it fires at IDLE_FLUSH_MS, ahead of
+              // the IDLE_FLUSH_BACKOFF_MS retry armed below, collapsing the
+              // backoff tier and burning maxFlushRetries faster — and no
+              // teardown path can reach the orphan because state.timer now
+              // holds the new handle.
+              if (current.timer) {
+                clearTimeout(current.timer);
+                current.timer = null;
+              }
               current.timer = setTimeout(() => {
                 this.idleFlush(sessionId, reconnectId);
               }, delay);
+              current.timerReconnectId = reconnectId;
               current.timer.unref?.();
+              // Retry armed for this state — this chain still owns the head.
+              retryScheduled = true;
             } else {
+              // The entry carries the sealed pre-boundary head; hand it off
+              // before the delete drops the only copy (see handOffSealedPre).
+              // This branch consumed the park flag above, so it states the
+              // turn is over explicitly — otherwise the handoff would re-stash
+              // into a turn whose counter it is about to drop.
+              this.handOffSealedPre(state, sessionId, true);
               this.streamState.delete(sessionId);
+              if (state.msgId !== undefined) {
+                this.releaseSessionReplyAnchor(sessionId, state.msgId);
+              }
               // #2: Clean up flushedSessions on retry exhaustion
               this.flushedSessions.delete(sessionId);
+              // Deferred turn fully abandoned — drop its turn-generation
+              // records only when they still belong to this turn.
+              this.deleteTurnGenerationIfOwned(state, sessionId);
               process.stderr.write(
                 `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
               );
@@ -2337,7 +2726,18 @@ export class QQChannel extends ChannelBase {
           const current = this.streamState.get(sessionId);
           // #6: Identity guard — only operate on the same state reference
           if (current === state) {
-            current.buffer = buffer + (current.buffer || '');
+            current.buffer = this.rebufferAfterStashMerge(current, buffer);
+            // Same re-seal and turn-ownership rule as the parked branch above
+            // (see resealOnRebuffer for why the whole payload is sealed and
+            // `carriedSeal` is the backstop).
+            this.resealOnRebuffer(
+              sessionId,
+              state,
+              current,
+              buffer,
+              carriedSeal,
+            );
+            this.carryWidenedWindowIntoSeal(current);
             // #3: If re-buffer exceeds max length, flush immediately
             if (current.buffer.length >= this.streamBufferLimit(current)) {
               current.retryCount++;
@@ -2345,12 +2745,23 @@ export class QQChannel extends ChannelBase {
                 this.maxFlushRetries > 0 &&
                 current.retryCount >= this.maxFlushRetries
               ) {
+                // Hand the sealed pre-boundary head off before the delete
+                // drops the only copy (see handOffSealedPre).
+                this.handOffSealedPre(state, sessionId);
                 this.streamState.delete(sessionId);
+                // No release here: the turn is not over (onResponseComplete
+                // has not fired) — the anchor still belongs to this reply,
+                // and onResponseComplete's terminal release cleans it up.
+                // Releasing now would make later chunks fall back to the
+                // racy chat-level entry.
                 this.flushedSessions.delete(sessionId);
                 process.stderr.write(
                   `[QQ:${this.name}] ${logLabel} retries exhausted (buffer exceeds limit) for ${sanitizeLogText(sessionId, 64)}\n`,
                 );
               } else {
+                // Retry armed for this state (idleFlush re-flushes now, or
+                // re-arms while a send is in flight): this chain owns the head.
+                retryScheduled = true;
                 this.idleFlush(sessionId, this._reconnectId);
               }
             } else {
@@ -2368,10 +2779,21 @@ export class QQChannel extends ChannelBase {
                   current.timer = setTimeout(() => {
                     this.idleFlush(sessionId, reconnectId);
                   }, delay);
+                  current.timerReconnectId = reconnectId;
                   current.timer.unref?.();
                 }
+                // Retry armed (or already pending) for this state — this chain
+                // still owns the head.
+                retryScheduled = true;
               } else {
+                // Hand the sealed pre-boundary head off before the delete
+                // drops the only copy (see handOffSealedPre).
+                this.handOffSealedPre(state, sessionId);
                 this.streamState.delete(sessionId);
+                // No release here — same rationale as the buffer-over-limit
+                // branch above: the turn has not ended, so the anchor is
+                // still this reply's and onResponseComplete's terminal
+                // release will clean it up.
                 // #2: Clean up flushedSessions on retry exhaustion
                 this.flushedSessions.delete(sessionId);
                 process.stderr.write(
@@ -2379,18 +2801,110 @@ export class QQChannel extends ChannelBase {
                 );
               }
             }
+          } else if (state.msgId !== undefined) {
+            // The entry was destroyed while this send was in flight (session
+            // death or a successor turn). Nothing will settle for this state,
+            // so release its anchor here — expectedMsgId keeps a successor's
+            // anchor untouched. The sealed head is NOT handled here:
+            // ownership passes on by the retryScheduled check at the end of
+            // this arm, whose predicate is "no retry armed for this state",
+            // not "msgId present".
+            this.releaseSessionReplyAnchor(sessionId, state.msgId);
           }
+        }
+        // No branch above armed a retry for this state, so this chain
+        // has given up on delivering the sealed pre-boundary head — pass its
+        // ownership on. handOffSealedPre is idempotent (it clears sealedPre at
+        // its top), so the exhaustion arms that already handed off are
+        // unaffected. Deliberately not gated on msgId: the head's ownership is
+        // independent of the reply anchor.
+        if (!retryScheduled) {
+          this.handOffSealedPre(state, sessionId);
         }
       })
       .finally(() => {
-        // Ownership-keyed: this chain clears only its own marker. Testing the
-        // streamState entry instead would strand the marker when a successor
-        // turn replaced the entry before this send settled — every later flush
-        // for the session would then be vetoed by a marker nothing can clear.
-        if (this.flushingSessions.get(sessionId) === state) {
-          this.flushingSessions.delete(sessionId);
+        // Ownership-keyed release: only the chain that still owns the marker
+        // may clear it, so a superseded chain cannot unblock a successor's
+        // concurrent send.
+        if (this.flushingSessions.get(sessionId) !== state) return;
+        this.flushingSessions.delete(sessionId);
+        if (deferredRelease !== undefined) {
+          this.releaseSessionReplyAnchor(sessionId, deferredRelease);
+        }
+        // A successor turn can only park while this chain's marker is live
+        // (onResponseComplete/onPromptEnd test .has(), not identity), so every
+        // settle path above guards on the state reference and never reaches
+        // the park flag. Service it here — the one place that knows the marker
+        // just became free — by handing the residual to a fresh idle timer;
+        // the re-flush's own settle then consumes the flag.
+        if (this.pendingStreamDelete.has(sessionId)) {
+          const parked = this.streamState.get(sessionId);
+          if (parked && parked !== state) {
+            if (parked.buffer) {
+              if (parked.timer) clearTimeout(parked.timer);
+              const reconnectId = this._reconnectId;
+              parked.timer = setTimeout(() => {
+                this.idleFlush(sessionId, reconnectId);
+              }, QQChannel.IDLE_FLUSH_MS);
+              parked.timerReconnectId = reconnectId;
+              parked.timer.unref?.();
+            } else {
+              // No residual to deliver — the turn is over, so run the terminal
+              // teardown now rather than leaving the park flag to outlive it.
+              // Clear the timer first: the release guard scans this entry for a
+              // live handle and would otherwise keep the msg_seq counter for a
+              // turn that is already gone.
+              if (parked.timer) {
+                clearTimeout(parked.timer);
+                parked.timer = null;
+              }
+              if (parked.msgId !== undefined) {
+                this.releaseSessionReplyAnchor(sessionId, parked.msgId);
+              }
+              this.pendingStreamDelete.delete(sessionId);
+              this.flushedSessions.delete(sessionId);
+              this.deleteTurnGenerationIfOwned(parked, sessionId);
+              if (this.streamState.get(sessionId) === parked) {
+                this.streamState.delete(sessionId);
+              }
+            }
+          }
         }
       });
+  }
+
+  /**
+   * Drop the session's turn-generation records — the turn counter and the
+   * completion record completedTurns — only when they still belong to the
+   * settling turn. A successor turn that started while this chain was in flight
+   * bumped the counter and cleared the completion record already (see
+   * onPromptStart); deleting them here would reset the successor's stale-state
+   * detection to 0 and let a stale completion record alias onto its turn.
+   *
+   * The counter is kept while this session still has a prompt in flight. A
+   * settle can run in the microtask window between onResponseComplete parking
+   * the session and ChannelBase's onPromptEnd (which clears the active marker
+   * first), and onPromptEnd then recognises the turn's own re-stashed sealed
+   * head by comparing the stash's turn against this counter — as does the
+   * parked-stash service before its early return. Deleting the counter here
+   * makes that gate read 0 and discard the head as superseded: the reply's
+   * opening reaches no wire, no buffer and no stash while the turn reports
+   * completed. The completion record still goes: it is turn-scoped, and a
+   * later prompt reusing the number must not alias it. onPromptEnd,
+   * onPromptStart and onSessionDied all still delete the counter once the
+   * prompt is over, so it stays bounded by the live sessions and can never be
+   * inherited by a successor turn.
+   */
+  private deleteTurnGenerationIfOwned(
+    state: { turn: number },
+    sessionId: string,
+  ): void {
+    if (state.turn !== (this.turnCounter.get(sessionId) ?? 0)) return;
+    if (this.completedTurns.get(sessionId) === state.turn) {
+      this.completedTurns.delete(sessionId);
+    }
+    if (this.activePromptSessions.has(sessionId)) return;
+    this.turnCounter.delete(sessionId);
   }
 
   override onToolCall(_chatId: string, event: ToolCallEvent): void {
@@ -2411,13 +2925,75 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
   ): void {
     const state = this.streamState.get(sessionId);
+    const currentTurn = this.turnCounter.get(sessionId) ?? 0;
+    // The bridge's collection is cleared here, in-flight payload included: seal
+    // the live turn's residual and record what a re-buffer must re-seal. The
+    // ungated bridge observer reaches the same seal when this hook is
+    // suppressed. The bridge's chunk collection is cleared on every boundary,
+    // so a stash accumulated before this point is no longer part of any later
+    // fullText and must still be prepended when the turn completes. Seal that
+    // portion separately: chunks arriving after the boundary append to `text`
+    // but are already in fullText and must not be prepended too.
+    this.captureBoundaryClear(sessionId);
+    this.sealOrphanStash(sessionId);
+    // A stale entry belongs to an earlier turn; when the deletes below drop it
+    // its parked flush chain can never settle again, so its reply anchor has
+    // to be released here (expectedMsgId-gated, so a live turn's own anchor is
+    // untouched). A stale entry kept by the branch below must NOT release: it
+    // still needs the anchor to deliver its residual.
+    const staleMsgId =
+      state && state.turn !== currentTurn ? state.msgId : undefined;
+    if (
+      state &&
+      (state.buffer ||
+        this.flushingSessions.has(sessionId) ||
+        this.pendingStreamDelete.has(sessionId))
+    ) {
+      // An unflushed residual must survive the boundary. The bridge emits this
+      // boundary immediately before the tool-call/permission event that
+      // QQChannel.onToolCall flushes that very buffer with, so deleting the
+      // entry here silently destroys the pre-tool text. A send still in flight
+      // or a turn parked for teardown has the same claim on its residual — no
+      // other path can re-deliver it. Keep the entry; the tool-call event (or
+      // the idle timer below) delivers it.
+      // Do NOT arm pendingStreamDelete: for the in-flight case that flag means
+      // "the turn is over", and for the parked case it is already armed. This
+      // is a mid-turn window gap, so hand the residual to the idle timer
+      // instead — idleFlush's blocked branch re-arms while the send is live.
+      if (state.buffer) {
+        // The live turn's prefix is already sealed above by
+        // captureBoundaryClear, which applies the same live-turn gate.
+        // Leave a handle already live under this generation alone: a parked
+        // retry's backoff timer is already going to deliver this residual, and
+        // re-arming at the shorter idle cadence on every boundary would
+        // collapse that tier and push the parked residual's deadline out. Same
+        // guard as the divert self-heal below.
+        const timerLive =
+          state.timer !== null && state.timerReconnectId === this._reconnectId;
+        if (!timerLive) {
+          if (state.timer) clearTimeout(state.timer);
+          const reconnectId = this._reconnectId;
+          state.timer = setTimeout(() => {
+            this.idleFlush(sessionId, reconnectId);
+          }, QQChannel.IDLE_FLUSH_MS);
+          state.timerReconnectId = reconnectId;
+          state.timer.unref?.();
+        }
+      }
+      return;
+    }
+    // The entry is being dropped: disarm its timer before the delete.
     if (state?.timer) {
       clearTimeout(state.timer);
+      state.timer = null;
     }
     this.streamState.delete(sessionId);
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    if (staleMsgId !== undefined) {
+      this.releaseSessionReplyAnchor(sessionId, staleMsgId);
+    }
   }
 
   protected override async onResponseComplete(
@@ -2740,7 +3316,8 @@ export class QQChannel extends ChannelBase {
   /**
    * Build a fresh streamState entry for a session's first chunk, resolving
    * the session's reply anchor (TTL-checked) and the segment's reply context.
-   * Used by onResponseChunk's fresh-entry path.
+   * Shared by onResponseChunk's fresh-entry path and onPromptEnd's delivery
+   * of a cancelled turn's stashed head.
    */
   private createStreamState(
     chatId: string,
@@ -2827,6 +3404,171 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
+   * The seal a failed payload needs when a boundary cleared the bridge's
+   * collection while the send was in flight: the payload's whole text is now
+   * absent from fullText, so it is sealed outright rather than only by the seal
+   * the send carried, which may cover just a prefix. `residual` is the text the
+   * boundary stripped from the live turn, captured by the boundary hooks ('' =
+   * nothing), and is appended after the payload — no string comparison against
+   * the carried seal, so a residual whose text repeats it still counts.
+   */
+  private sealClearedPayload(payload: string, residual: string): string {
+    return residual ? payload + residual : payload;
+  }
+
+  /**
+   * Put a transiently-failed payload back on `current` in the order the seal
+   * states it in.
+   *
+   * With no stash merged during this flight the payload predates whatever
+   * accumulated while it was in flight — chunks sent to state.buffer by the
+   * bridge's fallback path, or a residual that arrived mid-send — so the plain
+   * prepend (`payload + buffer`) is correct and is what the non-widened case
+   * has always done.
+   *
+   * After onPromptEnd merged a stash while this send was flight, the buffer is
+   * `[stashed head][chunks that arrived since]`: the merge prepends the head,
+   * and every later writer appends. That head is OLDER than the failed payload
+   * (it is the seal's leading segment — see handOffSealedPre, "the older
+   * first"), so the payload belongs BETWEEN the two portions and the
+   * reconstruction is `head + payload + newer`. Reconstructing it is the whole
+   * reason `staleStashPrefix` exists: the failed payload's text may repeat
+   * either portion of the buffer, the newer text may itself begin with the
+   * payload's text, and the payload may even be empty, so no boundary can be
+   * found by comparing text. A `startsWith`/dedup test against the buffer would
+   * strip the newer text's own leading characters — dropping real reply text —
+   * so the split uses the recorded length alone and never compares strings.
+   * The marker is consumed here — the payload is folded in and the next flight
+   * must not reorder against it again (flushAndTrack also resets it).
+   *
+   * A boundary that sealed a residual of its own while the send was in flight
+   * does not change that order: captureBoundaryClear records the residual and
+   * marks the re-seal, but the residual is only the text that accumulated
+   * since the boundary — it never contains the in-flight payload, and it does
+   * not know that the head prepended in front of it is older. A plain prepend
+   * would therefore read `head + payload + newer` as `payload + head + newer`.
+   * The reconstruction above stays the same; resealOnRebuffer's boundary arm
+   * extends the widened seal to match it.
+   */
+  private rebufferAfterStashMerge(
+    current: QQStreamState,
+    payload: string,
+  ): string {
+    const afterFlight = current.buffer || '';
+    const headLength = current.staleStashPrefix;
+    // Consumed either way, ahead of both arms: the payload is folded in below
+    // and the next flight must not reorder against this merge.
+    current.staleStashPrefix = undefined;
+    if (headLength !== undefined && headLength > 0) {
+      const head = afterFlight.slice(0, headLength);
+      const newer = afterFlight.slice(headLength);
+      return head + payload + newer;
+    }
+    return payload + afterFlight;
+  }
+
+  /**
+   * The seal owed for `payload` when a boundary cleared the bridge's collection
+   * while its send was in flight. onPromptEnd's stash merge may have widened the
+   * seal during this flight; the undelivered window is then the reconstruction
+   * rebufferAfterStashMerge builds (the OLDER stashed head, then this payload,
+   * then whatever accumulated since), read lazily so the non-widened path never
+   * consumes the stash marker. Otherwise the plain payload-plus-residual seal
+   * stands. Shared by the transient re-buffer arms (resealOnRebuffer) and the
+   * permanent handoff: all describe the same window, so they must not drift.
+   */
+  private sealForClearedWindow(
+    state: QQStreamState,
+    payload: string,
+    widenedWindow: () => string,
+  ): string {
+    return state.sealWidenedInFlight === true
+      ? widenedWindow()
+      : this.sealClearedPayload(payload, this.capturedResidual(state));
+  }
+
+  /**
+   * Re-seal a failed payload that a transient re-buffer puts back on `current`:
+   * a boundary that cleared the bridge's collection while the send was in
+   * flight removed the payload's whole text from fullText, so the entire
+   * payload is sealed, plus the residual the boundary captured (flagged
+   * deterministically, not by comparing seal text). Only a chain that still
+   * owns the live turn may write the seal — a superseded entry's payload is
+   * abandoned with its failure and must not be injected into a successor's
+   * reply. `carriedSeal` is the backstop for a re-seal whose boundary marker
+   * was missed, but it is skipped when the seal was widened during this flight
+   * (sealWidenedInFlight — onPromptEnd's stash merge already folded the carried
+   * head in as the widened seal's suffix, so prepending it again would seal it
+   * twice). Shared by the parked and non-parked re-buffer arms, and by the
+   * permanent handoff through sealForClearedWindow; they must stay identical
+   * because they encode the same rule.
+   */
+  private resealOnRebuffer(
+    sessionId: string,
+    state: QQStreamState,
+    current: QQStreamState,
+    payload: string,
+    carriedSeal: string | undefined,
+  ): void {
+    if (!this.ownsLiveTurn(sessionId, state)) return;
+    if (state.boundaryClearedInFlight !== undefined) {
+      // The boundary cleared the bridge's collection, so the whole undelivered
+      // window must be re-sealed. When onPromptEnd's stash merge widened the
+      // seal during this flight, that window is exactly what
+      // rebufferAfterStashMerge just rebuilt in `current.buffer`: the older
+      // stashed head, then this payload, then the residual/whatever
+      // accumulated since. `payload + capturedResidual` would instead put the
+      // payload in front of the head and overwrite the widened head — its only
+      // copy. The permanent handoff asks the same rule. Without a widening the
+      // buffer is already `payload + residual` and the plain seal stands byte
+      // for byte. `current === state` at both call sites, so `current.buffer` is
+      // this state's reconstructed window.
+      current.sealedPre = this.sealForClearedWindow(
+        state,
+        payload,
+        () => current.buffer || '',
+      );
+    } else if (
+      carriedSeal !== undefined &&
+      !state.sealWidenedInFlight &&
+      current.sealedPre !== carriedSeal
+    ) {
+      current.sealedPre = carriedSeal + (current.sealedPre ?? '');
+    }
+  }
+
+  /**
+   * Carry a widened, boundary-cleared re-buffer into the seal the NEXT flight
+   * captures, so the knowledge survives the per-flight resets and a permanent
+   * failure on a retry re-stashes the whole window instead of the stale
+   * residual.
+   *
+   * resealOnRebuffer writes exactly this for a live turn, but its live-turn
+   * gate skips a superseded entry — whose re-buffer would otherwise keep the
+   * residual the boundary overwrote ('AC') while `current.buffer` already holds
+   * the reconstruction ('APC'). The retry flight then starts with `sealedPre`
+   * 'AC' and, because flushAndTrack resets sealWidenedInFlight /
+   * boundaryClearedInFlight at every flight start, its permanent arm can no
+   * longer rebuild the window: the payload 'P' is on no wire and in no seal and
+   * the entry is deleted. Recording the reconstruction on the entry hands the
+   * retry flight the one value it needs: its success path still clears it
+   * without delivering, and only a give-up re-stashes it (or delivers it), the
+   * same handoff the widened permanent arm performs.
+   *
+   * Gated on the boundary marker AND the widening, not on the buffer alone: a
+   * widened re-buffer with NO boundary leaves the newer text in the bridge's
+   * collection, so welding it into the seal would deliver it twice. The value
+   * is the reconstruction `rebufferAfterStashMerge` just wrote to
+   * `current.buffer` — no seal/buffer text comparison anywhere.
+   */
+  private carryWidenedWindowIntoSeal(current: QQStreamState): void {
+    if (current.sealWidenedInFlight !== true) return;
+    if (current.boundaryClearedInFlight === undefined) return;
+    if (!current.buffer) return;
+    current.sealedPre = current.buffer;
+  }
+
+  /**
    * Whether a settling flush chain still owns the session: its entry is the
    * live streamState entry, or the chain still holds the flush marker. The
    * marker is cleared only by `.finally()` after the settle arms, so this stays
@@ -2839,6 +3581,15 @@ export class QQChannel extends ChannelBase {
       this.streamState.get(sessionId) === state ||
       this.flushingSessions.get(sessionId) === state
     );
+  }
+
+  /**
+   * Whether this entry is still the turn that owns the session's counter. A
+   * superseded entry's text is abandoned with its failure and must not be
+   * sealed into a successor's reply.
+   */
+  private ownsLiveTurn(sessionId: string, state: QQStreamState): boolean {
+    return state.turn === (this.turnCounter.get(sessionId) ?? 0);
   }
 
   /**
@@ -3018,8 +3769,8 @@ export class QQChannel extends ChannelBase {
     this.releaseSessionReplyAnchor(sessionId);
     // The entry's sealed head is the only copy of a boundary-cleared opening
     // and a died session has no owner left to hand it to, so its loss must be
-    // observable like every other drop (matching the unowned-session log the
-    // hand-off performs) instead of vanishing with the entry below.
+    // observable like every other drop (matching the unowned-session log in
+    // handOffSealedPre) instead of vanishing with the entry below.
     if (state?.sealedPre) {
       process.stderr.write(
         `[QQ:${this.name}] dropping ${state.sealedPre.length} chars of sealed head for unowned session ${sanitizeLogText(sessionId, 64)}\n`,
@@ -3118,6 +3869,87 @@ export class QQChannel extends ChannelBase {
       this.bridge.off?.('textChunk', this._cronTextHandler);
       this.cronTextHandlerAttached = false;
     }
+  }
+
+  /**
+   * Attach the ungated `responseBoundary` observer to the current bridge.
+   * No-op if already attached.
+   */
+  private attachBridgeBoundarySeal(): void {
+    if (this.bridgeBoundarySealAttached) return;
+    this.bridge.on?.('responseBoundary', this._bridgeBoundarySeal);
+    this.bridgeBoundarySealAttached = true;
+  }
+
+  /** Detach the boundary observer. No-op if not attached. */
+  private detachBridgeBoundarySeal(): void {
+    if (!this.bridgeBoundarySealAttached) return;
+    this.bridge.off?.('responseBoundary', this._bridgeBoundarySeal);
+    this.bridgeBoundarySealAttached = false;
+  }
+
+  /**
+   * Seal the pre-boundary portion of a stashed head. Called from both the
+   * adapter hook and the bridge's own boundary event: ChannelBase suppresses
+   * the hook while a cancel is pending, but the bridge clears its chunk
+   * collection on every boundary it emits, so only the ungated observer can
+   * guarantee `pre` is set before the turn completes.
+   */
+  private sealOrphanStash(sessionId: string): void {
+    const stashed = this.streamOrphanBuffer.get(sessionId);
+    if (stashed) stashed.pre = stashed.text;
+  }
+
+  /**
+   * A boundary clears the bridge's chunk collection. Seal the live turn's
+   * buffer-resident prefix for the completion path, and record on the
+   * entry whose flush is in flight what its re-buffer must re-seal: the payload
+   * the boundary stripped from fullText, always, plus that residual when the
+   * flushed entry is the live turn's own. Called by the adapter hook and by the
+   * ungated bridge observer — the observer is the only signal when ChannelBase
+   * suppresses the hook (cancel pending) — and both run on a normal boundary,
+   * where the assignments are idempotent. Keyed off the in-flight marker rather
+   * than streamState, so a successor turn replacing the entry cannot hide the
+   * chain whose payload is still in the air.
+   */
+  private captureBoundaryClear(sessionId: string): void {
+    const state = this.streamState.get(sessionId);
+    const currentTurn = this.turnCounter.get(sessionId) ?? 0;
+    // Seal ONLY the live turn's buffer-resident prefix: a stale/parked
+    // predecessor's buffer is delivered by its own chain on its own anchor, and
+    // sealing it would let the permanent-failure arm re-stash that text into a
+    // successor turn's reply.
+    const liveResidual =
+      state !== undefined && state.turn === currentTurn && state.buffer
+        ? state.buffer
+        : undefined;
+    if (state !== undefined && liveResidual !== undefined) {
+      state.sealedPre = liveResidual;
+    }
+    const flushing = this.flushingSessions.get(sessionId);
+    if (!flushing) return;
+    // A boundary always strips the in-flight payload from fullText. The
+    // residual rides along only when it belongs to the flushed entry itself,
+    // whose `sealedPre` was just set to it — never a successor's buffer, and
+    // never the stale carried seal. A later boundary may upgrade 'payload' to
+    // 'residual', never the reverse.
+    if (flushing === state && liveResidual !== undefined) {
+      flushing.boundaryClearedInFlight = 'residual';
+    } else if (flushing.boundaryClearedInFlight === undefined) {
+      flushing.boundaryClearedInFlight = 'payload';
+    }
+  }
+
+  /**
+   * The residual text a boundary captured for this entry, or '' when it
+   * recorded none. The text lives in `sealedPre`, written by
+   * captureBoundaryClear in the same call that sets the marker, so it is always
+   * a real residual and never the seal the failed payload carried.
+   */
+  private capturedResidual(state: QQStreamState): string {
+    return state.boundaryClearedInFlight === 'residual'
+      ? (state.sealedPre ?? '')
+      : '';
   }
 
   /** Flush pending state writes immediately (called on disconnect). */
@@ -3910,6 +4742,7 @@ export class QQChannel extends ChannelBase {
     this.isReconnecting = false;
     this.coldStart = false;
     this.attachCronHandler();
+    this.attachBridgeBoundarySeal();
   }
 
   private handleGatewayMessage(
@@ -4782,8 +5615,9 @@ export class QQChannel extends ChannelBase {
     // Non-@-bot messages pass isMentioned:false, which causes GroupGate.requireMention
     // to silently drop them before they reach the LLM. This is by core design:
     // non-@-bot group messages should flow through cron/log only, not trigger AI.
-    // Thread #17's fix (setting isMentioned=true for non-@-bot keyword/all matches)
-    // was intentionally reverted — it violated principle #1.
+    // The isMentioned=true override for non-@-bot keyword/all matches (PR #6457
+    // review thread #17, landed in 998d36068b, then reverted there) was
+    // intentionally not restored — it violated principle #1.
     // Users must set requireMention: false in group config
     // (e.g., `groups: { '*': { requireMention: false } }`) to allow
     // non-@-bot keyword/all messages to reach the AI.
