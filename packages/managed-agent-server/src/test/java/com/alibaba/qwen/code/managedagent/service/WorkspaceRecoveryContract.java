@@ -209,15 +209,29 @@ public final class WorkspaceRecoveryContract {
         assertThatThrownBy(() -> authority.release(fixture.session.workspace(), original.session()))
                 .isInstanceOf(RuntimeBrokerException.class);
 
+        // Admit the independent maintenance work while its parent still
+        // names the original storage. Its live claim survives the later
+        // registry change; that change cannot authorize a new child.
+        // Unique per run: the contract may run twice against one database.
+        var childStore = new com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore(jdbc,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
+        var admitted = childStore.admit(fixture.tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
+                fixture.session.workspace(), System.currentTimeMillis());
+        var claimed = childStore.claim(admitted, "maintenance-owner", System.currentTimeMillis(), 60_000);
+        assertThat(claimed).isNotNull();
+
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", fixture.tenant);
         jdbc.update("UPDATE ma_session SET status = 'DELETED', deleted_at = 2 WHERE session_id = ?",
                 fixture.session.sessionId());
         jdbc.update("UPDATE ma_workspace SET storage_id = 'changed', workspace_generation = 2,"
-                + " state = 'REMOVED' WHERE tenant_id = ?", fixture.tenant);
+                + " state = 'REMOVED' WHERE tenant_id = ? AND workspace_id = ?", fixture.tenant,
+                fixture.session.workspace().getWorkspaceId());
         assertThatThrownBy(() -> authority.authorize(fixture.session)).isInstanceOf(RuntimeBrokerException.class);
         var absentMounts = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
         var resolver = new WorkspaceRuntimeResolver(store, authority, absentMounts);
         assertThatThrownBy(() -> resolver.resolve(fixture.session.sessionId())).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> childStore.admit(fixture.tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
+                fixture.session.workspace(), System.currentTimeMillis())).isInstanceOf(RuntimeBrokerException.class);
 
         fixture.bindings.releaseOperation(lost.getBindingId(), "fixture", lost.getOperationGeneration());
         var nextClaim = fixture.bindings.claimOperation(lost.getBindingId(), "restored", Duration.ofMinutes(2));
@@ -229,14 +243,6 @@ public final class WorkspaceRecoveryContract {
 
         // A child Workspace maintenance hold (#13753 I1) is not the lost
         // binding's: a retried release passes it by and leaves it held.
-        // Unique per run: the id is unique table-wide and the contract may
-        // run twice against one database. The claim is live, so no scan of
-        // the application context takes the hold for a stale one.
-        var childStore = new com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore(jdbc,
-                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
-        var admitted = childStore.admit(fixture.tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
-                fixture.session.workspace(), System.currentTimeMillis());
-        var claimed = childStore.claim(admitted, "maintenance-owner", System.currentTimeMillis(), 60_000);
         String maintenance = claimed.childWorkspaceId();
         String maintenanceStep = authority.holdForMaintenance(fixture.session.workspace(), maintenance, 1);
         authority.releaseLost(nextClaim);
