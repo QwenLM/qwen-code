@@ -103,7 +103,7 @@ Parent 包含原 sandbox 和全部 descendant，只有 worker 退出不足以使
 
 ## 当前进程 credentials 检查
 
-当前 metadata consumer 还在固定 metadata 或启动 Wait 前检查四项 OCI process 安全意图：`apparmorProfile` 必须精确等于 `qwen-k2-worker-v1`，`noNewPrivileges` 必须为 JSON boolean true，`user.uid`/`user.gid` 必须为 JSON 整数 1000。有界 Spec 必须为有效 UTF-8、单一完整 JSON object，process/user 必须为 object，任何位置的重复字段均拒绝。缺失、null、大小写别名、错误类型或冲突值均拒绝。其它 OCI 字段仍作为不透明输入进入完整 metadata digest，不引入通用 OCI policy 解释器。首次拒绝在建立 metadata pin 和 lifetime Wait 前永久阻断原对象；后续拒绝保留原固定值并沿用 gateway/source blocked 路径。不输出或记录 raw Spec。
+当前 metadata consumer 还在固定 metadata 或启动 Wait 前检查四项 OCI process 安全意图：`apparmorProfile` 必须精确等于 `qwen-k2-worker-v1`，`noNewPrivileges` 必须为 JSON boolean true，`user.uid`/`user.gid` 必须为 JSON 整数 1000。Spec 上限为 64 KiB，完整 Container metadata 仍受既有 1 MiB 上限约束。Spec 必须为有效 UTF-8、单一完整 JSON object，process/user 必须为 object，任何位置的重复字段均拒绝。缺失、null、大小写别名、错误类型或冲突值均拒绝。其它 OCI 字段仍作为不透明输入进入完整 metadata digest，不引入通用 OCI policy 解释器。首次拒绝在建立 metadata pin 和 lifetime Wait 前永久阻断原对象；后续拒绝保留原固定值并沿用 gateway/source blocked 路径。不输出或记录 raw Spec。
 
 这项窄 intent gate 当前只有源码和编译检查；新增行为夹具与原生 source 验收尚未执行。它不增加 journal 字段、资格、release 权限或公开入口。下述真实 running-process 检查仍须保留。当前 OCI 声明不能证明原 runtime 在首次执行前实际消费了哪些输入，也不授予出生 confinement 或 ACK 安装资格。
 
