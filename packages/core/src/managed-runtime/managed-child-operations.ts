@@ -54,11 +54,11 @@ export const MANAGED_CHILD_LIMITS = Object.freeze({
 
 /**
  * The workspace isolation policies a launch may name. `worktree` (#13753
- * I2) also needs a host that serves child Workspaces; `snapshot` waits for
- * I3.
+ * I2) also needs a host that serves child Workspaces, and `snapshot` (I3)
+ * one that serves read-only snapshots as well.
  */
 export const MANAGED_CHILD_ADMITTED_WORKSPACE_MODES: readonly ChildWorkspaceMode[] =
-  Object.freeze(['shared', 'worktree']);
+  Object.freeze(['shared', 'worktree', 'snapshot']);
 
 export interface ChildLaunchEnvelope {
   readonly description: string;
@@ -293,12 +293,19 @@ export function admitChildLaunch(params: {
   readonly workspaceMode: ChildWorkspaceMode;
   /** The control plane serves child Workspaces, so `worktree` can run. */
   readonly childWorkspaces: boolean;
+  /**
+   * The control plane also serves read-only snapshots, so `snapshot` can
+   * run; it counts only beside `childWorkspaces`.
+   */
+  readonly childSnapshots: boolean;
   readonly sameDefinition: boolean;
 }): ChildAdmission {
   if (params.closing) return { admitted: false, reason: 'closing' };
   if (
     !MANAGED_CHILD_ADMITTED_WORKSPACE_MODES.includes(params.workspaceMode) ||
-    (params.workspaceMode === 'worktree' && !params.childWorkspaces)
+    (params.workspaceMode === 'worktree' && !params.childWorkspaces) ||
+    (params.workspaceMode === 'snapshot' &&
+      !(params.childWorkspaces && params.childSnapshots))
   ) {
     return { admitted: false, reason: 'workspace_mode' };
   }

@@ -15,6 +15,7 @@ import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -133,11 +134,25 @@ const proxy = createServer(async (req, res) => {
       req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
     const executionId = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
     if (!store) {
-      assert.equal(restoring, false, 'Cold load must not contact Broker');
-      assert.equal(fields.runtimeSessionId, current.promptId);
+      const harnessScoped =
+        req.method === 'POST' &&
+        [
+          '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/tool-sessions:active-holds',
+        ].includes(url.pathname);
+      const holdInventory = harnessScoped && operation === 'active-holds';
+      assert.equal(
+        restoring && !holdInventory,
+        false,
+        'Cold load must not execute Broker operations',
+      );
+      assert.equal(
+        fields.runtimeSessionId,
+        harnessScoped ? undefined : current.promptId,
+      );
       assert.notEqual(operation, 'acknowledge');
       assert.notEqual(operation, 'release');
-      current.operations.push(operation);
+      if (!holdInventory) current.operations.push(operation);
       if (executionId) assert.equal(executionId, current.executionCallId);
     }
     const target =
@@ -175,6 +190,11 @@ const proxy = createServer(async (req, res) => {
       : undefined;
     if (target && current.fault === 'receipt-failure') {
       assert.equal(upstream.status, 500, bytes.toString());
+    } else if (!store && url.pathname.endsWith(':release-mount')) {
+      assert(
+        isLegitimateMountRelease(upstream.status, json?.code),
+        `${upstream.status}: ${bytes.toString()}`,
+      );
     } else if (!store && upstream.status === 409) {
       assert.equal(
         current.injections,
