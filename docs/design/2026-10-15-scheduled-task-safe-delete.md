@@ -37,7 +37,7 @@ No HTTP shape, persisted task schema, transcript schema, or Java control-plane c
 
 ## Risks
 
-- A retained session can temporarily appear with the name of a task that no longer exists. This state is bounded by active work and the existing idle reaper.
+- A retained session can temporarily appear with the name of a task that no longer exists. This state is bounded by active work and, once the last event subscriber detaches, the existing idle reaper; an attached retained session is reclaimed only after that client goes away.
 - The DELETE response does not distinguish immediate session close from safe retention. Both outcomes satisfy deletion of the scheduled task; session cleanup remains internal lifecycle behavior.
 
 ## Validation plan

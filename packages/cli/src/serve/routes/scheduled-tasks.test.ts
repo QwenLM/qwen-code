@@ -2049,7 +2049,8 @@ describe('scheduled-tasks routes', () => {
       },
     });
     expect(deletionGeneration).toBe(1);
-    // The task's dedicated session is torn down with it (no resident leak).
+    // The task's dedicated session is offered a conditional close with it;
+    // production retains it while work holds it.
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
     expect(h.bridge.closeOptions).toEqual([
       {

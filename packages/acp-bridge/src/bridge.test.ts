@@ -864,8 +864,8 @@ describe('createAcpSessionBridge', () => {
       expect(conditionalCloseCalls).toBe(0);
       expect(bridge.sessionCount).toBe(1);
 
-      // Direct close remains a force operation even when reporting is
-      // incomplete; only ordinary automatic cleanup is fail-closed.
+      // A direct conditional close is fail-closed here too; a plain direct
+      // close remains a force operation even when reporting is incomplete.
       await bridge.closeSession(session.sessionId);
       expect(forcedCloseCalls).toBe(1);
       expect(bridge.sessionCount).toBe(0);

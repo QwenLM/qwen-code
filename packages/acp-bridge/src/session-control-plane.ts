@@ -3216,9 +3216,10 @@ export function createSessionControlPlane(
    *
    * Every automatic cleanup path funnels through here (last-client detach,
    * prompt settle, notification settle, a child reporting itself idle) so the
-   * preservation rule lives in exactly one place. Explicit close, kill, and
-   * shutdown deliberately do NOT come through here: they keep their force
-   * semantics.
+   * automatic policy lives in exactly one place. Explicit close, kill, and
+   * shutdown do NOT come through here: a plain explicit close keeps its force
+   * semantics, and an explicit `closeIfUnheld` close reaches the shared
+   * retention guard directly.
    */
   async function maybeCloseIdleSession(
     entry: SessionEntry,
