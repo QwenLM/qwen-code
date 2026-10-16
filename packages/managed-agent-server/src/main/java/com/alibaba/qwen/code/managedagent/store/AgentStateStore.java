@@ -274,6 +274,21 @@ public interface AgentStateStore {
     }
 
     /**
+     * Blocks the operation, and when {@code budgetExempt} is true records the
+     * attempt as a wait on an external condition (a live journal writer or a
+     * stale Harness view) that never consumed the terminal retry budget.
+     */
+    default void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt,
+            boolean budgetExempt) {
+        if (budgetExempt) {
+            throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
+        }
+        blockLifecycleOperation(tenantId, sessionId, operationId, owner,
+                generation, failureCode, availableAt);
+    }
+
+    /**
      * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
      * or returns the operation the same actor already admitted under the
      * key. The target directory is already normalized and the request digest
@@ -388,9 +403,53 @@ public interface AgentStateStore {
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed);
 
+    /**
+     * Terminates a claimed operation whose retry budget is spent, recording
+     * the failure honestly: the operation row goes to FAILED with the
+     * failure code kept and delivery_state CONFIRMED so no recovery path
+     * re-drives it — and nothing else. The Session keeps its pending status
+     * and no completion event is appended, because the settle this operation
+     * promised never happened; the receipt the contract requires of every
+     * confirmed row certifies nothing.
+     *
+     * @return false when the claim is no longer current
+     */
+    boolean failOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            String failureCode);
+
     void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt);
+
+    /**
+     * Retries the operation, and when {@code budgetExempt} is true records
+     * the attempt as a wait on an external condition (a live journal writer,
+     * a stale Harness view, or the projection lag after the Harness answered
+     * an action response) that must not consume the terminal retry budget.
+     * The attempt count still grows, so the dispatch backoff keeps
+     * stretching.
+     */
+    default void retryOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            long availableAt, boolean budgetExempt) {
+        if (budgetExempt) {
+            throw new UnsupportedOperationException(
+                    "Budget-exempt retry is unavailable");
+        }
+        retryOperation(tenantId, sessionId, operationId, owner,
+                claimGeneration, availableAt);
+    }
+
+    /**
+     * Records that the current attempt reached the Harness (the decision was
+     * committed), so a later failure of this attempt stays budget-exempt even
+     * when the recovery reads that would reschedule it throw before that
+     * write (review round 14, R14-3). The row stays leased; the watermark
+     * only makes a re-claimed attempt read budgetExemptAttempt &gt; 0.
+     */
+    void markOperationAnswered(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration);
 
     Admission replayCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest);
@@ -490,7 +549,7 @@ public interface AgentStateStore {
             String owner, long retryAfter);
 
     void scheduleTurnRetry(String tenantId, String sessionId, String turnId,
-            String owner, long retryAfter);
+            String owner, long retryAfter, boolean budgetExempt);
 
     boolean bindHarness(String tenantId, String sessionId, String turnId,
             String owner, String harnessBootId);
