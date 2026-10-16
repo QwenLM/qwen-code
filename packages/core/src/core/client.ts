@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { LlmPreparedRequestCallback } from './llm-chat.js';
+
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -91,13 +93,20 @@ import {
 } from './turn.js';
 
 // Services
-import { LoopDetectionService } from '../services/loopDetectionService.js';
+import {
+  isAttemptRestartEvent,
+  LoopDetectionService,
+} from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import {
+  getToolExplorationKind,
+  ToolExplorationBudget,
+} from '../services/tool-exploration-budget.js';
 import {
   renderAutoMemoryFocusedSubtree,
   toAutoMemoryRef,
@@ -246,6 +255,7 @@ interface StopHookChain {
 }
 
 export interface SendMessageOptions {
+  onPreparedRequest?: LlmPreparedRequestCallback;
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
@@ -497,6 +507,12 @@ export class LlmClient {
   private readonly interactionStartTypes = new Map<string, SendMessageType>();
 
   private readonly loopDetector: LoopDetectionService;
+  private readonly toolExplorationBudget = new ToolExplorationBudget();
+  // The prompt/turn that owns the exploration phase. A concurrent `/btw`
+  // side query reaches this same client with the full tool set, so the phase
+  // is bound to its owning interaction: every budget entrypoint below is a
+  // no-op for an invocation that does not own it.
+  private toolExplorationBudgetPromptId: string | undefined;
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -1962,6 +1978,7 @@ export class LlmClient {
     this.config.getMemoryManager().resetMemoryBodyStateForSession();
     this.cachedGitStatus = undefined;
     await this.refreshSystemInstruction();
+    const gitStatus = this.getCachedGitStatus();
     this.getChat().addHistory({
       role: 'user',
       parts: [
@@ -1970,6 +1987,7 @@ export class LlmClient {
             `The session's working directory has changed from ${oldDir} to ${newDir} via /cd. ` +
             `The startup directory context above is stale. All tool calls and relative paths now resolve from ${newDir}.`,
         },
+        ...(gitStatus ? [{ text: wrapSystemReminder(gitStatus) }] : []),
       ],
     });
     await this.addDirectoryContext();
@@ -1984,9 +2002,9 @@ export class LlmClient {
       return null;
     }
     if (this.cachedGitStatus === undefined) {
-      // Mirror claude-code: append git status (branch + recent commits) to the
-      // system prompt so the main agent treats version history as authoritative
-      // context, not background noise. Only injected when cwd is a git repo.
+      // Git status (branch + recent commits) for the main agent's startup
+      // prelude, so it treats version history as authoritative context.
+      // Only injected when cwd is a git repo.
       this.cachedGitStatus = getRecentGitStatus(this.config.getCwd());
     }
     return this.cachedGitStatus;
@@ -2004,18 +2022,20 @@ export class LlmClient {
       contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
     };
-    // Record the stable → context layers (everything before the volatile
-    // gitStatus/autoMemory tail) as the cross-session-stable system prefix.
-    // The Anthropic converter splits the outgoing system prompt at this
-    // boundary and puts an early cache breakpoint on the stable part, so
-    // new sessions (different git status) and in-session memory saves
-    // don't re-bill it. Recorded on every rebuild so it tracks
-    // memory/model/mode changes; consumers match via `startsWith` and fail
-    // open when it goes stale.
+    // Record the stable → context layers (everything before the autoMemory
+    // tail) as the cross-session-stable system prefix. The Anthropic
+    // converter splits the outgoing system prompt at this boundary and puts
+    // an early cache breakpoint on the stable part. Recorded on every
+    // rebuild so it tracks memory/model/mode changes; consumers match via
+    // `startsWith` and fail open when it goes stale.
+    //
+    // The git snapshot is deliberately not a layer here: it changes whenever
+    // the repository does, and providers that only cache at the end of the
+    // system message (DashScope) would lose the whole system prompt across
+    // sessions. It is announced in the startup prelude instead.
     this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
     return assembleSystemPrompt({
       ...stableLayers,
-      gitStatus: this.getCachedGitStatus(),
       autoMemory: this.config.getAutoMemoryPrompt(),
     });
   }
@@ -2040,6 +2060,8 @@ export class LlmClient {
     const remaining = currentHistory.slice(startupLength);
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
+      undefined,
+      { gitStatus: this.getCachedGitStatus() },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2078,6 +2100,8 @@ export class LlmClient {
 
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
+      undefined,
+      { gitStatus: this.getCachedGitStatus() },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2760,7 +2784,10 @@ export class LlmClient {
       );
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
-        () => getInitialChatHistory(this.config, extraHistory),
+        () =>
+          getInitialChatHistory(this.config, extraHistory, {
+            gitStatus: this.getCachedGitStatus(),
+          }),
       );
       this.config
         .getMemoryManager()
@@ -3807,8 +3834,13 @@ export class LlmClient {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
       // A side question asked while a turn is running is not a new turn: it
-      // must not move the running turn's starting point or drop its target.
+      // must not move the running turn's starting point or drop its target —
+      // nor take over (or clear) the running turn's exploration phase, which
+      // the ownership check below every budget entrypoint enforces for the
+      // side turn's tool results too.
       if (!options?.isConcurrentSideQuery) {
+        this.toolExplorationBudget.reset();
+        this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
       }
       // New input starts this interaction, so its first Stop is not
@@ -4175,6 +4207,14 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
+    // A concurrent `/btw` side query runs through this same client and its
+    // tool-result continuation is submitted without the flag, so ownership is
+    // carried by the prompt id the interaction claimed at its start: a
+    // non-owner invocation leaves the running turn's phase untouched (it
+    // neither records into it nor drains its pending reminder).
+    const ownsExplorationBudget =
+      !options?.isConcurrentSideQuery &&
+      prompt_id === this.toolExplorationBudgetPromptId;
     // The delivery was prepared before the request went out, so commit vs
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
@@ -4502,6 +4542,7 @@ export class LlmClient {
         // stays unmarked, so a replaced identified turn fails closed.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
         options?.retractDeliveredOutputOnRetry,
+        options?.onPreparedRequest,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -4797,6 +4838,14 @@ export class LlmClient {
         const activeTodoReminder = carriesAgentToolResult
           ? this.config.takeActiveTodoReminder(prompt_id, true)
           : this.config.takeActiveTodoReminder(prompt_id);
+        const explorationReminder =
+          this.loopDetector.isDisabledForSession() || !ownsExplorationBudget
+            ? undefined
+            : this.toolExplorationBudget.takeReminder(
+                this.config.getMaxToolCallsPerTurn(),
+              );
+        if (explorationReminder)
+          requestToSend.push({ text: explorationReminder });
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -4915,10 +4964,7 @@ export class LlmClient {
           }
           if (event.type === LlmEventType.ToolCallRequest) {
             hasToolCalls = true;
-          } else if (
-            event.type === LlmEventType.Retry ||
-            event.type === LlmEventType.ModelFallback
-          ) {
+          } else if (isAttemptRestartEvent(event)) {
             modelRequestAccepted = false;
             hasToolCalls = false;
             loopGuardFedCallIds.clear();
@@ -4963,6 +5009,38 @@ export class LlmClient {
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
             this.loopDetector.checkAlwaysOnSafeties(event);
+          // Exploration-budget lifecycle, recorded before the halt handling
+          // below takes effect: a halted batch's over-count is harmless only
+          // because every core halt is terminal (the halt branch returns the
+          // turn, and the next interaction resets the budget). Keep any
+          // future non-terminal core halt from silently counting calls that
+          // never executed. Ownership-gated like every other entrypoint: a
+          // concurrent side turn's stream neither feeds this turn's phase nor
+          // rolls it back.
+          if (ownsExplorationBudget) {
+            if (
+              event.type === LlmEventType.ToolCallRequest &&
+              !duplicateLoopGuardRequest
+            ) {
+              this.toolExplorationBudget.record(
+                getToolExplorationKind(
+                  this.config.getToolRegistry(),
+                  event.value.name,
+                  event.value.args,
+                ),
+              );
+            } else if (event.type === LlmEventType.Finished) {
+              this.toolExplorationBudget.commit();
+            } else if (isAttemptRestartEvent(event)) {
+              // A retry re-streams the failed attempt's calls, so its reads
+              // must not stay counted. A fallback attempt cannot have
+              // streamed calls (the chain only runs when the failed attempt
+              // yielded no candidate output), so its rollback is a no-op kept
+              // for symmetry — and harmless, because a rollback never goes
+              // below the committed floor.
+              this.toolExplorationBudget.rollback();
+            }
+          }
           if (alwaysOnLoop) {
             // Drop every tool call collected before the guard fired so the run
             // halts here instead of spawning a continuation that re-trips it.
@@ -5288,6 +5366,7 @@ export class LlmClient {
             };
 
             this.loopDetector.reset(prompt_id);
+            if (ownsExplorationBudget) this.toolExplorationBudget.reset();
             const hookTurnBudget = boundedTurns - 1;
             const pendingSteer = await takeSteerInput(hookTurnBudget);
             for (const goalEvent of takePendingGoalEvents()) {
@@ -5396,6 +5475,7 @@ export class LlmClient {
           // protection is preserved: the cap still bounds each iteration, and
           // the chain itself is bounded by stopHookBlockingCap.
           this.loopDetector.reset(prompt_id);
+          if (ownsExplorationBudget) this.toolExplorationBudget.reset();
 
           const hookTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(hookTurnBudget);

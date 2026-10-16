@@ -128,70 +128,147 @@ describe('HTTP Managed Session store', () => {
     };
   }
 
-  it('includes digest-addressed instructions in the definition transaction closure', async () => {
-    const server = new FakeManagedSessionStore();
-    const runtimeBaseDir = await mkdtemp(
-      path.join(tmpdir(), 'definition-closure-'),
-    );
-    temporaryDirectories.push(runtimeBaseDir);
-    const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
-      sessionKey: SESSION_KEY,
-      writerId: 'harness-a',
-      writerToken: TOKEN_A,
-      fetchFn: server.fetch,
-    });
-    const instructionsRef = await stores.resourceStore.publish(
-      'managed-agent-instructions',
-      Buffer.from('Definition instructions'),
-    );
-    const definitionRef = await stores.resourceStore.publish(
-      'managed-definition',
-      Buffer.from(
-        JSON.stringify({
-          engine: 'managed',
-          agentDefinition: {
-            agentId: `agent_${'a'.repeat(32)}`,
-            revision: '1',
-            digest: 'b'.repeat(64),
-            instructionsRef,
+  it.each(['instructions', 'skills', 'both'])(
+    'includes nested %s after the definition leaves the staged transaction closure',
+    async (extensions) => {
+      const server = new FakeManagedSessionStore();
+      const runtimeBaseDir = await mkdtemp(
+        path.join(tmpdir(), 'definition-closure-'),
+      );
+      temporaryDirectories.push(runtimeBaseDir);
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: server.fetch,
+      });
+      const instructionsBytes = Buffer.from('Definition instructions');
+      const skillsBytes = Buffer.from(
+        JSON.stringify([
+          { name: 'review', description: 'Review', body: 'Read the diff.' },
+        ]),
+      );
+      const instructionsRef = await stores.resourceStore.publish(
+        'managed-agent-instructions',
+        instructionsBytes,
+      );
+      const skillsRef = await stores.resourceStore.publish(
+        'managed-agent-skills',
+        skillsBytes,
+      );
+      const nested = [
+        ...(extensions !== 'skills' ? [instructionsRef] : []),
+        ...(extensions !== 'instructions' ? [skillsRef] : []),
+      ];
+      const definitionRef = await stores.resourceStore.publish(
+        'managed-definition',
+        Buffer.from(
+          JSON.stringify({
+            engine: 'managed',
+            agentDefinition: {
+              agentId: `agent_${'a'.repeat(32)}`,
+              revision: '1',
+              digest: 'b'.repeat(64),
+              ...(extensions !== 'skills' ? { instructionsRef } : {}),
+              ...(extensions !== 'instructions' ? { skillsRef } : {}),
+            },
+          }),
+        ),
+      );
+      const rootSnapshotRef = await stores.resourceStore.publish(
+        'managed-root',
+        Buffer.from('{}'),
+      );
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'harness-a',
+        activationLeaseDurationMs: 60000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+      });
+      expect(server.commits[0]?.['resources']).toEqual(
+        expect.arrayContaining(
+          nested.map((ref) => expect.objectContaining(ref)),
+        ),
+      );
+      const recoveryRef = await session.resources.publish(
+        'hosted-model-request',
+        Buffer.from(
+          JSON.stringify({
+            v: 1,
+            sessionKey: SESSION_KEY,
+            promptId: 'prompt',
+            definitionRef,
+            rootSnapshotRef,
+          }),
+        ),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'model.attempt',
+          commandId: 'model-1',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'e'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'model-1',
+          sessionKey: SESSION_KEY,
+          kind: 'model.attempt',
+          occurredAt: Date.now(),
+          subject: {
+            type: 'activation',
+            scopeId: session.activation.activationId,
+            ...session.activation,
+          },
+          payload: {
+            attemptId: 'prompt:main:0',
+            routeRef: rootSnapshotRef,
+            inputCheckpointRef: null,
+            state: 'started',
+            usageRef: null,
+            recoveryRef,
           },
         }),
-      ),
-    );
-    const rootSnapshotRef = await stores.resourceStore.publish(
-      'managed-root',
-      Buffer.from('{}'),
-    );
-    const session = await openManagedSession({
-      runtimeBaseDir,
-      sessionId: SESSION_KEY.sessionId,
-      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
-      sessionKey: SESSION_KEY,
-      cwd: '/workspace',
-      version: 'test',
-      workerId: 'harness-a',
-      activationLeaseDurationMs: 60000,
-      journalStore: stores.journalStore,
-      resourceStore: stores.resourceStore,
-      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
-    });
-    expect(await stores.resourceStore.read(instructionsRef)).toEqual(
-      Buffer.from('Definition instructions'),
-    );
-    await session.close();
-    const restored = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
-      sessionKey: SESSION_KEY,
-      writerId: 'harness-b',
-      writerToken: TOKEN_B,
-      fetchFn: server.fetch,
-    });
-    await restored.journalStore.open({ sessionKey: SESSION_KEY });
-    expect(await restored.resourceStore.read(instructionsRef)).toEqual(
-      Buffer.from('Definition instructions'),
-    );
-  });
+        { class: 'harness', activation: session.activation },
+      );
+      expect(server.commits.at(-1)?.['resources']).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining(definitionRef),
+          ...nested.map((ref) => expect.objectContaining(ref)),
+        ]),
+      );
+      for (const ref of [definitionRef, ...nested])
+        expect(
+          (
+            server.commits.at(-1)?.['resources'] as Array<
+              Record<string, unknown>
+            >
+          ).find((entry) => entry['resourceId'] === ref.resourceId),
+        ).not.toHaveProperty('bytesBase64');
+      await session.close();
+      const restored = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-b',
+        writerToken: TOKEN_B,
+        fetchFn: server.fetch,
+      });
+      await restored.journalStore.open({ sessionKey: SESSION_KEY });
+      for (const ref of nested)
+        expect(await restored.resourceStore.read(ref)).toEqual(
+          ref === instructionsRef ? instructionsBytes : skillsBytes,
+        );
+    },
+  );
 
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -248,6 +325,59 @@ describe('HTTP Managed Session store', () => {
     });
     return { stores, session };
   }
+
+  it.each([undefined, 1, 2])(
+    'requires Store acknowledgement before a bounded retraction (version=%s)',
+    async (version) => {
+      const server = new FakeManagedSessionStore();
+      server.supportedStorageVersion = version;
+      const { session } = await bootStoresAndSession(server);
+      try {
+        const before = server.commits.length;
+        const commit = session.authority.appendExecutionEvent(
+          {
+            operation: 'assistantRetract',
+            commandId: 'bounded',
+            sessionKey: SESSION_KEY,
+            contentDigest: 'a'.repeat(64),
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: 'bounded',
+            sessionKey: SESSION_KEY,
+            kind: 'message.retracted',
+            occurredAt: Date.now(),
+            subject: {
+              type: 'activation',
+              scopeId: session.activation.activationId,
+              ...session.activation,
+            },
+            payload: {
+              messageId: 'message',
+              turnId: 'turn',
+              fromSequence: 1,
+              sourceBootId: 'boot',
+              sourceEventEpoch: 'epoch',
+              throughSequence: 1,
+            },
+          }),
+          { class: 'harness', activation: session.activation },
+        );
+        if (version === 2) {
+          await commit;
+          expect(server.commits.length).toBe(before + 1);
+        } else {
+          await expect(commit).rejects.toThrow(
+            'does not support Hosted recovery storage version 2',
+          );
+          expect(server.commits.length).toBe(before);
+        }
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
 
   // A committed message body must be the reader-facing record the cold
   // projection will replay: the commit-time fence refuses anything else.
@@ -327,6 +457,9 @@ describe('HTTP Managed Session store', () => {
         const headers = new Headers(init?.headers);
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+        expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
+          '2',
+        );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);
         return jsonResponse(request);
@@ -1485,9 +1618,18 @@ describe('HTTP Managed Session store', () => {
     const referencedResources = server.commits.at(-1)!['resources'] as Array<{
       resourceId: string;
     }>;
+    // The settled Turn carries the checkpoint, the checkpoint's own api
+    // history dependency, and the payload-referenced result record a cold
+    // projection replays.
     expect(
       referencedResources.map(({ resourceId }) => resourceId).sort(),
-    ).toEqual([checkpointRef.resourceId, turnResultRef.resourceId].sort());
+    ).toEqual(
+      [
+        checkpointRef.resourceId,
+        historyRef.resourceId,
+        turnResultRef.resourceId,
+      ].sort(),
+    );
     const snapshotResources = new Map<
       string,
       {
@@ -3018,7 +3160,7 @@ describe('HTTP Managed Session store', () => {
 
   it.each([
     ['recoveryStatus', 'BLOCKED_RESOURCE'],
-    ['storageVersion', 2],
+    ['storageVersion', 3],
     ['state', 'SEALED'],
     ['writerGeneration', 2],
     ['compactedThroughRevision', 1],
@@ -3033,7 +3175,7 @@ describe('HTTP Managed Session store', () => {
       await expect(journal.read()).resolves.toBeDefined();
       server.headOverrides[key] = value;
       await expect(journal.read()).rejects.toThrow(
-        /not readable by this v1 writer/,
+        /not readable by this writer/,
       );
       await session.close();
     },
@@ -3308,6 +3450,87 @@ describe('HTTP Managed Session store', () => {
     ).rejects.toThrow(/OSS storage is not enabled/);
   });
 
+  it('commits and reuses every part of a private outcome manifest after reopen', async () => {
+    const server = new FakeManagedSessionStore();
+    const open = await createSessionOpener(server);
+    const first = await open('harness-a', TOKEN_A);
+    const parts = [
+      await first.resources.publish(
+        'managed-tool-outcome-part',
+        Buffer.alloc(60 * 1024, 0x61),
+      ),
+      await first.resources.publish(
+        'managed-tool-outcome-part',
+        Buffer.alloc(20 * 1024, 0x62),
+      ),
+    ];
+    const ref = await first.resources.publish(
+      'managed-tool-outcome-chunks',
+      Buffer.from(JSON.stringify({ parts })),
+    );
+    async function receipt(session: typeof first, call: string) {
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: call,
+          sessionKey: SESSION_KEY,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `tool-receipt:${call}`,
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: call,
+            toolOutcomeRef: ref,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+    }
+    try {
+      await receipt(first, 'first-call');
+      const uploaded = server.commits.at(-1)?.['resources'] as Array<
+        ManagedSessionDurableRef & { bytesBase64?: string }
+      >;
+      expect(uploaded.map((item) => item.resourceId).sort()).toEqual(
+        [ref, ...parts].map((item) => item.resourceId).sort(),
+      );
+      expect(
+        uploaded.every(
+          (item) =>
+            item.bytesBase64 !== undefined && item.byteLength <= 64 * 1024,
+        ),
+      ).toBe(true);
+    } finally {
+      await first.close();
+    }
+    const reopened = await open('harness-b', TOKEN_B);
+    try {
+      await receipt(reopened, 'second-call');
+      const reused = server.commits.at(-1)?.['resources'] as Array<
+        ManagedSessionDurableRef & { bytesBase64?: string }
+      >;
+      expect(reused.map((item) => item.resourceId).sort()).toEqual(
+        [ref, ...parts].map((item) => item.resourceId).sort(),
+      );
+      expect(reused.every((item) => item.bytesBase64 === undefined)).toBe(true);
+      for (const part of parts) {
+        expect((await reopened.resources.read(part)).byteLength).toBe(
+          part.byteLength,
+        );
+      }
+    } finally {
+      await reopened.close();
+    }
+  });
+
   it('commits an oversized message as chunks and projects it after a cold reopen', async () => {
     const server = new FakeManagedSessionStore();
     const open = await createSessionOpener(server);
@@ -3446,6 +3669,7 @@ describe('HTTP Managed Session store', () => {
 });
 
 class FakeManagedSessionStore {
+  supportedStorageVersion: number | undefined = 2;
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
   readonly headOverrides: Record<string, unknown> = {};
@@ -3551,7 +3775,10 @@ class FakeManagedSessionStore {
         ...this.pageOverrides,
       });
     }
-    if (suffix === '/transactions:commit') {
+    if (
+      suffix === '/transactions:commit' ||
+      suffix === '/transactions:commit-v2'
+    ) {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       this.commits.push(body);
       const resources = body['resources'] as Array<Record<string, unknown>>;
@@ -3670,6 +3897,9 @@ class FakeManagedSessionStore {
 
   private grant(): Record<string, unknown> {
     return {
+      ...(this.supportedStorageVersion === undefined
+        ? {}
+        : { supportedStorageVersion: this.supportedStorageVersion }),
       writerGeneration: this.writerGeneration,
       leaseUntil: this.leaseUntil,
       journalRevision: this.transactions.length,
@@ -3740,6 +3970,82 @@ describe('collectNestedResourceRefs', () => {
     };
   }
 
+  it('includes private file history admission refs by walking only preparation', () => {
+    const ref = closureRef('managed-file_history', 'prepared');
+    const inputRef = closureRef('managed-tool-input', 'input');
+    const toolDefinitionRef = closureRef(
+      'managed-tool-definition',
+      'definition',
+    );
+    // A prepared record's previousRecordRef and preparation.intentRef denote
+    // one resource: SQL admission requires both to equal the predecessor's
+    // file-history ref, and reads that ref from this transaction.
+    const predecessorRef = closureRef('managed-file_history', 'predecessor');
+    const body = {
+      schemaVersion: 2,
+      profile: 'csi-files-retirement/1',
+      previousRecordRef: predecessorRef,
+      preparation: {
+        stage: 'prepared',
+        intentRef: predecessorRef,
+        invocations: [
+          { inputRef, toolDefinitionRef },
+          { inputRef, toolDefinitionRef },
+        ],
+      },
+    };
+    const nested = collectNestedResourceRefs(
+      ref,
+      Buffer.from(JSON.stringify(body)),
+    );
+    expect(nested).toHaveLength(3);
+    expect(nested).toEqual(
+      expect.arrayContaining([inputRef, toolDefinitionRef, predecessorRef]),
+    );
+    for (const ordinary of [
+      { snapshots: [] },
+      { ...body, preparation: null },
+      { ...body, schemaVersion: 1 },
+      { ...body, profile: 'ordinary' },
+    ]) {
+      expect(
+        collectNestedResourceRefs(ref, Buffer.from(JSON.stringify(ordinary))),
+      ).toEqual([]);
+    }
+  });
+
+  it('refuses a malformed file history record instead of collapsing its closure', () => {
+    const ref = closureRef('managed-file_history', 'malformed');
+    expect(() =>
+      collectNestedResourceRefs(ref, Buffer.from('null', 'utf8')),
+    ).toThrow(/file history must be an object/);
+    expect(() =>
+      collectNestedResourceRefs(ref, Buffer.from('{', 'utf8')),
+    ).toThrow(/record is not valid JSON/);
+  });
+
+  it('closes over every private outcome part and rejects malformed manifests', () => {
+    const ref = closureRef('managed-tool-outcome-chunks', 'manifest');
+    const parts = [
+      closureRef('managed-tool-outcome-part', 'first'),
+      closureRef('managed-tool-outcome-part', 'second'),
+    ];
+    expect(
+      collectNestedResourceRefs(ref, Buffer.from(JSON.stringify({ parts }))),
+    ).toEqual(parts);
+    for (const manifest of [
+      { parts: [] },
+      { parts: [parts[0]] },
+      { parts: Array(70).fill(parts[0]) },
+      { parts, foreign: true },
+      { parts: [parts[0], { ...parts[1], kind: 'managed-message-part' }] },
+    ]) {
+      expect(() =>
+        collectNestedResourceRefs(ref, Buffer.from(JSON.stringify(manifest))),
+      ).toThrow();
+    }
+  });
+
   it('closes over attachment refs embedded in a managed-input envelope (R8 P1)', () => {
     // The leak: the commit uploaded the envelope but never the attachment
     // bytes it admits — a reopened reader found the envelope and 404'd on
@@ -3790,5 +4096,64 @@ describe('collectNestedResourceRefs', () => {
         Buffer.from('{"text":"<task-notification />"}', 'utf8'),
       ),
     ).toEqual([]);
+  });
+
+  it('closes over the page envelopes a result manifest names (#13856)', () => {
+    // The gap the B2 rig arm proved: the walker traversed checkpoints and
+    // records but never the manifest → page hop, so a staged page envelope
+    // never reached the commit's resource closure and the Artifact's read
+    // chain 404'd on it.
+    const pageRef = closureRef('managed-tool-result-page', 'page-envelope');
+    const manifestRef = closureRef('managed-tool-result-manifest', 'manifest');
+    const manifest = Buffer.from(
+      JSON.stringify({
+        toolResult: 'managed-tool-result/1',
+        type: 'manifest',
+        tenantId: 'tenant',
+        sessionId: 'session',
+        turnId: 'turn',
+        executionCallId: 'execution',
+        callId: 'call',
+        invocationDigest: `sha256:${'a'.repeat(64)}`,
+        bindingGeneration: '1',
+        captureId: 'capture',
+        revision: 1,
+        executionStatus: 'success',
+        exitCode: 0,
+        signal: null,
+        captureScope: 'process_pipes',
+        capturePolicy: 'complete_required',
+        captureStatus: 'complete',
+        captureReason: null,
+        upstreamTruncated: false,
+        contents: [
+          {
+            streamId: 'stdout',
+            role: 'stdout',
+            mimeType: 'application/octet-stream',
+            state: 'sealed',
+            byteLength: 3,
+            digest: 'b'.repeat(64),
+            missingRanges: [],
+            body: {
+              pages: [{ ref: pageRef, segmentCount: 1, byteLength: 3 }],
+            },
+          },
+          {
+            streamId: 'stderr',
+            role: 'stderr',
+            mimeType: 'application/octet-stream',
+            state: 'sealed',
+            byteLength: 0,
+            digest: 'c'.repeat(64),
+            missingRanges: [],
+            body: { pages: [] },
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const nested = collectNestedResourceRefs(manifestRef, manifest);
+    expect(nested).toEqual([pageRef]);
   });
 });

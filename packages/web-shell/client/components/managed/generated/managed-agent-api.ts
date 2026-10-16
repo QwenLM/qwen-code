@@ -59,7 +59,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409 only while the Snapshot backs the floor (replay_floor_sequence <= snapshot_through_sequence); a stream reconciliation discards the Snapshot without lowering the floor, and during that rebuild such a cursor is served from the retained events. On the resync frame, reload the transcript and resume after its lastSequence. */
+        /** @description POST SSE consumed through fetch response.body. An afterSequence strictly below the durable replay floor ends the stream with one agent.session.resync_required frame. Projection rebuilds preserve that floor and the current immutable Snapshot. On the resync frame, reload the transcript and resume after its lastSequence. */
         post: operations["webShellStreamEvents"];
         delete?: never;
         options?: never;
@@ -406,7 +406,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made. */
+        /** @description Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible — its pre-delete status — rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made. */
         post: operations["unarchiveWebShellSession"];
         delete?: never;
         options?: never;
@@ -476,7 +476,9 @@ export interface components {
             agentId: string;
             /** @description Planned; phase one rejects non-blank values. */
             environmentId?: string | null;
+            /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
+            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             workspace?: components["schemas"]["WebShellWorkspaceSelection"];
@@ -487,6 +489,7 @@ export interface components {
             idempotencyKey: string;
             /** Format: uuid */
             sessionId: string;
+            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
         };
@@ -498,8 +501,9 @@ export interface components {
             sessionId: string;
             turnId: string;
         };
+        /** @description Arbitrary caller metadata, as a JSON object (or null). Accepted and ignored in Phase 1: nothing from it is persisted. On WebShellCreateRequest the Session title travels in that request's own `title` field; WebShellSubmitRequest has no title surface. Any keys are valid. */
         WebShellMetadata: {
-            clientId?: string;
+            [key: string]: unknown;
         } | null;
         /** @description With durable_operations enabled, all three target fields are returned. accepted means Java durable delivery responsibility, not model execution. Missing fields retain the deployed legacy response semantics. */
         WebShellAdmission: {
@@ -519,9 +523,6 @@ export interface components {
             /** Format: int64 */
             completedAt?: number | null;
             errorCode?: string | null;
-            usage?: {
-                [key: string]: unknown;
-            } | null;
         };
         WebShellSession: {
             /** Format: uuid */
@@ -923,7 +924,7 @@ export interface components {
          */
         TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
         /**
-         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40, child_agent tasks in pending, running, waiting or degraded, in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent and 1.46 for workflow, tasks of those kinds in pending, running, waiting or degraded, in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
          * @enum {string}
          */
         TaskActionCapability: "cancel" | "send_input" | "read_output";
@@ -1176,7 +1177,7 @@ export interface components {
     parameters: never;
     requestBodies: never;
     headers: {
-        /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the current visible Session; operation responses represent the original operation at its current state. */
+        /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible — a rename or unarchive replay after delete answers with the Session's pre-delete status rather than 404, while a create replay after delete answers 404 on the public create route, which re-reads the Session before responding, and answers the recorded 202 admission carrying the tombstoned sessionId on the WebShell create route, which does not re-read it; operation responses represent the original operation at its current state. */
         IdempotentReplay: boolean;
         /** @description Trace-only correlation identifier; never an idempotency key. */
         RequestId: string;

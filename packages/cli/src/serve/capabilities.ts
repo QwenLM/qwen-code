@@ -223,6 +223,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `workspace_file_read`). The advertised upload byte cap is surfaced via
   // `limits.maxWorkspaceFileUploadBytes`.
   workspace_file_upload: { since: 'v1' },
+  workspace_directory_create: { since: 'v1' },
+  workspace_directory_delete: { since: 'v1' },
   // Daemon hosts the session-level approval-mode
   // control route `POST /session/:id/approval-mode` (gated by the
   // mutation gate, strict). The route accepts `{mode, persist?}` —

@@ -7,12 +7,14 @@
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
 import { randomUUID } from 'node:crypto';
+import { isChildNotificationSource } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
 import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 
 /**
  * The Session's one wake-recovery classification, shared by its wiring
@@ -24,7 +26,8 @@ export function monitorWakeNeedsRecovery(cause: unknown): boolean {
   return (
     cause instanceof HostedToolRecoveryRequiredError ||
     cause instanceof HostedMcpRecoveryRequiredError ||
-    cause instanceof HostedHookRecoveryRequiredError
+    cause instanceof HostedHookRecoveryRequiredError ||
+    cause instanceof LlmRequestPreparationError
   );
 }
 
@@ -63,8 +66,8 @@ export function createMonitorWakeRunTurn(params: {
    * re-read with the busy verdict right before the turn starts. */
   readonly held?: (turn: HostedMonitorWakeTurn) => boolean;
   /**
-   * The recovery-required classification. It is injected because the three
-   * RecoveryRequiredError classes must be matched by type — their
+   * The recovery-required classification. It is injected because these
+   * error classes must be matched by type — their
    * constructors never assign `name`, so every instance reads `name ===
    * 'Error'` and a name comparison silently reclassifies a recovery
    * exception as an ordinary failure, settling its unconsumed input.
@@ -236,7 +239,8 @@ export function withChildAgentConsumption(
     if (
       outcome === 'settled' &&
       !session.blocked &&
-      turn.source === 'child_agent' &&
+      // #13803: either child Session kind's acceptance notification.
+      isChildNotificationSource(turn.source) &&
       turn.turnId.endsWith(':accept:notify') &&
       session.childAgents
     ) {
