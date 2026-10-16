@@ -8452,6 +8452,30 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  async createWorkspaceDirectory(
+    path: string,
+    clientId?: string,
+  ): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/directory/create',
+      'POST /workspaces/:workspace/directory/create',
+      { method: 'POST', body: { path }, clientId, mode: 'rest' },
+    );
+  }
+
+  async deleteWorkspaceDirectory(
+    path: string,
+    clientId?: string,
+  ): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/directory/delete',
+      'POST /workspaces/:workspace/directory/delete',
+      { method: 'POST', body: { path }, clientId, mode: 'rest' },
+    );
+  }
+
   glob(
     pattern: string,
     opts: { maxResults?: number; signal?: AbortSignal } = {},
@@ -8472,11 +8496,11 @@ export class WorkspaceDaemonClient {
     req: DaemonWorkspaceFileWriteRequest,
     clientId?: string,
   ): Promise<DaemonWorkspaceFileWriteResult> {
-    return this.post(
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
       '/file/write',
       'POST /workspaces/:workspace/file/write',
-      req,
-      clientId,
+      { method: 'POST', body: req, clientId, mode: 'rest' },
     );
   }
 

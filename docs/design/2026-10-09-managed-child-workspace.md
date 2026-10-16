@@ -112,7 +112,7 @@ A nullable column naming the child Workspace that holds the storage as a mainten
 
 ## Files affected
 
-- `packages/sdk-java/managed-agent-server/src/main/resources/db/migration/V60__managed_child_workspace.sql`: the table and the lease column.
+- `packages/managed-agent-server/src/main/resources/db/migration/V60__managed_child_workspace.sql`: the table and the lease column.
 - `service/ChildWorktreeGit.java`: the hardened Git runner and the physical steps (layout check, snapshot, create, result, merge, apply, discard). `service/ChildWorkspaceException.java`: their failure codes.
 - `service/ChildWorkspaceProvider.java`: the provider interface `RuntimeWarmer.childWorkspaces()` answers. `EmbeddedRuntimeBroker` implements it over `service/WorkspaceRuntimeResolver.java`'s new `storageRoot`, the verified mount root.
 - `service/ChildWorkspaceService.java`: `prepare`, `finish`, `find`, the scheduled scan and the state machine.

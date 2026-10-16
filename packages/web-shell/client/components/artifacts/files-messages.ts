@@ -1,14 +1,25 @@
 export const FILES_MESSAGES_EN = {
+  'files.delete': 'Delete file',
+  'files.deleteTitle': 'Delete file?',
+  'files.deleteWarning':
+    'This will permanently delete the file. This cannot be undone.',
   'files.copyRelativePath': 'Copy relative path',
   'files.copyAbsolutePath': 'Copy absolute path',
   'files.reference': 'Reference',
   'files.title': 'Files',
-  'files.delete': 'Delete file',
+  'files.newFile': 'New file',
+  'files.newFolder': 'New folder',
   'files.deleteMenu': 'Delete',
-  'files.deleteTitle': 'Delete file?',
-  'files.deleteWarning':
-    'This will permanently delete the file. This cannot be undone.',
+  'files.deleteFolderTitle': 'Delete folder?',
+  'files.deleteFolderWarning':
+    'This folder and all its contents will be permanently deleted. This action cannot be undone.',
   'files.deleting': 'Deleting…',
+  'files.name': 'Name',
+  'files.create': 'Create',
+  'files.creating': 'Creating…',
+  'files.destination': 'Create in',
+  'files.invalidName':
+    'Enter a single name without slashes or control characters. “.” and “..” are not allowed.',
   'files.uploadTo': 'Drop files to upload into',
   'files.description': 'Browse workspace files',
   'files.filter': 'Filter files…',
@@ -26,15 +37,26 @@ export const FILES_MESSAGES_EN = {
 };
 
 export const FILES_MESSAGES_ZH = {
+  'files.delete': '删除文件',
+  'files.deleteTitle': '删除文件？',
+  'files.deleteWarning': '此操作将永久删除该文件。删除后不可恢复。',
   'files.copyRelativePath': '复制相对路径',
   'files.copyAbsolutePath': '复制绝对路径',
   'files.reference': '引用',
   'files.title': '文件',
-  'files.delete': '删除文件',
+  'files.newFile': '新建文件',
+  'files.newFolder': '新建文件夹',
   'files.deleteMenu': '删除',
-  'files.deleteTitle': '删除文件？',
-  'files.deleteWarning': '此操作将永久删除该文件。删除后不可恢复。',
+  'files.deleteFolderTitle': '删除文件夹？',
+  'files.deleteFolderWarning':
+    '文件夹及其全部内容将被永久删除，删除后不可恢复。',
   'files.deleting': '删除中…',
+  'files.name': '名称',
+  'files.create': '创建',
+  'files.creating': '创建中…',
+  'files.destination': '创建位置',
+  'files.invalidName':
+    '请输入单个名称，不可包含斜杠或控制字符，也不能为“.”或“..”。',
   'files.uploadTo': '拖放文件上传至',
   'files.description': '浏览工作区文件',
   'files.filter': '筛选文件…',

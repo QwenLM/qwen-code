@@ -24,7 +24,11 @@ export type ArtifactWorkspaceActions = Pick<
   | 'deleteScheduledTask'
 > &
   Partial<Pick<WorkspaceDaemonClient, 'deleteWorkspaceFile'>> &
-  Partial<FileUploadClient>;
+  Partial<FileUploadClient> & {
+    createFile?(path: string): Promise<void>;
+    createDirectory?(path: string): Promise<void>;
+    deleteDirectory?(path: string): Promise<void>;
+  };
 
 interface ArtifactWorkspaceOwner {
   cwd: string;
@@ -99,25 +103,56 @@ export function useArtifactWorkspaceTarget(
     () => resolveArtifactWorkspaceOwner(workspace.capabilities, workspaceCwd),
     [workspace.capabilities, workspaceCwd],
   );
-  const canDelete = Boolean(
-    owner?.id &&
-      workspace.capabilities?.features?.includes('workspace_file_delete') &&
-      workspace.capabilities?.features?.includes(
-        'workspace_qualified_rest_core',
-      ) &&
-      !workspace.capabilities?.workspaces?.find(
-        (entry) => entry.id === owner.id,
-      )?.ssh,
-  );
+  const localOwner =
+    import.meta.env.MODE !== 'transcript' &&
+    Boolean(
+      owner?.id &&
+        workspace.capabilities?.features?.includes(
+          'workspace_qualified_rest_core',
+        ) &&
+        !workspace.capabilities?.workspaces?.find(
+          (entry) => entry.id === owner.id,
+        )?.ssh,
+    );
+  const canDelete =
+    localOwner &&
+    Boolean(
+      workspace.capabilities?.features?.includes('workspace_file_delete'),
+    );
   const deleteAllowedRef = useRef(canDelete);
   deleteAllowedRef.current = canDelete;
-  const canUpload = Boolean(
-    owner?.id &&
-      workspace.capabilities?.features?.includes('workspace_file_upload') &&
-      workspace.capabilities?.features?.includes(
-        'workspace_qualified_rest_core',
-      ),
-  );
+  const canCreateFile =
+    localOwner &&
+    Boolean(workspace.capabilities?.features?.includes('workspace_file_write'));
+  const canCreateDirectory =
+    localOwner &&
+    Boolean(
+      workspace.capabilities?.features?.includes('workspace_directory_create'),
+    );
+  const canDeleteDirectory =
+    localOwner &&
+    Boolean(
+      workspace.capabilities?.features?.includes('workspace_directory_delete'),
+    );
+  const deletionAllowedRef = useRef(canDeleteDirectory);
+  deletionAllowedRef.current = canDeleteDirectory;
+  const creationAllowedRef = useRef({
+    file: canCreateFile,
+    directory: canCreateDirectory,
+  });
+  creationAllowedRef.current = {
+    file: canCreateFile,
+    directory: canCreateDirectory,
+  };
+  const canUpload =
+    import.meta.env.MODE !== 'transcript' &&
+    Boolean(
+      owner?.id &&
+        workspace.capabilities?.features?.includes('workspace_file_upload') &&
+        workspace.capabilities?.features?.includes(
+          'workspace_qualified_rest_core',
+        ),
+    );
   const uploadAllowedRef = useRef(canUpload);
   uploadAllowedRef.current = canUpload;
   const authorityRef = useRef<ArtifactWorkspaceAuthority | undefined>(
@@ -169,6 +204,20 @@ export function useArtifactWorkspaceTarget(
       }
       return current;
     };
+    const create = async (kind: 'file' | 'directory', path: string) => {
+      const requireCreationOwner = () => {
+        const current = requireOwner();
+        if (!creationAllowedRef.current[kind])
+          throw new Error('Workspace creation is no longer available');
+        return current;
+      };
+      const current = requireCreationOwner();
+      const client = workspace.client.workspaceByCwd(current.cwd);
+      if (kind === 'file')
+        await client.writeWorkspaceFile({ path, content: '', mode: 'create' });
+      else await client.createWorkspaceDirectory(path);
+      requireCreationOwner();
+    };
     return {
       ...(canDelete
         ? {
@@ -186,6 +235,29 @@ export function useArtifactWorkspaceTarget(
                 throw new Error(
                   'Workspace file deletion is no longer available',
                 );
+            },
+          }
+        : {}),
+      ...(canCreateFile
+        ? { createFile: (path: string) => create('file', path) }
+        : {}),
+      ...(canCreateDirectory
+        ? { createDirectory: (path: string) => create('directory', path) }
+        : {}),
+      ...(canDeleteDirectory
+        ? {
+            async deleteDirectory(path: string) {
+              const requireDeletionOwner = () => {
+                const current = requireOwner();
+                if (!deletionAllowedRef.current)
+                  throw new Error('Workspace deletion is no longer available');
+                return current;
+              };
+              const current = requireDeletionOwner();
+              await workspace.client
+                .workspaceByCwd(current.cwd)
+                .deleteWorkspaceDirectory(path);
+              requireDeletionOwner();
             },
           }
         : {}),
@@ -269,7 +341,16 @@ export function useArtifactWorkspaceTarget(
         requireScheduledTaskOwner(workspaceId);
       },
     };
-  }, [authority, primaryActions, workspace.client, canDelete, canUpload]);
+  }, [
+    authority,
+    primaryActions,
+    workspace.client,
+    canDelete,
+    canCreateFile,
+    canCreateDirectory,
+    canDeleteDirectory,
+    canUpload,
+  ]);
 
   if (!authority || !actions) return undefined;
   return {

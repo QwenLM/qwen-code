@@ -8,6 +8,7 @@ The Files context menu can preview, reference, copy paths and download, but
 cannot delete a file. Add permanent deletion of one regular file in a trusted
 local workspace, with a second confirmation explicitly warning that deletion
 cannot be undone. Directory, symlink and SSH deletion are outside this change.
+The regular-file action coexists with main's separately gated directory deletion.
 
 ## Design
 
@@ -29,12 +30,16 @@ cannot be undone. Directory, symlink and SSH deletion are outside this change.
   Require both delete and qualified REST capabilities, the exact trusted owner,
   and a local (non-SSH) workspace. Recheck eligibility and authority before and
   after the request so stale handlers cannot mutate a replacement owner.
+  Exclude mutation actions from the read-only transcript build, preserving its
+  existing size budget.
 - Add Delete only to regular-file menus. Use the shared scoped AlertDialog,
   show the absolute workspace file path and an irreversible-deletion warning,
   focus Cancel by default, and require the destructive button to proceed.
   Cancellation and
   Escape send no request. Disable dismissal and duplicate submission while
   deleting; keep errors visible in the dialog for retry.
+  Share the existing folder confirmation flow with a file/directory target kind,
+  distinct messages and methods. Wait for pending uploads before confirming.
 - After success remove the file from the existing tree and clear its preview
   if selected. Preserve other expansion/filter/selection state. Avoid restoring
   dropdown focus over the confirmation dialog; restore tree focus when it
