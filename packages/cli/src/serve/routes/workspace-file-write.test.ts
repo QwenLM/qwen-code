@@ -290,6 +290,66 @@ describe('POST /file/write', () => {
     expect(await fsp.readFile(target, 'utf-8')).toBe('new');
   });
 
+  it.each([false, true])(
+    'refuses create through a symlink when its target exists=%s',
+    async (targetExists) => {
+      const target = path.join(h.workspace, 'fresh.txt');
+      const alias = path.join(h.workspace, 'alias.txt');
+      if (targetExists) await fsp.writeFile(target, 'keep');
+      await fsp.symlink('fresh.txt', alias, 'file');
+      const result = await request(h.app)
+        .post('/file/write')
+        .set('Host', loopbackHost())
+        .set('Authorization', 'Bearer secret')
+        .send({ path: 'alias.txt', content: '', mode: 'create' });
+      expect(result.status).toBe(400);
+      expect(result.body.errorKind).toBe('symlink_escape');
+      expect((await fsp.lstat(alias)).isSymbolicLink()).toBe(true);
+      expect(await fsp.readlink(alias)).toBe('fresh.txt');
+      if (targetExists) expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+      else
+        await expect(fsp.stat(target)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+    },
+  );
+
+  it('retains replace-mode resolution through an existing in-workspace symlink', async () => {
+    const target = path.join(h.workspace, 'original.txt');
+    const alias = path.join(h.workspace, 'alias.txt');
+    await fsp.writeFile(target, 'old');
+    await fsp.symlink('original.txt', alias, 'file');
+    const result = await request(h.app)
+      .post('/file/write')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({
+        path: 'alias.txt',
+        content: 'new',
+        mode: 'replace',
+        expectedHash: rawHash('old'),
+      });
+    expect(result.status).toBe(200);
+    expect(result.body.path).toBe('original.txt');
+    expect(await fsp.readFile(target, 'utf8')).toBe('new');
+    expect((await fsp.lstat(alias)).isSymbolicLink()).toBe(true);
+  });
+
+  it.each(['.', 'folder/', 'name\0', 'bad.../file.txt'])(
+    'rejects raw invalid create path %j',
+    async (input) => {
+      const result = await request(h.app)
+        .post('/file/write')
+        .set('Host', loopbackHost())
+        .set('Authorization', 'Bearer secret')
+        .send({ path: input, content: '', mode: 'create' });
+      expect(result.status).toBe(400);
+      await expect(
+        fsp.stat(path.join(h.workspace, 'folder')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
   it('returns parse_error for malformed bodies', async () => {
     const res = await request(h.app)
       .post('/file/write')

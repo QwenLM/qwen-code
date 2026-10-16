@@ -12,7 +12,7 @@
 
 ## 已核实的现状
 
-以下路径未特别说明时位于 `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` 之下。
+以下路径未特别说明时位于 `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` 之下。
 
 - **绑定。** `V7__managed_workspace_binding.sql` 新增八列绑定集合(`workspace_id`、`workspace_generation`、`workspace_storage_id`、`cwd_relative`、`context_config_ref`、`context_revision`、`workspace_config_ref`、`workspace_policy_ref`),以全空或全非空为整体,承载七字段的 `ContextBinding` 模型,含 `cwd_relative` 与 `context_revision`(创建时硬编码为 `1`,见 `store/ManagedWorkspaceRegistry.java:212`)。不存在 `context_state` 列,本切片也不需要:一个未关闭的 cwd operation 本身就是闸门。
 - **operation 账本。** `V17__managed_session_operation.sql` 的 `managed_agent_operation` 是持久的 202 + Idempotency-Key 底座:按 (tenant, session, kind, actor, key) 唯一;PENDING/RUNNING/COMPLETED 状态;lease/claim/retry 列;以及带 `@Scheduled recoverOperations()` 的协调器(`service/SessionLifecycleCoordinator.java`)。kind 各自专属(`store/StoreModels.java:84` 的 `CLOSE/ARCHIVE/DELETE/ACTION_RESPONSE`);V24 增加了按 kind 的专有列,正是 cwd 列的模板。`findDeliverableOperations`、`claimOperation` 与 `retryOperation` 与 kind 无关可复用;`beginOperation`/`completeOperation` 不可复用(它们断言生命周期状态机,且拒绝绑定会话)。
@@ -126,13 +126,13 @@ WebShell 请求体携带 `sessionId`、`idempotencyKey`、`cwdRelative`、`expec
 - `api/PublicAgentController.java`、`api/WebShellAgentController.java`、`api/ApiModels.java`(路由与 DTO record)。
 - 测试:store 准入矩阵、coordinator 结算/回收、H2+临时挂载的传输探针、controller 测试、`ManagedAgentApiContractTest` 与 planned schema 钉、Hosted 集成套件的 cwd 组(H2;MySQL CI 车道与现有套件并列)。
 - `packages/web-shell` 按更新后的契约重新生成 `managed-agent-api.ts`(机械变更,与以往契约升级相同)。
-- 本设计双语文档;`packages/sdk-java/managed-agent-server/README.md`(路由行为与门禁)。
+- 本设计双语文档;`packages/managed-agent-server/README.md`(路由行为与门禁)。
 
 不改 `packages/cli/src/serve/**`、`packages/core/**`、worker、envelope 或共享 fixtures。
 
 ## 验证计划
 
-- **Java**:JDK 21 下 `packages/sdk-java/managed-agent-server` 的 `mvn test` 与 `mvn checkstyle:check`;聚焦的 store/coordinator/controller/contract 测试。
+- **Java**:JDK 21 下 `packages/managed-agent-server` 的 `mvn test` 与 `mvn checkstyle:check`;聚焦的 store/coordinator/controller/contract 测试。
 - **store 准入矩阵**:准入表每一行,含 CAS 前的重放顺序、摘要冲突、跨租户不可见、无读授权 404 `session_not_found` 与有读授权非创建者 403 `session_operation_forbidden`、授权被撤、Registry draining/removed、generation 漂移、期望 revision 不符、G0 初始 Turn 或保留 Runtime 上下文繁忙,以及同目录无变化请求。
 - **结算**:探针失败时会话原样保留且 `failure_code=workspace_unavailable`;外部 revision 变动后提交以 `context_revision_conflict` 失败;出现新的活动 Turn 或保留 Runtime 上下文时以 `session_context_busy` 失败;瞬时错误重试后成功一次;永不停歇的瞬时失败在 8 次尝试预算用尽后以类型化终态结算——可投递集合清空、两道准入屏障重新放行;消失的挂载根或目标判为终态(对照真实删除的目录钉住),一时的 I/O 形态判为可重试(以确定性的 ENAMETOOLONG 探测钉住);属主死亡的 LEASED 行回收后恰好完成一次;legacy 生命周期 operation 与 `ACTION_RESPONSE` 不受影响(其测试保持绿色)。
 - **契约**:映射 vs planned 漂移测试、六个触及 schema 的钉、WebShell 孪生、事件文档一致性。

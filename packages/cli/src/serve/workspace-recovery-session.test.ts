@@ -941,6 +941,75 @@ describe('migration profile evidence', () => {
 });
 
 describe('verifyRecoverySession', () => {
+  it.each([
+    [
+      'published catalog',
+      Buffer.from(
+        '[{"name":"review","description":"Review","body":"Check the diff."}]',
+      ),
+      undefined,
+      undefined,
+    ],
+    [
+      'corrupt bytes',
+      Buffer.from('[]'),
+      Buffer.from('{}'),
+      'resource bytes conflict',
+    ],
+    ['missing bytes', Buffer.from('[]'), null, 'missing_resource'],
+    [
+      'oversized catalog',
+      Buffer.alloc(48 * 1024 + 1, 0x20),
+      undefined,
+      'Invalid agent skills reference',
+    ],
+    [
+      'invalid UTF-8',
+      Buffer.from([0xff]),
+      undefined,
+      'The encoded data was not valid for encoding utf-8',
+    ],
+    [
+      'invalid catalog',
+      Buffer.from('[{"name":"review"}]'),
+      undefined,
+      'Invalid Hosted skill catalog',
+    ],
+  ] as const)(
+    'verifies pinned Skills through the recovery closure: %s',
+    async (_name, bytes, stored, error) => {
+      const skillsRef: ManagedSessionDurableRef = {
+        resourceId: 'agent-skills',
+        kind: 'managed-agent-skills',
+        schemaVersion: 1,
+        byteLength: bytes.length,
+        digest: hash(bytes),
+      };
+      const f = fixture({
+        toolProfile: 'hosted-workspace-files/1',
+        agentDefinition: {
+          agentId: `agent_${'a'.repeat(32)}`,
+          revision: '1',
+          digest: 'b'.repeat(64),
+          skillsRef,
+        },
+      });
+      if (stored !== null)
+        f.resources.set(skillsRef.resourceId, stored ?? bytes);
+      if (error) {
+        await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+          error,
+        );
+        expect(f.complete.has(skillsRef.resourceId)).toBe(false);
+      } else {
+        await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+          fileHistory: 'not_captured',
+        });
+        expect(f.complete.has(skillsRef.resourceId)).toBe(true);
+      }
+    },
+  );
+
   it('captures raw pinned agent instructions and refuses changed bytes', async () => {
     const bytes = Buffer.from('Keep the agent instructions. 保留指令。');
     const instructionsRef: ManagedSessionDurableRef = {
