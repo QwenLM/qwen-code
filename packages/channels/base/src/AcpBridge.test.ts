@@ -2202,7 +2202,7 @@ describe('AcpBridge adapter channel tools', () => {
 
   /** Register tools, then bind sessions through the real session-scoped add. */
   async function bridged(
-    tools: Array<ChannelToolDefinition>,
+    tools: ChannelToolDefinition[],
     sessions: Array<{ sessionId: string; sourceId?: string }>,
   ): Promise<Internals> {
     const bridge = internals(
