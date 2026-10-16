@@ -647,12 +647,20 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
-      // The transcript's compression boundary indexes the restored apiHistory
-      // (the same array startChat just loaded) — re-arm the live slot so the
-      // recovery classifier sees the same clean boundary as before the
-      // restart (#14325).
+      // The transcript's compression boundary indexes the restored
+      // apiHistory; startChat() may prepend a 0-or-1-entry startup prelude,
+      // shifting every live index. Carry the shift so the recovery
+      // classifier sees the same clean boundary as before the restart
+      // (#14325). A non-positive shift (unexpected) keeps the apiHistory
+      // basis — the safe direction.
       if (restoreRuntime.compressedTailLength !== undefined) {
-        chat.setCompressedTailLength(restoreRuntime.compressedTailLength);
+        const preludeShift =
+          (chat.getHistoryShallow?.() ?? chat.getHistory()).length -
+          restoreRuntime.apiHistory.length;
+        chat.setCompressedTailLength(
+          restoreRuntime.compressedTailLength +
+            (preludeShift > 0 ? preludeShift : 0),
+        );
       }
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
@@ -684,10 +692,18 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restored.completedToolCallIds);
-      // The accumulator reports the compression boundary on the same
-      // apiHistory basis (null = no compression in this conversation).
+      // The accumulator reports the compression boundary on the
+      // apiHistory basis (null = no compression in this conversation);
+      // startChat() may prepend a 0-or-1-entry startup prelude, shifting
+      // every live index. Carry the shift for the live slot (#14325); a
+      // non-positive shift (unexpected) keeps the apiHistory basis.
       if (restored.compressedTailLength !== null) {
-        chat.setCompressedTailLength(restored.compressedTailLength);
+        const preludeShift =
+          (chat.getHistoryShallow?.() ?? chat.getHistory()).length -
+          resumedHistory.length;
+        chat.setCompressedTailLength(
+          restored.compressedTailLength + (preludeShift > 0 ? preludeShift : 0),
+        );
       }
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
@@ -5908,9 +5924,17 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
-      this.getChat().setCompletedToolCallIds(
-        previousChat.getCompletedToolCallIds(),
+      const freshChat = this.getChat();
+      // startChat() rebuilds the LlmChat through getInitialChatHistory,
+      // which may prepend a 0-or-1-entry startup prelude, and the boundary
+      // armed inside tryCompress() lives on the discarded chat. Re-arm on
+      // the new chat so the recovery classifier sees the completed
+      // compression as a clean turn boundary (#14325): everything it holds
+      // at this point (prelude + payload) is settled state.
+      freshChat.setCompressedTailLength(
+        (freshChat.getHistoryShallow?.() ?? freshChat.getHistory()).length,
       );
+      freshChat.setCompletedToolCallIds(previousChat.getCompletedToolCallIds());
       if (
         !this.lastSessionStartContext &&
         previousSessionStartContext &&
