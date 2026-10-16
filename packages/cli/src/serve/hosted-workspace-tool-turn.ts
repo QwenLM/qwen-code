@@ -5972,6 +5972,7 @@ export class HostedWorkspaceToolTurn {
             | 'rejected'
             | 'cancelled'
             | 'unknown',
+          record.kind,
         ),
       );
       if (!journaled?.has(callId))
