@@ -41,7 +41,8 @@ class RuntimeBrokerBracketKeyBindingTest {
 
         ManagedAgentProperties properties = Binder.get(environment)
                 .bind("qwen.managed-agent", ManagedAgentProperties.class)
-                .orElseThrow();
+                .orElseThrow(() -> new IllegalStateException(
+                        "qwen.managed-agent properties not bound"));
 
         var previousKeys = properties.getRuntimeBroker()
                 .getPreviousCredentialKeys();
