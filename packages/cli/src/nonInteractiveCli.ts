@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
   BackgroundTaskStatus,
@@ -1206,9 +1208,14 @@ export async function runNonInteractive(
         // client.ts strips the ENTIRE trailing user run, so detection must
         // re-submit exactly that run or the oldest orphans get dropped. This
         // runs once per (rare) continue request, so the full clone is fine.
+        const history = llmClient.getChat().getHistory();
+        const cancellation = getLastApiPromptCancellation(
+          llmClient.getChat().getHistoryShallow(),
+          await config.getChatRecordingService()!.readActiveTranscriptChain(),
+        );
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: llmClient.getChat().getHistory(),
+          apiHistory: cancellation ? [] : history,
           completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
@@ -2076,10 +2083,12 @@ export async function runNonInteractive(
         // finalised (emitted, recorded, appended to `toolResponseParts`)
         // strictly in original request order, so the model and the event
         // log always see a deterministic sequence.
-        const toolBatches = partitionHeadlessToolCalls(
-          requestsToExecute,
-          config,
-        );
+        const toolBatches = modSession?.hasToolHooks
+          ? requestsToExecute.map((request) => ({
+              concurrent: false,
+              calls: [request],
+            }))
+          : partitionHeadlessToolCalls(requestsToExecute, config);
 
         // Tick BEFORE the call so that --max-tool-calls=N caps the run
         // at exactly N executions: the (N+1)th tick aborts before the
@@ -2162,6 +2171,9 @@ export async function runNonInteractive(
               : abortController.signal,
             {
               recordToolResult: false,
+              modToolCall: modSession?.toolCall(() =>
+                budgetEnforcer.tickToolCall(),
+              ),
               onToolResultFullTurnModel: (model) => {
                 if (inlineModelOverrideActive) return false;
                 return setModelOverride(model);

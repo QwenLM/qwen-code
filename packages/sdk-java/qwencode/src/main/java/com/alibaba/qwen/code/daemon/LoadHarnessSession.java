@@ -1,7 +1,9 @@
 package com.alibaba.qwen.code.daemon;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /** Input for attaching Java to an existing Hosted Harness session. */
 public final class LoadHarnessSession {
@@ -13,7 +15,10 @@ public final class LoadHarnessSession {
     private final boolean cancellationTakeover;
     private final boolean suppressChildAgents;
     private Map<String, Object> lifecycleAuthority;
+    private int lifecycleProtocolVersion = 1;
     private Map<String, Object> agentDefinition;
+    private List<Map<String, Object>> mcpServers;
+    private Map<String, Object> hookCatalog;
     private boolean stopMessages;
 
     /**
@@ -21,24 +26,56 @@ public final class LoadHarnessSession {
      * serves child Workspaces (see {@link CreateHarnessSession.Builder#childWorkspaces}).
      */
     private boolean childWorkspaces;
+    /** #13753 I3: with child Workspaces, the control plane serves snapshots too. */
+    private boolean childSnapshots;
 
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
         return this;
     }
 
+    public LoadHarnessSession withMcpServers(List<Map<String, Object>> value) {
+        this.mcpServers = value == null ? null : value.stream().map(Map::copyOf).collect(Collectors.toUnmodifiableList());
+        return this;
+    }
+
+    public LoadHarnessSession withHookCatalog(Map<String, Object> value) {
+        this.hookCatalog = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
     public LoadHarnessSession withChildWorkspaces(boolean value) {
+        return withChildWorkspaces(value, false);
+    }
+
+    /**
+     * #13753 I3: the copy also says whether the control plane serves
+     * read-only snapshot children, which only a host that serves child
+     * Workspaces can (see {@link CreateHarnessSession.Builder#childSnapshots}).
+     */
+    public LoadHarnessSession withChildWorkspaces(boolean value, boolean snapshots) {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.mcpServers = mcpServers;
+        copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
+        copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = value;
+        copy.childSnapshots = value && snapshots;
         copy.stopMessages = stopMessages;
         return copy;
     }
 
     public LoadHarnessSession forLifecycle(String operationId, long claimGeneration) {
+        return forLifecycle(operationId, claimGeneration, 1);
+    }
+
+    public LoadHarnessSession forLifecycle(String operationId, long claimGeneration, int protocolVersion) {
+        if (protocolVersion != 1 && protocolVersion != 2) {
+            throw new IllegalArgumentException("Invalid lifecycle protocol");
+        }
         if (operationId == null || !operationId.matches("[A-Za-z0-9._:-]{1,128}") || claimGeneration < 1) {
             throw new IllegalArgumentException("Invalid lifecycle authority");
         }
@@ -46,8 +83,12 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.mcpServers = mcpServers;
+        copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
+        copy.lifecycleProtocolVersion = protocolVersion;
         copy.childWorkspaces = childWorkspaces;
+        copy.childSnapshots = childSnapshots;
         copy.stopMessages = stopMessages;
         return copy;
     }
@@ -59,8 +100,12 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.mcpServers = mcpServers;
+        copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
+        copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = childWorkspaces;
+        copy.childSnapshots = childSnapshots;
         copy.stopMessages = true;
         return copy;
     }
@@ -151,6 +196,9 @@ public final class LoadHarnessSession {
         }
         if (lifecycleAuthority != null) {
             result.put("lifecycleAuthority", lifecycleAuthority);
+            if (lifecycleProtocolVersion == 2) {
+                result.put("lifecycleProtocolVersion", 2);
+            }
         }
         if (cancellationTakeover) {
             result.put("cancellationTakeover", true);
@@ -158,11 +206,20 @@ public final class LoadHarnessSession {
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
         }
+        if (mcpServers != null) {
+            result.put("mcpServers", mcpServers);
+        }
+        if (hookCatalog != null) {
+            result.put("hookCatalog", hookCatalog);
+        }
         if (stopMessages) {
             result.put("stopMessages", true);
         }
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
+        }
+        if (childSnapshots) {
+            result.put("childSnapshots", true);
         }
         return result;
     }

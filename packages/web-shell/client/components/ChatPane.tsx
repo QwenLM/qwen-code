@@ -390,9 +390,9 @@ export function ChatPane({
   ]);
   const { artifacts } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
-    (tool: ACPToolCall) => {
+    (tool: ACPToolCall, parentSessionId = connection.sessionId) => {
       if (
-        !connection.sessionId ||
+        !parentSessionId ||
         !onRightPanelOpen ||
         getSubagentDetailsUnavailableReason(tool)
       )
@@ -409,12 +409,12 @@ export function ChatPane({
           ? rawOutput['subagentName']
           : undefined);
       onRightPanelOpen({
-        id: `subagent:${connection.sessionId}:${tool.callId}`,
+        id: `subagent:${parentSessionId}:${tool.callId}`,
         kind: 'subagent',
         title: tool.title || subagentType || t('agent.label'),
         turnId: tool.callId,
         tool,
-        sessionId: connection.sessionId,
+        sessionId: parentSessionId,
         workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
       });
     },
@@ -1784,6 +1784,7 @@ export function ChatPane({
         {pendingToolApproval && (
           <div className={styles.approval} data-testid="pane-approval">
             <ToolApproval
+              showBrowserNotifications
               disabled={isExitPlanApproval && modeControlsBusy}
               planExecutionMode={connection.planExecutionMode}
               request={pendingToolApproval}

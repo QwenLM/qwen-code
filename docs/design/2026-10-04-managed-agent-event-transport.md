@@ -411,7 +411,11 @@ to the configured transport producer. Publication failure or delay never
 blocks the local post-commit SSE (#12380 constraint); the durable delivery
 line in SQL remains complete, and any missed notification is recovered by
 SQL-side scans, exactly as a missed in-process `SessionEventHub` publish is
-today (overflowed → re-read).
+today (overflowed → re-read). (As built, MQ2d: a missed public notice is
+covered by the scheduled materialization pass, but a missed wake has no
+generic scan — it recovers through the ledger of the source that committed
+its input, where one exists; see the MQ2 design's "Where a missed or burned
+wake recovers".)
 
 Consumer path (design reserve): on each Java node, wake consumers attempt
 Session activation through the Session Authority — the activation fence and
@@ -464,6 +468,22 @@ selected broker.
 | Clock skew between Java nodes                     | Fencing and leases use the database clock (the house lease pattern); envelope `committedAt` is advisory only.                                                                                                                                                                          |
 | Stale wake after a Session re-route or epoch bump | Activation fence rejects; no-op.                                                                                                                                                                                                                                                       |
 
+As built (MQ2d): the rows' "SQL-side scans" and "SQL scans" are, for a
+public notice, the scheduled materialization pass; for a wake, the ledger of
+the source that committed its input, where one exists — there is no generic
+wake scan. The MQ2 design's "Where a missed or burned wake recovers" names
+the ledgers and the gaps they already have.
+
+As run (MQ3): the rows run against two control-plane nodes, a MySQL
+database and a RocketMQ cluster in
+[2026-10-14-managed-agent-event-transport-mq3](2026-10-14-managed-agent-event-transport-mq3.md)
+(the public lane's duplicate and reorder stay with MQ2d's gate, and no epoch
+travels with a wake for the stale-wake row to bump). That design also records
+where the as-built rows differ from the required behavior above: a crash
+with a wake in flight holds the shared bootstrap lane for about two minutes; there is no producer retry buffer, so an envelope sent while the
+broker stays away is dropped; a node restarted during an outage needs the flag
+off to start; the Turn dispatch lease is on the JVM clock.
+
 ## 9. Constraints and risks
 
 - **Nothing here may appear on the synchronous frontend path.** SQL failure
@@ -476,10 +496,10 @@ selected broker.
   delivery/ordering items on 2026-10-12; the residual exposure is the
   MQ2-start staging re-check — if that fails, MQ2 falls back to Redis Streams
   under the same seam rather than relaxing the invariants.
-- **Wake-intent carrier.** The canonical design names `WakeIntent`; the repo
-  today carries the committed `wake.requested` record kind, and #12827's open
-  question 3 (Session inbox vs new record) stays unsettled until #13300 lands.
-  This design intentionally does not pick the carrier.
+- **Wake-intent carrier.** Resolved 2026-10-12 (§11): the carrier is the
+  committed `wake.requested` record, which #13300 landed; a distinct
+  WakeIntent record would store the same fact twice, so this supersedes
+  #12827 question 3.
 - **Scope hygiene.** Each phase records its slice and exclusions on the
   tracker, per #12380's claiming rule.
 
@@ -500,17 +520,36 @@ This slice's validation is documentation-only:
 
 ## 11. Open questions for the tracker issue
 
-1. Wake-intent carrier: keep the committed `wake.requested` record as the
-   wake envelope source, or a distinct WakeIntent record (supersedes #12827
-   question 3 once #13300 lands)?
-2. Which node consumes a Session's envelopes — a consumer-group-per-Session
-   routing scheme, or hash-partitioned wake workers? (Decision needed before
-   MQ2 consumer wiring.) Dispatch evidence from the 2026-10-12 verification
-   (§5.1): LiteTopic dispatch is shared within a group — one client per group
-   per LiteTopic — so fan-out to every node requires one consumer group per
-   node, while a single shared group wakes one node per dispatch (a lost ACK
-   or client inactivity can move the redelivery to another member) and leans
-   on the SQL-scan fallback otherwise.
+1. Wake-intent carrier — **resolved 2026-10-12**: the committed
+   `wake.requested` record stays the wake envelope source. It commits with
+   its Session input in one transaction on the authoritative journal stream,
+   it already sits in the envelope v1 vocabulary and fixtures, and a distinct
+   WakeIntent record would store the same fact twice, against the
+   single-commit-carrier discipline (§2). This supersedes #12827 question 3
+   now that #13300 has landed.
+2. Session-envelope consumption routing — **resolved 2026-10-12**: a shared
+   bootstrap lane plus owner-side dynamic subscription. Dispatch evidence
+   from the 2026-10-12 verification (§5.1): LiteTopic dispatch is shared
+   within a group — one dispatch attempt selects exactly one client per
+   group, and a redelivery after a lost ACK or client inactivity can move to
+   another member. Consumer-group-per-Session is the wrong axis (a group per
+   Session means millions of groups; LiteTopic already provides per-Session
+   addressing), and group-per-node fan-out is unnecessary because the
+   activation fence, not the broker, decides which node may act. So: a
+   pending-activation wake rides one shared bootstrap group (any worker takes
+   it and attempts activation through the fence, with SQL scans as the
+   backstop), and a node that wins activation subscribes to that Session's
+   LiteTopic (per-client, dynamic) and unsubscribes on release — the
+   Session's owner is then the sole subscriber and dispatch lands exactly on
+   it. That sole-subscriber property is the steady state, not the handoff:
+   when a lease expires without a clean unsubscribe, a stale subscription can
+   coexist briefly, the dispatcher may select it, and its fenced no-op ACK
+   still advances the group offset, so the new owner can miss that
+   notification — SQL reconciliation (the backstop above) covers the miss,
+   and the handoff case is on MQ2's verification list. (As built, MQ2d: the
+   handoff row runs against a real broker; the "SQL scans" backstop is each
+   input source's own ledger, not a generic scan — see the MQ2 design's
+   "Where a missed or burned wake recovers".)
 3. LiteTopic §5.1 items: the broker-docs verification ran 2026-10-12 and its
    results are pinned in §5.1's resolution block; what remains is the
    MQ2-start staging re-check against a real 5.5.0+ cluster.
@@ -521,22 +560,22 @@ This slice's validation is documentation-only:
 
 Read on `5ddfacc9d4` (2026-10-04). One line per resident responsibility.
 
-| Path                                                                                        | Resident responsibility                                                                                                          | Transport seam?                  |
-| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
-| `packages/sdk-java/managed-agent-server/.../store/CommittedEventPublisher.java`             | one-method after-commit fan-out interface `publish(List<EventRecord>)`                                                           | **YES — this is the seam**       |
-| `packages/sdk-java/managed-agent-server/.../store/ManagedAgentStore.java` (lines 2403–2411) | invokes `eventPublisher.publish(events)` from `TransactionSynchronization.afterCommit()`                                         | seam call site                   |
-| `packages/sdk-java/managed-agent-server/.../service/SessionEventHub.java`                   | sole implementation: in-process per-Session bounded buffers (cap 512), `overflowed` → re-read store; feeds Java SSE              | in-process only                  |
-| `packages/sdk-java/managed-agent-server/.../store/StoreModels.java` (`EventRecord`)         | committed event identity: `tenantId, sessionId, sequence, eventId, turnId, type, …, createdAt, schemaVersion, projectionVersion` | —                                |
-| `packages/sdk-java/managed-agent-server/.../store/ManagedExtensionRecordStore.java`         | Stage H record persistence; checks `domain.committed`; per-record delivery (outbox) line                                         | NO (persistence, no publication) |
-| `packages/sdk-java/managed-agent-server/.../db/migration/V18__managed_extension_record.sql` | `qwen_managed_session_extension_record` incl. `delivery_target`/`delivery_state` written in the committing transaction           | NO (SQL truth)                   |
-| `packages/sdk-java/managed-agent-server/.../db/migration/V14__managed_event_replay.sql`     | persisted replay floor backing SSE cursor recovery                                                                               | NO                               |
-| `packages/sdk-java/managed-agent-server/.../service/MessageMaterializer.java`               | async Item/Snapshot materialization (the "物化" consumer's current in-process form)                                              | NO                               |
-| `packages/core/src/managed-runtime/managed-session-inbox.ts`                                | durable Session inbox (`tenantId/sessionId/messageId`, states admitted/processing/finished)                                      | NO                               |
-| `packages/core/src/managed-runtime/managed-session-records.ts`                              | committed record index incl. `wake.requested` and `domain.committed` kinds                                                       | NO                               |
-| `packages/core/src/managed-runtime/managed-session-authority.ts`                            | commits Session input + wake intent in one transaction; reads the task projection                                                | NO                               |
-| `packages/core/src/managed-runtime/embedded-harness-scheduler.ts`                           | single-process activation pump over file leases; `scheduleRecoveryWake()` in-process timer                                       | NO (process-local by design)     |
-| `packages/core/src/managed-runtime/managed-activation-store.ts`                             | activation descriptors, leases, fences, epochs                                                                                   | NO                               |
-| `packages/core/src/managed-runtime/managed-extension-projection.ts`                         | `ManagedSessionTaskView` projection incl. outbox/delivery state                                                                  | NO                               |
+| Path                                                                               | Resident responsibility                                                                                                          | Transport seam?                  |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `packages/managed-agent-server/.../store/CommittedEventPublisher.java`             | one-method after-commit fan-out interface `publish(List<EventRecord>)`                                                           | **YES — this is the seam**       |
+| `packages/managed-agent-server/.../store/ManagedAgentStore.java` (lines 2403–2411) | invokes `eventPublisher.publish(events)` from `TransactionSynchronization.afterCommit()`                                         | seam call site                   |
+| `packages/managed-agent-server/.../service/SessionEventHub.java`                   | sole implementation: in-process per-Session bounded buffers (cap 512), `overflowed` → re-read store; feeds Java SSE              | in-process only                  |
+| `packages/managed-agent-server/.../store/StoreModels.java` (`EventRecord`)         | committed event identity: `tenantId, sessionId, sequence, eventId, turnId, type, …, createdAt, schemaVersion, projectionVersion` | —                                |
+| `packages/managed-agent-server/.../store/ManagedExtensionRecordStore.java`         | Stage H record persistence; checks `domain.committed`; per-record delivery (outbox) line                                         | NO (persistence, no publication) |
+| `packages/managed-agent-server/.../db/migration/V18__managed_extension_record.sql` | `qwen_managed_session_extension_record` incl. `delivery_target`/`delivery_state` written in the committing transaction           | NO (SQL truth)                   |
+| `packages/managed-agent-server/.../db/migration/V14__managed_event_replay.sql`     | persisted replay floor backing SSE cursor recovery                                                                               | NO                               |
+| `packages/managed-agent-server/.../service/MessageMaterializer.java`               | async Item/Snapshot materialization (the "物化" consumer's current in-process form)                                              | NO                               |
+| `packages/core/src/managed-runtime/managed-session-inbox.ts`                       | durable Session inbox (`tenantId/sessionId/messageId`, states admitted/processing/finished)                                      | NO                               |
+| `packages/core/src/managed-runtime/managed-session-records.ts`                     | committed record index incl. `wake.requested` and `domain.committed` kinds                                                       | NO                               |
+| `packages/core/src/managed-runtime/managed-session-authority.ts`                   | commits Session input + wake intent in one transaction; reads the task projection                                                | NO                               |
+| `packages/core/src/managed-runtime/embedded-harness-scheduler.ts`                  | single-process activation pump over file leases; `scheduleRecoveryWake()` in-process timer                                       | NO (process-local by design)     |
+| `packages/core/src/managed-runtime/managed-activation-store.ts`                    | activation descriptors, leases, fences, epochs                                                                                   | NO                               |
+| `packages/core/src/managed-runtime/managed-extension-projection.ts`                | `ManagedSessionTaskView` projection incl. outbox/delivery state                                                                  | NO                               |
 
 **Verdict: PARTIAL (read at the baseline `5ddfacc9d4`, 2026-10-04).** A Java
 after-commit seam exists (`CommittedEventPublisher`, at the baseline exactly

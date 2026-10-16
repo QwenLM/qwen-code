@@ -143,7 +143,7 @@ function semanticInput(value: object): Record<string, unknown> {
   return JSON.parse(JSON.stringify(fields)) as Record<string, unknown>;
 }
 
-function semanticInputDigest(value: object): string {
+export function semanticInputDigest(value: object): string {
   return createHash('sha256')
     .update(
       JSON.stringify(semanticInput(value), (_key, item: unknown) =>
@@ -189,13 +189,17 @@ function executionUnavailable(response: ManagedHookOperationView): boolean {
  * every other 409 stays a plain refusal, because the class defaults are
  * catch-alls an identity mismatch or any unexpected provider error shares —
  * absorbing those as fences wedged close() into a recovery-required error
- * for a Session holding no Hook work at all.
+ * for a Session holding no Hook work at all. `runtime_session_held` joins the
+ * fence (#13856): a live background run holding the owner's Runtime is the
+ * same "keep it attached, retry once it exits" shape as the module-evaluation
+ * hold.
  */
 function holdFencedRelease(cause: unknown): boolean {
   return (
     cause instanceof HostedWorkspaceBrokerRejection &&
     cause.status === 409 &&
-    cause.code === 'managed_runtime_owner_hold_pending'
+    (cause.code === 'managed_runtime_owner_hold_pending' ||
+      cause.code === 'runtime_session_held')
   );
 }
 
@@ -293,14 +297,20 @@ export class HostedHookSession {
     private readonly session: ManagedSession,
     private readonly initialPin: ManagedHookCatalogPin,
     broker?: HostedWorkspaceBroker,
+    private readonly lifecycleV2: () => boolean = () => false,
   ) {
     this.ownsBroker = broker === undefined;
+    const previous = lifecycleV2()
+      ? session.authority.extensionRecordsInDomain('hook_execution').at(-1)
+      : undefined;
     this.broker =
       broker ??
       new HostedWorkspaceBroker(
         options,
         this.key,
-        `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
+        previous
+          ? parseHookExecution(previous.record).runtimeSessionId
+          : `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
       );
   }
 
@@ -346,9 +356,37 @@ export class HostedHookSession {
     // released once.
     this.acquiring ??= (async () => {
       try {
-        await this.releaseEarlierOwners();
-        await this.broker.warm();
-        await this.broker.acquire();
+        if (!this.lifecycleV2()) await this.releaseEarlierOwners(false);
+        if (this.lifecycleV2()) {
+          const pins = this.session.authority
+            .extensionRecordsInDomain('hook_execution')
+            .filter(
+              (entry) =>
+                parseHookExecution(entry.record).runtimeSessionId ===
+                this.broker.runtimeSessionId,
+            )
+            .flatMap((entry) => (entry.run.runtime ? [entry.run.runtime] : []));
+          const runtime = this.broker.runtime;
+          const expected =
+            pins[0] ??
+            (runtime && {
+              runtimeBindingId: runtime.bindingId,
+              generation: runtime.generation,
+            });
+          if (
+            !expected ||
+            pins.some(
+              (pin) =>
+                pin.runtimeBindingId !== expected.runtimeBindingId ||
+                pin.generation !== expected.generation,
+            )
+          )
+            throw new HostedHookRecoveryRequiredError();
+          await this.broker.acquire(expected);
+        } else {
+          await this.broker.warm();
+          await this.broker.acquire();
+        }
         if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
         this.acquired = true;
       } finally {
@@ -358,7 +396,12 @@ export class HostedHookSession {
     await this.acquiring;
   }
 
-  private async releaseEarlierOwners(): Promise<void> {
+  /**
+   * `drain` belongs to the close alone: an acquire hands an earlier owner
+   * back while the Session lives, so it must never stop a background run
+   * that still provably holds that owner's Runtime (#13856).
+   */
+  private async releaseEarlierOwners(drain: boolean): Promise<void> {
     if (!this.ownsBroker) return;
     const owners = new Map<string, boolean>();
     const { authority } = this.session;
@@ -395,7 +438,7 @@ export class HostedHookSession {
     }
     for (const [id, settled] of owners) {
       if (!settled) continue;
-      await this.releaseOwner(id);
+      await this.releaseOwner(id, drain);
     }
   }
 
@@ -404,14 +447,15 @@ export class HostedHookSession {
    * failures. A hold-fenced owner is kept in `fencedOwners` so a later turn
    * retries it: booking it released here would strand the Runtime owner for
    * the worker's lifetime, which is what blocks tools in the whole Workspace.
+   * `drain` belongs to the close alone, as in `releaseEarlierOwners`.
    */
-  private async releaseOwner(id: string): Promise<void> {
+  private async releaseOwner(id: string, drain: boolean): Promise<void> {
     if (this.releasedOwners.has(id)) return;
     const broker =
       this.recoveredBrokers.get(id) ??
       new HostedWorkspaceBroker(this.options, this.key, id);
     try {
-      await broker.release();
+      await broker.release(drain ? { drain: true } : undefined);
     } catch (cause) {
       const absent =
         cause instanceof HostedWorkspaceBrokerRejection &&
@@ -459,7 +503,7 @@ export class HostedHookSession {
       try {
         for (const id of [...this.fencedOwners]) {
           try {
-            await this.releaseOwner(id);
+            await this.releaseOwner(id, false);
           } catch (cause) {
             writeStderrLineSafe(
               `qwen serve: earlier Hook owner release retry failed, left attached: ${id} ${String(cause)}`,
@@ -479,14 +523,16 @@ export class HostedHookSession {
    * acquisition-free state when a foreground child would need the mount.
    */
   get mountHeld(): boolean {
-    return this.acquired;
+    return this.acquired || this.broker.acquired;
   }
 
   /**
-   * Whether this Session's Hook catalog holds an eligible command Hook on a
-   * tool-result event. Such a Hook acquires the Session-owned mount when its
-   * results complete — possibly after child-agent admission — so a child
-   * must not be admitted while one exists.
+   * Whether this Session's Hook catalog holds an eligible non-prompt Hook
+   * on a tool-result event. Any such Hook acquires the Session-owned mount
+   * when its results complete — possibly after child-agent admission — so a
+   * child must not be admitted while one exists. Command, http and function
+   * Hooks all dispatch through the broker (`executionBroker`), so all three
+   * hold the mount; only prompt Hooks run in-process and never take it.
    *
    * Scans the catalog without the `matcher` predicate dispatch applies, and
    * that breadth is the intent. A foreground child cannot share a batch with
@@ -514,7 +560,7 @@ export class HostedHookSession {
     return (
       this.catalog?.hooks.some(
         (hook) =>
-          hook.config.type === HookType.Command &&
+          hook.config.type !== HookType.Prompt &&
           this.isHookEligible(hook, usedOnce, null) &&
           (hook.eventName === HookEventName.PostToolUse ||
             hook.eventName === HookEventName.PostToolUseFailure ||
@@ -1750,13 +1796,18 @@ export class HostedHookSession {
 
   async close(): Promise<void> {
     await this.drain();
-    await this.releaseEarlierOwners();
+    // The close is the drain arm. A Hook-configured Shell turn shares this
+    // broker and its `finish()` skips the release, so a background run that
+    // outlives the turn holds this Runtime, and a routine release here
+    // would refuse `runtime_session_held` and fail the Session's close
+    // before its own drain ever runs (#13856).
+    await this.releaseEarlierOwners(true);
     // A recovered earlier owner goes through the same absorbing release as
     // any other: its hold fence is recorded, not thrown, so one refused
     // release neither escapes close() as a raw Broker refusal nor strands
     // every owner behind it in the map.
     for (const id of [...this.recoveredBrokers.keys()])
-      await this.releaseOwner(id);
+      await this.releaseOwner(id, true);
     this.recoveredBrokers.clear();
     // The clear above empties the state a DELETE retry would release from,
     // so the recorded fences are retried before they are named: without this
@@ -1772,9 +1823,9 @@ export class HostedHookSession {
     // before releasing the Session's own owner: the Session stays attached
     // with it, so a later turn can still run and retry the fenced release.
     if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
-    if (this.ownsBroker && this.broker.runtime) {
+    if (this.ownsBroker && this.mountHeld) {
       try {
-        await this.broker.release();
+        await this.broker.release({ drain: true });
       } catch (cause) {
         // A Runtime that settled an abandoned module evaluation as cancelled
         // lets drain() pass while the evaluation still runs, so this release
