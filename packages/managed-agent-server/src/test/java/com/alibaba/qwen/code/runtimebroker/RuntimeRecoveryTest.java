@@ -27,6 +27,14 @@ class RuntimeRecoveryTest {
     }
 
     @Test
+    void memoryRepositoryHonorsUnprovenCaptureContract() {
+        RuntimeRecoveryContract.verifyUnprovenCapture(
+                new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "memory-capture");
+    }
+
+    @Test
     void persistedLossEndsExecutionBeforeAnUnavailableObserverResponds() {
         var bindings = new InMemoryRuntimeBindingRepository();
         var sessions = new InMemoryRuntimeSessionRepository();
