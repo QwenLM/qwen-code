@@ -136,9 +136,9 @@ describe('requestQQApi', () => {
     await requestQQApi(
       'https://api.example.com',
       'POST',
-      '/v2/groups/g123/batch_remove_members',
+      '/v2/groups/g123/actions',
       'tok',
-      { member_openids: ['m1'] },
+      { items: ['a'] },
     );
 
     const [, init] = mockFetch.mock.calls[0];
@@ -146,7 +146,7 @@ describe('requestQQApi', () => {
     expect((init?.headers as Record<string, string>)?.['Content-Type']).toBe(
       'application/json',
     );
-    expect(init?.body).toBe(JSON.stringify({ member_openids: ['m1'] }));
+    expect(init?.body).toBe(JSON.stringify({ items: ['a'] }));
   });
 
   it('returns the fetch Response directly', async () => {
@@ -156,7 +156,7 @@ describe('requestQQApi', () => {
     const resp = await requestQQApi(
       'https://api.example.com',
       'GET',
-      '/v2/groups/g123/bot_state',
+      '/v2/groups/g123/status',
       'tok',
     );
 

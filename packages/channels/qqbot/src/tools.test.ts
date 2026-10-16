@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   buildModerationTools,
   type ModerationApiResult,
@@ -70,6 +70,15 @@ describe('buildModerationTools', () => {
       expect(tool.description.length).toBeGreaterThan(0);
     }
   });
+
+  it('declares the argument properties the model calls the tool with', () => {
+    const tool = harness().tools[0];
+    const properties = (
+      tool!.inputSchema as { properties?: Record<string, unknown> }
+    ).properties;
+    expect(properties).toHaveProperty('message_id');
+    expect(properties).toHaveProperty('member_openid');
+  });
 });
 
 describe('qq_recall_message', () => {
@@ -88,7 +97,10 @@ describe('qq_recall_message', () => {
       recentMemberMessage: () => 'M-MEMBER',
     });
     await call('qq_recall_message', { member_openid: 'A'.repeat(32) });
-    expect(calls[0]?.path).toBe('/v2/groups/G123/messages/M-MEMBER');
+    expect(calls[0]).toEqual({
+      method: 'DELETE',
+      path: '/v2/groups/G123/messages/M-MEMBER',
+    });
   });
 
   it('uses the explicit message id first', async () => {
@@ -96,7 +108,10 @@ describe('qq_recall_message', () => {
       recentMemberMessage: () => 'M-MEMBER',
     });
     await call('qq_recall_message', { message_id: 'M-EXPLICIT' });
-    expect(calls[0]?.path).toBe('/v2/groups/G123/messages/M-EXPLICIT');
+    expect(calls[0]).toEqual({
+      method: 'DELETE',
+      path: '/v2/groups/G123/messages/M-EXPLICIT',
+    });
   });
 
   it('uses the C2C path outside groups with an explicit id', async () => {
@@ -104,7 +119,10 @@ describe('qq_recall_message', () => {
       resolveChat: () => ({ chatId: 'U9', isGroup: false }),
     });
     await call('qq_recall_message', { message_id: 'M-DM' });
-    expect(calls[0]?.path).toBe('/v2/users/U9/messages/M-DM');
+    expect(calls[0]).toEqual({
+      method: 'DELETE',
+      path: '/v2/users/U9/messages/M-DM',
+    });
   });
 
   it('refuses an implicit target in a direct chat', async () => {
@@ -132,6 +150,21 @@ describe('qq_recall_message', () => {
     const result = await call('qq_recall_message');
     expect(isError(result)).toBe(true);
     expect(textOf(result)).toContain('pass message_id explicitly');
+  });
+
+  it('resolves the chat bound to the calling session', async () => {
+    const resolveChat = vi.fn(() => ({ chatId: 'G123', isGroup: true }));
+    const { call } = harness({ resolveChat });
+    await call('qq_recall_message');
+    expect(resolveChat).toHaveBeenCalledWith('S1');
+  });
+
+  it('rejects a non-string message id as a tool error', async () => {
+    const { call, calls } = harness();
+    const result = await call('qq_recall_message', { message_id: 123 });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('message_id must be a string');
+    expect(calls).toHaveLength(0);
   });
 });
 
@@ -193,6 +226,35 @@ describe('platform failure mapping', () => {
     const result = textOf(await call('qq_recall_message'));
     expect(result).toContain('HTTP 500');
     expect(result).toContain('boom');
+  });
+
+  it('maps 50065001 to the retry explanation', async () => {
+    const { call } = harness(
+      {},
+      {
+        ok: false,
+        status: 500,
+        code: 50065001,
+        message: '撤回失败',
+      },
+    );
+    const result = textOf(await call('qq_recall_message'));
+    expect(result).toContain('50065001');
+    expect(result).toContain('safe to retry');
+  });
+
+  it('reports a call that never reached the platform without a status', async () => {
+    const { call } = harness(
+      {},
+      {
+        ok: false,
+        status: 0,
+        message: 'connection reset',
+      },
+    );
+    const result = textOf(await call('qq_recall_message'));
+    expect(result).toContain('did not complete');
+    expect(result).toContain('connection reset');
   });
 });
 

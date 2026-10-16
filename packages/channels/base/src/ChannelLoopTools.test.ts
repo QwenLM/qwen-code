@@ -309,7 +309,7 @@ describe('ChannelLoopMcpServer adapter tools', () => {
     const server = new ChannelLoopMcpServer(handler, {
       extraTools: () => [
         tool('qq_recall_message', vi.fn()),
-        tool('qq_kick_member', vi.fn()),
+        tool('adapter_tool', vi.fn()),
       ],
     });
 
@@ -327,7 +327,7 @@ describe('ChannelLoopMcpServer adapter tools', () => {
             description: 'qq_recall_message description',
             inputSchema: { type: 'object', properties: {} },
           }),
-          expect.objectContaining({ name: 'qq_kick_member' }),
+          expect.objectContaining({ name: 'adapter_tool' }),
         ]),
       },
     });
@@ -365,7 +365,7 @@ describe('ChannelLoopMcpServer adapter tools', () => {
     const server = new ChannelLoopMcpServer(handler, {
       extraTools: () => [
         tool(
-          'qq_kick_member',
+          'adapter_tool',
           vi.fn().mockResolvedValue({ text: 'allowlist-only', isError: true }),
         ),
       ],
@@ -376,7 +376,7 @@ describe('ChannelLoopMcpServer adapter tools', () => {
         jsonrpc: '2.0',
         id: 3,
         method: 'tools/call',
-        params: { name: 'qq_kick_member', arguments: {} },
+        params: { name: 'adapter_tool', arguments: {} },
       },
       { sessionId: 's-1' },
     );

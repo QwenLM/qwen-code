@@ -313,8 +313,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   /**
    * Channel-tool identity for one `client_mcp/message` frame. The frame's
    * `sessionId` is a carrier, not a credential: it resolves only when this
-   * bridge itself bound the channel_loop server to that session, so a forged
-   * or stale id resolves to nothing and no channel tool can run.
+   * bridge itself bound the channel_loop server to that session, so an id the
+   * bridge never bound resolves to nothing and no channel tool can run.
+   *
+   * This is a membership check, not a transport check: every id in the bound
+   * ledger resolves, so a bound session that named another bound session would
+   * be treated as that one. The child injects the id into its own reverse
+   * frames and the model cannot set it, which is what makes the ledger — not
+   * the frame — the authority on which chat a call may touch.
    */
   private boundSessionId(params: Record<string, unknown>): string | undefined {
     const sessionId = params['sessionId'];
