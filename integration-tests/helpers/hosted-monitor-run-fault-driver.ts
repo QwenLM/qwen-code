@@ -654,8 +654,8 @@ function projection(rows: Array<Record<string, unknown>>, surface: string) {
       type: row['event_type'],
       created_at:
         surface === 'public'
-          ? Math.floor(Number(row['created_at']) / 1000)
-          : row['created_at'],
+          ? Math.floor(Number(row['gmt_create']) / 1000)
+          : row['gmt_create'],
       data: JSON.parse(String(row['data_json'])),
       terminal: Boolean(row['terminal']),
     };

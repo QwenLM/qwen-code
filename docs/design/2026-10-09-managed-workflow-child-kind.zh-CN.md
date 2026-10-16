@@ -93,7 +93,7 @@ Schema version 1。链以 `childRunId` 为键,与 `child_agent` 相同。[`child
 - `packages/core/src/managed-runtime/managed-child-operations.ts`:`maxLaunchesPerScope`、`launchedInScope` 与 `budget_exhausted` 拒绝。
 - `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json`:`workflow` 模板、15 个用例与 9 个后继对,child agent 的对照用例 `agent-start-without-definition`,以及改指向 `kind: "unregistered"` 的未知 kind 见证。`managed-extension-projection-v1.fixtures.json`:`child_run.workflow → workflow`。
 - `packages/cli/src/serve/hosted-child-agent-session.ts`(`launchedChildRunsOf`;`activeChildRunsOf` 计入两种 kind)、`hosted-workspace-tool-turn.ts`(传入 launch 计数)与 `hosted-harness-session.ts`(restore 跳过所有 child Session kind)。
-- `packages/sdk-java/managed-agent-server`:`ManagedExtensionRecords`(分发、`requireChildSession`、pin 规则、任务 kind)、`ManagedExtensionRecordStore`(三条跨记录规则按 child Session 适用)、`ChildResultRelayStore`(relay 发现页与级联限定到 `child_agent`)。
+- `packages/managed-agent-server`:`ManagedExtensionRecords`(分发、`requireChildSession`、pin 规则、任务 kind)、`ManagedExtensionRecordStore`(三条跨记录规则按 child Session 适用)、`ChildResultRelayStore`(relay 发现页与级联限定到 `child_agent`)。
 - 两种语言中各文件旁的测试;本设计的两种语言版本,以及 H4 问题框架、H4a 与 H4b 设计中的范围说明。
 
 ## 验证
