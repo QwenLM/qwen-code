@@ -91,6 +91,7 @@ const broker = vi.hoisted(() => ({
   acknowledgeV3: vi.fn(),
   cancel: vi.fn(),
   release: vi.fn(),
+  releaseMount: vi.fn(),
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
   backgroundProcessStatus: vi.fn(),
@@ -108,11 +109,18 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
     readonly capabilityDigest = broker.capabilityDigest;
+    // Like the real client: the claim is recorded before the acquire
+    // request leaves, so a lost reply still names it.
+    private claim?: string;
+    mountClaim = () => this.claim;
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
     warm = broker.warm;
-    acquire = broker.acquire;
+    acquire = (...args: unknown[]) => {
+      this.claim = `claim-${broker.acquire.mock.calls.length + 1}`;
+      return broker.acquire(...args);
+    };
     prepare = broker.prepare;
     prepareV3 = broker.prepareV3;
     execute = broker.execute;
@@ -120,6 +128,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     acknowledgeV3 = broker.acknowledgeV3;
     cancel = broker.cancel;
     release = broker.release;
+    releaseMount = broker.releaseMount;
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
     backgroundProcessStatus = broker.backgroundProcessStatus;
@@ -222,6 +231,7 @@ beforeEach(async () => {
     broker.acquire,
     broker.cancel,
     broker.release,
+    broker.releaseMount,
   ])
     method.mockResolvedValue(undefined);
   root = await mkdtemp(path.join(tmpdir(), 'hosted-tool-turn-'));
@@ -2037,6 +2047,225 @@ it('keeps release failures recovery blocked', async () => {
   await expect(turn.finish()).rejects.toBeInstanceOf(
     HostedToolRecoveryRequiredError,
   );
+});
+
+it('hands back only the Workspace mount on the recovery-block path', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  expect(broker.acquire).toHaveBeenCalledOnce();
+  await turn.releaseForRecoveryBlock();
+  // #13800: the mount lease goes back so later Sessions on the same
+  // storage are never wedged by this turn's block; the Runtime Session
+  // itself never sees the RELEASED-forever full release, and the handback
+  // names the claim of the acquire that owes it.
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  expect(broker.releaseMount).toHaveBeenCalledWith('claim-1');
+  expect(broker.release).not.toHaveBeenCalled();
+  // A repeated block-side handback is a no-op.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+});
+
+it('keeps the block verdict deliverable when the mount handback fails, and keeps the handback owed until it lands', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  vi.useFakeTimers();
+  try {
+    // The failure is logged, never thrown: the recovery-block verdict must
+    // still reach the Session.
+    await expect(turn.releaseForRecoveryBlock()).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    // Owed until it lands: the cadence keeps asking on a widening backoff
+    // and then a steady one-minute tail instead of dropping the debt after
+    // two gaps — the freeze stays honest while the turn's work is unproven.
+    for (const [gap, calls] of [
+      [1000, 2],
+      [3000, 3],
+      [5000, 4],
+      [10000, 5],
+      [30000, 6],
+      [60000, 7],
+      [60000, 8],
+    ] as const) {
+      await vi.advanceTimersByTimeAsync(gap);
+      expect(broker.releaseMount).toHaveBeenCalledTimes(calls);
+    }
+    // One line for the repeated refusal, not one per minute.
+    expect(log).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('hands the mount back once a busy refusal settles', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount
+    .mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+    )
+    .mockResolvedValue(undefined);
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  [503, 'runtime_reconciliation_required'],
+  [409, 'runtime_session_conflict'],
+  [409, 'runtime_admission_closed'],
+  [409, 'workspace_writer_unproven'],
+])(
+  'makes one attempt for a final %s %s refusal without retrying',
+  async (status, code) => {
+    await turn.execute(calls, parts, 'model', new AbortController().signal);
+    // A Session the Broker no longer holds, a claim a re-drive superseded,
+    // a lifecycle drain that frees the mount itself, or a writer that never
+    // proved it stopped: waiting settles none of them.
+    broker.releaseMount.mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(status, code),
+    );
+    await turn.releaseForRecoveryBlock();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    await turn.blockMountRetry;
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([
+  ['a lost reply', () => new TypeError('fetch failed')],
+  [
+    "the Broker's internal error",
+    () =>
+      new HostedWorkspaceBrokerRejection(500, 'runtime_broker_internal_error'),
+  ],
+])('re-sends the handback after %s', async (_label, failure) => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount
+    .mockRejectedValueOnce(failure())
+    .mockResolvedValue(undefined);
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  // Neither decided anything, and the holder-conditioned clear is
+  // idempotent, so the chain re-sends on the cadence until it lands.
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+});
+
+it('delivers the block verdict without waiting out a hung handback', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  let rejectFirst!: (cause: unknown) => void;
+  broker.releaseMount
+    .mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectFirst = reject;
+        }),
+    )
+    .mockResolvedValue(undefined);
+  vi.useFakeTimers();
+  try {
+    const verdict = turn.releaseForRecoveryBlock();
+    await vi.advanceTimersByTimeAsync(2000);
+    // The verdict proceeded on its own short bound, not on the Broker's
+    // 30s fetch timeout; the attempt itself is still alive in the chain.
+    await expect(verdict).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    rejectFirst(new TypeError('fetch failed'));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+    await turn.blockMountRetry;
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('hands nothing back when the turn never sent an acquire', async () => {
+  // Only an acquire's claim can name a mount: a turn blocked before its
+  // first acquire holds nothing.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).not.toHaveBeenCalled();
+  expect(turn.blockMountRetry).toBeUndefined();
+});
+
+it('stops the owed handback when the daemon shuts down', async () => {
+  const mountHandbacks = new Set<() => void>();
+  const owned = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test', mountHandbacks },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+  );
+  await owned.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+  await owned.releaseForRecoveryBlock();
+  expect(mountHandbacks.size).toBe(1);
+  for (const stop of mountHandbacks) stop();
+  await owned.blockMountRetry;
+  expect(mountHandbacks.size).toBe(0);
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+});
+
+it('hands the mount back even when the acquire answer was lost after the grant', async () => {
+  broker.acquire.mockRejectedValue(new TypeError('fetch failed'));
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  // The reply loss means no acquired flag — but the Broker may have
+  // committed the claim, so the handback still runs under the claim the
+  // request carried; the holder-conditioned clear is a no-op when nothing
+  // was granted.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  expect(broker.releaseMount).toHaveBeenCalledWith('claim-1');
+});
+
+it("hands the Hook and MCP lanes' Session-scoped mounts back through their own discipline", async () => {
+  const mcpAttempt = vi.fn(async () => undefined);
+  const mcpHandback = vi.fn(() => mcpAttempt);
+  const mcpTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    {
+      mcp: {
+        broker: { ...broker, runtimeSessionId: 'mcp:session' },
+        ensureReady: async () => undefined,
+        refresh: async () => undefined,
+        tools: () => [],
+        toolInput: () => undefined,
+        mountHandback: mcpHandback,
+      } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
+  );
+  await mcpTurn.releaseForRecoveryBlock();
+  expect(mcpHandback).toHaveBeenCalledOnce();
+  expect(mcpAttempt).toHaveBeenCalledOnce();
+  const hookAttempt = vi.fn(async () => undefined);
+  const hooksTurn = createTurn(false, undefined, {
+    acquire: vi.fn(async () => undefined),
+    mountHandback: () => hookAttempt,
+  } as unknown as HostedHookSession);
+  await hooksTurn.releaseForRecoveryBlock();
+  expect(hookAttempt).toHaveBeenCalledOnce();
+  // The lanes' Session-scoped mounts never go back through the turn's
+  // own per-turn broker.
+  expect(broker.releaseMount).not.toHaveBeenCalled();
 });
 
 it('keeps an empty Runtime error visible to the model instead of reporting success', async () => {

@@ -175,9 +175,12 @@ export function validateReasoningCapabilities(
   } catch {
     host = '';
   }
+  // The QwenCloud MaaS suffixes stay inside the anchored (^|\.)…$ group so a
+  // forged `maas.qianwenaiapi.com.evil.com` cannot match, and so their
+  // `token-plan.` subscription subdomains still do.
   const dashscope =
     auth === 'qwen-oauth' ||
-    /(^|\.)(dashscope(?:-intl|-us)?\.aliyuncs\.com|alibaba-inc\.com|aliyun-inc\.com|alicloudapi\.com)$/.test(
+    /(^|\.)(dashscope(?:-intl|-us)?\.aliyuncs\.com|alibaba-inc\.com|aliyun-inc\.com|alicloudapi\.com|maas\.qianwenaiapi\.com|maas\.qwencloudapi\.com)$/.test(
       host,
     ) ||
     /^token-plan\..+\.maas\.aliyuncs\.com$/.test(host);
