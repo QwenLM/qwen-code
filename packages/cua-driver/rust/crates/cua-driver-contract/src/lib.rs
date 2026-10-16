@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 pub mod compatibility;
+pub mod computer_use;
 pub mod cursor;
 mod cursor_tools;
 mod desktop;

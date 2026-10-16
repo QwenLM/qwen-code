@@ -54,6 +54,7 @@ pub mod capture_mode;
 pub mod capture_scope;
 pub mod cdp;
 pub mod clipboard;
+mod computer_use;
 pub mod consent;
 pub mod coord_norm;
 pub mod cursor_events;

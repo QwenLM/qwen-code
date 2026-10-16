@@ -548,7 +548,7 @@ pub fn load_driver_config() -> DriverConfig {
 }
 
 pub struct ResizeRegistry {
-    ratios: std::sync::Mutex<std::collections::HashMap<u32, f64>>,
+    ratios: std::sync::Mutex<std::collections::HashMap<(u32, u64), f64>>,
 }
 
 impl ResizeRegistry {
@@ -557,14 +557,14 @@ impl ResizeRegistry {
             ratios: std::sync::Mutex::new(Default::default()),
         }
     }
-    pub fn set_ratio(&self, pid: u32, ratio: f64) {
-        self.ratios.lock().unwrap().insert(pid, ratio);
+    pub fn set_ratio(&self, pid: u32, window: u64, ratio: f64) {
+        self.ratios.lock().unwrap().insert((pid, window), ratio);
     }
-    pub fn clear_ratio(&self, pid: u32) {
-        self.ratios.lock().unwrap().remove(&pid);
+    pub fn clear_ratio(&self, pid: u32, window: u64) {
+        self.ratios.lock().unwrap().remove(&(pid, window));
     }
-    pub fn ratio(&self, pid: u32) -> Option<f64> {
-        self.ratios.lock().unwrap().get(&pid).copied()
+    pub fn ratio(&self, pid: u32, window: u64) -> Option<f64> {
+        self.ratios.lock().unwrap().get(&(pid, window)).copied()
     }
 }
 
@@ -1186,6 +1186,7 @@ impl Tool for GetWindowStateTool {
                 "window_id":{"type":"integer","description":"HWND of the target window. Must belong to `pid`. Enumerate via `list_windows` or read from `launch_app`'s `windows` array."},
                 "app_context":{"type":"boolean","description":"Use the compact app observation projection."},
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                "include_accessibility":{"type":"boolean","default":true,"description":"Set false for a screenshot without a UIA walk."},
                 "include_screenshot":{"type":"boolean","description":"Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action)."},
                 "screenshot_out_file":{"type":"string","description":"When set, write the PNG to this file path instead of embedding base64 in the response. The structured output will contain `screenshot_file_path` instead."},
                 "query":{"type":"string","description":"Optional case-insensitive substring. Projects both tree_markdown and structured elements to matches plus ancestors while preserving original indices. Compare total_element_count with returned_element_count."},
@@ -1406,8 +1407,12 @@ impl Tool for GetWindowStateTool {
 
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let collect_runtime_ids = revision_request_for_capture.is_some();
+        let include_accessibility = args["include_accessibility"] != false;
         let mut tree_task = tokio::task::spawn_blocking(move || {
-            crate::uia::walk_tree_bounded_with_progress(
+            if !include_accessibility {
+                return None;
+            }
+            Some(crate::uia::walk_tree_bounded_with_progress(
                 hwnd,
                 tree_query.as_deref(),
                 max_elements,
@@ -1416,7 +1421,7 @@ impl Tool for GetWindowStateTool {
                 &mut |node, line| {
                     let _ = progress_tx.send((node.depth, node, line));
                 },
-            )
+            ))
         });
         let tree_deadline = tokio::time::sleep(std::time::Duration::from_secs(4));
         tokio::pin!(tree_deadline);
@@ -1442,7 +1447,7 @@ impl Tool for GetWindowStateTool {
                         query.as_deref(),
                         "uia_provider_timeout",
                     );
-                    break (Ok(partial), true);
+                    break (Ok(Some(partial)), true);
                 }
             }
         };
@@ -1455,7 +1460,7 @@ impl Tool for GetWindowStateTool {
         let observation_revision = match (
             revision_request_for_capture.as_ref(),
             observation_session,
-            tree_result.as_ref().ok(),
+            tree_result.as_ref().ok().and_then(Option::as_ref),
         ) {
             (Some(request), Some(session), Some(tree)) => match observation_revisions.observe(
                 session,
@@ -1468,7 +1473,7 @@ impl Tool for GetWindowStateTool {
             ) {
                 Ok(revision) => Some(revision),
                 Err(error) => {
-                    if let Ok(tree) = tree_result.as_mut() {
+                    if let Ok(Some(tree)) = tree_result.as_mut() {
                         crate::uia::settle_node_bindings(&mut tree.nodes, tree.backend, false);
                     }
                     return ToolResult::error(error);
@@ -1478,7 +1483,7 @@ impl Tool for GetWindowStateTool {
         };
         let result = tree_result.map(|tree| {
             (
-                Some(tree),
+                tree,
                 screenshot_opt,
                 screenshot_err,
                 observation_revision,
@@ -1793,10 +1798,12 @@ impl Tool for GetWindowStateTool {
                     if !observation_only {
                         if let Some(ow) = orig_w {
                             if w > 0 {
-                                state.resize_registry.set_ratio(pid, ow as f64 / w as f64);
+                                state
+                                    .resize_registry
+                                    .set_ratio(pid, hwnd, ow as f64 / w as f64);
                             }
                         } else {
-                            state.resize_registry.clear_ratio(pid);
+                            state.resize_registry.clear_ratio(pid, hwnd);
                         }
                     }
                     // base64 is embedded only when no out_file was given (vision
@@ -3999,7 +4006,7 @@ impl Tool for ClickTool {
                         ))
                     }
                 }
-            } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+            } else if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
                 px *= ratio;
                 py *= ratio;
             }
@@ -5401,7 +5408,7 @@ impl Tool for PressKeyTool {
                 Err(result) => return result,
             };
             let (mut px, mut py) = screen_to_bitmap(hwnd, cx, cy);
-            if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+            if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
                 px = (px as f64 / ratio).round() as i32;
                 py = (py as f64 / ratio).round() as i32;
             }
@@ -7274,7 +7281,7 @@ impl Tool for DoubleClickTool {
                         ))
                     }
                 }
-            } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+            } else if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
                 px *= ratio;
                 py *= ratio;
             }
@@ -7625,7 +7632,7 @@ impl Tool for RightClickTool {
                         ))
                     }
                 }
-            } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+            } else if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
                 px *= ratio;
                 py *= ratio;
             }
@@ -7850,6 +7857,24 @@ impl Tool for DragTool {
             };
 
         let hwnd_opt = args.opt_u64("window_id");
+        let hwnd = match hwnd_opt {
+            Some(h) => h,
+            None => {
+                let windows =
+                    tokio::task::spawn_blocking(move || crate::win32::list_windows(Some(pid)))
+                        .await
+                        .unwrap_or_default();
+                match windows.first() {
+                    Some(w) => w.hwnd,
+                    None => {
+                        return ToolResult::error(format!(
+                            "No windows found for pid {pid}. Provide window_id."
+                        ))
+                    }
+                }
+            }
+        };
+
         let duration_ms = args.u64_or("duration_ms", 500);
         let steps = args.u64_or("steps", 20) as usize;
         let button = args.str_or("button", "left");
@@ -7871,30 +7896,12 @@ impl Tool for DragTool {
                     ))
                 }
             }
-        } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+        } else if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
             from_x *= ratio;
             from_y *= ratio;
             to_x *= ratio;
             to_y *= ratio;
         }
-
-        let hwnd = match hwnd_opt {
-            Some(h) => h,
-            None => {
-                let windows =
-                    tokio::task::spawn_blocking(move || crate::win32::list_windows(Some(pid)))
-                        .await
-                        .unwrap_or_default();
-                match windows.first() {
-                    Some(w) => w.hwnd,
-                    None => {
-                        return ToolResult::error(format!(
-                            "No windows found for pid {pid}. Provide window_id."
-                        ))
-                    }
-                }
-            }
-        };
 
         // Compute screen-coord endpoints. Same correction as the click
         // tools — bitmap pixels are anchored to the DWM-frame top-left,
@@ -9174,7 +9181,7 @@ impl Tool for ZoomTool {
         let ratio = self
             .state
             .resize_registry
-            .ratio(raw_pid as u32)
+            .ratio(raw_pid as u32, hwnd)
             .unwrap_or(1.0);
         let (nx1, ny1, nx2, ny2) = (x1 * ratio, y1 * ratio, x2 * ratio, y2 * ratio);
 

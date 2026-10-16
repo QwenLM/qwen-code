@@ -147,7 +147,7 @@ pub fn load_driver_config() -> DriverConfig {
 }
 
 pub struct ResizeRegistry {
-    ratios: std::sync::Mutex<std::collections::HashMap<u32, f64>>,
+    ratios: std::sync::Mutex<std::collections::HashMap<(u32, u64), f64>>,
 }
 
 impl ResizeRegistry {
@@ -156,14 +156,14 @@ impl ResizeRegistry {
             ratios: std::sync::Mutex::new(Default::default()),
         }
     }
-    pub fn set_ratio(&self, pid: u32, ratio: f64) {
-        self.ratios.lock().unwrap().insert(pid, ratio);
+    pub fn set_ratio(&self, pid: u32, window: u64, ratio: f64) {
+        self.ratios.lock().unwrap().insert((pid, window), ratio);
     }
-    pub fn clear_ratio(&self, pid: u32) {
-        self.ratios.lock().unwrap().remove(&pid);
+    pub fn clear_ratio(&self, pid: u32, window: u64) {
+        self.ratios.lock().unwrap().remove(&(pid, window));
     }
-    pub fn ratio(&self, pid: u32) -> Option<f64> {
-        self.ratios.lock().unwrap().get(&pid).copied()
+    pub fn ratio(&self, pid: u32, window: u64) -> Option<f64> {
+        self.ratios.lock().unwrap().get(&(pid, window)).copied()
     }
 }
 
@@ -765,6 +765,7 @@ impl Tool for GetWindowStateTool {
                 "window_id":{"type":"integer","description":"X11 XID from list_windows."},
                 "app_context":{"type":"boolean","description":"Use the compact app observation projection."},
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                "include_accessibility":{"type":"boolean","default":true,"description":"Set false for a screenshot without an AT-SPI walk."},
                 "include_screenshot":{"type":"boolean",
                     "description":"Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action)."},
                 "screenshot_out_file":{"type":"string",
@@ -916,22 +917,27 @@ impl Tool for GetWindowStateTool {
         let observation_revisions = state.observation_revisions.clone();
         let revision_request_for_capture = observation_revision_request.clone();
         let query_for_walk = query.clone();
+        let include_accessibility = args["include_accessibility"] != false;
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let capture = || -> anyhow::Result<_> {
-                let mut tree = crate::atspi::walk_tree_bounded(
-                    pid,
-                    xid,
-                    query_for_walk.as_deref(),
-                    max_elements,
-                    max_depth,
-                );
-                // Compact model observations only. Internal browser setup/consent
-                // matching needs the original label boundaries from the native tree.
-                if revision_request_for_capture.is_some() {
-                    tree.nodes = crate::atspi::projection::compact(tree.nodes);
-                }
-                let tree_result = Some(tree);
+                let tree_result = if include_accessibility {
+                    let mut tree = crate::atspi::walk_tree_bounded(
+                        pid,
+                        xid,
+                        query_for_walk.as_deref(),
+                        max_elements,
+                        max_depth,
+                    );
+                    // Compact model observations only. Internal browser setup/consent
+                    // matching needs the original label boundaries from the native tree.
+                    if revision_request_for_capture.is_some() {
+                        tree.nodes = crate::atspi::projection::compact(tree.nodes);
+                    }
+                    Some(tree)
+                } else {
+                    None
+                };
                 // Bounds and element indices come from the same captured AT-SPI
                 // traversal. Joining two live walks by ordinal mis-associated
                 // Chromium controls when its lazy subtree changed between walks.
@@ -1237,10 +1243,12 @@ impl Tool for GetWindowStateTool {
                     if !observation_only {
                         if let Some(ow) = orig_w {
                             if w > 0 {
-                                state.resize_registry.set_ratio(pid, ow as f64 / w as f64);
+                                state
+                                    .resize_registry
+                                    .set_ratio(pid, xid, ow as f64 / w as f64);
                             }
                         } else {
-                            state.resize_registry.clear_ratio(pid);
+                            state.resize_registry.clear_ratio(pid, xid);
                         }
                     }
                     // ax mode + screenshot_out_file writes the PNG to disk and
@@ -2910,7 +2918,7 @@ impl Tool for ClickTool {
                     ))
                 }
             }
-        } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+        } else if let Some(ratio) = self.state.resize_registry.ratio(pid, xid) {
             x *= ratio;
             y *= ratio;
         }
@@ -4825,7 +4833,7 @@ impl Tool for DoubleClickTool {
                     ))
                 }
             }
-        } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+        } else if let Some(ratio) = self.state.resize_registry.ratio(pid, xid) {
             x *= ratio;
             y *= ratio;
         }
@@ -5057,7 +5065,7 @@ impl Tool for RightClickTool {
                     ))
                 }
             }
-        } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+        } else if let Some(ratio) = self.state.resize_registry.ratio(pid, xid) {
             x *= ratio;
             y *= ratio;
         }
@@ -5265,7 +5273,7 @@ impl Tool for DragTool {
                     ))
                 }
             }
-        } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+        } else if let Some(ratio) = self.state.resize_registry.ratio(pid, xid) {
             from_x *= ratio;
             from_y *= ratio;
             to_x *= ratio;
@@ -5534,7 +5542,7 @@ impl Tool for MouseButtonDownTool {
                     ))
                 }
             }
-        } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+        } else if let Some(ratio) = self.state.resize_registry.ratio(pid, xid) {
             x *= ratio;
             y *= ratio;
         }
@@ -5671,7 +5679,7 @@ impl Tool for MouseDragTool {
                     .with_structured(mouse_hold_json(&cursor_id, Some(&hold)))
                 }
             }
-        } else if let Some(ratio) = self.state.resize_registry.ratio(hold.pid) {
+        } else if let Some(ratio) = self.state.resize_registry.ratio(hold.pid, hold.xid) {
             to_x *= ratio;
             to_y *= ratio;
         }
@@ -5850,26 +5858,32 @@ impl Tool for MouseButtonUpTool {
 
         let mut x = args.opt_f64("x").unwrap_or(hold.x);
         let mut y = args.opt_f64("y").unwrap_or(hold.y);
-        if args.bool_or("from_zoom", false) {
-            match self.state.zoom_registry.get(hold.pid) {
-                Some(ctx) => {
-                    let (wx, wy) = ctx.zoom_to_window(x, y);
-                    x = wx;
-                    y = wy;
-                }
-                None => {
-                    return ToolResult::error(format!(
-                        "from_zoom=true but no zoom context for pid {}. Call zoom first.",
-                        hold.pid
-                    ))
-                    .with_structured(mouse_hold_json(&cursor_id, Some(&hold)))
-                }
-            }
-        } else if let Some(ratio) = self.state.resize_registry.ratio(hold.pid) {
-            x *= ratio;
-            y *= ratio;
+        if args.get("x").is_some() != args.get("y").is_some() {
+            return ToolResult::error(
+                "Provide both x and y, or omit both to release at the held position.",
+            );
         }
-
+        if args.get("x").is_some() {
+            if args.bool_or("from_zoom", false) {
+                match self.state.zoom_registry.get(hold.pid) {
+                    Some(ctx) => {
+                        let (wx, wy) = ctx.zoom_to_window(x, y);
+                        x = wx;
+                        y = wy;
+                    }
+                    None => {
+                        return ToolResult::error(format!(
+                            "from_zoom=true but no zoom context for pid {}. Call zoom first.",
+                            hold.pid
+                        ))
+                        .with_structured(mouse_hold_json(&cursor_id, Some(&hold)))
+                    }
+                }
+            } else if let Some(ratio) = self.state.resize_registry.ratio(hold.pid, hold.xid) {
+                x *= ratio;
+                y *= ratio;
+            }
+        }
         crate::overlay::send_command_for(
             cursor_id.clone(),
             cursor_overlay::OverlayCommand::PinAbove(xid),

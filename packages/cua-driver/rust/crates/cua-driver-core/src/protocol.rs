@@ -326,6 +326,18 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    pub fn computer_use_error(code: &str, reason: impl Into<String>, sent: bool) -> Self {
+        let reason = reason.into();
+        let next = if sent {
+            "Observe the app state before deciding whether to retry."
+        } else {
+            "Observe the app again and use its current target."
+        };
+        Self::error(format!("{code}: {reason} {next}")).with_structured(serde_json::json!({
+            "code":code,"reason":reason,"sent":sent,"next":next,
+        }))
+    }
+
     pub fn text(msg: impl Into<String>) -> Self {
         Self {
             content: vec![Content::text(msg)],

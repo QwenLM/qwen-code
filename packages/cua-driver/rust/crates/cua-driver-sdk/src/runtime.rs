@@ -559,6 +559,7 @@ fn build_registry(options: &RuntimeOptions) -> ToolRegistry {
     if let Some(register_host_tools) = options.register_host_tools {
         register_host_tools(&mut registry);
     }
+    registry.enable_computer_use();
     let recording = Arc::downgrade(&registry.recording);
     let recording_session_end = cua_driver_core::session::register_scoped_fallible_session_end_hook(
         "recording",

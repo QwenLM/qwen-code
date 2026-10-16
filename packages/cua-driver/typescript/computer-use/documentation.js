@@ -1,3 +1,5 @@
+import manifest from './interface.json' with { type: 'json' };
+
 const platformGuidance = {
   darwin: 'macOS: use application names, bundle IDs or absolute application paths.',
   win32: 'Windows: use an exact application name or executable path. Input delivery is managed by the driver.',
@@ -16,7 +18,7 @@ export function documentation(platform = process.platform) {
     'app.getScreenshot(options?) displays the current window image. app.getAXStateAndScreenshot(options?) displays both AX and image. Observation methods return strings; emit:false suppresses automatic output.',
     'Use the short numeric element IDs from the latest observation of this window. Coordinates {x,y} are window screenshot pixels and require a current screenshot.',
     'Actions: await app.click(idOrPoint), doubleClick(idOrPoint), rightClick(idOrPoint), scroll(idOrPoint,{direction,amount}), drag({fromX,fromY,toX,toY}), setValue(id,value), typeText(text), pressKey(key), hotkey(keys). Actions return void. Confirm with an observation in the same call.',
-    ...(platform === 'darwin' ? ['macOS text: app.paste(text) restores the clipboard; app.selectText(id,text) selects a unique match.'] : []),
+    ...manifest.tools.map((tool) => `${['getState', 'getApp'].includes(tool.method) ? 'cua' : 'app'}.${tool.method}: ${tool.description}`),
     'Do not wrap observations in nodeRepl.write or emitImage: they display themselves. For other output use nodeRepl.write(value) and await nodeRepl.emitImage(bytesOrDataUrl). Plain expressions produce no output.',
     'Imports use await import(); Node modules run with the server permissions. nodeRepl.cwd, homeDir, tmpDir and signal are available. A timeout stops JS continuation; actions already dispatched are never automatically replayed.',
     'Once the requested result is visible, stop and report it.',

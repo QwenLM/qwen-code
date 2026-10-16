@@ -19,17 +19,13 @@ import { test } from "node:test";
 import { ComputerUse } from "../index.js";
 
 const socketPath = process.env.COMPUTER_USE_SOCKET;
-const pid = Number(process.env.COMPUTER_USE_PID ?? "");
-const windowId = Number(process.env.COMPUTER_USE_WINDOW ?? "");
-const configured =
-  Number.isInteger(pid) && pid > 0 && Number.isInteger(windowId) && windowId > 0;
 
 test("default authorization follows the ComputerUse owner lifetime", async () => {
   const computer = await ComputerUse.create({
     session: `computer-use-owner-lifetime-${process.pid}`,
   });
   try {
-    await computer.listApps();
+    await computer.getState();
     const session = await computer.sessionInfo();
     assert.ok(
       session.expiresInSeconds > 24n * 60n * 60n,
@@ -47,7 +43,7 @@ test("finite authorization remains an explicit opt-in", async () => {
     idleTtlSeconds: 30,
   });
   try {
-    await computer.listApps();
+    await computer.getState();
     const session = await computer.sessionInfo();
     assert.ok(session.expiresInSeconds <= 30n);
   } finally {
@@ -55,42 +51,16 @@ test("finite authorization remains an explicit opt-in", async () => {
   }
 });
 
-test(
-  "wrapper drives revision v1 against a live native target",
-  { skip: !configured && "set COMPUTER_USE_PID/WINDOW to run" },
-  async () => {
-    const options = { session: "computer-use-integration" };
-    const computer = socketPath
-      ? await ComputerUse.connect({ ...options, socketPath })
-      : await ComputerUse.create(options);
-    try {
-      assert.equal(await computer.supportsObservationRevision(), true);
-
-      const first = await computer.observeWindow({ pid, windowId });
-      assert.equal(first.mode, "full");
-      assert.equal(first.diagnostics.revisionSupported, true);
-      assert.ok(first.text.length > 0);
-
-      const second = await computer.observeWindow({ pid, windowId });
-      assert.equal(second.diagnostics.revisionSupported, true);
-      assert.ok(
-        ["no_change", "diff"].includes(second.mode),
-        `unexpected mode ${second.mode}`,
-      );
-      assert.ok(
-        second.diagnostics.selectedBytes < second.diagnostics.fullBytes,
-        "a validated diff/no_change payload must be smaller than the current full tree",
-      );
-
-      const forced = await computer.observeWindow({
-        pid,
-        windowId,
-        disableDiff: true,
-      });
-      assert.equal(forced.mode, "full");
-      assert.equal(forced.resyncReason, "requested");
-    } finally {
-      await computer.close();
-    }
-  },
-);
+test('runtime observes a live native app without SDK window resolution', { skip: !process.env.COMPUTER_USE_APP && 'set COMPUTER_USE_APP to run' }, async () => {
+  const computer = socketPath ? await ComputerUse.connect({ socketPath }) : await ComputerUse.create();
+  try {
+    const { app, initial } = await computer.getApp(process.env.COMPUTER_USE_APP);
+    assert.equal(initial.structured.mode, 'full');
+    assert.equal(initial.images.length, 0);
+    const second = await app.call('get_ax_state');
+    assert.ok(['diff','no_change','full'].includes(second.structured.mode));
+    const full = await app.call('get_ax_state', { force_full: true });
+    assert.equal(full.structured.mode, 'full');
+    assert.equal(full.structured.elements, undefined);
+  } finally { await computer.close(); }
+});

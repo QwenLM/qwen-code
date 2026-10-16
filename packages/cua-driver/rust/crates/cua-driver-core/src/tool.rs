@@ -598,6 +598,7 @@ impl TrustedInvocationEvidence {
 
 /// Thread-safe collection of all registered tools.
 pub struct ToolRegistry {
+    computer_use: Option<Arc<crate::computer_use::ComputerUseRuntime>>,
     tools: HashMap<String, Box<dyn Tool>>,
     /// Ordered list of tool names for `tools/list`.
     order: Vec<String>,
@@ -668,6 +669,7 @@ impl ToolRegistry {
                 })
             }));
         Self {
+            computer_use: None,
             tools: HashMap::new(),
             order: Vec::new(),
             recording,
@@ -776,6 +778,27 @@ impl ToolRegistry {
         self.tools.insert(name, tool);
     }
 
+    pub fn enable_computer_use(&mut self) {
+        if self.computer_use.is_some() {
+            return;
+        }
+        let runtime = Arc::new(crate::computer_use::ComputerUseRuntime::default());
+        let weak = Arc::downgrade(&runtime);
+        self.retain_session_end_hook(crate::session::register_scoped_session_end_hook(
+            move |session| {
+                if let Some(runtime) = weak.upgrade() {
+                    runtime.clear_session(session);
+                }
+            },
+        ));
+        for spec in cua_driver_contract::computer_use::tools() {
+            if !self.tools.contains_key(spec.name) {
+                self.register(Box::new(crate::computer_use::Entry::new(spec)));
+            }
+        }
+        self.computer_use = Some(runtime);
+    }
+
     pub fn retain_session_end_hook(
         &mut self,
         registration: crate::session::SessionEndHookRegistration,
@@ -839,13 +862,47 @@ impl ToolRegistry {
     }
 
     pub fn tools_list(&self) -> Value {
-        let list: Vec<Value> = self
+        let mut list: Vec<Value> = self
             .order
             .iter()
             .filter(|name| crate::policy::is_tool_listable(name))
             .filter_map(|name| self.tools.get(name))
             .map(|tool| tool.def().to_list_entry())
             .collect();
+        if self.computer_use.is_some() {
+            let extra = std::env::var("CUA_DRIVER_EXTRA_TOOLS").as_deref() == Ok("1");
+            let mut entries = Vec::new();
+            for spec in cua_driver_contract::computer_use::tools() {
+                if !crate::policy::is_tool_listable(spec.name) {
+                    continue;
+                }
+                let mut schema = spec.input_schema.clone();
+                if extra {
+                    if let Some(native) = self.tools.get(spec.name) {
+                        schema = serde_json::json!({"oneOf":[schema,native.def().input_schema]});
+                    }
+                }
+                let risk_tool = match spec.name {
+                    "get_app" => "get_window_state",
+                    "get_state" => "list_apps",
+                    "get_ax_state" | "get_screenshot" | "get_ax_state_and_screenshot" => {
+                        "get_window_state"
+                    }
+                    _ => spec.name,
+                };
+                entries.push(serde_json::json!({
+                    "name":spec.name,"description":spec.description,"inputSchema":schema,
+                    "annotations":{"readOnlyHint":spec.read_only,"destructiveHint":false,"idempotentHint":spec.read_only,"openWorldHint":!spec.read_only},
+                    "capabilities":default_capabilities_for(risk_tool),
+                    "risk":crate::authorization::risk_metadata_json(risk_tool),
+                }));
+            }
+            if extra {
+                list.retain(|entry| !entries.iter().any(|app| app["name"] == entry["name"]));
+                entries.extend(list);
+            }
+            list = entries;
+        }
         // `capability_version` is the contract version for the
         // capability tokens claimed by each tool entry. Bumped on
         // BREAKING vocabulary changes only; additive changes (new
@@ -1069,6 +1126,12 @@ impl ToolRegistry {
                 "authorization_revoked",
                 "this session authorization context has been revoked",
             );
+        }
+
+        if let Some(runtime) = &self.computer_use {
+            if cua_driver_contract::computer_use::is_app_call(name, &args) {
+                return runtime.invoke(self, name, args).await;
+            }
         }
 
         // Deprecated alias: `type_text_chars` → `type_text`.  Swift's

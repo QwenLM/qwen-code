@@ -360,6 +360,16 @@ async fn invoke_daemon_tool(
     // the MCP policy contract now that every call passes through the daemon.
     if let Err(error) = cua_driver_core::authorization::authorize_tool_call(&tool_name, &args) {
         observe_daemon_error(observation, 1);
+        if cua_driver_contract::computer_use::is_app_call(&tool_name, &args) {
+            return DaemonResponse::ok(
+                serde_json::to_value(cua_driver_core::protocol::ToolResult::computer_use_error(
+                    "permission_denied",
+                    error.to_string(),
+                    false,
+                ))
+                .expect("serializable tool result"),
+            );
+        }
         return DaemonResponse::err(error.to_string(), 1);
     }
 

@@ -81,6 +81,7 @@ fn def() -> &'static ToolDef {
                 "app_context": { "type": "boolean", "description": "Capture the app interaction context with native compact AX projection." },
                 "query": { "type": "string", "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values." },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                "include_accessibility": {"type":"boolean","default":true,"description":"Set false for a screenshot without an accessibility walk."},
                 "include_screenshot": {
                     "type": "boolean",
                     "description": "Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return the tree only (the cheap path when you're just re-indexing before an element ax action; saves the image tokens + screen-grab latency). screenshot_out_file still forces a capture to disk."
@@ -274,8 +275,9 @@ impl Tool for GetWindowStateTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        // Always walk the AX tree (perception returns both tree + screenshot).
-        let tree_result = {
+        let tree_result = if args["include_accessibility"] == false {
+            None
+        } else {
             let q = query.clone();
             let state = Arc::clone(&self.state);
             // Keep the product deadline below the public client's 25-second
@@ -587,7 +589,7 @@ impl Tool for GetWindowStateTool {
             .as_ref()
             .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
             .unwrap_or(0);
-        let snapshot_id = if scope_matched && !observation_only {
+        let snapshot_id = if tree_result.is_some() && scope_matched && !observation_only {
             Some(cua_driver_core::element_token::global().register_snapshot(
                 pid,
                 window_id,
