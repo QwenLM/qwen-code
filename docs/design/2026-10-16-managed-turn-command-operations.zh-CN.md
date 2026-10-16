@@ -2,7 +2,7 @@
 
 [English](2026-10-16-managed-turn-command-operations.md) | [简体中文](2026-10-16-managed-turn-command-operations.zh-CN.md)
 
-状态：已在本次改动中实现。Turn 的输入与取消成为持久命令 operation，种类为 `submit_input` 与 `cancel`，可经 operation 查询读取；契约 `1.53.0`，schema V7。两个编号都是暂定的：在审的 #14358 与 #14318 已占用契约 `1.52.0`，#14318 还占用了 schema V7。schema 版本必须连续，所以后合入的改动要为其迁移重新编号。准入响应暂不携带该 operation，那属于 D7-3。
+状态：已在本次改动中实现。Turn 的输入与取消成为持久命令 operation，种类为 `submit_input` 与 `cancel`，可经 operation 查询读取；契约 `1.53.0`，schema V8。#14318 先合入了契约 `1.52.0` 与 schema V7，本改动排在其后。准入响应暂不携带该 operation，那属于 D7-3。
 
 这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 伞形 issue）的 **D7-1** 切片，由 [#14168](https://github.com/QwenLM/qwen-code/issues/14168) 跟踪。#12380 规定 Stage D 只有在具备持久命令投递与原命令对账时才能暴露 `java_durable`。本切片提供前一半。D7-2（[#14166](https://github.com/QwenLM/qwen-code/issues/14166)）提供对账，D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选 profile）须等两者都落地。
 
@@ -85,11 +85,11 @@
 
 ### 8. 结算使用当前读
 
-每个结算调用者都先锁 Session 行，但其 REPEATABLE READ 快照可能早于该锁。例如 `requireLegacyMutation` 在 `recordHarnessEvents` 加锁之前就做了读取。普通读于是可能漏掉其间提交的取消，使其 operation 永远停在 pending。因此 `settleTurnCommands` 以 `FOR UPDATE` 读取 Turn，并在该 Turn 的标识索引前缀上以加锁读查找待处理的 operation。这些读只覆盖一个 Session scope 内一个 Turn 的条目。没有调用者会在其后向 `ma_operation` 插入，所以它们无法形成 #13918 所消除的那类插入-间隙环。回执插入及其后的 operation 插入，仍遵循两个准入既有的 Session 与租户 guard 加锁顺序。
+每个结算调用者都先锁 Session 行，但其 REPEATABLE READ 快照可能早于该锁。例如 `requireLegacyMutation` 在 `recordHarnessEvents` 加锁之前就做了读取。普通读于是可能漏掉其间提交的取消，使其 operation 永远停在 pending。因此 `settleTurnCommands` 以 `FOR UPDATE` 读取 Turn，并以固定在该 Turn 的 `uq_ma_operation_identity` 前缀上的加锁读查找待处理的 operation（写在 MySQL 可执行注释里的 `FORCE INDEX`，H2 会跳过）。这些读只覆盖一个 Session scope 内一个 Turn 的条目。这个固定是必需的：交给优化器时，若某个 Turn 有很长的已结算历史、而表中待处理行很少，扫描会转向 `ix_ma_operation_claim`，其 `(operation_kind, state)` 范围包含所有 Session 的待处理行，两个 Session 的结算于是越过各自的 Session 锁形成死锁。没有调用者会在其后向 `ma_operation` 插入，所以它们无法形成 #13918 所消除的那类插入-间隙环。回执插入及其后的 operation 插入，仍遵循两个准入既有的 Session 与租户 guard 加锁顺序。
 
-### 9. Schema V7 与契约 1.53
+### 9. Schema V8 与契约 1.53
 
-- `V7__turn_command_operations.sql` 删除并重建 `ck_ma_operation_kind`，加入 `SUBMIT_INPUT` 与 `CANCEL`。`ManagedSchema.extend` 现在会把迁移中先删后建的任意 CHECK 在规范 DDL 中就地替换，并保留其末尾逗号。V4 回执命名空间的特例成为这条规则的一个实例。服务端由 Flyway 应用 V7，Broker 由 `ManagedSchema.initialize` 应用。V6 目录会被识别为版本 6 并升级。
+- `V8__turn_command_operations.sql` 删除并重建 `ck_ma_operation_kind`。它保留 V7 约束的每个种类（包括 `WORKSPACE_CREATE`），并加入 `SUBMIT_INPUT` 与 `CANCEL`。这类迁移每次都重建整条 CHECK，所以必须以迁移链末端的约束为起点，而不是 V1 基线。由 #14318 一般化的 `ManagedSchema.extend` 会在规范 DDL 中就地替换重建的 CHECK。服务端由 Flyway 应用 V8，Broker 由 `ManagedSchema.initialize` 应用。V7 目录会被识别为版本 7 并升级。
 - 契约升至 `1.53.0`。operation 路由的描述列出它所服务的每个种类，两处 `failure_code` 描述写明新的失败，版本说明写明 D7-1 改变什么、不改变什么。生成的 WebShell 类型只在该描述上变化。
 - `contract-known-gaps.txt` 仍无条目，文件头改为指向 #14122。该文件为空意味着 D4 的出口已满足，而不是不再有契约缺口。
 
@@ -104,14 +104,14 @@
   - 输入以 Turn 的错误码失败；
   - 准入前取消（输入为 `cancelled`，取消为 `java_durable`）；
   - Harness 取消使两次合并的取消都完成，且回执各不相同；
-  - 取消以 `turn_already_settled` 失败；
+  - 取消以 `turn_already_settled` 失败，包括 Turn 完成与派发器判 Turn 失败两种情况；
   - 对已结束 Turn 的取消在准入时结算；
   - 不产生任何屏障或扫描效果。
-- `ManagedTurnCommandOperationMySqlIT` 在 InnoDB 上运行同样的用例。它为决策 8 增加两个见证。第一个：一个终态事务固定了快照，其间提交了一次取消，结算仍以 `turn_already_settled` 失败该取消。第二个：一次取消固定了快照，其间 Turn 失败，该取消仍在准入时结算。把待处理 operation 的查找改成普通读会让第一个失败；把 Turn 的读取改成普通读会让第二个失败。
+- `ManagedTurnCommandOperationMySqlIT` 在 InnoDB 上运行同样的用例。它为决策 8 增加三个见证，每个都固定为 REPEATABLE READ，使服务端默认值无法让它失效。第一个：两个 Session 各持有一个运行中 Turn 的待处理取消，再各自取消一个带 1000 条已结算取消的已结束 Turn；两次结算都成功。去掉索引固定会让它们死锁。第二个：一个终态事务固定了快照，其间提交了一次取消，结算仍以 `turn_already_settled` 失败该取消。第三个：一次取消固定了快照，其间 Turn 失败，该取消仍在准入时结算。把待处理 operation 的查找改成普通读会让第二个失败；把 Turn 的读取改成普通读会让第三个失败。
 - 去掉任意一个结算挂钩、回执链接或读取回退，都会让上述至少一个用例失败。
 - `HostedConcurrentTurnBurstMySqlIT`（#13333 的同租户突发）每轮都完成结算，没有准入或续租失败，锁等待采样与基线构建相同。
 - `ManagedAgentApiContractTest` 经两个 operation 路由读取一个被 Harness 取消的 Turn 的 `submit_input` 与 `cancel` operation，并按契约校验。
-- schema 测试改为版本 7。`WorkspaceCreationSchemaMySqlIT` 在走升级路径前，还会恢复 V1 的种类 CHECK。
+- schema 测试改为版本 8。`ManagedSchemaTest` 在完整迁移链之后，经 Broker 初始化器与 Flyway 两条路径插入每个已发布的 operation 种类。`WorkspaceCreationSchemaMySqlIT` 升级一个已存有 `WORKSPACE_CREATE` operation 的 V7 目录，保留该行并接受全部三个种类。从 V8 删掉 `WORKSPACE_CREATE` 一支会让两者都失败。
 
 ## 验收
 

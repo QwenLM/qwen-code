@@ -2,7 +2,7 @@
 
 [English](2026-10-16-managed-turn-command-operations.md) | [简体中文](2026-10-16-managed-turn-command-operations.zh-CN.md)
 
-Status: implemented in this change. Turn input and cancellation are durable command operations of the kinds `submit_input` and `cancel`, readable through the operation query, in contract `1.53.0` and schema V7. Both numbers are provisional: open pull requests #14358 and #14318 already claim contract `1.52.0`, and #14318 also claims schema V7. Schema versions must stay contiguous, so whichever change lands second renumbers its migration. Admission responses do not carry the operation yet; that is D7-3.
+Status: implemented in this change. Turn input and cancellation are durable command operations of the kinds `submit_input` and `cancel`, readable through the operation query, in contract `1.53.0` and schema V8. #14318 landed contract `1.52.0` and schema V7 first, so this change follows them. Admission responses do not carry the operation yet; that is D7-3.
 
 This is slice **D7-1** of [#14122](https://github.com/QwenLM/qwen-code/issues/14122) (the D7 umbrella of [#12380](https://github.com/QwenLM/qwen-code/issues/12380), Stage D), tracked by [#14168](https://github.com/QwenLM/qwen-code/issues/14168). #12380 lets Stage D expose `java_durable` only with durable command delivery and original-command reconciliation. This slice supplies the first half. D7-2 ([#14166](https://github.com/QwenLM/qwen-code/issues/14166)) supplies reconciliation, and D7-3 ([#14167](https://github.com/QwenLM/qwen-code/issues/14167)), the opt-in profile, waits for both.
 
@@ -85,11 +85,11 @@ A private `settleTurnCommands` runs inside every transaction that commits a Turn
 
 ### 8. Settlement uses current reads
 
-Every settle caller locks the Session row first, but its REPEATABLE READ snapshot can predate that lock. `requireLegacyMutation`, for example, reads before `recordHarnessEvents` locks. A plain read could then miss a cancel committed in between and leave its operation pending forever. `settleTurnCommands` therefore reads the Turn with `FOR UPDATE` and finds pending operations with a locking read on the Turn's identity-index prefix. Those reads cover one Turn's entries in one Session scope. No caller inserts into `ma_operation` after them, so they cannot close an insert-gap cycle of the kind #13918 removed. The receipt insert, and the operation insert behind it, stay under the existing Session and tenant-guard order of the two admissions.
+Every settle caller locks the Session row first, but its REPEATABLE READ snapshot can predate that lock. `requireLegacyMutation`, for example, reads before `recordHarnessEvents` locks. A plain read could then miss a cancel committed in between and leave its operation pending forever. `settleTurnCommands` therefore reads the Turn with `FOR UPDATE` and finds pending operations with a locking read pinned to the Turn's prefix of `uq_ma_operation_identity` (`FORCE INDEX` in a MySQL executable comment, which H2 skips). Those reads cover one Turn's entries in one Session scope. The pin is required. Left to the optimizer, a Turn with a long settled history in a table with few pending rows steers the scan to `ix_ma_operation_claim`, whose `(operation_kind, state)` range holds every Session's pending rows, and two Sessions' settles then deadlock across their own Session locks. No caller inserts into `ma_operation` after them, so they cannot close an insert-gap cycle of the kind #13918 removed. The receipt insert, and the operation insert behind it, stay under the existing Session and tenant-guard order of the two admissions.
 
-### 9. Schema V7 and contract 1.53
+### 9. Schema V8 and contract 1.53
 
-- `V7__turn_command_operations.sql` drops and re-adds `ck_ma_operation_kind` with `SUBMIT_INPUT` and `CANCEL`. `ManagedSchema.extend` now replaces any CHECK that a migration drops and re-adds, in place in the canonical DDL, keeping its trailing comma. The V4 receipt-namespace special case becomes one instance of that rule. Flyway applies V7 on the server, and `ManagedSchema.initialize` applies it on the Broker. A V6 catalog validates as version 6 and upgrades.
+- `V8__turn_command_operations.sql` drops and re-adds `ck_ma_operation_kind`. It keeps every kind of the V7 constraint, `WORKSPACE_CREATE` included, and adds `SUBMIT_INPUT` and `CANCEL`. Each such migration re-adds the whole CHECK, so it must start from the constraint at the tip of the chain, not from the V1 baseline. `ManagedSchema.extend`, generalized by #14318, replaces the re-added CHECK in place in the canonical DDL. Flyway applies V8 on the server, and `ManagedSchema.initialize` applies it on the Broker. A V7 catalog validates as version 7 and upgrades.
 - The contract moves to `1.53.0`. The operation route's description names every kind it serves, both `failure_code` descriptions name the new failures, and the version note states what D7-1 does and does not change. The generated WebShell types change only in that description.
 - `contract-known-gaps.txt` still has no entries. Its header now points at #14122. That file being empty means D4's exit is met, not that no contract gap remains.
 
@@ -104,14 +104,14 @@ Every settle caller locks the Session row first, but its REPEATABLE READ snapsho
   - input failure with the Turn's code;
   - cancellation before admission (`cancelled` input, `java_durable` cancel);
   - Harness cancellation completing two coalesced cancels with distinct receipts;
-  - a cancel failing `turn_already_settled`;
+  - a cancel failing `turn_already_settled`, when its Turn completes and when the dispatcher fails it;
   - cancels of ended Turns settling at admission;
   - the absence of any barrier or scan effect.
-- `ManagedTurnCommandOperationMySqlIT` runs the same cases on InnoDB. It adds two witnesses for decision 8. In the first, a terminal transaction pins its snapshot, a cancel commits meanwhile, and the settle still fails that cancel `turn_already_settled`. In the second, a cancel pins its snapshot, the Turn fails meanwhile, and the cancel still settles at admission. Making the pending-operation lookup a plain read fails the first; making the Turn read a plain read fails the second.
+- `ManagedTurnCommandOperationMySqlIT` runs the same cases on InnoDB. It adds three witnesses for decision 8, each pinned to REPEATABLE READ so the server default cannot void it. In the first, two Sessions each hold a pending cancel of a running Turn and then cancel an ended Turn with 1000 settled cancels; both settles succeed. Removing the index pin deadlocks them. In the second, a terminal transaction pins its snapshot, a cancel commits meanwhile, and the settle still fails that cancel `turn_already_settled`. In the third, a cancel pins its snapshot, the Turn fails meanwhile, and the cancel still settles at admission. Making the pending-operation lookup a plain read fails the second; making the Turn read a plain read fails the third.
 - Removing any one settle hook, the receipt link or the read fallback fails at least one of the cases above.
 - `HostedConcurrentTurnBurstMySqlIT`, the #13333 same-tenant burst, settles every round with no admission or renewal failures and the same lock-wait samples as the base build.
 - `ManagedAgentApiContractTest` reads the `submit_input` and `cancel` operations of a Harness-cancelled Turn through both operation routes and validates them against the contract.
-- The schema tests move to version 7. `WorkspaceCreationSchemaMySqlIT` also restores the V1 kind CHECK before it walks the upgrade.
+- The schema tests move to version 8. `ManagedSchemaTest` inserts every shipped operation kind after the full chain, through both the Broker initializer and Flyway. `WorkspaceCreationSchemaMySqlIT` upgrades a V7 catalog that already holds a `WORKSPACE_CREATE` operation, keeps the row and admits all three kinds. Dropping the `WORKSPACE_CREATE` arm from V8 fails both.
 
 ## Acceptance
 

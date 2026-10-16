@@ -42,7 +42,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ManagedTurnCommandOperationTest {
     static final String TENANT = "turn-command-tenant";
     static final String OWNER = "dispatcher";
-    private static final List<Map<String, Object>> INPUT = List.of(Map.of(
+    static final List<Map<String, Object>> INPUT = List.of(Map.of(
             "type", "text", "text", "hello"));
     private final AtomicLong now = new AtomicLong(1_000_000);
     ManagedAgentStore store;
@@ -233,6 +233,26 @@ class ManagedTurnCommandOperationTest {
         assertThat(operation.deliveryState()).isEqualTo("BLOCKED");
         assertThat(operation.failureCode()).isEqualTo("turn_already_settled");
         assertThat(operation.receiptId()).isNull();
+    }
+
+    @Test
+    void aCancelPendingWhenTheDispatcherFailsItsTurnFailsAlreadySettled() {
+        Admission admitted = submit("submit-1", "digest-1");
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
+        assertThat(cancel.commandEffect()).isTrue();
+        assertThat(operation(cancel.operationId()).state()).isEqualTo("PENDING");
+
+        claim(admitted);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "hosted_harness_unavailable", "gone");
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("FAILED");
+        assertThat(operation.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(operation.deliveryState()).isEqualTo("BLOCKED");
+        assertThat(operation.failureCode()).isEqualTo("turn_already_settled");
+        assertThat(operation.receiptId()).isNull();
+        assertThat(operation(admitted.operationId()).failureCode())
+                .isEqualTo("hosted_harness_unavailable");
     }
 
     @Test

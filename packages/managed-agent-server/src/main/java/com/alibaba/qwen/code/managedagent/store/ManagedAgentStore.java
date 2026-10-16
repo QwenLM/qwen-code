@@ -1987,8 +1987,13 @@ public class ManagedAgentStore implements AgentStateStore {
             String turnId, OperationKind kind, String state,
             String admissionStage, String failureCode, long now) {
         boolean completed = "COMPLETED".equals(state);
+        // The identity index confines this locking scan to the Turn's own
+        // operations. Left to the optimizer, a long settled history steers it
+        // to a (kind, state) index whose range holds every Session's pending
+        // rows, and two Sessions' settles then deadlock. H2 skips the hint.
         for (String operationKey : jdbc.queryForList("SELECT operation_key"
-                        + " FROM ma_operation WHERE scope_key = ? AND"
+                        + " FROM ma_operation /*! FORCE INDEX (uq_ma_operation_identity) */"
+                        + " WHERE scope_key = ? AND"
                         + " operation_kind = ? AND target_key = ? AND state ="
                         + " 'PENDING' FOR UPDATE", String.class,
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
