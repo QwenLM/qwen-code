@@ -10,6 +10,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.validation.BindingResult;
+import org.springframework.validation.FieldError;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
@@ -22,13 +24,19 @@ import org.springframework.web.context.request.async.AsyncRequestNotUsableExcept
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
     private static final Logger LOG = LoggerFactory.getLogger(
             ApiExceptionHandler.class);
+    private static final int LOGGED_CONSTRAINTS = 5;
+    private static final int LOGGED_FRAMES = 6;
+    private static final int LOGGED_URI_CHARS = 256;
 
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<Map<String, Object>> api(ApiException error,
@@ -107,6 +115,7 @@ public class ApiExceptionHandler {
             HttpMessageNotReadableException.class})
     public ResponseEntity<Map<String, Object>> invalid(Exception error,
             HttpServletRequest request, HttpServletResponse response) {
+        logInternalRefusal(request, error);
         return response(request, response, HttpStatus.BAD_REQUEST,
                 "invalid_request", "The request body is invalid.");
     }
@@ -136,8 +145,82 @@ public class ApiExceptionHandler {
     public ResponseEntity<Map<String, Object>> invalidArgument(
             IllegalArgumentException error, HttpServletRequest request,
             HttpServletResponse response) {
+        logInternalRefusal(request, error);
         return response(request, response, HttpStatus.BAD_REQUEST,
                 "invalid_request", "The request is invalid.");
+    }
+
+    // A public caller's 400 is its own input mistake and stays out of the
+    // log. An internal route is called by the control plane's own
+    // components (the Harness, Runtime workers, channel adapters), and the
+    // generic answer hides which check refused one (#14361), so it gets one
+    // line. The line names the check without quoting the request: exception
+    // messages here can carry body content (Jackson's parse errors, rejected
+    // values, a forwarded channel message), so only the exception type, the
+    // failing fields' names and constraints, and the application frames
+    // that threw are kept. The path is classified as the router saw it, as
+    // RoutingFilter does, but logged raw: the routed path is decoded, and a
+    // %0A in a segment would start a forged log line. Body checks run before
+    // the writer credential is checked, so the line's size is bounded
+    // whatever the request holds.
+    private static void logInternalRefusal(HttpServletRequest request,
+            Exception error) {
+        if (!PublicSurface.pathWithinApplication(request).startsWith("/internal/")) {
+            return;
+        }
+        String detail;
+        if (error instanceof MethodArgumentNotValidException invalid) {
+            detail = " " + constraints(invalid.getBindingResult());
+        } else if (error instanceof IllegalArgumentException) {
+            // The frames run from the helper that threw (often a shared
+            // require) up through the check that called it.
+            detail = " at " + applicationFrames(error);
+        } else {
+            // A body that did not parse fails inside Spring; any application
+            // frames on its stack are filters, not a check.
+            detail = "";
+        }
+        LOG.warn("Managed Agent refused an internal request: {} {} ({}{})",
+                request.getMethod(), bounded(request.getRequestURI()),
+                error.getClass().getSimpleName(), detail);
+    }
+
+    // Field paths keep their shape but drop list indices and map keys, which
+    // the client chooses. Repeats then collapse, so a list of thousands of
+    // bad elements logs as one entry, and the error count says how many.
+    private static String constraints(BindingResult result) {
+        List<String> distinct = result.getAllErrors().stream()
+                .map(error -> error instanceof FieldError field
+                        ? field.getField().replaceAll("\\[[^\\]]*\\]", "[]")
+                                + ":" + field.getCode()
+                        : error.getObjectName() + ":" + error.getCode())
+                .distinct()
+                .sorted()
+                .toList();
+        return distinct.stream().limit(LOGGED_CONSTRAINTS)
+                .collect(Collectors.joining(", ", "fields ",
+                        distinct.size() > LOGGED_CONSTRAINTS ? ", …" : ""))
+                + " (" + result.getErrorCount() + " errors)";
+    }
+
+    private static String applicationFrames(Throwable error) {
+        return Arrays.stream(error.getStackTrace())
+                .filter(frame -> frame.getClassName()
+                        .startsWith("com.alibaba.qwen.code."))
+                .limit(LOGGED_FRAMES)
+                .map(frame -> frame.getClassName().substring(
+                        frame.getClassName().lastIndexOf('.') + 1)
+                        + "." + frame.getMethodName() + ":"
+                        + frame.getLineNumber())
+                .collect(Collectors.collectingAndThen(Collectors.joining(" < "),
+                        frames -> frames.isEmpty() ? "no application frame" : frames));
+    }
+
+    private static String bounded(String uri) {
+        if (uri == null || uri.length() <= LOGGED_URI_CHARS) {
+            return uri;
+        }
+        return uri.substring(0, LOGGED_URI_CHARS) + "… (" + uri.length() + " chars)";
     }
 
     @ExceptionHandler(Exception.class)
