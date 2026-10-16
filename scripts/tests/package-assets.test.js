@@ -25,6 +25,7 @@ import {
 } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
 import { preparePackage } from '../prepare-package.js';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const realReadFileSync = fs.readFileSync;
 const realReaddirSync = fs.readdirSync;
@@ -569,12 +570,12 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable
-  // there. The case skips rather than running into the other branch — a
-  // readable tree, stamped as usual — and failing red against the no-stamp
-  // assertion.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // chmod is the only lever this case has: on Windows it is a no-op, and
+  // root with its DAC capabilities reads through it, so the branch under
+  // test is unreachable there. The case skips rather than running into the
+  // other branch — a readable tree, stamped as usual — and failing red
+  // against the no-stamp assertion.
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses when a digest root exists but cannot be listed',
     () => {
       // The root-level arm of the unlistable-directory refusal: with the
