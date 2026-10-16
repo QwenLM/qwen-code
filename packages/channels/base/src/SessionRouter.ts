@@ -124,6 +124,54 @@ export interface SessionRouterOptions {
   recoveryMode?: SessionRecoveryMode;
 }
 
+/**
+ * The routing key a `single` scope builds for a channel: one context shared by
+ * every group and every direct message. Exported so consumers that reason about
+ * persisted keys (a channel's legacy-route purge, for one) name the same string
+ * the router does instead of re-deriving it.
+ */
+export function singleScopeRoutingKey(channelName: string): string {
+  return `${channelName}:__single__`;
+}
+
+/**
+ * The persisted form of a message route's routing key. A per-message route
+ * (`resolve` with `routeKey`) wraps its chat-level key in a fixed two-element
+ * tuple so a message route can never collide with a chat route; the wrap and
+ * the unwrap below are the only two places that shape is encoded.
+ */
+export function wrapMessageRoutingKey(
+  baseKey: string,
+  routeKey: string,
+): string {
+  return JSON.stringify([baseKey, routeKey]);
+}
+
+/**
+ * The chat-level key inside a routing key, for a caller that was handed keys
+ * from the router without their shape (the purge's orphan predicates). A
+ * channel name may legitimately start with `[`, so an unparsable or
+ * non-wrapper `[` string is returned unchanged rather than discarded: every
+ * purging caller must fail toward inspecting the route, never toward skipping
+ * one it cannot classify.
+ */
+export function unwrapMessageRoutingKey(key: string): string {
+  if (!key.startsWith('[')) return key;
+  try {
+    const parsed: unknown = JSON.parse(key);
+    if (
+      Array.isArray(parsed) &&
+      parsed.length === 2 &&
+      typeof parsed[0] === 'string'
+    ) {
+      return parsed[0];
+    }
+  } catch {
+    // Fall through: treat it as a base key that merely starts with '['.
+  }
+  return key;
+}
+
 export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
@@ -318,10 +366,10 @@ export class SessionRouter {
     routeKey?: string,
   ): string {
     if (routeKey !== undefined) {
-      return JSON.stringify([
+      return wrapMessageRoutingKey(
         this.routingKey(channelName, senderId, chatId, threadId),
         routeKey,
-      ]);
+      );
     }
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     switch (scope) {
@@ -332,7 +380,7 @@ export class SessionRouter {
           ? `${channelName}:${chatId}:${threadId}`
           : `${channelName}:${chatId}`;
       case 'single':
-        return `${channelName}:__single__`;
+        return singleScopeRoutingKey(channelName);
       case 'user':
       default:
         return `${channelName}:${senderId}:${chatId}`;
