@@ -83,6 +83,12 @@ version-2 artifact manifest 绑定两份原始镜像 digest、完整清单字节
 
 ## 来源与释放依赖
 
+离线策略阶段消费准确的第2版工件清单、两份镜像目录及 shim 配置，以及已审目标事实、原私有 Runtime 请求和两份实际服务配置。生成器输出单一五角色策略源码及服务 unit，unit 的 argv 使用同一配置路径。权限语法由生成器拥有，不接受调用者规则、include 或 AppArmor 模式。配置及密钥路径不能落入可写的 inputs、journal、socket 或 worker 根，不同角色私钥不能别名；宿主 peer 哈希必须与实际 source/gateway 配置一致。
+
+策略源码仍是候选。AppArmor 能限定挂载类型、flags、source 和 destination，不能比较任意 mount data、设备编号或 DBus 消息正文；完整原契约继续由可信创建者及消费端比较。数字 proc 名还依赖实际内核只允许修改自身属性的语义，UID 相同不代表进程相同。SDK 子进程 OOM 调整及 disconnected namespace/root 命名需要明确的安装资格。生成五个命名 profile 不能补出既存宿主主体的反向权限，也不代表安装合格。
+
+外层 snapshot 挂载输入与内层 OCI mount 分开；规则拆分正常挂载阶段，将原数据保留在已审目标及契约中。实际 source 类型、VFS flags 和 disconnected 别名仍需原生资格化。后续编译阶段消费完整 pinned 候选，以准确 parser/features、空配置、无 kernel load/cache 的方式执行，并保留失败记录。普通测试仅准备数据及检查 argv，绝不执行 parser；两个阶段均不授予释放权限。
+
 当前 source/6 格式保留配对 sandbox/worker 出生、实际镜像及 snapshot 祖先链、原始消费
 输入、创建进程 custody，以及明确的发布/停止/卸载依赖。Go producer 与 Java 读端一起
 更新。decoder、签名、hash 链或自报摘要都不能资格化安装结果。读端必须通过绑定原始 SQL

@@ -150,3 +150,66 @@ python3 deploy/k2-evidence/render-pre-exec.py \
 `shim.json` 对应拟安装的 `/etc/qwen-k2/shim.json`；`runtime-handler.toml` 是经审阅 containerd CRI runtime 配置的 fragment，明确使用 `runtime_path` 与 `io.containerd.qwen-k2.v1` runtime type。既有 RuntimeClass name/handler 仍为 `qwen-k2-runc-v1`。source 配置还必须加入生成的 `sandboxImageSha256`。tmpfiles fragment 提供固定私有目录。工具不会安装或 apply 这些文件。
 
 安装前必须资格化实际 daemon 的 handler/bootstrap 兼容性、私有 ext4 消费输入挂载、immutable 安装文件及 ancestor、初始 namespaces、完整已加载并 locked 的 AppArmor bundle 和 actor/admission 边界。当前 service units 和历史 profiles 不继承本次改变后候选的资格。运行时目录必须允许正常 PID/log/rootfs/cleanup 写入，不能将整个消费 bundle 设为 immutable。用 exact reviewed source/shim 配置执行 `node-config`，生成 Java 必需的出生期待值；解析成功仍不代表安装资格或物理释放。详见[出生设计](../../docs/design/2026-10-16-k2-pre-exec-birth.zh-CN.md)。
+
+## 离线五角色策略候选
+
+用 `render-profiles.py` 消费上述准确工件目录。此阶段重新核对两份原镜像布局，将完整目录字节与第2版清单比较，同时核对原契约和固定 shim 配置。它读取实际 source/gateway JSON，不打开配置引用的密钥；以实际文件和 socket 路径生成规则，并让输出 unit 的 argv 使用同一部署配置路径。
+
+```sh
+python3 deploy/k2-evidence/render-profiles.py \
+  --candidate /absolute/output/new-pre-exec-candidate \
+  --artifact-manifest-sha256 REVIEWED_ARTIFACT_MANIFEST_SHA256 \
+  --target /absolute/reviewed/profile-target.json \
+  --target-sha256 REVIEWED_TARGET_SHA256 \
+  --runtime /absolute/reviewed/private-runtime.json \
+  --runtime-sha256 REVIEWED_RUNTIME_SHA256 \
+  --source-config /absolute/reviewed/source.json \
+  --source-config-sha256 REVIEWED_SOURCE_CONFIG_SHA256 \
+  --gateway-config /absolute/reviewed/gateway.json \
+  --gateway-config-sha256 REVIEWED_GATEWAY_CONFIG_SHA256 \
+  --worker-layout /absolute/reviewed/worker-oci \
+  --sandbox-layout /absolute/reviewed/sandbox-oci \
+  --output /absolute/output/new-profile-candidate
+```
+
+闭合的 `qwen-k2-profile-target/2` 对象要求以下字段。这些是已审部署输入，不是观察结果或安装证书。
+
+| 字段                            | 支持的输入                                                                                                                                               |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `format`、`architecture`        | 上述准确版本；`amd64` 或 `arm64`，与两镜像及三个宿主产物一致                                                                                             |
+| `hostExecutables`               | 准确的 `runtime`、`kubelet`、`registrar`、`plugin`、`systemd` 对象，各含 literal `path`、`sha256` 和不同的受限 `label`；四个 peer 摘要必须与服务配置一致 |
+| `snapshotRoot`                  | `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots`                                                                                   |
+| `podSlicePrefix`                | 实际 systemd kubepods Pod slice 前缀，可在 burstable 或 besteffort 层级                                                                                  |
+| `apparmorExportRoot`            | `/qwen-k2-disconnected/source` 下准确测量的 exporter 路径，只读叶子模式由生成器拥有                                                                      |
+| `systemBus`                     | 闭合的 `socket`、`privateSocket`、`label`；系统 bus socket、`/run/systemd/private` 和实际受限 bus label                                                  |
+| `volumeSerialPath`              | 实际最终 `/sys/devices/.../serial` 对象                                                                                                                  |
+| `roleConfigPaths`               | `/etc/qwen-k2` 直接子文件中的准确 `source`、`gateway` JSON 部署路径，同样进入输出 unit                                                                   |
+| `sandboxNetworkNamespaceSource` | `/run/netns/` 下包含唯一 `${SANDBOX_ID}`（64位十六进制）或 `${NETWORK_NAMESPACE_ID}`（UUID）的组件模板，不接受调用者模式                                 |
+| `rootfsMounts`                  | 准确的 `worker`、`sandbox` 数组，目前各一个外层 `overlay` mount，包含 `type`、`source`、完整 `options` 及 lowerdir 数据；与内层 OCI 挂载分开             |
+| `oldRootPath`                   | `/qwen-k2-disconnected/shim` 下准确测量的旧根名字，不提供全局 unmount 回退                                                                               |
+| `hugepageSizes`                 | 最多128个实际且不同的大小，如 `2MB`、`1GB`，只用于原 leaf 的只读规则                                                                                     |
+
+两份服务配置必须准确包含 Go 入口消费的字段。配置及 TLS 路径留在 `/etc/qwen-k2` 直接子文件，声明的私钥路径不能与其他角色或公开输入别名。宿主程序路径不能进入角色文件、journal、socket、kubelet 数据、proc/sys/dev、临时或 worker 可写根，防止程序身份字段形成第二条密钥/数据读取路径；实际 inode/密钥字节隔离仍需安装资格化。journal 根及 runtime socket 固定；frontend/backend socket basename 可在既有私有目录内变化。gateway URL 必须指向实际 IP listener；DNS 及未指定监听地址不在此离线支持范围。完整已保存 Runtime command/image、worker mount root 必须与契约及镜像一致，可写根不能覆盖受保护目录或镜像文件。
+
+输出包含单一 `qwen-k2-profiles` 源码、两份调整后的 unit、原服务/目标/Runtime/契约字节，以及绑定所有输出和生成器的 `profile-candidate.json`。不接受权限数组、调用者 AARE 或 include。完整 mount data 保留在原契约，规则只生成 AppArmor 可表达的类型、flags、source 和 destination；首个支持范围拒绝未知挂载选项、idmapped mount、相对 bind source 和宽泛设备许可。
+
+挂载规则区分外层 snapshot 与内层 OCI mount，并拆分初挂、propagation、bind remount、切根后的只读 finalize 及 masked paths。只读 remount 仅覆盖支持的继承安全 flags 的有限组合。镜像父链接先解析，再生成 mount/boot 路径；新 mountpoint 的父目录可尚未存在于镜像，普通镜像目录解析仍要求父项存在，解析结果超出 literal path 子集则拒绝。规则不能证明 source 类型、继承的 VFS flags、namespace 归属或实际 disconnected 名字，仍需已审目标和原生验收。source 仍不能写 cgroup controller；shim 新增 root-controller/statistics 权限只读，正常状态临时文件限定在原 CID 状态目录。
+
+此阶段不会运行 parser、加载或锁定策略、执行镜像或安装服务。清单记录仍待验证的语义边界，包括数字 proc 的仅自身修改检查、SDK parent/child OOM 关系、disconnected 对象命名及外部宿主策略/CSI 隔离；这些依赖实际内核和固定可信实现，策略源码及摘要不能证明。`workerPolicySha256` 最终必须使用实际 packed bundle hash；编译后以最终配置重新生成候选，并确认策略源码不变，临时摘要不能成为安装证据。真实正常生命周期、完整 actor 排除及最终物理释放权限仍待完成。
+
+## 显式策略编译阶段
+
+`compile-profiles.py` 消费已审 `profile-candidate.json` 及其中每份 pinned 文件。仅接受生成器的平铺、有序五角色布局，不接受 ambient include、alias、ABI 选择或嵌套 profile；布局检查不是通用策略 parser 或权限审查。提供准确目标 parser ELF 及目标 feature 字节：
+
+```sh
+python3 deploy/k2-evidence/compile-profiles.py \
+  --candidate /absolute/output/new-profile-candidate \
+  --profile-candidate-sha256 REVIEWED_PROFILE_CANDIDATE_SHA256 \
+  --parser /absolute/reviewed/apparmor_parser \
+  --parser-sha256 REVIEWED_PARSER_SHA256 \
+  --features /absolute/reviewed/kernel-features \
+  --features-sha256 REVIEWED_FEATURES_SHA256 \
+  --output /absolute/output/new-policy-compilation
+```
+
+工具将准确 parser/source/features 复制到新的私有目录，使用显式空 parser 配置及两份显式 features 参数，关闭 kernel load 和 cache，记录实际 argv；未强制规则警告按错误处理。失败或超时保留 attempt、stderr 和部分输出，成功输出受 source reader 的8 MiB上限约束并记录长度及摘要。Parser 依赖、目标 feature 正确性及工具链来源仍需独立资格化；编译不会加载或锁定策略，也不能认证语义或安装。当前普通测试仅执行准备、布局拒绝和 argv 构造，并阻止 parser 执行；本候选未运行任何真实或模拟 parser。

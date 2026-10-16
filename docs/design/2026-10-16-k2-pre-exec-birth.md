@@ -118,6 +118,33 @@ the installation authority required below.
 
 ## Source and release dependency
 
+The offline profile stage consumes the exact version-2 artifact manifest, both
+catalogues and shim configuration, plus reviewed target facts, the original
+private Runtime request and both actual service configurations. It generates
+one five-profile source and service units whose argv names the same configuration
+paths. The generator owns all permission syntax; caller rules, includes and
+AppArmor patterns are not accepted. Configuration/key paths must stay outside
+writable input, journal, socket and worker roots. Different role keys must not
+alias. Host peer hashes must agree with the actual source/gateway configuration.
+
+Policy source remains a candidate. AppArmor can constrain mount type, flags,
+source and destination, but it cannot compare arbitrary mount data, device
+numbers or DBus message bodies. The complete original contract remains pinned
+for the trusted creator/consumer to compare. Numeric proc names also require
+the actual kernel's self-only attribute-write semantics; UID ownership does
+not establish process ownership. SDK child OOM adjustment and disconnected
+namespace/root naming require explicit installation qualification. Generating
+five named profiles does not supply the reciprocal profiles of existing host
+actors or qualify an installation.
+
+Outer snapshot mount inputs are separate from inner OCI mounts. Rules split
+normal mount stages and preserve the original data in the reviewed target and
+contract. Actual source types, VFS flags and disconnected aliases still require
+native qualification. The following compilation stage consumes the full pinned
+candidate, uses exact parser/features with an empty configuration and no kernel
+load/cache, and saves failed attempts. Its ordinary tests only prepare data and
+inspect argv; they never execute a parser. Neither stage grants release.
+
 The current source/6 format preserves paired sandbox/worker births, actual image
 and snapshot ancestry, raw consumed inputs, created-process custody and the
 explicit publication/stop/unpublish dependencies. Update the Go producer and

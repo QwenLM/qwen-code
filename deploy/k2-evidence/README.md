@@ -174,3 +174,66 @@ Both image layouts must contain the exact selected OCI manifest, configuration a
 `shim.json` is the candidate for `/etc/qwen-k2/shim.json`; `runtime-handler.toml` is a fragment for the reviewed containerd CRI runtime configuration, with explicit `runtime_path` and `io.containerd.qwen-k2.v1` runtime type. The existing RuntimeClass name/handler remains `qwen-k2-runc-v1`. The source configuration additionally requires the generated `sandboxImageSha256`. The tmpfiles fragment supplies the fixed private directories. None of these files is installed or applied by this tool.
 
 Before installation, qualify the actual daemon's handler/bootstrap compatibility, private ext4 consumed-input mount, immutable installed files and ancestors, initial namespaces, complete loaded/locked AppArmor bundle and actor/admission boundary. The current service units and historical profiles have not inherited this changed candidate's qualification. The runtime directory must remain writable for its normal PID/log/rootfs/cleanup operations. Do not make the entire consumption bundle immutable. Use `node-config` with the exact reviewed source/shim configurations to produce the mandatory Java birth inputs; successful parsing remains distinct from installation qualification and physical release. See the [birth design](../../docs/design/2026-10-16-k2-pre-exec-birth.md).
+
+## Offline five-role profile candidate
+
+Continue from that exact artifact directory using `render-profiles.py`. This stage remeasures both original image layouts and compares the complete catalogue bytes with the version-2 manifest. It also checks the original contract and fixed shim configuration. It reads the actual source/gateway JSON files without opening their referenced keys, uses their literal paths and sockets in the rules, and emits service units whose argv uses those same deployed configuration paths.
+
+```sh
+python3 deploy/k2-evidence/render-profiles.py \
+  --candidate /absolute/output/new-pre-exec-candidate \
+  --artifact-manifest-sha256 REVIEWED_ARTIFACT_MANIFEST_SHA256 \
+  --target /absolute/reviewed/profile-target.json \
+  --target-sha256 REVIEWED_TARGET_SHA256 \
+  --runtime /absolute/reviewed/private-runtime.json \
+  --runtime-sha256 REVIEWED_RUNTIME_SHA256 \
+  --source-config /absolute/reviewed/source.json \
+  --source-config-sha256 REVIEWED_SOURCE_CONFIG_SHA256 \
+  --gateway-config /absolute/reviewed/gateway.json \
+  --gateway-config-sha256 REVIEWED_GATEWAY_CONFIG_SHA256 \
+  --worker-layout /absolute/reviewed/worker-oci \
+  --sandbox-layout /absolute/reviewed/sandbox-oci \
+  --output /absolute/output/new-profile-candidate
+```
+
+The closed `qwen-k2-profile-target/2` object requires the following fields. These are reviewed deployment inputs, not observations or an installation certificate.
+
+| Field                           | Supported input                                                                                                                                                                                      |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `format`, `architecture`        | Exact version above; `amd64` or `arm64`, agreeing with both images and all three host artifacts                                                                                                      |
+| `hostExecutables`               | Exact `runtime`, `kubelet`, `registrar`, `plugin`, `systemd` objects, each with literal `path`, `sha256` and a distinct confined `label`; the four peer digests must equal the service configuration |
+| `snapshotRoot`                  | `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots`                                                                                                                               |
+| `podSlicePrefix`                | The actual systemd kubepods Pod-slice prefix, optionally in the burstable or besteffort hierarchy                                                                                                    |
+| `apparmorExportRoot`            | The specific measured exporter path below `/qwen-k2-disconnected/source`; the generator owns its read-only leaf patterns                                                                             |
+| `systemBus`                     | Closed `socket`, `privateSocket`, `label`; the system bus socket and `/run/systemd/private` with an actual confined bus label                                                                        |
+| `volumeSerialPath`              | The actual final `/sys/devices/.../serial` object                                                                                                                                                    |
+| `roleConfigPaths`               | Exact `source` and `gateway` deployed JSON paths directly beneath `/etc/qwen-k2`; these also enter the emitted units                                                                                 |
+| `sandboxNetworkNamespaceSource` | A `/run/netns/` component template containing exactly one `${SANDBOX_ID}` (64 hex) or `${NETWORK_NAMESPACE_ID}` (UUID), without caller patterns                                                      |
+| `rootfsMounts`                  | Exact `worker` and `sandbox` arrays, currently one outer `overlay` mount each with `type`, `source`, complete `options` including lowerdir data; these are separate from inner OCI mounts            |
+| `oldRootPath`                   | The specific measured old-root name below `/qwen-k2-disconnected/shim`; no global unmount fallback                                                                                                   |
+| `hugepageSizes`                 | Up to 128 actual unique sizes such as `2MB` or `1GB`, used only for same-leaf read rules                                                                                                             |
+
+Both service configurations must contain exactly the fields consumed by the Go entry point. Configuration and TLS paths stay directly beneath `/etc/qwen-k2`; declared private-key paths cannot alias another role or public input. Host executable paths cannot enter role files, journals, sockets, kubelet data, proc/sys/dev, temporary or worker writable roots. This prevents executable-identity inputs from introducing a second key/data read route; actual inode/key-byte isolation still requires installation qualification. The journal root and runtime socket remain fixed; frontend and backend socket basenames may differ within the existing private directories. The gateway URL must name its concrete IP listener; DNS and unspecified listener addresses are outside this offline lane. The full persisted Runtime command/image and worker mount root must agree with the creation contract and image. Writable worker roots cannot overlap protected roots or image files.
+
+The output contains one `qwen-k2-profiles` source, the two adjusted units, original service/target/runtime/contract bytes and a `profile-candidate.json` manifest binding every output and generator. It accepts no permission arrays, caller AARE or includes. It preserves mount data in the original contract while generating only the type/flags/source/destination constraints AppArmor can express. The first lane refuses unknown mount options, idmapped mounts, relative bind sources and broad device grants.
+
+Mount rules distinguish outer snapshot mounts from inner OCI mounts and split initial mounting, propagation, bind remount, post-pivot read-only finalization and masked paths. Read-only remounts admit only the finite combinations of the supported retained security flags. Image parent symlinks are resolved before rendering mount/boot paths; new mountpoint directories may be absent in the image, while normal image catalogue resolution still requires existing parents. Resolved names outside the literal-path subset refuse. These rules do not establish mount source types, inherited VFS flags, namespace membership or actual disconnected names; those require the reviewed target and native acceptance. The source remains unable to write cgroup controllers. The shim's root-controller/statistics additions are read-only, and its normal state temporary files stay inside the original CID state directory.
+
+This stage never runs a parser, loads or locks policy, executes an image or installs a service. Its manifest records the remaining semantic boundaries, including numeric proc self-only checks, the SDK's parent/child OOM relationship, disconnected object naming and external host profiles/CSI isolation. Those depend on the actual kernel and pinned trusted implementation. Profile source and its hashes cannot establish them. `workerPolicySha256` must eventually contain the actual packed bundle hash: after compilation, supply the final configuration and regenerate this candidate, confirming the profile source is unchanged. No provisional hash is installation evidence. Actual normal lifecycle, complete actor exclusion and final physical-release authority remain pending.
+
+## Explicit policy compilation stage
+
+`compile-profiles.py` consumes the reviewed `profile-candidate.json` and every pinned candidate file. It accepts only the generated flat, ordered five-role layout, with no ambient includes, aliases, ABI selection or nested profiles. This layout check is not a general policy parser or permission audit. Supply the exact target parser ELF and target feature bytes:
+
+```sh
+python3 deploy/k2-evidence/compile-profiles.py \
+  --candidate /absolute/output/new-profile-candidate \
+  --profile-candidate-sha256 REVIEWED_PROFILE_CANDIDATE_SHA256 \
+  --parser /absolute/reviewed/apparmor_parser \
+  --parser-sha256 REVIEWED_PARSER_SHA256 \
+  --features /absolute/reviewed/kernel-features \
+  --features-sha256 REVIEWED_FEATURES_SHA256 \
+  --output /absolute/output/new-policy-compilation
+```
+
+The compiler copies the exact parser/source/features into a private new directory, uses an empty explicit parser configuration and both explicit feature arguments, disables kernel loading and caches, and records the actual argv. Warnings about unenforced rules are errors. The attempt, stderr and partial output survive failure or timeout; successful output is bounded to the source reader's 8 MiB limit and gets its own byte count/hash. Parser dependencies, target feature correctness and toolchain provenance still require independent qualification. Compilation does not load or lock the policy and cannot certify its semantics or installation. Current ordinary tests exercise only preparation, layout rejection and argv construction, with parser execution blocked; no real or fake parser has been run for this candidate.

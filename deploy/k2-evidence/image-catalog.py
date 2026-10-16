@@ -57,7 +57,7 @@ def link_parts(target):
     return target.split("/")
 
 
-def resolve(entries, name):
+def resolve(entries, name, allow_missing_parents=False):
     pending, resolved, links = name.split("/"), [], 0
     while pending:
         part, pending = pending[0], pending[1:]
@@ -79,7 +79,7 @@ def resolve(entries, name):
                 resolved = []
             pending = link_parts(target) + pending
         else:
-            if pending and (item is None or item["kind"] != "directory"):
+            if pending and (item is None and not allow_missing_parents or item is not None and item["kind"] != "directory"):
                 raise ValueError("image symlink traverses a missing or non-directory parent")
             resolved.append(part)
     return "/" + "/".join(resolved)
