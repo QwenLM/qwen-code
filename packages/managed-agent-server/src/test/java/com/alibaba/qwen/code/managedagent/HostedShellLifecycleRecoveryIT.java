@@ -646,7 +646,7 @@ class HostedShellLifecycleRecoveryIT {
             } finally {
                 Path evidence = Path.of("target/l4-shell-lifecycle", cut);
                 Files.createDirectories(evidence);
-                // Walk, not list: the harness daemon log sits under QWEN_HOME/debug/.
+                // Walk, not list: the daemon log sits under runtime/debug/daemon/.
                 try (var files = Files.walk(root)) {
                     for (Path file : files.filter(Files::isRegularFile).filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList()) {
                         Path target = evidence.resolve(root.relativize(file).toString());
