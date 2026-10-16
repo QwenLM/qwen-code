@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
@@ -218,6 +219,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     false, toolProfile(session), false, false,
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
+                .withMcpServers(mcpServers(session))
+                .withHookCatalog(hookCatalog(session))
                     .withChildWorkspaces(childWorkspaces)
                     .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
@@ -707,6 +710,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         false, false,
                         WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                         .withAgentDefinition(agentDefinition(session, false))
+                        .withMcpServers(mcpServers(session))
+                        .withHookCatalog(hookCatalog(session))
                         .withChildWorkspaces(childWorkspaces)
                         .withStoppedMessages());
         if (session.workspace() != null && !actions.approvalMode(tenantId,
@@ -936,6 +941,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (store != null) {
                 builder.managedSessionStore(store);
             }
+            List<Map<String, Object>> mcp = mcpServers(session);
+            if (mcp != null) {
+                builder.mcpServers(mcp);
+            }
+            Map<String, Object> hooks = hookCatalog(session);
+            if (hooks != null) {
+                builder.hookCatalog(hooks);
+            }
             Map<String, Object> definition = agentDefinition(session, true);
             if (definition != null) {
                 builder.agentDefinition(definition);
@@ -980,6 +993,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 driveRuntimeRecovery, cancellationTakeover,
                 WorkspaceToolProfiles.isPublicShell(profile))
                 .withAgentDefinition(agentDefinition(session, false))
+                .withMcpServers(mcpServers(session))
+                .withHookCatalog(hookCatalog(session))
                 .withChildWorkspaces(childWorkspaces));
     }
 
@@ -1177,7 +1192,34 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     "kind", ref.kind(), "schemaVersion", ref.schemaVersion(),
                     "byteLength", ref.byteLength(), "digest", ref.digest()));
         }
+        List<Map<String, Object>> skills = AgentDefinitionExtensions.skills(
+                content.get("skills"), session.workspace() != null);
+        if (!skills.isEmpty()) {
+            String workspace = session.workspace().getWorkspaceId();
+            var ref = resources.publishAgentSkills(session.tenantId(), workspace,
+                    session.sessionId(), skills);
+            pin.put("skillsRef", Map.of("resourceId", ref.resourceId(),
+                    "kind", ref.kind(), "schemaVersion", ref.schemaVersion(),
+                    "byteLength", ref.byteLength(), "digest", ref.digest()));
+        }
         return pin;
+    }
+
+    private List<Map<String, Object>> mcpServers(SessionRecord session) {
+        if (session.agentDefinitionDigest() == null || definitions == null) {
+            return null;
+        }
+        List<Map<String, Object>> pins = AgentDefinitionExtensions.mcpServers(
+                definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile());
+        return pins.isEmpty() ? null : pins;
+    }
+
+    private Map<String, Object> hookCatalog(SessionRecord session) {
+        if (session.agentDefinitionDigest() == null || definitions == null) {
+            return null;
+        }
+        return AgentDefinitionExtensions.hookCatalog(
+                definitions.pinnedContent(session).get("hook_catalog"), session.workspace() != null);
     }
 
     private ManagedSessionStoreConnection managedSessionStore(

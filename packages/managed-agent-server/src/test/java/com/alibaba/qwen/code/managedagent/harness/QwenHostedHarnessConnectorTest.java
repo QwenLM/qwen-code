@@ -16,6 +16,9 @@ import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -2670,6 +2673,50 @@ class QwenHostedHarnessConnectorTest {
                 () -> connector.createOrLoad("tenant-a", SESSION_ID, false))
                 .isSameAs(failure);
         verify(client, never()).loadSession(any());
+    }
+
+    @Test
+    void forwardsPinnedExtensionsAndPublishesSkillsOnlyOnCreate() {
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID,
+                "agent_00112233445566778899aabbccddeeff", "2", null, "ACTIVE",
+                null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "workspace-a", 1, "storage", ".", "config", 1),
+                "default", "hosted-workspace-mcp/1", "a".repeat(64));
+        List<Map<String, Object>> skills = List.of(Map.of("name", "review", "description", "Review", "body", "Read the diff."));
+        ManagedAgentDefinitionStore definitions = mock(ManagedAgentDefinitionStore.class);
+        when(definitions.pinnedContent(session)).thenReturn(Map.of("skills", skills,
+                "mcp_servers", List.of(Map.of("server_id", "docs", "server_revision", 1, "definition_digest", "b".repeat(64))),
+                "hook_catalog", Map.of("catalog_id", "review", "catalog_revision", 2, "definition_digest", "c".repeat(64))));
+        ManagedSessionStore resources = mock(ManagedSessionStore.class);
+        when(resources.publishAgentSkills("tenant-a", "workspace-a", SESSION_ID, skills))
+                .thenReturn(new ToolResultResourceRef("skills", "managed-agent-skills", 1, 100, "d".repeat(64)));
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties(), sessions(),
+                mock(WorkspaceExecutionStore.class), actions, definitions, resources);
+        ReflectionTestUtils.setField(connector, "client", client);
+        ReflectionTestUtils.invokeMethod(connector, "create", session, false);
+        ReflectionTestUtils.invokeMethod(connector, "load", session, false);
+        ArgumentCaptor<CreateHarnessSession> creates = ArgumentCaptor.forClass(CreateHarnessSession.class);
+        verify(client).createSession(creates.capture());
+        ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(loads.capture());
+        Map<String, Object> created = ReflectionTestUtils.invokeMethod(creates.getValue(), "toJson");
+        Map<String, Object> loaded = ReflectionTestUtils.invokeMethod(loads.getValue(), "toJson");
+        Map<String, Object> identity = Map.of("agentId", session.agentId(), "revision", "2", "digest", "a".repeat(64));
+        assertThat(loaded).containsEntry("agentDefinition", identity);
+        assertThat(created).containsEntry("mcpServers", List.of(Map.of("serverId", "docs", "serverRevision", 1L,
+                "definitionDigest", "b".repeat(64)))).containsEntry("hookCatalog", Map.of("catalogId", "review",
+                        "catalogRevision", 2L, "definitionDigest", "c".repeat(64)));
+        assertThat(loaded).containsEntry("mcpServers", created.get("mcpServers"))
+                .containsEntry("hookCatalog", created.get("hookCatalog"));
+        assertThat(new ObjectMapper().valueToTree(created).at("/agentDefinition/skillsRef/kind").asText())
+                .isEqualTo("managed-agent-skills");
+        verify(resources, times(1)).publishAgentSkills("tenant-a", "workspace-a", SESSION_ID, skills);
     }
 
     private static ManagedAgentProperties properties() {
