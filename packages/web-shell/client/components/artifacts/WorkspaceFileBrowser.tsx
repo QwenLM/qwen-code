@@ -1,3 +1,4 @@
+import { formatFileName } from './file-name-display';
 import { safeDisplayText } from '../../hooks/useAtMentionSources';
 import { usePanelRef } from 'react-resizable-panels';
 import { FileTree, type ContextMenuOpenContext } from '@pierre/trees';
@@ -122,6 +123,8 @@ export function WorkspaceFileBrowser({
   const treePanelRef = usePanelRef();
   const contentPanelRef = usePanelRef();
   const hostRef = useRef<HTMLDivElement>(null);
+  const filterRef = useRef<HTMLInputElement>(null);
+  const restoreFilterFocusRef = useRef(false);
   const treeLabelRef = useRef(t('files.title'));
   treeLabelRef.current = t('files.title');
   const treeRef = useRef<FileTree | undefined>(undefined);
@@ -164,13 +167,22 @@ export function WorkspaceFileBrowser({
   const closingMenuRef = useRef(false);
 
   useEffect(() => {
-    if (!hasPreview) return undefined;
     // Wait for the group to register the nonzero preview constraints.
-    const frame = requestAnimationFrame(() =>
-      contentPanelRef.current?.resize('70%'),
-    );
+    const frame = requestAnimationFrame(() => {
+      if (hasPreview) contentPanelRef.current?.resize('70%');
+      else treePanelRef.current?.resize('100%');
+    });
     return () => cancelAnimationFrame(frame);
-  }, [hasPreview, contentPanelRef]);
+  }, [hasPreview, contentPanelRef, treePanelRef]);
+
+  useEffect(() => {
+    if (hasPreview || !treeVisible || !restoreFilterFocusRef.current) return;
+    restoreFilterFocusRef.current = false;
+    const frame = requestAnimationFrame(() => {
+      filterRef.current?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [hasPreview, treeVisible]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -196,6 +208,7 @@ export function WorkspaceFileBrowser({
       initialExpansion: 'closed',
       flattenEmptyDirectories: false,
       icons: 'complete',
+      formatItemName: formatFileName,
       unsafeCSS: `
         [data-file-tree-virtualized-scroll] { overflow: auto; }
         [data-file-tree-virtualized-list] {
@@ -207,6 +220,7 @@ export function WorkspaceFileBrowser({
           flex-shrink: 0;
         }
         [data-item-section="spacing"] { flex-shrink: 0; }
+        [data-truncate-content] { white-space: pre; }
       `,
       // The host supplies the visible filter instead of Pierre's search input.
       search: false,
@@ -644,7 +658,7 @@ export function WorkspaceFileBrowser({
     path
       ? `${workspaceCwd.replace(separator === '\\' ? /[\\/]+$/ : /\/+$/, '')}${separator}${path.replaceAll('/', separator)}`
       : workspaceCwd;
-  const workspaceName = safeDisplayText(
+  const workspaceName = formatFileName(
     workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1) ?? workspaceCwd,
   );
   const absoluteMenuPath = absolutePath(menu?.path ?? '');
@@ -689,7 +703,7 @@ export function WorkspaceFileBrowser({
           </DropdownMenuTrigger>
           <DropdownMenuContent
             className="w-48"
-            aria-label={`${t('files.title')}: ${safeDisplayText(menu.path)}`}
+            aria-label={`${t('files.title')}: ${formatFileName(menu.path)}`}
             aria-labelledby={undefined}
             data-file-tree-context-menu-root="true"
             onCloseAutoFocus={(event) => {
@@ -961,10 +975,10 @@ export function WorkspaceFileBrowser({
       <header className={styles.toolbar}>
         <span
           className={styles.path}
-          title={safeDisplayText(absolutePath(selectedPath ?? ''))}
+          title={formatFileName(absolutePath(selectedPath ?? ''))}
         >
           {workspaceName}
-          {selectedPath && <> / {safeDisplayText(selectedPath)}</>}
+          {selectedPath && <> / {formatFileName(selectedPath)}</>}
         </span>
         {canPreview && (
           <Button
@@ -1021,6 +1035,22 @@ export function WorkspaceFileBrowser({
             aria-pressed={treeVisible}
           >
             <FolderIcon />
+          </Button>
+        )}
+        {hasPreview && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={t('files.closePreview')}
+            title={t('files.closePreview')}
+            onClick={() => {
+              restoreFilterFocusRef.current = true;
+              treeRef.current?.getItem(selectedPath)?.deselect();
+              treePanelRef.current?.expand();
+              setSelectedPath(undefined);
+            }}
+          >
+            <XIcon />
           </Button>
         )}
       </header>
@@ -1121,6 +1151,7 @@ export function WorkspaceFileBrowser({
             <div className={styles.search}>
               <SearchIcon aria-hidden />
               <Input
+                ref={filterRef}
                 data-workspace-file-filter
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
@@ -1195,7 +1226,7 @@ export function WorkspaceFileBrowser({
                   <div key={directory.path}>
                     <span>
                       {directory.path
-                        ? safeDisplayText(directory.path)
+                        ? formatFileName(directory.path)
                         : t('files.title')}
                       :{' '}
                     </span>

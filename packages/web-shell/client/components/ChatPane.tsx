@@ -258,6 +258,7 @@ export interface ChatPaneProps {
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
   /** Enable the app-scoped experimental Session Workflow presentation. */
   sessionWorkflowEnabled?: boolean;
+  showResponseTokensPerSecond?: boolean;
   planControlVisible?: boolean;
 }
 
@@ -298,6 +299,7 @@ export function ChatPane({
   voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
   voiceWorkspaces,
   sessionWorkflowEnabled = false,
+  showResponseTokensPerSecond = false,
   planControlVisible = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
@@ -1878,6 +1880,9 @@ export function ChatPane({
               token count + cancel hint, but no rotating "witty" loading
               phrase. */}
           <StreamingStatus
+            showResponseTokensPerSecond={
+              showResponseTokensPerSecond && !approvalActive
+            }
             startedAt={activeTurnStartedAt}
             showPhrase={false}
             hasActivePrompt={sessionHasActivePrompt}

@@ -89,7 +89,6 @@ import {
   InvalidWorkspaceRelativePathError,
   normalizeWorkspaceRelativePath,
 } from './managed-workspace-binding.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
   hostedRuntimeSessionId,
@@ -4124,7 +4123,7 @@ export class HostedWorkspaceToolTurn {
           invocationBindingId: request.isShell
             ? request.runtimeCallId
             : executionCallId,
-          capabilityVersion: WORKSPACE_CAPABILITY_DIGEST,
+          capabilityVersion: this.broker.capabilityDigest,
           policyVersion: 'preapproved-workspace-tools/1',
           mediaVersion: null,
           modelMessageId: messageId,
