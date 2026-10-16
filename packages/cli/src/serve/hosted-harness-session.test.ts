@@ -13330,6 +13330,121 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  // #13753 I3: what a prompt's tool turn declares, read from inside it.
+  async function declaredDuring(
+    server: Parameters<typeof supertest>[0],
+    clientId: string,
+  ): Promise<{ tools: string[]; isolation?: unknown }> {
+    let declared: { tools: string[]; isolation?: unknown } | undefined;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const tools = await toolTurn!.declarations(signal);
+      const agent = tools.find((tool) => tool.name === 'agent');
+      declared = {
+        tools: tools.map((tool) => tool.name!),
+        isolation: ((
+          agent?.parametersJsonSchema as {
+            properties?: Record<string, { enum?: unknown }>;
+          }
+        )?.properties ?? {})['isolation']?.enum,
+      };
+      return { text: 'ok', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: randomUUID() }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: randomUUID(),
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    expect(declared).toBeDefined();
+    return declared!;
+  }
+
+  // #13753 I3: `childSnapshots` describes the host like `childWorkspaces`,
+  // and counts only beside it.
+  it('advertises snapshot isolation only while a create or load restates it beside child Workspaces', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      childWorkspaces: true,
+      childSnapshots: true,
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    expect((await declaredDuring(server, clientId)).isolation).toEqual([
+      'worktree',
+      'snapshot',
+    ]);
+    for (const [flags, isolation] of [
+      [{ childWorkspaces: true }, ['worktree']],
+      [{ childSnapshots: true }, undefined],
+      [{ childWorkspaces: true, childSnapshots: 'true' }, ['worktree']],
+      [
+        { childWorkspaces: true, childSnapshots: true },
+        ['worktree', 'snapshot'],
+      ],
+    ] as const) {
+      const resident = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+        ...flags,
+      });
+      expect(resident.status).toBe(200);
+      expect((await declaredDuring(server, clientId)).isolation).toEqual(
+        isolation,
+      );
+    }
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  // The read profile is a saved profile: it is created, and its turns
+  // declare the two read tools and no Agent tool, whatever the host serves.
+  it('serves the read profile with its two read tools', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-read/1',
+      approvalMode: 'default',
+      childWorkspaces: true,
+      childSnapshots: true,
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    expect(await declaredDuring(server, clientId)).toEqual({
+      tools: ['read_file', 'glob'],
+      isolation: undefined,
+    });
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
   it.each(['completed', 'model-error', 'execution-error'])(
     'closes the Shell publisher after a %s turn',
     async (ending) => {
@@ -31048,6 +31163,80 @@ describe('Hosted Harness stored definitions', () => {
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'Skill loaded',
+    });
+  });
+
+  // #13753 I3: a snapshot child's read profile declares only read_file and
+  // glob, so its Session takes no skill catalog: no instruction names a
+  // skill tool that the profile would refuse, failing the Turn.
+  it('gives a read-profile Session no skill catalog from its agent definition', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const server = await app(true);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const skillsRef = await resources.publish(
+      'managed-agent-skills',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'published',
+            description: 'Published instructions',
+            body: 'ORIGINAL_SKILL_BODY',
+            base_directory: 'docs',
+          },
+        ]),
+      ),
+    );
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        agentDefinition: {
+          agentId: `agent_${'a'.repeat(32)}`,
+          revision: '1',
+          digest: 'b'.repeat(64),
+          skillsRef,
+        },
+        toolProfile: 'hosted-workspace-read/1',
+        childWorkspaces: true,
+        childSnapshots: true,
+      })
+      .expect(200);
+    state.model.mockImplementationOnce(async (input) => {
+      expect((input as { skills?: unknown }).skills).toBeUndefined();
+      expect(
+        (await input.toolTurn!.declarations(input.signal)).map(
+          (tool) => tool.name,
+        ),
+      ).toEqual(['read_file', 'glob']);
+      return { text: 'read only', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'Review the change' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', created.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    expect(state.model).toHaveBeenCalledOnce();
+    await expect(state.model.mock.results[0].value).resolves.toMatchObject({
+      text: 'read only',
     });
   });
 

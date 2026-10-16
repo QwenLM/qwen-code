@@ -197,6 +197,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         "Automation scan-delay, lease, late-tolerance and lookback must be positive durations.");
             }
         }
+        // Snapshot children (#13753 I3) are read-only child Workspaces: they
+        // need the capability itself. Their switch is separate so it can be
+        // turned on once every replica runs a relay that knows the mode.
+        if (runtimeBroker.isChildSnapshotsEnabled() && !runtimeBroker.isChildWorkspacesEnabled()) {
+            throw new IllegalStateException("Child snapshots require child Workspaces");
+        }
         // The child Workspace capability (#13753 I1) runs Git in this
         // control plane against an administrator mount, so it needs the
         // local-process Broker that mounts the storage here.
@@ -927,6 +933,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
         private boolean childWorkspacesEnabled;
+        private boolean childSnapshotsEnabled;
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
@@ -1096,6 +1103,20 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {
             this.childWorkspacesEnabled = childWorkspacesEnabled;
+        }
+
+        /**
+         * Whether hosted Sessions may launch read-only snapshot children
+         * (#13753 I3). A relay from before snapshots would create one as a
+         * shared writer, so this is turned on only after every control-plane
+         * replica runs this version.
+         */
+        public boolean isChildSnapshotsEnabled() {
+            return childSnapshotsEnabled;
+        }
+
+        public void setChildSnapshotsEnabled(boolean childSnapshotsEnabled) {
+            this.childSnapshotsEnabled = childSnapshotsEnabled;
         }
 
         public String getChildWorkspaceGit() {
