@@ -37,8 +37,7 @@ updates:
   - package-ecosystem: 'maven'
     directories:
       - '/packages/sdk-java/qwencode'
-      - '/packages/sdk-java/runtime-broker'
-      - '/packages/sdk-java/managed-agent-server'
+      - '/packages/managed-agent-server'
       - '/packages/sdk-java/client'
     schedule:
       interval: 'daily'
