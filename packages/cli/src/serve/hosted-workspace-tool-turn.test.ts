@@ -338,7 +338,9 @@ it('loads a published static Skill durably without Runtime execution or approval
     'assistant',
     'tool_result',
   ]);
-  expect(history[1].message?.parts).toEqual(responses);
+  expect(history[1].message?.parts).toEqual(
+    JSON.parse(JSON.stringify(responses)),
+  );
   expect(broker.acquire).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(broker.execute).not.toHaveBeenCalled();
