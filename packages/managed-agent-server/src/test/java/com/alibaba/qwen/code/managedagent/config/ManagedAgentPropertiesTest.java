@@ -745,6 +745,46 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void springBindsResidentMappingsAndRequiresTheExplicitResidentDeploymentShape() {
+        String prefix = "qwen.managed-agent.runtime-broker.";
+        String entry = prefix + "resident-workspaces[0].";
+        var values = new java.util.ArrayList<String>(List.of(
+                "qwen.managed-agent.harness.enabled=true", "qwen.managed-agent.harness.workspace-files-enabled=true",
+                "qwen.managed-agent.session-store.enabled=true", prefix + "enabled=true",
+                prefix + "provisioner=kubernetes-workspace", prefix + "isolation-class=workspace",
+                TRUSTED_KEY + "=false", prefix + "resident-kubernetes-api-url=https://cluster.example",
+                prefix + "resident-kubernetes-token-file=/reviewed/token", prefix + "resident-kubernetes-ca-file=/reviewed/ca",
+                entry + "workspace-id=workspace", entry + "workspace-generation=1",
+                entry + "image=worker@sha256:" + "a".repeat(64), entry + "command[0]=node", entry + "command[1]=/worker/cli.js"));
+        var registration = java.util.Map.ofEntries(java.util.Map.entry("tenant-id", "tenant"),
+                java.util.Map.entry("storage-id", "storage"), java.util.Map.entry("cluster-domain", "cluster"),
+                java.util.Map.entry("namespace", "resident"), java.util.Map.entry("pvc-name", "claim"),
+                java.util.Map.entry("pvc-uid", "pvc-uid"), java.util.Map.entry("pv-name", "volume"),
+                java.util.Map.entry("pv-uid", "pv-uid"), java.util.Map.entry("driver", "diskplugin.csi.alibabacloud.com"),
+                java.util.Map.entry("volume-handle", "handle"), java.util.Map.entry("backend-domain", "backend"),
+                java.util.Map.entry("disk-serial", "serial"), java.util.Map.entry("mount-root", "/workspace"),
+                java.util.Map.entry("revision", "1"));
+        registration.forEach((key, value) -> values.add(entry + "registration." + key + "=" + value));
+        java.util.Map.of("namespace-uid", "namespace", "policy-name", "policy", "policy-uid", "policy-uid",
+                "policy-generation", "1", "binding-name", "binding", "binding-uid", "binding-uid", "binding-generation", "1")
+                .forEach((key, value) -> values.add(entry + "protection." + key + "=" + value));
+        // Empty lists bind from YAML; a constructor receiving no artifacts must do the same.
+        values.add(entry + "artifacts=");
+        var context = new ApplicationContextRunner().withUserConfiguration(PropertiesConfiguration.class)
+                .withPropertyValues(values.toArray(String[]::new));
+        context.run(started -> {
+            assertThat(started).hasNotFailed();
+            var selected = started.getBean(ManagedAgentProperties.class).getRuntimeBroker().getResidentWorkspaces().getFirst();
+            assertThat(selected.workspaceId()).isEqualTo("workspace");
+            assertThat(selected.registration().storageId()).isEqualTo("storage");
+            assertThat(selected.command()).containsExactly("node", "/worker/cli.js");
+        });
+        context.withPropertyValues(TRUSTED_KEY + "=true").run(started -> assertThat(started).hasFailed());
+        context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-enabled=true")
+                .run(started -> assertThat(started).hasFailed());
+    }
+
+    @Test
     void shellAdmissionIsDefaultOffAndRequiresAnAskingModeAndFiles() throws Exception {
         String key = "qwen.managed-agent.harness.workspace-shell-enabled";
         assertThat(applicationYmlValues()).containsEntry(key,

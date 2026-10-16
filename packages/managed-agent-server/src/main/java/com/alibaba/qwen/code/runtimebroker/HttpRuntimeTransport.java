@@ -380,9 +380,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
                 || !request.isManagedContext()
                 || !request.getScope().equals(session.getScope())
-                || !session.getHarnessSessionId().equals(request.getIsolationKey())
-                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
-                        session.getScope().getCapabilityDigest())
+                || !(ResidentWorkspaceProfile.selects(request)
+                        || session.getHarnessSessionId().equals(request.getIsolationKey())
+                            && WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(session.getScope().getCapabilityDigest()))
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
             throw new IllegalArgumentException("Workspace activation identity is invalid");
@@ -393,7 +393,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         body.put("sessionId", session.getRuntimeSessionId());
         body.put("contextDigest", binding.getContextDigest());
         body.put("contextConfigRef", binding.getContextConfigRef());
-        body.put("profile", WorkspaceExecutionProfile.PROFILE);
+        body.put("profile", ResidentWorkspaceProfile.selects(request)
+                ? ResidentWorkspaceProfile.PROFILE : WorkspaceExecutionProfile.PROFILE);
         Map<String, Object> expected = new LinkedHashMap<>(body);
         expected.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
         expected.put("runtimeIncarnation", seed.getGatewayIncarnation());

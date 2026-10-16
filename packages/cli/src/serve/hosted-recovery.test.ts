@@ -18,6 +18,7 @@ import {
   hostedRuntimeSessionId,
   HostedWorkspaceBroker,
 } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import { HostedApprovalWaiters } from './hosted-tool-approval.js';
 import {
@@ -453,6 +454,11 @@ it.each([
     const f = await fixture();
     try {
       let runtime = f.broker.runtime;
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = runtime;
