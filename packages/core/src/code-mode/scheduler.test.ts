@@ -544,6 +544,43 @@ describe('CodeModeOnly scheduler dispatch', () => {
     expect(fnResponse()?.response?.['error']).toContain('denied');
   }, 10_000);
 
+  it('applies the AUTO destructive guard to nested shell calls', async () => {
+    const execute = vi.fn();
+    const { run, call, fnResponse } = setup(
+      [
+        new MockTool({
+          name: ToolNames.SHELL,
+          kind: Kind.Execute,
+          params: { type: 'object' },
+          getDefaultPermission: async () => 'ask',
+          execute,
+        }),
+      ],
+      {
+        params: { approvalMode: ApprovalMode.AUTO },
+        // AUTO reads the chat history before the guard; there is no chat here.
+        configure: (config) =>
+          vi
+            .spyOn(config, 'getLlmClient')
+            .mockReturnValue(
+              undefined as unknown as ReturnType<Config['getLlmClient']>,
+            ),
+      },
+    );
+
+    await run(
+      'exec-guard',
+      'prompt-guard',
+      "await tools.run_shell_command({ command: 'git -C /tmp reset --hard' })",
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(call().status).toBe('error');
+    expect(fnResponse()?.response?.['error']).toContain(
+      'Blocked destructive git command: "git reset --hard".',
+    );
+  }, 30_000);
+
   it('routes nested permission approval through the visible scheduler', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'approved',

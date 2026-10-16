@@ -5725,6 +5725,253 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  describe('AUTO destructive guard', () => {
+    /** Permission manager whose rules resolve every call to `decision`. */
+    function rulesResolving(decision: PermissionDecision, denyRule?: string) {
+      return {
+        isToolEnabled: async () => true,
+        hasRelevantRules: () => true,
+        evaluate: async () => decision,
+        hasMatchingAskRule: () => decision === 'ask',
+        findMatchingDenyRule: () => denyRule,
+      };
+    }
+
+    /** Shell tool confirming `command` through `onConfirm`. */
+    function shellTool(command: string, onConfirm: Mock, execute: Mock) {
+      return askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Run command', command, 'git', onConfirm),
+          ),
+        execute,
+      });
+    }
+
+    function permissionRequests(messageBus: { request: Mock }) {
+      return messageBus.request.mock.calls.filter(
+        ([request]) =>
+          (request as { eventName: string }).eventName === 'PermissionRequest',
+      );
+    }
+
+    it('waits for a human on an ask-ruled destructive call even when a PermissionRequest hook allows', async () => {
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const messageBus = permissionRequestHookBus({ behavior: 'allow' });
+      const harness = autoScheduler(
+        shellTool('git reset --hard', onConfirm, execute),
+        {
+          messageBus,
+          disableHooks: false,
+          permissionManager: rulesResolving('ask'),
+        },
+      );
+
+      await harness.scheduler.schedule(
+        shellRequest('ask-destructive', 'git reset --hard'),
+        new AbortController().signal,
+      );
+
+      const waiting = await waitForApproval(harness.onToolCallsUpdate);
+      expect(waiting.confirmationDetails).toMatchObject({
+        hideAlwaysAllow: true,
+      });
+      expect(permissionRequests(messageBus)).toHaveLength(1);
+      expect(runSideQueryMock).not.toHaveBeenCalled();
+      expect(onConfirm).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      await vi.waitFor(() =>
+        expect(harness.onAllToolCallsComplete).toHaveBeenCalled(),
+      );
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('runs nothing when the human declines an ask-ruled destructive call', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const harness = autoScheduler(
+        shellTool('git reset --hard', vi.fn(), execute),
+        { permissionManager: rulesResolving('ask') },
+      );
+
+      await harness.scheduler.schedule(
+        shellRequest('ask-destructive-cancel', 'git reset --hard'),
+        new AbortController().signal,
+      );
+      const waiting = await waitForApproval(harness.onToolCallsUpdate);
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.Cancel,
+      );
+
+      await vi.waitFor(() =>
+        expect(harness.onAllToolCallsComplete).toHaveBeenCalled(),
+      );
+      expectStatus(firstBatch(harness.onAllToolCallsComplete)[0], 'cancelled');
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('denies an ask-ruled destructive call in non-interactive STREAM_JSON instead of offering it to the host', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const harness = autoScheduler(
+        shellTool('git reset --hard', vi.fn(), execute),
+        {
+          isInteractive: false,
+          inputFormat: InputFormat.STREAM_JSON,
+          permissionManager: rulesResolving('ask'),
+        },
+      );
+
+      await scheduleAndSettle(
+        harness,
+        shellRequest('ask-destructive-stream-json', 'git reset --hard'),
+      );
+
+      const [denied] = firstBatch<CompletedToolCall>(
+        harness.onAllToolCallsComplete,
+      );
+      expect(denied.status).toBe('error');
+      expect(denied.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(
+        reportedCalls(harness.onToolCallsUpdate).map((c) => c.status),
+      ).not.toContain('awaiting_approval');
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('keeps an ordinary ask-ruled call answerable by a PermissionRequest hook', async () => {
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const harness = autoScheduler(
+        shellTool('git status', onConfirm, execute),
+        {
+          messageBus: permissionRequestHookBus({ behavior: 'allow' }),
+          disableHooks: false,
+          permissionManager: rulesResolving('ask'),
+        },
+      );
+
+      await scheduleAndSettle(
+        harness,
+        shellRequest('ask-ordinary', 'git status'),
+      );
+
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('lets a matching deny rule win over the ask rule', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const harness = autoScheduler(
+        shellTool('git reset --hard', vi.fn(), execute),
+        { permissionManager: rulesResolving('deny', 'Bash(git reset *)') },
+      );
+
+      await scheduleAndSettle(
+        harness,
+        shellRequest('deny-and-ask', 'git reset --hard'),
+      );
+
+      const [denied] = firstBatch<CompletedToolCall>(
+        harness.onAllToolCallsComplete,
+      );
+      expect(denied.status).toBe('error');
+      expect(denied.response.error?.message).toContain('Bash(git reset *)');
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('checks the command a PreToolUse hook rewrote, not the original', async () => {
+      runSideQueryMock.mockResolvedValue({ shouldBlock: false });
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const messageBus = hookBus(async (request) =>
+        hookResponse(
+          request.eventName,
+          request.eventName === 'PreToolUse'
+            ? {
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse',
+                  updatedInput: { command: 'git -C /repo reset --hard' },
+                },
+              }
+            : {},
+        ),
+      );
+      const harness = autoScheduler(shellTool('git status', vi.fn(), execute), {
+        messageBus,
+        disableHooks: false,
+      });
+
+      await scheduleAndSettle(
+        harness,
+        shellRequest('pre-tool-use-rewrite', 'git status'),
+      );
+
+      const [blocked] = firstBatch<CompletedToolCall>(
+        harness.onAllToolCallsComplete,
+      );
+      expect(blocked.status).toBe('error');
+      expect(blocked.response.error?.message).toContain(
+        'Blocked destructive git command: "git reset --hard".',
+      );
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('leaves an explicit allow rule ahead of the guard', async () => {
+      // The guard is an AUTO-mode (L5) layer: a user's allow rule still
+      // decides at L4 unless AUTO forces a review of that call.
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const harness = autoScheduler(
+        shellTool('git reset --hard', vi.fn(), execute),
+        { permissionManager: rulesResolving('allow') },
+      );
+
+      await scheduleAndSettle(
+        harness,
+        shellRequest('allow-rule', 'git reset --hard'),
+      );
+
+      expect(runSideQueryMock).not.toHaveBeenCalled();
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('lets printed text reach the classifier and run when it allows', async () => {
+      runSideQueryMock.mockResolvedValue({ shouldBlock: false });
+      const execute = vi.fn().mockResolvedValue(textResult('printed'));
+      const command = `printf '%s\\n' 'git reset --hard'`;
+      const harness = autoScheduler(shellTool(command, vi.fn(), execute));
+
+      await scheduleAndSettle(harness, shellRequest('print-example', command));
+
+      expect(runSideQueryMock).toHaveBeenCalled();
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('blocks git -C reset --hard before a classifier that would allow it', async () => {
+      runSideQueryMock.mockResolvedValue({ shouldBlock: false });
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const command = 'git -C /repo reset --hard';
+      const harness = autoScheduler(shellTool(command, vi.fn(), execute));
+
+      await scheduleAndSettle(harness, shellRequest('global-option', command));
+
+      const [blocked] = firstBatch<CompletedToolCall>(
+        harness.onAllToolCallsComplete,
+      );
+      expect(blocked.status).toBe('error');
+      expect(blocked.response.error?.message).toContain(
+        'Blocked destructive git command: "git reset --hard".',
+      );
+      expect(runSideQueryMock).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+    });
+  });
+
   /** Read-kind MockTools by name; each runs a mock or resolves a result. */
   function readToolMap(
     executes: Record<string, Mock | ToolResult>,
@@ -8056,10 +8303,13 @@ describe('CoreToolScheduler request queueing', () => {
       denialState?: TestDenialState;
       disableHooks?: boolean;
       failPermissionDeniedHook?: boolean;
+      command?: string;
+      classifyAllShell?: boolean;
     },
     signal = new AbortController().signal,
   ) {
     const cwd = '/repo';
+    const command = options?.command ?? PROTECTED_WRITE_COMMAND;
     let denialState = options?.denialState ?? blockedState(0);
     const setAutoModeDenialState = vi.fn((next: typeof denialState) => {
       denialState = next;
@@ -8093,7 +8343,9 @@ describe('CoreToolScheduler request queueing', () => {
       setAutoModeDenialState,
       getLlmClient: () => ({ getHistoryTail: () => [] }),
       getToolRegistry: () => toolRegistry,
-      getAutoModeSettings: () => ({}),
+      getAutoModeSettings: () => ({
+        classifyAllShell: options?.classifyAllShell === true,
+      }),
       getModel: () => 'test-model',
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -8107,7 +8359,7 @@ describe('CoreToolScheduler request queueing', () => {
     const request = toolRequest(
       'pending-protected-write',
       ToolNames.SHELL,
-      { command: PROTECTED_WRITE_COMMAND },
+      { command },
       'prompt-pending-protected-write',
     );
     const invocation = {
@@ -8128,7 +8380,7 @@ describe('CoreToolScheduler request queueing', () => {
         confirmationDetails: {
           type: 'exec',
           title: 'Confirm shell command',
-          command: PROTECTED_WRITE_COMMAND,
+          command,
           rootCommand: 'echo',
           onConfirm: vi.fn(),
         },
@@ -8165,6 +8417,19 @@ describe('CoreToolScheduler request queueing', () => {
     expect(runSideQueryMock).toHaveBeenCalled();
     expect(setAutoModeDenialState).toHaveBeenCalledWith(blockedState(0));
     expect(lastBatch(onToolCallsUpdate)[0]?.status).toBe('scheduled');
+  });
+
+  it('blocks a pending destructive call the sibling pass re-reviews, before the classifier', async () => {
+    runSideQueryMock.mockReset();
+    const { onToolCallsUpdate } = await autoApprovePendingProtectedWrite({
+      command: 'git -C /repo reset --hard',
+      classifyAllShell: true,
+    });
+
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+    const statuses = reportedCalls(onToolCallsUpdate).map((c) => c.status);
+    expect(statuses).toContain('error');
+    expect(statuses).not.toContain('scheduled');
   });
 
   it('fires PermissionDenied hooks for pending AUTO classifier blocks', async () => {

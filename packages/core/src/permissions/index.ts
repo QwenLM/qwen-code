@@ -52,7 +52,6 @@ export {
 export { MAX_TRANSCRIPT_MESSAGES } from './classifier-transcript.js';
 export {
   isDestructiveCommand,
-  extractLastUserPrompt,
   registerSessionCommit,
   clearSessionCommits,
   type DestructiveCommandResult,

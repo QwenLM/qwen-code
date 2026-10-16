@@ -4,217 +4,285 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   isDestructiveCommand,
-  userMentionsDiscard,
-  extractLastUserPrompt,
   registerSessionCommit,
   clearSessionCommits,
 } from './destructive-commands.js';
-import { modelText, userText } from '../test-utils/model-fixtures.js';
 
 beforeEach(() => {
   clearSessionCommits();
 });
 
-/** Asserts a block, and that the reason names `reasonPart` when given. */
-function expectBlocked(cmd: string, prompt: string, reasonPart?: string) {
-  const result = isDestructiveCommand(cmd, prompt);
-  expect(result).not.toBeNull();
-  expect(result!.blocked).toBe(true);
-  if (reasonPart !== undefined) expect(result!.reason).toContain(reasonPart);
+const UNVERIFIABLE = 'could not verify';
+
+async function reasonFor(command: string, cwd?: string) {
+  const result = await isDestructiveCommand(command, cwd);
+  if (result) expect(result.blocked).toBe(true);
+  return result?.reason ?? null;
 }
 
-function expectAllowed(commands: string[], prompt: string) {
-  for (const cmd of commands) {
-    expect(isDestructiveCommand(cmd, prompt)).toBeNull();
-  }
-}
-
-describe('userMentionsDiscard', () => {
-  it('returns true for English discard keywords', () => {
-    const prompts = [
-      'discard all local changes',
-      'throw away my changes',
-      'wipe the working tree',
-      'clean up the git state',
-      'reset everything',
-      'drop all changes',
-      'force reset the repo',
-      'start over',
-      'start fresh',
-      'clean slate',
-    ];
-    for (const prompt of prompts) {
-      expect(userMentionsDiscard(prompt)).toBe(true);
-    }
-  });
-
-  it('returns true for Chinese discard keywords', () => {
-    for (const prompt of ['丢弃所有修改', '清除工作区', '重置到初始状态']) {
-      expect(userMentionsDiscard(prompt)).toBe(true);
-    }
-  });
-
-  it('returns false for normal prompts', () => {
-    const prompts = [
-      'add a new feature',
-      'fix the bug in auth',
-      'commit the changes',
-      'create a new branch',
-      'run the tests',
-    ];
-    for (const prompt of prompts) {
-      expect(userMentionsDiscard(prompt)).toBe(false);
-    }
+describe('isDestructiveCommand — text that is not executed', () => {
+  it.each([
+    `printf '%s\\n' 'git reset --hard'`,
+    'printf ok # git reset --hard',
+    `echo 'git reset --hard'`,
+    'echo git reset --hard',
+    `grep -rn 'terraform destroy' docs`,
+    `rg 'git stash drop'`,
+    `git commit -m 'docs: explain git reset --hard'`,
+    `git log --grep 'git checkout -- .'`,
+    `cat <<'EOF' > notes.md\ngit reset --hard\nEOF`,
+    `NOTE='git clean -fd' && echo "$NOTE"`,
+    `[ "$x" = 'terraform destroy' ]`,
+  ])('allows %j', async (command) => {
+    expect(await reasonFor(command)).toBeNull();
   });
 });
 
-describe('extractLastUserPrompt', () => {
-  it('returns undefined for empty messages', () => {
-    expect(extractLastUserPrompt([])).toBeUndefined();
+describe('isDestructiveCommand — executed git and IaC operations', () => {
+  it.each<[string, string]>([
+    ['git reset --hard', 'git reset --hard'],
+    ['git reset --hard HEAD~1', 'git reset --hard'],
+    // Git accepts any unambiguous prefix of a long option.
+    ['git reset --har', 'git reset --hard'],
+    ['git -C /repo reset --hard', 'git reset --hard'],
+    ['git -C /a -C b -c core.pager=less reset --hard', 'git reset --hard'],
+    ['git -c advice.detachedHead=false reset --hard', 'git reset --hard'],
+    ['git --git-dir=/x/.git --work-tree=/x reset --hard', 'git reset --hard'],
+    ['git checkout -- .', 'git checkout -- .'],
+    ['git checkout .', 'git checkout -- .'],
+    ['git checkout HEAD -- ./', 'git checkout -- .'],
+    ['git checkout -q -- ../..', 'git checkout -- .'],
+    ['git clean -fd', 'git clean -f'],
+    ['git clean -d -f', 'git clean -f'],
+    ['git clean -xdf', 'git clean -f'],
+    ['git clean --force', 'git clean -f'],
+    ['git stash drop', 'git stash drop'],
+    ['git stash drop stash@{1}', 'git stash drop'],
+    ['/usr/bin/git reset --hard', 'git reset --hard'],
+    ['terraform destroy', 'terraform destroy'],
+    ['terraform -chdir=infra destroy -auto-approve', 'terraform destroy'],
+    ['pulumi -C infra destroy --yes', 'pulumi destroy'],
+    ['cdk --profile prod destroy MyStack', 'cdk destroy'],
+    ['npx cdk destroy', 'cdk destroy'],
+  ])('blocks %j as %s', async (command, label) => {
+    expect(await reasonFor(command)).toContain(`"${label}"`);
   });
 
-  it('extracts text from the last user message', () => {
-    const messages = [
-      userText('first message'),
-      modelText('model response'),
-      userText('second message'),
-    ];
-    expect(extractLastUserPrompt(messages)).toBe('second message');
+  it('names destructive git and infrastructure commands differently', async () => {
+    expect(await reasonFor('git stash drop')).toBe(
+      'Blocked destructive git command: "git stash drop".',
+    );
+    expect(await reasonFor('cdk destroy')).toBe(
+      'Blocked infrastructure destroy command: "cdk destroy".',
+    );
   });
-
-  it('skips model and function messages', () => {
-    const messages = [
-      modelText('model only'),
-      userText('user text'),
-      modelText('another model'),
-    ];
-    expect(extractLastUserPrompt(messages)).toBe('user text');
-  });
-
-  it('returns undefined when no user messages exist', () => {
-    expect(extractLastUserPrompt([modelText('model only')])).toBeUndefined();
-  });
-});
-
-describe('isDestructiveCommand — git patterns', () => {
-  it.each<[string, string, string?]>([
-    ['git reset --hard', 'fix the bug', 'git reset --hard'],
-    ['git checkout -- .', 'fix the bug'],
-    ['git clean -fd', 'remove files'],
-    ['git clean -f', 'remove files'],
-    ['git clean -fdx', 'remove all'],
-    ['git stash drop', 'remove stash'],
-  ])('blocks %s', expectBlocked);
 
   it.each([
-    [
-      'allows git reset --hard when user mentions discard',
-      'git reset --hard',
-      'discard all local changes and reset',
-    ],
-    [
-      'allows git clean -fd when user mentions wipe',
-      'git clean -fd',
-      'wipe the working tree clean',
-    ],
-    [
-      'allows git stash drop when user mentions discard',
-      'git stash drop',
-      'discard all stashes',
-    ],
-  ])('%s', (_title, cmd, prompt) => expectAllowed([cmd], prompt));
-
-  it('allows safe git commands', () => {
-    const safeCommands = [
-      'git status',
-      'git log',
-      'git diff',
-      'git add .',
-      'git commit -m "fix"',
-      'git branch -a',
-      'git checkout feature-branch',
-      'git pull',
-      'git push origin main',
-      'git stash',
-      'git stash pop',
-      'git stash list',
-    ];
-    expectAllowed(safeCommands, 'do stuff');
+    'git status',
+    'git reset --soft HEAD~1',
+    'git reset HEAD~1',
+    'git checkout feature-branch',
+    // A single file or directory is not the whole tree.
+    'git checkout -- ./src',
+    'git checkout .gitignore',
+    // A brace without a comma is not expanded.
+    'git checkout HEAD@{1} -- src',
+    // `-b` consumes `.x` as the new branch name.
+    'git checkout -b .x',
+    // A dry run wins over --force and deletes nothing.
+    'git clean -n -f',
+    'git clean --dry-run -fd',
+    // `-e` consumes `-f` as its exclude pattern.
+    'git clean -e -f',
+    'git stash',
+    'git stash pop',
+    'git stash list',
+    // The message value is not an option.
+    'git commit -m --amend',
+    'git commit -m "fix" -- ./',
+    'git -C /repo reset -- --hard',
+    'terraform plan -out destroy',
+    'terraform apply',
+    'pulumi stack rm destroy',
+    'cdk deploy',
+    'npm install',
+    'command -v git',
+  ])('allows %j', async (command) => {
+    expect(await reasonFor(command)).toBeNull();
   });
 });
 
-describe('isDestructiveCommand — shell indirection', () => {
+describe('isDestructiveCommand — wrappers and shell structure', () => {
   it.each([
-    ['bash -c "git reset --hard"', 'fix something'],
-    ["sh -c 'git clean -fd'", 'remove untracked files'],
-    ['zsh -c "git stash drop"', 'do stuff'],
-  ])('blocks %s', (cmd, prompt) => expectBlocked(cmd, prompt));
+    `bash -c 'git reset --hard'`,
+    `bash -o pipefail -c 'git reset --hard'`,
+    `sh -lc "git -C /repo reset --hard"`,
+    `sh -c "bash -c 'git reset --hard'"`,
+    `env FOO=1 git reset --hard`,
+    `command git reset --hard`,
+    `sudo -u build git reset --hard`,
+    `timeout 30 git reset --hard`,
+    `xargs git reset --hard`,
+    `git status && git reset --hard`,
+    `git status\ngit reset --hard`,
+    `git reset --hard 2>/dev/null | tail -1`,
+    `(git reset --hard)`,
+    `f() { git reset --hard; }`,
+    `if true; then git reset --hard; fi`,
+    `echo "$(git reset --hard)"`,
+    'echo `git reset --hard`',
+    `cat <<EOF\n$(git reset --hard)\nEOF`,
+    `bash <<'EOF'\ngit reset --hard\nEOF`,
+    `bash <<< 'git reset --hard'`,
+    `eval "git reset --hard"`,
+    `git -c alias.x=status submodule foreach 'git reset --hard'`,
+    `cmd /c "git reset --hard"`,
+    `g"it" reset --hard`,
+    'g\\it reset --hard',
+  ])('blocks %j', async (command) => {
+    expect(await reasonFor(command)).toContain('"git reset --hard"');
+  });
 
-  it('allows bash -c with safe commands', () => {
-    expectAllowed(['bash -c "git status && git log"'], 'check status');
+  it('does not treat a wrapper option value as the program', async () => {
+    expect(await reasonFor('bash -o pipefail -c "git status"')).toBeNull();
+    expect(await reasonFor('timeout 30 npm test')).toBeNull();
   });
 });
 
-describe('isDestructiveCommand — IaC patterns', () => {
-  it.each<[string, string, string?]>([
-    ['terraform destroy', 'update infrastructure', 'terraform'],
-    ['pulumi destroy', 'update infrastructure'],
-    ['cdk destroy', 'update infra'],
-  ])('blocks %s', expectBlocked);
-
-  it('allows terraform destroy when user explicitly requests it', () => {
-    expectAllowed(['terraform destroy'], 'terraform destroy the staging stack');
+describe('isDestructiveCommand — commands it cannot verify', () => {
+  it.each([
+    // The program, its arguments or the script only exist at run time.
+    '$GIT reset --hard',
+    'git reset $MODE',
+    'git checkout "$TARGET"',
+    // Brace expansion yields `.` among other words.
+    'git checkout {.,src}',
+    'git stash "$ACTION"',
+    'terraform "$COMMAND"',
+    `bash -c "git reset $MODE"`,
+    `echo 'git reset --hard' | bash`,
+    `git -c alias.nuke='!git reset --hard' nuke`,
+    // The parser cannot read these.
+    `case "$1" in x) git reset --hard ;; esac`,
+    `echo 'git reset --hard`,
+  ])('blocks %j', async (command) => {
+    expect(await reasonFor(command)).toContain(UNVERIFIABLE);
   });
 
-  it('allows terraform apply and plan', () => {
-    const safeCommands = [
-      'terraform apply',
-      'terraform plan',
-      'terraform init',
-      'pulumi up',
-      'cdk deploy',
-    ];
-    expectAllowed(safeCommands, 'deploy');
+  it.each([
+    'echo $HOME',
+    '$EDITOR notes.md',
+    `case "$1" in x) npm test ;; esac`,
+    `echo 'npm test' | bash`,
+    // The shell reads its program from the here-string, not from the pipe.
+    `bash <<< 'git status' | cat`,
+    'git commit -m "$(cat msg.txt)"',
+    'git commit --message="$MSG"',
+    'git checkout -b "feature/$NAME"',
+  ])('allows %j, which cannot reach a protected operation', async (command) => {
+    expect(await reasonFor(command)).toBeNull();
   });
 });
 
 describe('isDestructiveCommand — git commit --amend', () => {
-  it('blocks git commit --amend when no session commits registered', () => {
-    expectBlocked('git commit --amend --no-edit', 'amend the commit', 'amend');
+  const tmpDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tmpDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
-  it('allows git commit (without --amend)', () => {
-    expectAllowed(['git commit -m "fix"'], 'commit changes');
+  /** A repo with one commit; registers that commit when `own` is set. */
+  function makeRepo(parent: string, name: string, own: boolean): string {
+    const dir = path.join(parent, name);
+    fs.mkdirSync(dir);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: dir, encoding: 'utf-8' }).trim();
+    git('init', '-q');
+    git(
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      name,
+    );
+    if (own) registerSessionCommit(git('rev-parse', 'HEAD'));
+    return dir;
+  }
+
+  function makeRepos() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'amend-guard-'));
+    tmpDirs.push(root);
+    return {
+      root,
+      own: makeRepo(root, 'own', true),
+      other: makeRepo(root, 'other', false),
+    };
+  }
+
+  it('allows amending a commit the agent made in this session', async () => {
+    const { own } = makeRepos();
+    expect(await reasonFor('git commit --amend --no-edit', own)).toBeNull();
+    expect(
+      await reasonFor(`bash -c 'git commit -m "msg" --amend'`, own),
+    ).toBeNull();
+    // Only a setting's value can run a command, not its name.
+    expect(
+      await reasonFor('git -c commit.gpgsign=false commit --amend', own),
+    ).toBeNull();
+  });
+
+  it('resolves git -C against the command directory', async () => {
+    const { root, own, other } = makeRepos();
+    expect(await reasonFor('git -C own commit --amend', root)).toBeNull();
+    expect(
+      await reasonFor(`git -C ${other} commit --amend --no-edit`, own),
+    ).toContain('git commit --amend');
+  });
+
+  it.each([
+    [
+      'another repository',
+      (dirs: Repos) => `git -C ${dirs.other} commit --amend`,
+    ],
+    [
+      'a directory change',
+      (dirs: Repos) => `cd ${dirs.own} && git commit --amend`,
+    ],
+    [
+      'a repository variable',
+      (dirs: Repos) => `GIT_DIR=${dirs.other}/.git git commit --amend`,
+    ],
+    ['a wrapper', () => 'env git commit --amend'],
+    ['a run-time directory', () => 'git -C "$REPO" commit --amend'],
+    ['an option with unknown effect', () => 'git --bare commit --amend'],
+  ])('blocks an amend whose target goes through %s', async (_label, build) => {
+    const dirs = makeRepos();
+    expect(await reasonFor(build(dirs), dirs.own)).toContain(
+      'could not be verified as one the agent made in this session',
+    );
+  });
+
+  it('never falls back to the process directory', async () => {
+    registerSessionCommit(
+      execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf-8' }),
+    );
+    expect(await reasonFor('git commit --amend')).toContain(
+      'git commit --amend',
+    );
   });
 });
 
-describe('session commit tracking', () => {
-  it('registerSessionCommit and clearSessionCommits work', () => {
-    registerSessionCommit('abc123');
-    // isAmendOfSessionCommit needs a real git repo; this only checks that
-    // clearSessionCommits doesn't throw.
-    clearSessionCommits();
-  });
-
-  it('isAmendOfSessionCommit returns false with no session commits', () => {
-    // isAmendOfSessionCommit is not exported; tested via isDestructiveCommand.
-    expectBlocked('git commit --amend', 'amend commit');
-  });
-});
-
-describe('isDestructiveCommand — non-destructive commands', () => {
-  it('returns null for non-git, non-IaC commands', () => {
-    const commands = [
-      'npm install',
-      'python script.py',
-      'ls -la',
-      'cat file.txt',
-      'echo "hello"',
-      'mkdir -p src',
-    ];
-    expectAllowed(commands, 'do stuff');
-  });
-});
+type Repos = { root: string; own: string; other: string };
