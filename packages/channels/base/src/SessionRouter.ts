@@ -162,7 +162,8 @@ export function unwrapMessageRoutingKey(key: string): string {
     if (
       Array.isArray(parsed) &&
       parsed.length === 2 &&
-      typeof parsed[0] === 'string'
+      typeof parsed[0] === 'string' &&
+      typeof parsed[1] === 'string'
     ) {
       return parsed[0];
     }

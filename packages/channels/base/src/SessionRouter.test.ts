@@ -4055,6 +4055,8 @@ describe('routing-key shape helpers', () => {
       '["a","b","c"]',
       '[1,"b"]',
       '[null,null]',
+      '["a",42]',
+      '["a",null]',
     ]) {
       expect(unwrapMessageRoutingKey(bad)).toBe(bad);
     }
