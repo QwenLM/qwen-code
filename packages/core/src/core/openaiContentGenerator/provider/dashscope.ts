@@ -13,7 +13,6 @@ import type {
   DashScopeRequestMetadata,
   ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
-  ChatCompletionToolWithCache,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
@@ -365,7 +364,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     reattachBlockCount = 0,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
-    let tools = request.tools;
+    const tools = request.tools;
 
     // glm-* models served via DashScope only parse structured "content parts"
     // arrays when the request is in function-calling mode. A tool-less request
@@ -385,14 +384,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       messages = this.flattenTextContent(messages);
     } else if (this.shouldEnableCacheControl()) {
       // Apply DashScope cache control if enabled (default is enabled).
-      const { messages: updatedMessages, tools: updatedTools } =
-        this.addDashScopeCacheControl(
-          request,
-          request.stream ? 'all' : 'system_only',
-          reattachBlockCount,
-        );
-      messages = updatedMessages;
-      tools = updatedTools;
+      messages = this.addDashScopeCacheControl(
+        request,
+        request.stream ? 'all' : 'system_only',
+        reattachBlockCount,
+      );
     }
 
     // Apply output token limits using parent class logic.
@@ -786,16 +782,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Add cache control flag to specified message(s) for DashScope providers
+   * Add cache control flag to specified message(s) for DashScope providers.
+   * Tool definitions get no marker: DashScope ignores `cache_control` on
+   * tools, and the system marker already covers them (they render first).
    */
   private addDashScopeCacheControl(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     cacheControl: 'system_only' | 'all',
     reattachBlockCount = 0,
-  ): {
-    messages: OpenAI.Chat.ChatCompletionMessageParam[];
-    tools?: ChatCompletionToolWithCache[];
-  } {
+  ): OpenAI.Chat.ChatCompletionMessageParam[] {
     const messages = request.messages;
 
     const systemIndex = messages.findIndex((msg) => msg.role === 'system');
@@ -841,15 +836,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
             } as OpenAI.Chat.ChatCompletionMessageParam;
           });
 
-    const updatedTools =
-      cacheControl === 'all' && request.tools?.length
-        ? this.addCacheControlToTools(request.tools)
-        : (request.tools as ChatCompletionToolWithCache[] | undefined);
-
-    return {
-      messages: updatedMessages,
-      tools: updatedTools,
-    };
+    return updatedMessages;
   }
 
   /**
@@ -884,23 +871,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       remaining -= blockCount;
     }
     return undefined;
-  }
-
-  private addCacheControlToTools(
-    tools: OpenAI.Chat.ChatCompletionTool[],
-  ): ChatCompletionToolWithCache[] {
-    if (tools.length === 0) {
-      return tools as ChatCompletionToolWithCache[];
-    }
-
-    const updatedTools = [...tools] as ChatCompletionToolWithCache[];
-    const lastToolIndex = tools.length - 1;
-    updatedTools[lastToolIndex] = {
-      ...updatedTools[lastToolIndex],
-      cache_control: { type: 'ephemeral' },
-    };
-
-    return updatedTools;
   }
 
   /**

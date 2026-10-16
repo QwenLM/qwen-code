@@ -24,6 +24,7 @@ import type {
 import { ToolErrorType } from '../tools/tool-error.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
+import { resolveApiErrorRequestId } from '../utils/errorParsing.js';
 import {
   getErrorMessage,
   getErrorStatus,
@@ -115,6 +116,13 @@ export type ServerLlmModelFallbackEvent = {
 export interface StructuredError {
   message: string;
   status?: number;
+  /**
+   * Provider request id (e.g. the `x-request-id` response header openai-node
+   * stamps onto every APIError), resolved here while the original Error is
+   * still whole. Downstream formatters only ever receive this structured
+   * value, so an id not captured at this point is unrecoverable.
+   */
+  requestId?: string;
 }
 
 export interface LlmErrorEventValue {
@@ -895,6 +903,10 @@ export class Turn {
       }
 
       const originalStatus = getErrorStatus(e);
+      // Resolve against the raw caught error: toFriendlyError() below can
+      // return a different Error that no longer carries the SDK's `.headers`,
+      // and this is the last point where the request id is still reachable.
+      const requestId = resolveApiErrorRequestId(e);
       const error = toFriendlyError(e);
       if (error instanceof UnauthorizedError) {
         throw error;
@@ -925,6 +937,7 @@ export class Turn {
       const structuredError: StructuredError = {
         message: getErrorMessage(error),
         status: getErrorStatus(error) ?? originalStatus,
+        ...(requestId ? { requestId } : {}),
       };
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
       yield { type: LlmEventType.Error, value: { error: structuredError } };
