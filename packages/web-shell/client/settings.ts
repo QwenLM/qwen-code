@@ -22,7 +22,6 @@ const SETTING_KEYS = {
   'setting:timestamps': 'output.showTimestamps',
   'setting:theme': 'ui.theme',
   'setting:loading-phrases': 'ui.accessibility.enableLoadingPhrases',
-  'setting:custom-witty-phrases': 'ui.customWittyPhrases',
   'setting:workflow-keyword-trigger': 'ui.disableWorkflowKeywordTrigger',
   'setting:status-in-title': 'ui.showStatusInTitle',
   'setting:response-speed': 'ui.showResponseTokensPerSecond',
