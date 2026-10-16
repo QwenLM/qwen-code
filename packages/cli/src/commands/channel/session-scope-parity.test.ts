@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
+import type { ChannelPlugin } from '@qwen-code/channel-base';
 import type {
   DaemonChannelInstanceSnapshot,
   DaemonChannelTypeDescriptor,
@@ -30,6 +31,14 @@ const clientModulePath = fileURLToPath(
     '../../../../web-shell/client/components/channels/channel-editor-state.ts',
     import.meta.url,
   ),
+);
+
+// A real plugin that declares a non-user default, loaded through a runtime path
+// for the same reason as the client module: the channel packages are separate
+// workspace packages, and this test only needs the plugin object to drive the
+// registry pipeline. github declares `defaultSessionScope: 'chat_thread'`.
+const githubPluginPath = fileURLToPath(
+  new URL('../../../../channels/github/src/index.ts', import.meta.url),
 );
 
 type ClientDraftModule = {
@@ -165,5 +174,29 @@ describe('web-shell/daemon session scope parity', () => {
         } as unknown as Parameters<typeof multiSessionCompatibilityError>[1]),
       ).toBeUndefined();
     }
+  });
+
+  it('pipes a plugin non-user defaultSessionScope into the catalog descriptor', async () => {
+    const registry = await import('./channel-registry.js');
+    // Builtins may already have registered github (and loaded its real
+    // package); only fall back to the source-loaded plugin when they did not.
+    let catalog = await registry.supportedChannelCatalog();
+    if (!catalog.some((entry) => entry.type === 'github')) {
+      const { plugin } = (await import(githubPluginPath)) as {
+        plugin: ChannelPlugin;
+      };
+      registry.registerPlugin(plugin);
+      catalog = await registry.supportedChannelCatalog();
+    }
+
+    const descriptor = catalog.find((entry) => entry.type === 'github');
+    expect(descriptor).toBeDefined();
+    const scopeField = descriptor!.fields.find(
+      (field) => field.key === 'sessionScope',
+    );
+    // The registry must carry the plugin's default into the descriptor: the
+    // Web Shell editor falls back to the first enum option when the field has
+    // no default, so a dropped default would silently re-split cli and client.
+    expect(scopeField?.default).toBe('chat_thread');
   });
 });
