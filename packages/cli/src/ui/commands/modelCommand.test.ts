@@ -813,7 +813,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('rejects typed non-runtime Qwen OAuth selections', async () => {
+  it('rejects typed Qwen OAuth selections', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn();
     // Deliberately does NOT list the selected id. The guard has to fire before
@@ -854,6 +854,49 @@ describe('modelCommand', () => {
       content: expect.stringContaining('Qwen OAuth free tier was discontinued'),
     });
     // The ordering the comment above declares, asserted rather than assumed.
+    expect(getAvailableModelsForAuthType).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('rejects a wrapped runtime Qwen OAuth snapshot selection', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn();
+    const getAvailableModelsForAuthType = vi.fn().mockReturnValue([]);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: `/model $runtime|${AuthType.QWEN_OAUTH}|coder-model(${AuthType.QWEN_OAUTH})`,
+        name: 'model',
+        args: `$runtime|${AuthType.QWEN_OAUTH}|coder-model(${AuthType.QWEN_OAUTH})`,
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType,
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      `$runtime|${AuthType.QWEN_OAUTH}|coder-model(${AuthType.QWEN_OAUTH})`,
+    );
+
+    // The wrapped snapshot form parses to `authType: QWEN_OAUTH` too (the
+    // parser keys off the trailing `(...)`), so the guard rejects it as well —
+    // wider than the picker's non-runtime predicate. Pinned on the message
+    // text: `switchModel` is not called on either arm, so only the text
+    // distinguishes "rejected by this guard" from "unavailable below".
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Qwen OAuth free tier was discontinued'),
+    });
     expect(getAvailableModelsForAuthType).not.toHaveBeenCalled();
     expect(switchModel).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalled();

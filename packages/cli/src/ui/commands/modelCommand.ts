@@ -169,9 +169,11 @@ async function switchMainModel(
   const parsed = parseAcpModelOption(modelArg);
 
   if (parsed.authType) {
-    // The `/model` action rejects any `QWEN_OAUTH` selection before this point
-    // (the free tier is discontinued), so `switchModel` is never asked to
-    // require cached Qwen OAuth credentials here.
+    // The main-model branch of the `/model` action rejects a typed
+    // `(qwen-oauth)` selection before this point (the free tier is
+    // discontinued), so `switchModel` is never asked to require cached Qwen
+    // OAuth credentials here. The `--fast`/`--vision`/`--compaction`/`--image`
+    // branches are not covered — they still resolve and persist the tier.
     await config.switchModel(parsed.authType, parsed.modelId, undefined);
     if (persistSelection) {
       persistSetting(
@@ -1125,10 +1127,15 @@ export const modelCommand: SlashCommand = {
       const parsed = parseAcpModelOption(modelName);
       // `coder-model(qwen-oauth)` from the shipped registry would otherwise
       // reach the switch and surface a misleading "credentials expired" error
-      // for a tier that no longer exists. `parseAcpModelOption` only yields
-      // `authType: QWEN_OAUTH` for a typed `(qwen-oauth)` suffix on a bare
-      // registry id — it returns `{ modelId }` (no authType) for a
-      // `$runtime|…` snapshot, so there is nothing here to exempt.
+      // for a tier that no longer exists. A wrapped
+      // `$runtime|qwen-oauth|<id>(qwen-oauth)` snapshot also parses to
+      // `authType: QWEN_OAUTH` — the parser keys off the trailing `(...)` and
+      // has no `$runtime|` branch — so this guard is wider than the picker's
+      // non-runtime predicate (`ModelDialog.tsx`, `dialog-data.ts`). That is
+      // harmless only because `getAvailableModelsForAuthType` lists registry
+      // ids and never `$runtime|…` snapshot ids, so the wrapped form already
+      // failed below. Revisit if this lookup is widened to
+      // `getAllConfiguredModels()`, which does list the runtime option.
       if (parsed.authType === AuthType.QWEN_OAUTH) {
         return {
           type: 'message',
