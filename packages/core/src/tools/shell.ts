@@ -3192,7 +3192,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       0,
     );
 
-    const rawOutputSize = rawCapture ? null : measureToolOutput(llmContent);
+    // A capture-bound discard leaves llmContent a retained prefix, so the
+    // pre-reduction size is unrecoverable: declare it unknown, not the bound.
+    const rawOutputSize =
+      rawCapture || result.outputCaptureLimitExceeded
+        ? null
+        : measureToolOutput(llmContent);
 
     // Raw capture owns full output; result.output is only a bounded preview.
     // Otherwise truncate large output and save full content to a temp file.

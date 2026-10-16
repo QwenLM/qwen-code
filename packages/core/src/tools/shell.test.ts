@@ -1368,6 +1368,20 @@ describe('ShellTool', () => {
       return () => captured;
     };
 
+    it('declares the raw size unknown when the capture bound discarded output', async () => {
+      const output = 'o'.repeat(5_000);
+      const clipped = await runFg('yes', {
+        output,
+        outputCaptureLimitExceeded: true,
+      });
+      expect(clipped.rawOutputSize).toBeNull();
+
+      // Control: the same body without a discard is still measured, so the
+      // null above is the capture bound and not "shell never declares".
+      const whole = await runFg('yes', { output });
+      expect(whole.rawOutputSize).not.toBeNull();
+    });
+
     describe('simulated sed edit', () => {
       const expectedSedFilePath = path.resolve('/test/dir', 'file.txt');
       const SED = "sed -i 's/foo/bar/' file.txt";
