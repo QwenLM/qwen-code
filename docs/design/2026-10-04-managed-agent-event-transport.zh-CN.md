@@ -421,22 +421,22 @@ bootstrap 通道停顿约两分钟；没有生产者重试缓冲，broker 离开
 
 在 `5ddfacc9d4`（2026-10-04）上阅读。每行一条既有职责。
 
-| 路径                                                                                         | 既有职责                                                                                                               | 传输接缝？           |
-| -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| `packages/sdk-java/managed-agent-server/.../store/CommittedEventPublisher.java`              | 单方法 after-commit 扇出接口 `publish(List<EventRecord>)`                                                              | **是——这就是接缝**   |
-| `packages/sdk-java/managed-agent-server/.../store/ManagedAgentStore.java`（第 2403–2411 行） | 从 `TransactionSynchronization.afterCommit()` 调用 `eventPublisher.publish(events)`                                    | 接缝调用点           |
-| `packages/sdk-java/managed-agent-server/.../service/SessionEventHub.java`                    | 唯一实现：进程内按 Session 有界缓冲（容量 512），`overflowed` → 重读 store；服务 Java SSE                              | 仅进程内             |
-| `packages/sdk-java/managed-agent-server/.../store/StoreModels.java`（`EventRecord`）         | 已提交事件身份：`tenantId, sessionId, sequence, eventId, turnId, type, …, createdAt, schemaVersion, projectionVersion` | —                    |
-| `packages/sdk-java/managed-agent-server/.../store/ManagedExtensionRecordStore.java`          | Stage H 记录持久化；校验 `domain.committed`；每记录 delivery（outbox）行                                               | 否（持久化，无发布） |
-| `packages/sdk-java/managed-agent-server/.../db/migration/V18__managed_extension_record.sql`  | `qwen_managed_session_extension_record`，含由提交事务写入的 `delivery_target`/`delivery_state`                         | 否（SQL 真相）       |
-| `packages/sdk-java/managed-agent-server/.../db/migration/V14__managed_event_replay.sql`      | 支撑 SSE 游标恢复的持久 replay floor                                                                                   | 否                   |
-| `packages/sdk-java/managed-agent-server/.../service/MessageMaterializer.java`                | 异步 Item/Snapshot 物化（"物化"消费端的现行进程内形态）                                                                | 否                   |
-| `packages/core/src/managed-runtime/managed-session-inbox.ts`                                 | 持久 Session inbox（`tenantId/sessionId/messageId`，状态 admitted/processing/finished）                                | 否                   |
-| `packages/core/src/managed-runtime/managed-session-records.ts`                               | 已提交记录索引，含 `wake.requested` 与 `domain.committed` 类型                                                         | 否                   |
-| `packages/core/src/managed-runtime/managed-session-authority.ts`                             | 把 Session 输入 + 唤醒意图在同一事务提交；读取任务投影                                                                 | 否                   |
-| `packages/core/src/managed-runtime/embedded-harness-scheduler.ts`                            | 基于文件租约的单进程激活泵；进程内 `scheduleRecoveryWake()` 定时器                                                     | 否（按设计进程内）   |
-| `packages/core/src/managed-runtime/managed-activation-store.ts`                              | activation 描述体、租约、fence、代际                                                                                   | 否                   |
-| `packages/core/src/managed-runtime/managed-extension-projection.ts`                          | `ManagedSessionTaskView` 投影，含 outbox/delivery 状态                                                                 | 否                   |
+| 路径                                                                                | 既有职责                                                                                                               | 传输接缝？           |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `packages/managed-agent-server/.../store/CommittedEventPublisher.java`              | 单方法 after-commit 扇出接口 `publish(List<EventRecord>)`                                                              | **是——这就是接缝**   |
+| `packages/managed-agent-server/.../store/ManagedAgentStore.java`（第 2403–2411 行） | 从 `TransactionSynchronization.afterCommit()` 调用 `eventPublisher.publish(events)`                                    | 接缝调用点           |
+| `packages/managed-agent-server/.../service/SessionEventHub.java`                    | 唯一实现：进程内按 Session 有界缓冲（容量 512），`overflowed` → 重读 store；服务 Java SSE                              | 仅进程内             |
+| `packages/managed-agent-server/.../store/StoreModels.java`（`EventRecord`）         | 已提交事件身份：`tenantId, sessionId, sequence, eventId, turnId, type, …, createdAt, schemaVersion, projectionVersion` | —                    |
+| `packages/managed-agent-server/.../store/ManagedExtensionRecordStore.java`          | Stage H 记录持久化；校验 `domain.committed`；每记录 delivery（outbox）行                                               | 否（持久化，无发布） |
+| `packages/managed-agent-server/.../db/migration/V18__managed_extension_record.sql`  | `qwen_managed_session_extension_record`，含由提交事务写入的 `delivery_target`/`delivery_state`                         | 否（SQL 真相）       |
+| `packages/managed-agent-server/.../db/migration/V14__managed_event_replay.sql`      | 支撑 SSE 游标恢复的持久 replay floor                                                                                   | 否                   |
+| `packages/managed-agent-server/.../service/MessageMaterializer.java`                | 异步 Item/Snapshot 物化（"物化"消费端的现行进程内形态）                                                                | 否                   |
+| `packages/core/src/managed-runtime/managed-session-inbox.ts`                        | 持久 Session inbox（`tenantId/sessionId/messageId`，状态 admitted/processing/finished）                                | 否                   |
+| `packages/core/src/managed-runtime/managed-session-records.ts`                      | 已提交记录索引，含 `wake.requested` 与 `domain.committed` 类型                                                         | 否                   |
+| `packages/core/src/managed-runtime/managed-session-authority.ts`                    | 把 Session 输入 + 唤醒意图在同一事务提交；读取任务投影                                                                 | 否                   |
+| `packages/core/src/managed-runtime/embedded-harness-scheduler.ts`                   | 基于文件租约的单进程激活泵；进程内 `scheduleRecoveryWake()` 定时器                                                     | 否（按设计进程内）   |
+| `packages/core/src/managed-runtime/managed-activation-store.ts`                     | activation 描述体、租约、fence、代际                                                                                   | 否                   |
+| `packages/core/src/managed-runtime/managed-extension-projection.ts`                 | `ManagedSessionTaskView` 投影，含 outbox/delivery 状态                                                                 | 否                   |
 
 **结论:部分存在(PARTIAL,基线 `5ddfacc9d4`,2026-10-04 读取)。** Java 的
 after-commit 接缝存在(`CommittedEventPublisher`,基线时恰好只有一个进程内
