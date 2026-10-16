@@ -81,7 +81,20 @@ export function useFollowupSuggestionGeneration({
       abortRef.current = ac;
       const generate = async () => {
         const mods = getInteractiveModSession(config);
-        if (mods) await mods.ready;
+        if (mods) {
+          let onAbort: (() => void) | undefined;
+          try {
+            await Promise.race([
+              mods.ready,
+              new Promise<never>((_, reject) => {
+                onAbort = () => reject(ac.signal.reason);
+                ac.signal.addEventListener('abort', onAbort, { once: true });
+              }),
+            ]);
+          } finally {
+            if (onAbort) ac.signal.removeEventListener('abort', onAbort);
+          }
+        }
         ac.signal.throwIfAborted();
         // Only clone the tail — a full structuredClone of a large resumed
         // session causes transient heap peaks that trigger OOM (#4624).

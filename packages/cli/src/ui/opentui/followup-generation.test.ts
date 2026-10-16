@@ -132,6 +132,58 @@ describe('useFollowupSuggestionGeneration', () => {
     },
   );
 
+  it.each(['abort', 'dismiss', 'unmount'])(
+    'cleans up the readiness wait on %s while Mods are still pending',
+    async (action) => {
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+      const addListener = vi.spyOn(AbortSignal.prototype, 'addEventListener');
+      const removeListener = vi.spyOn(
+        AbortSignal.prototype,
+        'removeEventListener',
+      );
+      const config = buildConfig();
+      const view = renderGeneration(props({ config }));
+      try {
+        await act(async () => {
+          view.rerender(props({ config, streaming: false }));
+        });
+        await act(async () => {
+          if (action === 'abort') view.result.current.abortPromptSuggestion();
+          else if (action === 'dismiss')
+            view.result.current.dismissPromptSuggestion();
+          else view.unmount();
+        });
+
+        expect(removeListener).toHaveBeenCalledWith(
+          'abort',
+          expect.any(Function),
+        );
+        const [event, listener] = removeListener.mock.calls[0];
+        expect(addListener).toHaveBeenCalledWith(event, listener, {
+          once: true,
+        });
+        expect(mocks.generate).not.toHaveBeenCalled();
+        expect(mocks.getHistoryTail).not.toHaveBeenCalled();
+        await act(async () => {
+          release();
+        });
+        expect(mocks.generate).not.toHaveBeenCalled();
+      } finally {
+        view.unmount();
+        release();
+        owner.mockRestore();
+        addListener.mockRestore();
+        removeListener.mockRestore();
+      }
+    },
+  );
+
   it('generates on the streaming→idle edge and publishes the suggestion', async () => {
     mocks.generate.mockResolvedValue({ suggestion: 'Run the tests' });
     const config = buildConfig();

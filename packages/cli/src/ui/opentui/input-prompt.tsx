@@ -934,7 +934,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     if (key.name === 'escape') {
       key.preventDefault();
-      const commandCancelled = onCancelCommand?.() ?? false;
       // Ink parity (InputPrompt exits the mode with no streaming gate;
       // AppContainer's broadcast handler cancels the request on the same
       // keypress): Esc in shell mode leaves the mode first, and when a turn
@@ -948,6 +947,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         onInterrupt?.();
         return;
       }
+      const commandCancelled = onCancelCommand?.() ?? false;
       if (commandCancelled) return;
       if (completionModeRef.current !== CompletionMode.IDLE) {
         completionModeRef.current = CompletionMode.IDLE;

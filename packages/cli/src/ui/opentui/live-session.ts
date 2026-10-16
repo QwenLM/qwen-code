@@ -588,6 +588,7 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       ) {
         return;
       }
+      getInteractiveModSession(config)?.failStartup(err);
       throw err;
     })
     .then(async () => {

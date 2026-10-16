@@ -304,11 +304,13 @@ describe('guards (ink handleSlashCommand parity)', () => {
         getGeminiClient: () => undefined,
         getSessionId: () => 'mod-startup-failed',
       } as unknown as Config;
+      const failStartup = vi.fn();
       const owner = vi
         .spyOn(interactiveMods, 'getInteractiveModSession')
         .mockReturnValue({
           ready: new Promise(() => {}),
-        } as interactiveMods.InteractiveModSession);
+          failStartup,
+        } as unknown as interactiveMods.InteractiveModSession);
       const action = vi
         .fn()
         .mockResolvedValue({ type: 'submit_prompt', content: 'must not run' });
@@ -336,6 +338,7 @@ describe('guards (ink handleSlashCommand parity)', () => {
       try {
         const outcome = await dispatcher.handle(input);
         expect(action).not.toHaveBeenCalled();
+        expect(failStartup).toHaveBeenCalledTimes(recovery ? 0 : 1);
         if (recovery) {
           expect(outcome).toMatchObject({
             kind: name === 'help' ? 'open_dialog' : 'quit',
