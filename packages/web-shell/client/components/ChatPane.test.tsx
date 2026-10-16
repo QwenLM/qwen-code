@@ -4007,6 +4007,37 @@ describe('pane approval mode allowlist', () => {
     expect(setApprovalMode).not.toHaveBeenCalled();
   });
 
+  it('reports when a directly selected mode is not offered', () => {
+    const onError = vi.fn();
+    render({ onError }, { allowedApprovalModes: ['default', 'auto'] });
+    act(() => latestChatEditorProps.onSelectMode('yolo'));
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('not offered here: yolo'),
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('keeps reporting plan as unsupported when an allowlist is set', async () => {
+    const onError = vi.fn();
+    render({ onError }, { allowedApprovalModes: ['auto'] });
+    await act(async () => {
+      latestChatEditorProps.onSelectMode('plan');
+      await Promise.resolve();
+    });
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          'Unsupported execution approval mode: plan',
+        ),
+      }),
+      expect.any(String),
+    );
+  });
+
   it('reads its own workspace settings and drops old choices on workspace change', async () => {
     paneSettings.mockResolvedValueOnce({
       v: 1,

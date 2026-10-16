@@ -34,6 +34,7 @@ function status(modes: string[]): DaemonWorkspaceSettingsStatus {
         label: 'Modes',
         category: 'UI',
         requiresRestart: false,
+        default: [],
         values: { effective: modes },
       },
     ],

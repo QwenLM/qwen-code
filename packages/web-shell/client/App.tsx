@@ -199,7 +199,11 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { parsePlanCommand, type WebShellApprovalMode } from './utils/planMode';
+import {
+  nextApprovalMode,
+  parsePlanCommand,
+  type WebShellApprovalMode,
+} from './utils/planMode';
 import { useApprovalModes } from './hooks/useApprovalModes';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
@@ -3427,7 +3431,7 @@ export function App({
   filterArtifact,
   shellRef,
   composerToolbarActions,
-  allowedApprovalModes,
+  allowedApprovalModes: allowedApprovalModesProp,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3723,6 +3727,7 @@ export function App({
     [],
   );
 
+  const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const customization = useMemo(
     () => ({
       allowedApprovalModes,
@@ -13641,11 +13646,16 @@ export function App({
         isDaemonApprovalMode(modeId) &&
         modeId !== 'plan' &&
         !availableApprovalModes.some((mode) => mode === modeId)
-      )
+      ) {
+        reportError(
+          new Error(`Approval mode not offered here: ${modeId}`),
+          t('local.approvalMode'),
+        );
         return;
+      }
       void setComposerMode(modeId, currentModeRef.current === 'plan');
     },
-    [availableApprovalModes, setComposerMode],
+    [availableApprovalModes, setComposerMode, reportError, t],
   );
   const handleTogglePlan = useCallback(() => {
     void setComposerMode(
@@ -14223,15 +14233,8 @@ export function App({
   ]);
 
   const handleCycleMode = useCallback(() => {
-    // findIndex, not indexOf: narrowing currentMode to the tuple member type
-    // silently degrades when the SDK's declaration bundle leaves its
-    // permission-mode import dangling, and the build must survive both states.
-    const idx = availableApprovalModes.findIndex(
-      (mode) => mode === executionMode,
-    );
-    const next =
-      availableApprovalModes[(idx + 1) % availableApprovalModes.length];
-    if (next && next !== executionMode) handleSetMode(next);
+    const next = nextApprovalMode(availableApprovalModes, executionMode);
+    if (next) handleSetMode(next);
   }, [availableApprovalModes, executionMode, handleSetMode]);
 
   // Shared by the /context slash command and the status-bar context

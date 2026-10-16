@@ -15,6 +15,7 @@ import {
   registerWorkspaceSettingsRoutes,
 } from './workspace-settings.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
+import { WORKSPACE_RESTRICTED_SETTINGS } from '../../config/settingsUtils.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
@@ -147,10 +148,19 @@ function makeApp(
   if (overrides.userSettings || overrides.workspaceSettings) {
     const user = structuredClone(overrides.userSettings ?? {});
     const workspace = structuredClone(overrides.workspaceSettings ?? {});
+    // Mirror the real merge: a workspace value for a restricted key is
+    // stripped before merging, though the raw workspace scope is still
+    // reported under `workspace`.
+    const mergeableWorkspace = structuredClone(workspace);
+    for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+      const sectionValue = mergeableWorkspace[section];
+      if (sectionValue && typeof sectionValue === 'object')
+        delete (sectionValue as Record<string, unknown>)[key];
+    }
     // Mirror the real precedence (workspace over user), merging one level deep
     // so sibling keys under `experimental` are not lost.
     const merged: Record<string, unknown> = { ...user };
-    for (const [key, value] of Object.entries(workspace)) {
+    for (const [key, value] of Object.entries(mergeableWorkspace)) {
       const base = merged[key];
       merged[key] =
         base &&
@@ -1340,8 +1350,26 @@ describe('Web Shell approval mode allowlist settings', () => {
         (setting: { key: string }) => setting.key === 'ui.allowedApprovalModes',
       ),
     ).toMatchObject({
-      values: { effective: [], user: ['default', 'auto'], workspace: [] },
+      values: {
+        effective: ['default', 'auto'],
+        user: ['default', 'auto'],
+        workspace: [],
+      },
     });
+  });
+
+  it('rejects a workspace-scope write of the allowlist', async () => {
+    const { app, persistSetting } = makeApp();
+    const response = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'ui.allowedApprovalModes',
+      value: [],
+    });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      code: 'workspace_restricted_setting',
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
   });
 
   it('reads the list from the selected runtime rather than primary', async () => {

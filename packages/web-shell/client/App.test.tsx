@@ -16,14 +16,19 @@ const approvalModesProbe = vi.hoisted(() => ({
 }));
 vi.mock('./hooks/useApprovalModes', async () => {
   const { resolveApprovalModes } = await import('./utils/planMode');
+  const { useMemo } = await import('react');
   return {
     useApprovalModes: (
       cwd: string | undefined,
       allowed: readonly string[] | undefined,
     ) => {
       approvalModesProbe.cwd = cwd;
-      return resolveApprovalModes(
-        allowed ?? (cwd ? approvalModesProbe.setting : undefined),
+      // Identity-stable like the real hook's memo, so a fresh-but-equal host
+      // array only churns the result when App drops its stabilization.
+      const setting = approvalModesProbe.setting;
+      return useMemo(
+        () => resolveApprovalModes(allowed ?? (cwd ? setting : undefined)),
+        [allowed, cwd, setting],
       );
     },
   };
@@ -47645,6 +47650,7 @@ describe('approval mode allowlist', () => {
         label: 'Modes',
         category: 'UI',
         requiresRestart: false,
+        default: [],
         values: { effective: ['default'] },
       },
     ];
@@ -47708,6 +47714,42 @@ describe('approval mode allowlist', () => {
     });
     await flush();
     expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('keeps the resolved list identity stable across fresh-but-equal host arrays', () => {
+    const { rerender } = renderApp({
+      allowedApprovalModes: ['default', 'auto'],
+    });
+    const first = testState.latestChatEditorProps?.availableModes;
+    expect(first).toEqual(['default', 'auto']);
+    rerender({ allowedApprovalModes: ['default', 'auto'] });
+    expect(testState.latestChatEditorProps?.availableModes).toBe(first);
+  });
+
+  it('reports when a directly selected mode is not offered', async () => {
+    const onToast = vi.fn();
+    renderApp({ allowedApprovalModes: ['auto'], onToast });
+    act(() => testState.latestChatEditorProps?.onSelectMode?.('yolo'));
+    await flush();
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('not offered here: yolo'),
+    );
+  });
+
+  it('keeps reporting plan as unsupported when an allowlist is set', async () => {
+    const onToast = vi.fn();
+    renderApp({ allowedApprovalModes: ['auto'], onToast });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('plan');
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('Unsupported execution approval mode: plan'),
+    );
   });
 
   it('keeps Plan toggling independent when no execution choices are offered', async () => {

@@ -1994,8 +1994,9 @@ export const ChatEditor = memo(
     const planDescriptionId = useId();
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     useEffect(() => {
-      if (modeControlsDisabled) setModeDropdownOpen(false);
-    }, [modeControlsDisabled]);
+      if (modeControlsDisabled || availableModes.length === 0)
+        setModeDropdownOpen(false);
+    }, [availableModes.length, modeControlsDisabled]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     useEffect(() => {
       if (modelControlsDisabled) setModelDropdownOpen(false);

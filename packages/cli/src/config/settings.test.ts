@@ -2871,7 +2871,7 @@ describe('Settings Loading and Merging', () => {
     });
 
     it.each([{ workspaceModes: ['default'] }, { workspaceModes: [] }])(
-      'replaces the user approval mode list with workspace $workspaceModes',
+      'ignores the workspace approval mode list $workspaceModes in favor of the user list',
       ({ workspaceModes }) => {
         (mockFsExistsSync as Mock).mockImplementation(
           (p: fs.PathLike) =>
@@ -2887,9 +2887,16 @@ describe('Settings Loading and Merging', () => {
               },
             }),
         );
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.ui?.allowedApprovalModes).toEqual([
+          'auto',
+          'yolo',
+        ]);
         expect(
-          loadSettings(MOCK_WORKSPACE_DIR).merged.ui?.allowedApprovalModes,
-        ).toEqual(workspaceModes);
+          getSettingsWarnings(settings).some((warning) =>
+            warning.includes('ui.allowedApprovalModes'),
+          ),
+        ).toBe(true);
       },
     );
 

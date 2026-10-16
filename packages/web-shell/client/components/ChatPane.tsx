@@ -116,7 +116,7 @@ import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { GoalStatusStrip } from './GoalStatusStrip';
 import composerStatusStyles from './ComposerStatusStack.module.css';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
-import { parsePlanCommand } from '../utils/planMode';
+import { nextApprovalMode, parsePlanCommand } from '../utils/planMode';
 import { useApprovalModes } from '../hooks/useApprovalModes';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
@@ -1495,19 +1495,20 @@ export function ChatPane({
         isDaemonApprovalMode(modeId) &&
         modeId !== 'plan' &&
         !availableApprovalModes.some((mode) => mode === modeId)
-      )
+      ) {
+        reportError(
+          new Error(`Approval mode not offered here: ${modeId}`),
+          'Failed to set approval mode',
+        );
         return;
+      }
       void setComposerMode(modeId, planMode);
     },
-    [availableApprovalModes, setComposerMode, planMode],
+    [availableApprovalModes, setComposerMode, planMode, reportError],
   );
   const handleCycleMode = useCallback(() => {
-    const idx = availableApprovalModes.findIndex(
-      (mode) => mode === executionMode,
-    );
-    const next =
-      availableApprovalModes[(idx + 1) % availableApprovalModes.length];
-    if (next && next !== executionMode) handleSelectMode(next);
+    const next = nextApprovalMode(availableApprovalModes, executionMode);
+    if (next) handleSelectMode(next);
   }, [availableApprovalModes, executionMode, handleSelectMode]);
   const handleTogglePlan = useCallback(() => {
     void setComposerMode(executionMode, !planMode);

@@ -2992,6 +2992,30 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
     ).toBe(true);
   });
 
+  it('closes an open mode dropdown when the list becomes empty', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto'],
+    };
+    const container = renderChatEditor(props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.disabled,
+    ).toBe(true);
+  });
+
   it('keeps permission and Plan controls operable while approval disables input', () => {
     const onSelectMode = vi.fn();
     const onTogglePlan = vi.fn();

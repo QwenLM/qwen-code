@@ -8,7 +8,7 @@ Web Shell always offers default, auto-edit, auto and yolo. Hosts and settings.js
 
 ## Design
 
-Register `ui.allowedApprovalModes` as an optional string array in the settings schema, with replacement semantics across settings scopes. Serve it through the existing workspace-scoped settings response; keep it out of the Settings editor. This reuses the existing runtime, trust and reload behavior without adding a route.
+Register `ui.allowedApprovalModes` as an optional string array in the settings schema, with replacement semantics across settings scopes. The key narrows which approval modes the shell offers, so it is honored from operator scopes only (User, System, SystemDefaults): a value in a repository's workspace settings is stripped with a warning and workspace-scope writes are refused, because a cloned repository must not remove a restriction the operator set. Serve it through the existing workspace-scoped settings response; keep it out of the Settings editor. This reuses the existing runtime, trust and reload behavior without adding a route.
 
 Expose `allowedApprovalModes` on WebShellProps (also inherited by WebShellWithProviders). An explicitly supplied Prop overrides settings, including an empty array. Omission defaults to all four execution modes. Filter unknown values, duplicates and Plan, preserving the built-in ordering. A malformed non-array setting falls back to all modes; an array with no supported modes offers none.
 
@@ -26,7 +26,7 @@ CLI settings schema, generated editor schema and workspace settings route; Web S
 - Settings and Props each filter choices; Props override settings.
 - Dropdown, dialog, custom footer and keyboard cycling use the same list.
 - Verify wraparound, hidden current mode, empty/single/invalid lists and live Prop changes.
-- Verify scoped settings exposure and replacement merging, including different primary/secondary lists for the same session in main and split views, without changing approval enforcement or Plan toggling.
+- Verify scoped settings exposure, replacement merging across operator scopes, and that workspace-scope values are stripped. Hosts set per-shell lists — including different lists for different embeds — through the `allowedApprovalModes` Prop, without changing approval enforcement or Plan toggling.
 - Build, typecheck, bundle, focused unit tests, browser checks using a clearly identified mock daemon, and two clean self-audit passes.
 
 ## Risks and open questions
