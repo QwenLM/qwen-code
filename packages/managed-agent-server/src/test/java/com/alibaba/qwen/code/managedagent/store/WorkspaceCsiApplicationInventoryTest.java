@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -22,6 +23,9 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.sql.Connection;
 import java.time.Clock;
 import java.time.Duration;
@@ -35,6 +39,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceCsiApplicationInventoryTest {
+    @TempDir
+    Path temp;
     private DriverManagerDataSource source;
     private JdbcTemplate jdbc;
     private RuntimeBindingRecord binding;
@@ -134,6 +140,166 @@ class WorkspaceCsiApplicationInventoryTest {
         jdbc.update("UPDATE ma_request_receipt SET request_digest = ? WHERE receipt_key = ?", "broken", before.text("receipt_key"));
         assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("ma_request_receipt")
                 && blocker.code().equals("unresolved_candidate_owner"));
+    }
+
+    @Test
+    void liveInventoryPreservesCompletedWorkspaceCreationReceiptsFromTheActualProducer() throws Exception {
+        var original = inspect();
+        for (String owner : List.of("tenant", "foreign")) {
+            var created = createOtherWorkspace(owner);
+            String receiptKey = created.workspaceId().substring("workspace-".length());
+            var before = jdbc.queryForMap("SELECT * FROM ma_request_receipt WHERE receipt_key = ?", receiptKey);
+            var found = inspect();
+            assertThat(found.blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+            var receipt = found.table("ma_request_receipt").rows().stream()
+                    .filter(row -> receiptKey.equals(row.text("receipt_key"))).findFirst().orElseThrow();
+            assertThat(receipt.membership()).isEqualTo(WorkspaceCsiApplicationInventory.Membership.OTHER);
+            assertThat(found.table("ma_workspace").rows()).anyMatch(row -> owner.equals(row.text("tenant_id"))
+                    && created.workspaceId().equals(row.text("workspace_id"))
+                    && row.membership() == WorkspaceCsiApplicationInventory.Membership.OTHER);
+            assertThat(found.table("ma_storage").rows()).anyMatch(row -> owner.equals(row.text("tenant_id"))
+                    && ("created-" + receiptKey).equals(row.text("storage_id"))
+                    && row.membership() == WorkspaceCsiApplicationInventory.Membership.OTHER);
+            assertThat(inspect().table("ma_request_receipt").rows()).anyMatch(row -> java.util.Arrays.equals(row.bytes(), receipt.bytes()));
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_request_receipt WHERE receipt_key = ?", receiptKey))
+                    .usingRecursiveComparison().isEqualTo(before);
+            for (String table : List.of("ma_session", "ma_operation", "ma_storage_owner", "ma_runtime_binding", "ma_runtime_slot")) {
+                assertThat(found.table(table).rows().stream().filter(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL)
+                        .map(WorkspaceCsiApplicationInventory.Row::bytes).toList())
+                        .usingRecursiveComparison().isEqualTo(original.table(table).rows().stream()
+                                .filter(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL)
+                                .map(WorkspaceCsiApplicationInventory.Row::bytes).toList());
+            }
+        }
+    }
+
+    @Test
+    void workspaceCreationReceiptsRefuseChangedIdentityAndUnrelatedDomainFields() throws Exception {
+        String receipt = createOtherWorkspace("foreign").workspaceId().substring("workspace-".length());
+        var original = jdbc.queryForMap("SELECT * FROM ma_request_receipt WHERE receipt_key = ?", receipt);
+        var changes = new java.util.LinkedHashMap<String, Object>();
+        for (String field : List.of("tenant_key", "scope_key", "idempotency_digest", "request_digest", "result_operation_key")) {
+            changes.put(field, "0".repeat(64));
+        }
+        changes.put("scope_id", "wrong-actor");
+        changes.put("actor_id", new byte[] {1});
+        changes.put("operation", "UNRECOGNIZED");
+        changes.put("state", "PENDING");
+        changes.put("idempotency_key", "invalid key");
+        changes.put("workspace_bound", true);
+        for (String field : List.of("session_id", "turn_id", "agent_id", "schedule_id", "channel_id", "action_id", "session_status_before")) {
+            changes.put(field, "unrelated");
+        }
+        for (String field : List.of("agent_revision", "account_generation", "semantic_revision", "action_version", "mutation_attempt_sequence")) {
+            changes.put(field, 1L);
+        }
+        for (var change : changes.entrySet()) {
+            jdbc.update("UPDATE ma_request_receipt SET " + change.getKey() + " = ? WHERE receipt_key = ?", change.getValue(), receipt);
+            assertWorkspaceReceiptBlocked(receipt);
+            jdbc.update("UPDATE ma_request_receipt SET " + change.getKey() + " = ? WHERE receipt_key = ?", original.get(change.getKey()), receipt);
+        }
+        assertThat(inspect().blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+    }
+
+    @Test
+    void workspaceCreationReceiptsRefuseChangedResultAndOriginalReferences() throws Exception {
+        String receipt = createOtherWorkspace("foreign").workspaceId().substring("workspace-".length());
+        String original = jdbc.queryForObject("SELECT result_json FROM ma_request_receipt WHERE receipt_key = ?", String.class, receipt);
+        var json = new ObjectMapper();
+        var details = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(original);
+        var changed = List.of(
+                details.deepCopy().put("workspaceId", "workspace"),
+                details.deepCopy().put("storageId", "storage"),
+                details.deepCopy().put("displayName", " Other Workspace "),
+                details.deepCopy().put("displayName", "different"),
+                details.deepCopy().put("registrationId", "1-1-1-1-1"),
+                details.deepCopy().put("registrationId", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"),
+                details.deepCopy().put("registrationId", 1),
+                details.deepCopy().putNull("workspaceId"),
+                details.deepCopy().without("displayName"),
+                details.deepCopy().put("unknown", "ordinary"),
+                details.deepCopy().put("sessionId", session),
+                details.deepCopy().put("bindingId", binding.getBindingId()));
+        for (var value : changed) {
+            jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", value.toString(), receipt);
+            assertWorkspaceReceiptBlocked(receipt);
+        }
+        for (String malformed : List.of(original + "{}", original.substring(0, original.length() - 1) + ",\"displayName\":\"duplicate\"}")) {
+            jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", malformed, receipt);
+            assertThatThrownBy(this::inspect).isInstanceOf(IllegalArgumentException.class);
+        }
+        jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", original, receipt);
+        assertThat(inspect().blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+    }
+
+    @Test
+    void workspaceCreationReceiptsRequireTheirActualParentsAndSeparatePhysicalStorage() throws Exception {
+        for (String owner : List.of("tenant", "foreign")) {
+            var created = createOtherWorkspace(owner);
+            String receipt = created.workspaceId().substring("workspace-".length());
+            String alias = JdbcRuntimeBindingRepository.storageAliasKey(owner, "created-" + receipt);
+            for (String field : List.of("parent_session_id", "child_run_id", "child_workspace_id")) {
+                jdbc.update("UPDATE ma_workspace SET " + field + " = ? WHERE tenant_id = ? AND workspace_id = ?", session, owner, created.workspaceId());
+                assertWorkspaceReceiptBlocked(receipt);
+                jdbc.update("UPDATE ma_workspace SET " + field + " = NULL WHERE tenant_id = ? AND workspace_id = ?", owner, created.workspaceId());
+            }
+            var before = jdbc.queryForMap("SELECT * FROM ma_storage WHERE alias_key = ?", alias);
+            for (var change : Map.of("physical_key", intent.physicalKey(), "tenant_key", "0".repeat(64),
+                    "storage_key", "1".repeat(64), "storage_kind", "UNREGISTERED", "registration_state", "RETIRING",
+                    "fence_operation_id", "pending", "registration_json", "{\"schemaVersion\":1,\"operationId\":\"wrong\"}").entrySet()) {
+                jdbc.update("UPDATE ma_storage SET " + change.getKey() + " = ? WHERE alias_key = ?", change.getValue(), alias);
+                assertWorkspaceReceiptBlocked(receipt);
+                jdbc.update("UPDATE ma_storage SET " + change.getKey() + " = ? WHERE alias_key = ?", before.get(change.getKey()), alias);
+            }
+            String deleted = "deleted-" + receipt;
+            jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?", owner, created.workspaceId());
+            jdbc.update("UPDATE ma_workspace SET workspace_id = ? WHERE tenant_id = ? AND workspace_id = ?", deleted, owner, created.workspaceId());
+            assertWorkspaceReceiptBlocked(receipt);
+            jdbc.update("UPDATE ma_workspace SET workspace_id = ? WHERE tenant_id = ? AND workspace_id = ?", created.workspaceId(), owner, deleted);
+            jdbc.update("UPDATE ma_storage SET alias_key = ? WHERE alias_key = ?", "f".repeat(64), alias);
+            assertWorkspaceReceiptBlocked(receipt);
+            jdbc.update("UPDATE ma_storage SET alias_key = ? WHERE alias_key = ?", alias, "f".repeat(64));
+        }
+        assertThat(inspect().blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+    }
+
+    @Test
+    void interruptedWorkspaceCreationRemainsBlockedWithItsActualPendingReceipt() throws Exception {
+        assertThatThrownBy(() -> otherWorkspaceStore("foreign", true).create("foreign", "actor", "Pending", "pending"))
+                .isInstanceOfSatisfying(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"))
+                .hasCauseInstanceOf(IllegalStateException.class).hasRootCauseMessage("ordinary-registration-unavailable");
+        String receipt = jdbc.queryForObject("SELECT receipt_key FROM ma_request_receipt WHERE namespace = 'WORKSPACE_CREATE'", String.class);
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_request_receipt WHERE receipt_key = ?", String.class, receipt)).isEqualTo("PENDING");
+        assertWorkspaceReceiptBlocked(receipt);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ?", Integer.class, "foreign")).isZero();
+    }
+
+    private void assertWorkspaceReceiptBlocked(String receipt) throws Exception {
+        var found = inspect();
+        assertThat(found.table("ma_request_receipt").rows()).filteredOn(row -> receipt.equals(row.text("receipt_key")))
+                .hasSize(1).allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL);
+        assertThat(found.blockers()).anyMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+    }
+
+    private ManagedWorkspaceRegistry.WorkspaceSummary createOtherWorkspace(String tenant) throws Exception {
+        return otherWorkspaceStore(tenant, false).create(tenant, "actor", "Other Workspace", "other-workspace");
+    }
+
+    private WorkspaceCreationStore otherWorkspaceStore(String tenant, boolean failRegistration) throws Exception {
+        var properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setWorkspaceCreationRoot(Files.createDirectory(temp.resolve(tenant)).toRealPath().toString());
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        var manager = new DataSourceTransactionManager(source);
+        var guard = new WorkspaceStorageGuard(jdbc, manager, properties, root -> {
+            if (failRegistration) {
+                throw new IllegalStateException("ordinary-registration-unavailable");
+            }
+            return new WorkspaceStorageGuard.Identity(root.toString(), "ordinary-test-host", "device",
+                    Files.readAttributes(root, BasicFileAttributes.class).fileKey().toString(), "2026-10-16T00:00:00.123456789Z");
+        });
+        return new WorkspaceCreationStore(jdbc, manager, guard, new ManagedWorkspaceRegistry(jdbc),
+                properties, new ObjectMapper(), Clock.systemUTC());
     }
 
     @Test

@@ -104,3 +104,13 @@ have passed their required checks.
 Lifecycle failure settlement checks the actual private fence before operation/head DML. Ordinary model-usage UI projection requires `csi_guard=FALSE`; private journal model events and original resources remain intact without adding a `hosted_context_usage` domain/ref. Action dispatch and ended-action settlement scans exclude private Sessions before LIMIT and recheck inside the claim/settlement transaction; tool-result capture retains its method-level private refusal. The new approvalMode creation overload still checks resident registration or LOCAL storage.
 
 Ordinary H2 data-component controls verify these boundaries, without establishing MySQL locking, native producer, physical stop or volume-reuse qualification.
+
+## Passive Workspace creation receipts
+
+The global receipt scan also sees normal public Workspace creation. A completed `WORKSPACE_CREATE` receipt can belong to a different Workspace even within the original tenant; treating every such row as an unknown owner blocks an otherwise unrelated retirement. Support only this completed producer shape. Pending, orphaned, unknown and conflicting receipts continue to block.
+
+Verify the actual receipt key, tenant/scope/idempotency hashes, actor scope, `CREATE_WORKSPACE` operation, completed state and all unused domain columns. Decode exactly the four saved result fields, with the producer's name/digest and canonical registration UUID. The Workspace and storage IDs must be derived from the actual receipt key. Read the actual root Workspace and registered LOCAL alias on the existing Connection, check their exact identity and registration association, and reject the original Workspace, storage, physical key or any original strong reference. Retain complete rows and the existing aggregate limits. This is passive attribution only: it performs no filesystem or runtime I/O, changes no owner and does not accept original Workspace creation as supported retirement work.
+
+Ordinary H2 tests use the real public Workspace creation producer, preserve full receipt and original-row bytes, and cover malformed hashes/results, missing or changed parents/aliases, original references and pending state. These tests do not establish MySQL lock ordering or physical qualification. Artifact and delivery ownership still require their separate producer chains; this change does not classify unknown rows as unrelated.
+
+This change attributes live inventory only. It does not extend historical carrier decoders or qualify arbitrary concurrent foreign activity; whole saved OTHER rows still participate in image comparisons.

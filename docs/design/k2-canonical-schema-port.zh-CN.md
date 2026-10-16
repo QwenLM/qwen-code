@@ -82,3 +82,13 @@ checkpoint 协议检查、精确应用像和回滚/重试行为、同步读端�
 生命周期失败结算必须在任何 operation/head DML 之前核对实际 private fence。模型用量的普通界面投影仅接受 `csi_guard=FALSE`；私有 journal 的原模型事件与原资源不变，不额外生成 `hosted_context_usage` domain/ref。Action 扫描及已结束 action 的恢复结算都在 LIMIT 前排除 private Session，claim/结算事务内再核；工具结果采集保留方法级 private 早退。新 approvalMode 创建重载仍核对 resident 注册或 LOCAL storage。
 
 普通 H2 数据组件控制验证这些边界，不证明 MySQL 锁、原生 producer、物理停止或卷复用。
+
+## Workspace 创建回执的被动归属
+
+全局回执扫描还会遇到普通公开 Workspace 创建。已完成的 `WORKSPACE_CREATE` 回执可以属于原 tenant 内另一个 Workspace；把这类行一概视为未知 owner，会阻塞无关退役。本次仅支持这个已完成的 producer 形状。PENDING、孤儿、未知和冲突回执继续阻塞。
+
+核对实际回执键、tenant/scope/idempotency 摘要、actor scope、`CREATE_WORKSPACE` 操作、完成状态及全部未使用领域列。Result 只允许保存的四个字段，校验 producer 的名称/摘要及 canonical registration UUID。Workspace/storage ID 必须由实际 receipt key 派生。在原 Connection 读取真实 ROOT Workspace 与已注册 LOCAL alias，核对精确身份和注册关联，拒绝原 Workspace、storage、physical key 或任意原强引用。保留完整行和原聚合上限。这只证明被动归属，不进行文件系统或 runtime I/O，不改变 owner，也不把原 Workspace 创建活动纳入支持的退役工作。
+
+普通 H2 测试使用真实公开 Workspace 创建 producer，保留回执与原行完整字节，覆盖损坏的摘要/result、缺失或变化的父对象/alias、原引用及 PENDING 状态。它们不证明 MySQL 锁序或物理资格。Artifact 与 delivery 仍须独立验证其 producer 链，不能把未知行直接分类为无关。
+
+本次仅增加 live 清单归属，不扩展历史 carrier 解码器，也不资格化任意并发 foreign 活动；已保存 OTHER 完整行仍参与全像比较。

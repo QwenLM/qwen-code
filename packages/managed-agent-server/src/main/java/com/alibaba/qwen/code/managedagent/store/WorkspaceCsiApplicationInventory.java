@@ -2302,8 +2302,13 @@ final class WorkspaceCsiApplicationInventory {
                             namespace, ownerTenant, scopeKind, scopeId, idempotency).equals(row.text("receipt_key"))
                     || !com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(ownerTenant).equals(row.text("tenant_key"))
                     || !ManagedReceipts.scope(ownerTenant, scopeId).equals(row.text("scope_key"))
-                    || !com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(idempotency).equals(row.text("idempotency_digest"))
-                    || !row.cell("operation").isNull() || !row.cell("session_status_before").isNull()) {
+                    || !com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(idempotency).equals(row.text("idempotency_digest"))) {
+                return false;
+            }
+            if (namespace == com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace.WORKSPACE_CREATE) {
+                return otherWorkspaceCreationReceipt(row);
+            }
+            if (!row.cell("operation").isNull() || !row.cell("session_status_before").isNull()) {
                 return false;
             }
             if (namespace == com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace.SESSION_CREATE_MODE) {
@@ -2329,6 +2334,70 @@ final class WorkspaceCsiApplicationInventory {
             }
             return lookup("ma_turn", "tenant_id = ? AND session_id = ? AND turn_id = ?",
                     ownerTenant, row.text("session_id"), row.text("turn_id")) != null;
+        }
+
+        private boolean otherWorkspaceCreationReceipt(Row row) throws SQLException {
+            if (!"ACTOR".equals(row.text("scope_kind")) || !"COMPLETED".equals(row.text("state"))
+                    || !"CREATE_WORKSPACE".equals(row.text("operation")) || row.text("tenant_id").isEmpty()
+                    || row.binary("actor_id") == null || row.binary("actor_id").length == 0
+                    || !ManagedReceipts.actorScope(row.binary("actor_id")).equals(row.text("scope_id"))
+                    || !row.text("idempotency_key").matches("[\\x21-\\x7e]{1,128}")) {
+                return false;
+            }
+            for (String field : List.of("workspace_bound", "session_id", "turn_id", "agent_id", "agent_revision",
+                    "schedule_id", "channel_id", "account_generation", "semantic_revision", "action_id", "action_version",
+                    "decision_scope_key", "mutation_attempt_sequence", "session_status_before", "result_operation_key")) {
+                if (!row.cell(field).isNull()) {
+                    return false;
+                }
+            }
+            JsonNode details = parse(row.text("result_json"));
+            WorkspaceCsiApplicationJson.closed(details, Set.of("workspaceId", "storageId", "displayName", "registrationId"));
+            for (String field : List.of("workspaceId", "storageId", "displayName", "registrationId")) {
+                if (!details.path(field).isTextual()) {
+                    return false;
+                }
+            }
+            String otherWorkspace = details.path("workspaceId").textValue();
+            String otherStorage = details.path("storageId").textValue();
+            String name = details.path("displayName").textValue();
+            String registration = details.path("registrationId").textValue();
+            if (!("workspace-" + row.text("receipt_key")).equals(otherWorkspace)
+                    || !("created-" + row.text("receipt_key")).equals(otherStorage)
+                    || name.isEmpty() || name.length() > 128 || !name.equals(name.strip())
+                    || name.codePoints().anyMatch(Character::isISOControl)
+                    || !com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(name).equals(row.text("request_digest"))
+                    || !java.util.UUID.fromString(registration).toString().equals(registration)
+                    || tenant.equals(row.text("tenant_id")) && (workspace.equals(otherWorkspace) || storage.equals(otherStorage))) {
+                return false;
+            }
+            Row parent = lookup("ma_workspace", "tenant_id = ? AND workspace_id = ?", row.text("tenant_id"), otherWorkspace);
+            Row alias = lookup("ma_storage", "alias_key = ?",
+                    JdbcRuntimeBindingRepository.storageAliasKey(row.text("tenant_id"), otherStorage));
+            if (parent == null || alias == null || !otherStorage.equals(parent.text("storage_id"))
+                    || !"ROOT".equals(parent.text("workspace_kind"))
+                    || parent.number("workspace_generation") == null || parent.number("workspace_generation") < 1
+                    || !Set.of("ACTIVE", "REMOVED").contains(parent.text("state"))
+                    || !row.text("tenant_id").equals(alias.text("tenant_id")) || !otherStorage.equals(alias.text("storage_id"))
+                    || !JdbcRuntimeBindingRepository.storageFenceKey(row.text("tenant_id")).equals(alias.text("tenant_key"))
+                    || !JdbcRuntimeBindingRepository.storageFenceKey(otherStorage).equals(alias.text("storage_key"))
+                    || !"LOCAL".equals(alias.text("storage_kind")) || !"REGISTERED".equals(alias.text("registration_state"))
+                    || alias.number("registration_revision") == null || alias.number("registration_revision") < 1
+                    || !alias.cell("fence_operation_id").isNull() || alias.text("physical_key") == null
+                    || !alias.text("physical_key").matches("[a-f0-9]{64}") || intent.physicalKey().equals(alias.text("physical_key"))
+                    || savedOriginalReference("ma_workspace", parent, liveReferences())
+                    || savedOriginalReference("ma_storage", alias, liveReferences())) {
+                return false;
+            }
+            for (String field : List.of("child_state", "parent_workspace_id", "parent_session_id", "child_run_id", "child_workspace_id")) {
+                if (!parent.cell(field).isNull()) {
+                    return false;
+                }
+            }
+            JsonNode registered = parse(alias.text("registration_json"));
+            WorkspaceCsiApplicationJson.closed(registered, Set.of("schemaVersion", "operationId"));
+            return registered.path("schemaVersion").isIntegralNumber() && registered.path("schemaVersion").canConvertToLong()
+                    && registered.path("schemaVersion").longValue() == 1 && registration.equals(registered.path("operationId").textValue());
         }
 
         private boolean otherCapture(Row row) throws SQLException {
