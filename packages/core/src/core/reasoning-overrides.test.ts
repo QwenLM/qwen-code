@@ -274,22 +274,6 @@ describe('reasoning declarations', () => {
       'maas.qwencloudapi.com',
       'https://maas.qwencloudapi.com/compatible-mode/v1',
     ],
-  ])(
-    'inherits DashScope capabilities for QwenCloud host %s',
-    (_host, baseUrl) => {
-      // qwen3.8-max is registered in the QwenCloud standard provider with
-      // disableField: 'reasoning_effort', so the dashscope host match
-      // produces a dashscope-effort profile rather than toggle-only.
-      const resolved = resolveReasoningCapabilities(
-        { ...route, model: 'qwen3.8-max', baseUrl },
-        { canDisable: false },
-      );
-      expect(resolved).toBeDefined();
-      expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
-    },
-  );
-
-  it.each([
     [
       'token-plan.maas.qianwenaiapi.com',
       'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
@@ -299,24 +283,26 @@ describe('reasoning declarations', () => {
       'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
     ],
   ])(
-    'inherits DashScope capabilities for QwenCloud Token Plan host %s',
+    'inherits DashScope capabilities for QwenCloud host %s',
     (_host, baseUrl) => {
-      // Token Plan subdomains are not registered as separate providers, so
-      // no inherited capabilities exist. But the host still matches the
-      // dashscope regex, which is what we're testing. Use a model name
-      // that triggers the qwen + dashscope path without needing inherited.
+      // The declaration must omit `thinking` and `profile`: either one returns
+      // from validateReasoningDeclaration before `route.baseUrl` is parsed, so
+      // the host regex is never reached. qwen3.8-max carries disableField
+      // 'reasoning_effort' in both presets, leaving the host match as the only
+      // thing selecting 'dashscope-effort' over 'qwen-chat-template'.
       const resolved = resolveReasoningCapabilities(
-        { ...route, model: 'qwen3.7-plus', baseUrl },
-        { thinking: true, toggleOnly: true, disableField: 'enable_thinking' },
+        { ...route, model: 'qwen3.8-max', baseUrl },
+        { canDisable: false },
       );
       expect(resolved).toBeDefined();
-      expect(resolved).toMatchObject({
-        disableField: 'enable_thinking',
-        toggleOnly: true,
-      });
+      expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
     },
   );
 
+  // A lookalike host matches no preset, so resolution returns at the
+  // `!inherited && !gpt && !claude && !input.profile` guard before parsing
+  // `route.baseUrl`: these pin "unregistered host resolves to nothing", while
+  // the positive cases above are what pin the anchored regex.
   it.each([
     [
       'maas.qianwenaiapi.com.evil.com',

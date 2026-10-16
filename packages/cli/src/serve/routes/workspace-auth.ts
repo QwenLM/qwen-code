@@ -367,9 +367,12 @@ export function registerWorkspaceAuthRoutes(
       // endpoint first and validate the resolved URL, while this route
       // validates the client-supplied `baseUrl` (`''` when omitted). Every
       // shipped validator keys on the prefix alone, so the two agree today.
+      // Validate the same string the route forwards: the parser returns
+      // `apiKey` raw, so the trim has to happen here rather than downstream.
+      const apiKey = installRequest.apiKey.trim();
       if (knownProvider.validateApiKey) {
         const apiKeyError = knownProvider.validateApiKey(
-          installRequest.apiKey.trim(),
+          apiKey,
           installRequest.baseUrl ?? '',
         );
         if (apiKeyError) {
@@ -383,9 +386,10 @@ export function registerWorkspaceAuthRoutes(
       try {
         const assertGenerationOpen = captureGenerationAssertion?.();
         assertGenerationOpen?.();
+        const request = { ...installRequest, apiKey };
         const result = assertGenerationOpen
-          ? await installAuthProvider(installRequest, assertGenerationOpen)
-          : await installAuthProvider(installRequest);
+          ? await installAuthProvider(request, assertGenerationOpen)
+          : await installAuthProvider(request);
         assertGenerationOpen?.();
         let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
         if (syncModelProvidersRuntime) {

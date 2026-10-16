@@ -1469,6 +1469,46 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     },
   );
 
+  it('resolves the view title while rendering, not at import time (T1)', async () => {
+    // Ungated on purpose: every keystroke-driven QwenCloud case in this file is
+    // skipped when CI=true, so this is the only Ink-side guard that runs there.
+    // The module is imported under the default locale, so an eager VIEW_TITLES
+    // would still render 'Connect a Provider' after the switch to zh.
+    await setLanguageAsync('zh');
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { lastFrame, unmount } = renderAuthDialog(settings);
+    try {
+      expect(lastFrame()).toContain('连接服务商');
+    } finally {
+      unmount();
+      await setLanguageAsync('en');
+    }
+  });
+
   itWhenTuiInputReliable(
     'renders QwenCloud flow title in Chinese when locale is zh (T1)',
     async () => {
@@ -1511,6 +1551,9 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Token Plan');
+      // The sub-menu heading comes from VIEW_TITLES, unlike the flowTitle path
+      // asserted below, so it is the assertion that pins render-time lookup.
+      expect(lastFrame()).toContain('千问AI平台 · 接入方式');
       stdin.write('\r');
 
       await vi.waitFor(
