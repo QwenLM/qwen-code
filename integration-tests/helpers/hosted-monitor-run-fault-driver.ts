@@ -501,6 +501,7 @@ const proxyUrl = `http://127.0.0.1:${proxyAddress.port}`;
 let storeProxyFailure: unknown;
 let holdSegments = false;
 let heldSegments = 0;
+let segmentReleaseBudget = 0;
 const heldReplies: Array<() => void> = [];
 let dropNextCommit = false;
 let droppedCommits = 0;
@@ -526,11 +527,15 @@ const storeProxy = createServer(async (req, res) => {
       parsed?.['kind'] === 'managed-tool-result-content' &&
       parsed?.['byteLength'] === SEGMENT_BYTES
     ) {
-      heldSegments++;
-      console.log(`FG8_STORE_PROXY hold segment ${heldSegments}`);
-      // Held BEFORE the commit reaches the store: the committed prefix
-      // freezes while the producer's pipe backs up to the pause watermark.
-      await new Promise<void>((resolve) => heldReplies.push(resolve));
+      if (segmentReleaseBudget > 0) {
+        segmentReleaseBudget--;
+      } else {
+        heldSegments++;
+        console.log(`FG8_STORE_PROXY hold segment ${heldSegments}`);
+        // Held BEFORE the commit reaches the store: the committed prefix
+        // freezes while the producer's pipe backs up to the pause watermark.
+        await new Promise<void>((resolve) => heldReplies.push(resolve));
+      }
     }
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) {
@@ -584,9 +589,10 @@ const storeProxyAddress = storeProxy.address();
 assert(storeProxyAddress && typeof storeProxyAddress !== 'string');
 const storeProxyUrl = `http://127.0.0.1:${storeProxyAddress.port}`;
 
-function releaseHeldSegments() {
-  holdSegments = false;
-  const pending = heldReplies.splice(0);
+function releaseHeldSegments(count = Number.POSITIVE_INFINITY) {
+  holdSegments = Number.isFinite(count);
+  const pending = heldReplies.splice(0, count);
+  segmentReleaseBudget = holdSegments ? count - pending.length : 0;
   console.log(`FG8_STORE_PROXY release ${pending.length} held segments`);
   for (const resolve of pending) resolve();
 }
@@ -915,14 +921,14 @@ async function awaitProducerStall(): Promise<number> {
 }
 
 async function inFlightCap() {
-  holdSegments = true;
   const stallBlocks = await awaitProducerStall();
   step(
     `stalled at ${stallBlocks} blocks with ${heldSegments} segment commits held`,
   );
-  releaseHeldSegments();
-  // The resume watermark re-arms: the producer advances again while the
-  // drain is still short of the full output.
+  // Leave at least 3 MiB held, allowing for a pipe chunk beyond the
+  // 16 MiB pause threshold. The late JDBC sample cannot race the drain,
+  // and a resume-at-empty regression cannot advance the producer.
+  releaseHeldSegments(13);
   let committedAtResume = -1;
   await waitUntil(async () => {
     checkStoreProxy();
@@ -931,6 +937,7 @@ async function inFlightCap() {
     committedAtResume = fullSegments(state).length;
     return true;
   }, 30_000);
+  releaseHeldSegments();
   await releaseFifo(current.directory, 'run-gate');
   await waitUntil(async () => {
     checkProxy();
@@ -949,7 +956,6 @@ async function inFlightCap() {
 
 async function receiptDrop(cli: HostedHarnessProcess, clientId: string) {
   // Cross the watermarks first: the drop lands after a real pause/resume.
-  holdSegments = true;
   await awaitProducerStall();
   releaseHeldSegments();
   await waitUntil(() => {
@@ -1014,6 +1020,7 @@ async function runPublishCase() {
   try {
     if (current.name !== 'publisher-kill-mid-capture') {
       execFileSync('mkfifo', [path.join(current.directory, 'run-gate')]);
+      holdSegments = true;
     }
     const { clientId } = await createSession(cli, storeProxyUrl);
     await submitPrompt(cli, clientId, `fg8 ${current.name} launch`);
@@ -1044,6 +1051,7 @@ async function runPublishCase() {
     );
     throw cause;
   } finally {
+    releaseHeldSegments();
     await cli.close();
   }
 }
@@ -1056,6 +1064,7 @@ try {
     operations.length = 0;
     holdSegments = false;
     heldSegments = 0;
+    segmentReleaseBudget = 0;
     dropNextCommit = false;
     droppedCommits = 0;
     if (config.letter === 'fg8f') {
