@@ -678,8 +678,8 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     expect(install.run).toContain(
       'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
     );
-    // The write-back closes the cache: 'maven' loop — the seed above only
-    // reads the cache-saved ~/.m2, so without it a pom key rotation saves a
+    // The write-back closes the host-shared ~/.m2 loop — the seed above only
+    // reads that repository, so without it a pom key rotation leaves a
     // thin entry that never recaptures the managed-agent-server tree. The
     // excludes name the two in-house fixed release coordinates, not the
     // whole com/alibaba group, so third-party artifacts under it (druid)
@@ -923,5 +923,31 @@ describe('Java SDK release validation gate', () => {
     expect(guard).toBeLessThan(
       steps.findIndex((entry) => entry.name === 'Create and push release tag'),
     );
+  });
+});
+
+// An ECS host keeps ~/.m2 between jobs, and setup-java's post-job save tars
+// that whole shared repository before reserving the key: 14 to 37 minutes per
+// job on 2026-10-16, discarded when a parallel job wins the reservation.
+describe('setup-java Maven cache stays on hosted runners', () => {
+  const hostedOnly =
+    "${{ runner.environment == 'github-hosted' && 'maven' || '' }}";
+  const files = [
+    '.github/workflows/sdk-java.yml',
+    '.github/workflows/release-managed-agent-reference.yml',
+  ];
+  const sites = files.flatMap((file) =>
+    Object.entries(parse(readFileSync(file, 'utf8')).jobs).flatMap(
+      ([name, job]) =>
+        (job.steps ?? [])
+          .filter((s) => String(s.uses ?? '').startsWith('actions/setup-java'))
+          .map((s) => [`${file} ${name}`, s]),
+    ),
+  );
+  it('finds every setup-java step', () => {
+    expect(sites.length).toBe(7);
+  });
+  it.each(sites)('%s caches Maven only on hosted runners', (_, step) => {
+    expect(step.with?.cache).toBe(hostedOnly);
   });
 });
