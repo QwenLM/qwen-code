@@ -2625,6 +2625,390 @@ describe('WorkspaceFileSystem - writeBytesAtomic', () => {
   });
 });
 
+describe('WorkspaceFileSystem - deleteDirectory', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await teardown(h);
+  });
+
+  it('classifies changing directory contents as retryable without deleting siblings', async () => {
+    const target = path.join(h.workspace, 'folder');
+    await fsp.mkdir(target);
+    await fsp.writeFile(path.join(target, 'keep.txt'), 'keep');
+    await fsp.writeFile(path.join(h.workspace, 'sibling.txt'), 'sibling');
+    vi.spyOn(fsp, 'rm').mockRejectedValueOnce(
+      Object.assign(new Error('directory is not empty'), { code: 'ENOTEMPTY' }),
+    );
+    await expect(h.fs.deleteDirectory!('folder')).rejects.toMatchObject({
+      kind: 'io_error',
+      status: 503,
+    });
+    expect(await fsp.readFile(path.join(target, 'keep.txt'), 'utf8')).toBe(
+      'keep',
+    );
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'sibling.txt'), 'utf8'),
+    ).toBe('sibling');
+  });
+
+  it.each([false, true])(
+    'deletes a directory with contents=%s and audits it',
+    async (nonempty) => {
+      const target = path.join(h.workspace, 'folder');
+      await fsp.mkdir(target);
+      if (nonempty) {
+        await fsp.mkdir(path.join(target, 'nested'));
+        await fsp.writeFile(
+          path.join(target, 'nested/data.bin'),
+          Buffer.from([0, 255]),
+        );
+      }
+      await fsp.writeFile(path.join(h.workspace, 'keep.txt'), 'keep');
+      expect(await h.fs.deleteDirectory!('folder')).toBe(target);
+      await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(
+        await fsp.readFile(path.join(h.workspace, 'keep.txt'), 'utf8'),
+      ).toBe('keep');
+      expect(h.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: FS_ACCESS_EVENT_TYPE,
+            data: expect.objectContaining({
+              intent: 'delete',
+              operation: 'rm',
+            }),
+          }),
+        ]),
+      );
+    },
+  );
+
+  it('unlinks nested symlinks without removing their inside or outside targets', async () => {
+    const folder = path.join(h.workspace, 'folder');
+    const inside = path.join(h.workspace, 'keep-inside');
+    const outside = path.join(h.scratch, 'keep-outside');
+    for (const directory of [folder, inside, outside])
+      await fsp.mkdir(directory);
+    for (const directory of [inside, outside])
+      await fsp.writeFile(path.join(directory, 'keep.txt'), 'keep');
+    await fsp.symlink(inside, path.join(folder, 'inside-link'), 'dir');
+    await fsp.symlink(outside, path.join(folder, 'outside-link'), 'dir');
+    await fsp.symlink(
+      path.join(outside, 'keep.txt'),
+      path.join(folder, 'file-link'),
+      'file',
+    );
+    await fsp.symlink('absent', path.join(folder, 'dangling-link'), 'file');
+    await h.fs.deleteDirectory!('folder');
+    await expect(fsp.stat(folder)).rejects.toMatchObject({ code: 'ENOENT' });
+    for (const directory of [inside, outside])
+      expect(await fsp.readFile(path.join(directory, 'keep.txt'), 'utf8')).toBe(
+        'keep',
+      );
+  });
+
+  it.each(['', '.', '..', 'folder/', '../outside', 'regular.txt'])(
+    'refuses invalid or non-directory target %j',
+    async (input) => {
+      await fsp.mkdir(path.join(h.workspace, 'folder'));
+      await fsp.writeFile(path.join(h.workspace, 'folder/keep.txt'), 'keep');
+      await fsp.writeFile(path.join(h.workspace, 'regular.txt'), 'keep');
+      await expect(h.fs.deleteDirectory!(input)).rejects.toBeInstanceOf(Error);
+      expect(
+        await fsp.readFile(path.join(h.workspace, 'folder/keep.txt'), 'utf8'),
+      ).toBe('keep');
+      expect(
+        await fsp.readFile(path.join(h.workspace, 'regular.txt'), 'utf8'),
+      ).toBe('keep');
+    },
+  );
+
+  it('refuses an absolute workspace root and reports missing directories', async () => {
+    await expect(h.fs.deleteDirectory!(h.workspace)).rejects.toBeInstanceOf(
+      Error,
+    );
+    await expect(h.fs.deleteDirectory!('absent')).rejects.toMatchObject({
+      kind: 'path_not_found',
+    });
+    expect((await fsp.stat(h.workspace)).isDirectory()).toBe(true);
+  });
+
+  it('refuses final symlinks and escaping symlink ancestors', async () => {
+    const outside = path.join(h.scratch, 'outside');
+    await fsp.mkdir(path.join(outside, 'nested'), { recursive: true });
+    await fsp.writeFile(path.join(outside, 'nested/keep.txt'), 'keep');
+    const link = path.join(h.workspace, 'link');
+    await fsp.symlink(outside, link, 'dir');
+    for (const input of ['link', 'link/nested'])
+      await expect(h.fs.deleteDirectory!(input)).rejects.toMatchObject({
+        kind: 'symlink_escape',
+      });
+    expect((await fsp.lstat(link)).isSymbolicLink()).toBe(true);
+    expect(
+      await fsp.readFile(path.join(outside, 'nested/keep.txt'), 'utf8'),
+    ).toBe('keep');
+  });
+
+  it('refuses a directory swapped for a symlink after metadata inspection', async () => {
+    const target = path.join(h.workspace, 'folder');
+    const moved = path.join(h.workspace, 'moved');
+    const outside = path.join(h.scratch, 'outside');
+    for (const directory of [target, outside]) {
+      await fsp.mkdir(directory);
+      await fsp.writeFile(path.join(directory, 'keep.txt'), 'keep');
+    }
+    const lstat = fsp.lstat;
+    vi.spyOn(fsp, 'lstat').mockImplementation(async (...args) => {
+      const stat = await lstat(...args);
+      if (args[0] === target) {
+        await fsp.rename(target, moved);
+        await fsp.symlink(outside, target, 'dir');
+      }
+      return stat;
+    });
+    await expect(h.fs.deleteDirectory!('folder')).rejects.toMatchObject({
+      kind: 'symlink_escape',
+    });
+    for (const directory of [moved, outside]) {
+      expect(await fsp.readFile(path.join(directory, 'keep.txt'), 'utf8')).toBe(
+        'keep',
+      );
+    }
+  });
+
+  it('refuses untrusted deletion and rechecks generation before recursive removal', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: false });
+    await fsp.mkdir(path.join(h.workspace, 'folder'));
+    await expect(h.fs.deleteDirectory!('folder')).rejects.toMatchObject({
+      kind: 'untrusted_workspace',
+    });
+    await teardown(h);
+    let closed = false;
+    const failure = Object.assign(new Error('closed'), {
+      code: 'workspace_generation_closed',
+    });
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          if (closed) throw failure;
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'folder');
+    await fsp.mkdir(target);
+    await fsp.writeFile(path.join(target, 'keep.txt'), 'keep');
+    const lstat = fsp.lstat;
+    vi.spyOn(fsp, 'lstat').mockImplementation(async (...args) => {
+      const stat = await lstat(...args);
+      if (args[0] === target) closed = true;
+      return stat;
+    });
+    await expect(h.fs.deleteDirectory!('folder')).rejects.toBe(failure);
+    expect(await fsp.readFile(path.join(target, 'keep.txt'), 'utf8')).toBe(
+      'keep',
+    );
+  });
+});
+
+describe('WorkspaceFileSystem - createDirectory', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    await teardown(h);
+  });
+
+  it.each(['create', 'delete'] as const)(
+    'records ignored-directory audit metadata on %s',
+    async (operation) => {
+      await teardown(h);
+      h = await makeHarness({ ignore: new Ignore().add(['dist/']) });
+      if (operation === 'delete')
+        await fsp.mkdir(path.join(h.workspace, 'dist'));
+      await (operation === 'create'
+        ? h.fs.createDirectory!('dist')
+        : h.fs.deleteDirectory!('dist'));
+      const event = h.events.find(
+        (entry) => entry.type === FS_ACCESS_EVENT_TYPE,
+      );
+      expect(event?.data).toMatchObject({
+        matchedIgnore: 'directory',
+        ...(operation === 'create' ? { sizeBytes: 0 } : {}),
+      });
+    },
+  );
+
+  it.each(['reports.', 'NUL'])(
+    'rejects suspicious leaf %j and preserves reports',
+    async (input) => {
+      await fsp.mkdir(path.join(h.workspace, 'reports'));
+      await fsp.writeFile(path.join(h.workspace, 'reports/keep.txt'), 'keep');
+      for (const operation of [h.fs.createDirectory!, h.fs.deleteDirectory!]) {
+        await expect(operation.call(h.fs, input)).rejects.toMatchObject({
+          kind: 'path_outside_workspace',
+          status: 400,
+        });
+      }
+      expect(
+        await fsp.readFile(path.join(h.workspace, 'reports/keep.txt'), 'utf8'),
+      ).toBe('keep');
+    },
+  );
+
+  it('creates exactly one directory under an existing parent and audits it', async () => {
+    await fsp.mkdir(path.join(h.workspace, 'src'));
+    await expect(h.fs.createDirectory!('src/新 folder')).resolves.toBe(
+      path.join(h.workspace, 'src/新 folder'),
+    );
+    expect(
+      (await fsp.stat(path.join(h.workspace, 'src/新 folder'))).isDirectory(),
+    ).toBe(true);
+    expect(h.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: FS_ACCESS_EVENT_TYPE,
+          data: expect.objectContaining({
+            intent: 'write',
+            operation: 'mkdir',
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it('preserves existing files and directories on collision', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'file'), 'keep');
+    await fsp.mkdir(path.join(h.workspace, 'folder'));
+    for (const input of ['file', 'folder']) {
+      await expect(h.fs.createDirectory!(input)).rejects.toMatchObject({
+        kind: 'file_already_exists',
+        status: 409,
+      });
+    }
+    expect(await fsp.readFile(path.join(h.workspace, 'file'), 'utf8')).toBe(
+      'keep',
+    );
+  });
+
+  it('only one same-path create succeeds', async () => {
+    const results = await Promise.allSettled([
+      h.fs.createDirectory!('same'),
+      h.fs.createDirectory!('same'),
+    ]);
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.find((result) => result.status === 'rejected'),
+    ).toMatchObject({ reason: { kind: 'file_already_exists' } });
+  });
+
+  it('reports a directory created externally at the final mkdir as a collision', async () => {
+    const target = path.join(h.workspace, 'raced');
+    const mkdir = fsp.mkdir;
+    const spy = vi
+      .spyOn(fsp, 'mkdir')
+      .mockImplementation(async (input, options) => {
+        if (String(input) === target) await mkdir(target);
+        return mkdir(input, options);
+      });
+    try {
+      await expect(h.fs.createDirectory!('raced')).rejects.toMatchObject({
+        kind: 'file_already_exists',
+        status: 409,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each([
+    '',
+    '.',
+    '..',
+    '/',
+    'folder/',
+    'name\0',
+    '../escape',
+    'missing/child',
+  ])('refuses invalid, escaping or missing-parent path %j', async (input) => {
+    await expect(h.fs.createDirectory!(input)).rejects.toBeInstanceOf(Error);
+    await expect(
+      fsp.stat(path.join(h.scratch, 'escape')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      fsp.stat(path.join(h.workspace, 'missing')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses final symlinks and parent symlink escapes', async () => {
+    await fsp.symlink(h.scratch, path.join(h.workspace, 'link'), 'dir');
+    for (const input of ['link', 'link/child']) {
+      await expect(h.fs.createDirectory!(input)).rejects.toMatchObject({
+        kind: 'symlink_escape',
+      });
+    }
+    await expect(fsp.stat(path.join(h.scratch, 'child'))).rejects.toMatchObject(
+      { code: 'ENOENT' },
+    );
+  });
+
+  it('refuses a canonical parent swapped for a symlink before creation', async () => {
+    await fsp.mkdir(path.join(h.workspace, 'parent'));
+    const target = path.join(h.workspace, 'parent/new');
+    const realLstat = fsp.lstat;
+    const spy = vi.spyOn(fsp, 'lstat').mockImplementation(async (...args) => {
+      if (String(args[0]) === target) {
+        await fsp.rmdir(path.dirname(target));
+        await fsp.symlink(h.scratch, path.dirname(target), 'dir');
+      }
+      return realLstat(...args);
+    });
+    try {
+      await expect(h.fs.createDirectory!('parent/new')).rejects.toMatchObject({
+        kind: 'symlink_escape',
+      });
+      await expect(fsp.stat(path.join(h.scratch, 'new'))).rejects.toMatchObject(
+        { code: 'ENOENT' },
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('enforces trust and the final runtime generation checkpoint', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: false });
+    await expect(h.fs.createDirectory!('blocked')).rejects.toMatchObject({
+      kind: 'untrusted_workspace',
+    });
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          if (++checks === 3)
+            throw Object.assign(new Error('closed'), {
+              code: 'workspace_generation_closed',
+            });
+        },
+      },
+    });
+    await expect(h.fs.createDirectory!('blocked')).rejects.toMatchObject({
+      code: 'workspace_generation_closed',
+    });
+    await expect(
+      fsp.stat(path.join(h.workspace, 'blocked')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
 describe('WorkspaceFileSystem - mkdir', () => {
   let h: Harness;
   beforeEach(async () => {
