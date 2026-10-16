@@ -40,8 +40,10 @@ const TOS_PRIVACY_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
-type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
 type AuthGroup = DaemonAuthProviderCatalog['groups'][number];
+// Derived so the SDK union stays the single source of truth: a re-declared
+// literal union here is what let the daemon emit a group id this file denied.
+type AuthGroupId = AuthGroup['id'];
 type ModelWireApi = 'chat-completions' | 'responses';
 type AuthStep =
   | 'protocol'
@@ -52,6 +54,7 @@ type AuthStep =
   | 'advancedConfig';
 
 interface AuthMessageProps {
+  allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onClose: () => void;
 }
@@ -141,7 +144,13 @@ function normalizeModelIds(value: string): string[] {
   ];
 }
 
-export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
+export function AuthMessage({
+  onMessage,
+  onClose,
+  allowAdd = true,
+}: AuthMessageProps) {
+  const allowAddRef = useRef(allowAdd);
+  allowAddRef.current = allowAdd;
   const { t } = useI18n();
   const fieldId = useId();
   const openExternalLink = useExternalLinkOpener();
@@ -157,7 +166,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const [setupBackView, setSetupBackView] = useState<AuthView>('providers');
   const [stepIndex, setStepIndex] = useState(0);
   const [catalog, setCatalog] = useState<DaemonAuthProviderCatalog>();
-  const [groupId, setGroupId] = useState<AuthGroupId>('alibaba');
+  const [groupId, setGroupId] = useState<AuthGroupId>('qwencloud');
   const [provider, setProvider] = useState<DaemonAuthProviderDescriptor | null>(
     null,
   );
@@ -423,7 +432,8 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   ]);
 
   const save = useCallback(() => {
-    if (!provider || saving || !validateAdvanced()) return;
+    if (!allowAddRef.current || !provider || saving || !validateAdvanced())
+      return;
     const owner = ownerRef.current;
     const operation = ++saveOperationRef.current;
     const isCurrent = () =>

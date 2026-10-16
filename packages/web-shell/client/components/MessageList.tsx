@@ -77,6 +77,7 @@ import {
   isAskUserQuestionToolName,
   toolContainsCallId,
 } from './messages/toolFormatting';
+import { McpAppSessionContext } from '../mcpAppHostContext';
 import { getMcpAppDisplay } from './messages/McpApp';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
@@ -171,6 +172,7 @@ export interface MessageListProps {
    */
   bottomOverlayInset?: number;
   hideSessionTimeline?: boolean;
+  timelineAction?: ReactNode;
   hideFirstUserMessage?: boolean;
   firstTurnMetrics?: {
     durationMs?: number;
@@ -189,6 +191,7 @@ export interface MessageListProps {
   turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
   sourceEntries?: readonly WebShellSource[];
   sourceSessionId?: string;
+  mcpAppSessionId?: string;
   onSourceOpen?: (source: WebShellSource) => void;
   turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>;
   onReviewChanges?: (
@@ -198,6 +201,7 @@ export interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
 }
@@ -731,12 +735,28 @@ export interface ApplyTurnCollapseOptions {
   enabled: boolean;
 }
 
+/**
+ * A workspace agent's reply in the session. It is never the session's own
+ * answer: its record can land inside a main-model turn (the user prompted
+ * while the agent ran), and taking it as that turn's final answer would fold
+ * the main reply on collapse and move the copy / feedback / branch footer
+ * onto the agent's reply.
+ */
+function isAgentReply(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'assistant' &&
+    item.message.agentMessage?.kind === 'agent_message'
+  );
+}
+
 function isFinalContentCandidate(
   item: DisplayItem,
   includeBackgroundNotifications: boolean,
 ): boolean {
   return (
     item.type === 'message' &&
+    !isAgentReply(item) &&
     (item.message.role === 'assistant' ||
       (includeBackgroundNotifications &&
         item.message.role === 'system' &&
@@ -833,9 +853,9 @@ function collectFinalAssistantTurnIds(
 
 /**
  * A turn's hideable "steps": tool activity, plans, mid-turn assistant text,
- * and non-final background notifications. The final content and any other
- * system/shell/insight rows (errors, cancellations, command output) are kept
- * visible even when the turn is collapsed.
+ * non-final background notifications, and background result markers. Final
+ * content and other system/shell/insight rows (errors, cancellations, command
+ * output) are kept visible even when the turn is collapsed.
  */
 function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'parallel_agents') return true;
@@ -847,14 +867,19 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
     case 'plan':
       return true;
     case 'assistant':
-      return !isFinalAnswer;
+      // An agent's reply is its own message, kept like a user row.
+      return !isFinalAnswer && !isAgentReply(item);
     case 'thinking':
       return true;
     case 'system':
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
       }
-      return item.message.source === 'vision_bridge_notice';
+      return (
+        item.message.source === 'background_notification_turn_started' ||
+        item.message.source === 'background_task_completed' ||
+        item.message.source === 'vision_bridge_notice'
+      );
     case 'user':
     case 'user_shell':
     case 'btw':
@@ -2373,6 +2398,11 @@ export interface MessageListHandle {
    * highlight it. Returns false when the message is not in the list.
    */
   scrollToMessage: (messageId: string, callId?: string) => boolean;
+  /** 定位持久化历史搜索结果；调用方可取消仍在加载的选择。 */
+  scrollToSearchHit?: (
+    hit: import('../daemon/session/turn-navigation-store').ConversationSearchHit,
+    isCurrent?: () => boolean,
+  ) => Promise<boolean | 'cancelled'>;
   /** Resume bottom-follow mode and scroll to the latest output. */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
 }
@@ -2636,7 +2666,9 @@ const SessionTimeline = memo(function SessionTimeline({
   currentRange,
   hidden,
   onSelect,
+  action,
 }: {
+  action?: ReactNode;
   entries: readonly SessionTimelineEntry[];
   currentTurnId: string | null;
   currentRange: SessionTimelineRange | null;
@@ -2906,6 +2938,7 @@ const SessionTimeline = memo(function SessionTimeline({
             })}
           </ol>
         </div>
+        {action}
         {tooltip &&
           typeof document !== 'undefined' &&
           createPortal(
@@ -3028,6 +3061,7 @@ export const MessageList = memo(
       autoScrollTailIntoView = false,
       bottomOverlayInset = 0,
       hideSessionTimeline = false,
+      timelineAction,
       hideFirstUserMessage = false,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics = true,
@@ -3041,12 +3075,14 @@ export const MessageList = memo(
       turnArtifacts,
       sourceEntries,
       sourceSessionId,
+      mcpAppSessionId = sourceSessionId,
       onSourceOpen,
       turnScheduledTasks,
       onReviewChanges,
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      onToolResultOpen,
       onError,
       generateContent,
     },
@@ -5803,6 +5839,7 @@ export const MessageList = memo(
                 changes={displayItem.changes}
                 turnId={displayItem.turnId}
                 artifacts={displayItem.artifacts}
+                sourceSessionId={sourceSessionId}
                 scheduledTasks={displayItem.scheduledTasks}
                 workspaceCwd={workspaceCwd}
                 onOpenRequest={onTurnOutputOpen}
@@ -5854,8 +5891,13 @@ export const MessageList = memo(
           // only stamps the prompt's; both carry the same value.
           const feedbackPromptId =
             displayItem.message.promptId ?? feedbackHead?.promptId;
+          // An agent's reply gets a copy button only: no feedback marks (they
+          // rate the session's own answer) and no branching from it.
+          const agentReply =
+            displayItem.message.role === 'assistant' &&
+            displayItem.message.agentMessage?.kind === 'agent_message';
           const branchRecordId =
-            displayItem.message.role === 'assistant'
+            displayItem.message.role === 'assistant' && !agentReply
               ? displayItem.message.branchRecordId
               : undefined;
           const editableUserContent =
@@ -5900,6 +5942,7 @@ export const MessageList = memo(
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
               onTurnOutputOpen={onTurnOutputOpen}
+              onToolResultOpen={onToolResultOpen}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
                 onEditUserMessage && userMessageEditTarget
@@ -5931,21 +5974,27 @@ export const MessageList = memo(
               branchRecordId={branchRecordId}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
+                (agentReply ||
+                  finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
+                !agentReply &&
                 !isResponding &&
                 branchRecordId !== undefined
               }
               assistantFeedbackTurnId={
-                assistantFeedbackEnabled ? finalAssistantTurnId : undefined
+                assistantFeedbackEnabled && !agentReply
+                  ? finalAssistantTurnId
+                  : undefined
               }
               assistantFeedbackPromptId={
-                assistantFeedbackEnabled ? feedbackPromptId : undefined
+                assistantFeedbackEnabled && !agentReply
+                  ? feedbackPromptId
+                  : undefined
               }
               assistantFeedbackRating={
-                assistantFeedbackEnabled && feedbackPromptId
+                assistantFeedbackEnabled && !agentReply && feedbackPromptId
                   ? assistantFeedbackRatings[feedbackPromptId]
                   : undefined
               }
@@ -6022,10 +6071,12 @@ export const MessageList = memo(
         onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
+        sourceSessionId,
         onOpenArtifact,
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        onToolResultOpen,
         sourcesByTurn,
         onSourceOpen,
         onError,
@@ -6088,107 +6139,112 @@ export const MessageList = memo(
     }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
     return (
-      <div
-        ref={containerRef}
-        className={joinClassNames(
-          styles.list,
-          hasHeader && centerWelcomeHeader
-            ? styles.listWithWelcomeHeader
-            : undefined,
-        )}
-        data-web-shell-message-list
-        onClickCapture={handleDisclosureClickCapture}
-      >
-        {showLoadingSkeleton && (
-          <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
-        )}
-        {loadingOlderHistory &&
-          !showLoadingSkeleton &&
-          !suppressOlderHistoryLoadingStatus && (
+      <McpAppSessionContext.Provider value={mcpAppSessionId}>
+        <div
+          ref={containerRef}
+          className={joinClassNames(
+            styles.list,
+            hasHeader && centerWelcomeHeader
+              ? styles.listWithWelcomeHeader
+              : undefined,
+          )}
+          data-web-shell-message-list
+          onClickCapture={handleDisclosureClickCapture}
+        >
+          {showLoadingSkeleton && (
+            <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+          )}
+          {loadingOlderHistory &&
+            !showLoadingSkeleton &&
+            !suppressOlderHistoryLoadingStatus && (
+              <div className={styles.historyStatus} role="status">
+                {t('history.loadingEarlier')}
+              </div>
+            )}
+          {historyCapacityReached && !showLoadingSkeleton && (
             <div className={styles.historyStatus} role="status">
-              {t('history.loadingEarlier')}
+              {t('history.capacityReached')}
             </div>
           )}
-        {historyCapacityReached && !showLoadingSkeleton && (
-          <div className={styles.historyStatus} role="status">
-            {t('history.capacityReached')}
-          </div>
-        )}
-        {historyPaginationError &&
-          !showLoadingSkeleton &&
-          !historyCapacityReached && (
-            <div className={styles.historyStatus}>
-              <span role="status">{t('history.paginationError')}</span>
-              {onLoadOlderHistory && (
-                <button
-                  type="button"
-                  className={styles.historyRetryButton}
-                  onClick={retryOlderHistory}
-                >
-                  {t('history.retry')}
-                </button>
-              )}
-            </div>
-          )}
-        <SessionTimeline
-          entries={sessionTimelineEntries}
-          currentTurnId={currentTimelineTurnId}
-          currentRange={sessionTimelineRange}
-          hidden={!isSessionTimelineVisible || !hasEnoughSessionTimelineEntries}
-          onSelect={scrollToMessage}
-        />
-        {useVirtualScroll ? (
-          <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
-            {virtualItems.map((virtualRow) => (
-              <div
-                key={virtualRow.key}
-                data-index={virtualRow.index}
-                ref={measureVirtualRow}
-                className={joinClassNames(
-                  styles.virtualRow,
-                  getRowClassName(
+          {historyPaginationError &&
+            !showLoadingSkeleton &&
+            !historyCapacityReached && (
+              <div className={styles.historyStatus}>
+                <span role="status">{t('history.paginationError')}</span>
+                {onLoadOlderHistory && (
+                  <button
+                    type="button"
+                    className={styles.historyRetryButton}
+                    onClick={retryOlderHistory}
+                  >
+                    {t('history.retry')}
+                  </button>
+                )}
+              </div>
+            )}
+          <SessionTimeline
+            action={timelineAction}
+            entries={sessionTimelineEntries}
+            currentTurnId={currentTimelineTurnId}
+            currentRange={sessionTimelineRange}
+            hidden={
+              !isSessionTimelineVisible || !hasEnoughSessionTimelineEntries
+            }
+            onSelect={scrollToMessage}
+          />
+          {useVirtualScroll ? (
+            <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
+              {virtualItems.map((virtualRow) => (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={measureVirtualRow}
+                  className={joinClassNames(
+                    styles.virtualRow,
+                    getRowClassName(
+                      visibleItems[virtualRow.index - headerOffset],
+                    ),
+                  )}
+                  data-message-row-key={String(getItemKey(virtualRow.index))}
+                  data-source-block-ids={displayItemSourceBlockIds(
                     visibleItems[virtualRow.index - headerOffset],
-                  ),
-                )}
-                data-message-row-key={String(getItemKey(virtualRow.index))}
-                data-source-block-ids={displayItemSourceBlockIds(
-                  visibleItems[virtualRow.index - headerOffset],
-                  messages,
-                )}
-                data-web-shell-message-row
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                }}
-              >
-                {renderVirtualItem(virtualRow.index)}
-              </div>
-            ))}
-          </div>
-        ) : (
-          Array.from({ length: totalCount }, (_, index) => {
-            const key = getItemKey(index);
-            const item = visibleItems[index - headerOffset];
-            return (
-              <div
-                key={key}
-                data-index={index}
-                className={getRowClassName(item)}
-                data-message-row-key={String(key)}
-                data-source-block-ids={displayItemSourceBlockIds(
-                  item,
-                  messages,
-                )}
-                data-web-shell-message-row
-              >
-                {renderVirtualItem(index)}
-              </div>
-            );
-          })
-        )}
-      </div>
+                    messages,
+                  )}
+                  data-web-shell-message-row
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                  }}
+                >
+                  {renderVirtualItem(virtualRow.index)}
+                </div>
+              ))}
+            </div>
+          ) : (
+            Array.from({ length: totalCount }, (_, index) => {
+              const key = getItemKey(index);
+              const item = visibleItems[index - headerOffset];
+              return (
+                <div
+                  key={key}
+                  data-index={index}
+                  className={getRowClassName(item)}
+                  data-message-row-key={String(key)}
+                  data-source-block-ids={displayItemSourceBlockIds(
+                    item,
+                    messages,
+                  )}
+                  data-web-shell-message-row
+                >
+                  {renderVirtualItem(index)}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </McpAppSessionContext.Provider>
     );
   }),
 );

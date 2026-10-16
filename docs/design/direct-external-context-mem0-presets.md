@@ -1,5 +1,7 @@
 # Direct External Context Mem0 Presets
 
+[English](direct-external-context-mem0-presets.md) | [简体中文](direct-external-context-mem0-presets.zh-CN.md)
+
 **Status:** Implemented in the private direct integration
 
 **Date:** 2026-08-27
@@ -38,11 +40,14 @@ A preset therefore identifies one complete, verified contract. Published
 preset identifiers are immutable. An incompatible upstream change receives a
 new identifier rather than silently changing an existing mapping.
 
-The first built-in presets are:
+The built-in presets are:
 
 - `mem0-platform-v3`
 - `mem0-oss-rest-2026-08`
 - `aliyun-polardb-mysql-2026-08`
+- `mem0-v2`
+- `mem0-v3`
+- `mem0-oss-2026-08`
 
 ## Configuration
 
@@ -100,6 +105,7 @@ Built-in presets select only reviewed constants:
   `filters`, or omitted
 - a closed set of fixed search options such as `threshold` and `rerank`
 - a `results` response collection with reviewed identifier and content fields
+- optional single-user direct-import message decoding, only for `mem0-v2` results marked `infer: false`
 - an optional static direct-import path and one reviewed response mapping
 
 The engine always sends at most five as the provider limit and retains at most
@@ -149,6 +155,8 @@ authentication override.
 - Direct import: `POST /v1/memories`, `infer: false`
 - Write response: a valid `results[].id` is `stored`; otherwise `unknown`
 
+The historical `aliyun-polardb-mysql-2026-08` identifier keeps `top_k` and raw search content. The newer `mem0-v2` mapping uses `limit` and unwraps one nonempty user message from an `infer: false` direct-import result. It leaves ordinary text, other message arrays, and results without that marker unchanged. `mem0-v3` and `mem0-oss-2026-08` alias the corresponding legacy V3 and OSS contracts without changing them.
+
 An `event_id` alone is never treated as proof of storage. If a later PolarDB
 contract documents asynchronous event polling, that behavior requires a new
 preset and write design rather than changing this preset in place.
@@ -193,6 +201,7 @@ The implementation must prove:
 - safe `origin` plus `basePath` joining
 - exact authentication, path, scope, and limit mapping for every preset
 - per-item response normalization and the five-result cap
+- preservation of historical preset responses alongside the bounded `mem0-v2` direct-import decoding
 - conservative synchronous versus asynchronous write outcomes
 - no retry on search or write failures
 - loadability of the shipped PolarDB and OSS examples

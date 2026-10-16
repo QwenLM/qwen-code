@@ -5,6 +5,7 @@
  */
 
 import { useState, useCallback } from 'react';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   SessionService,
   buildSessionRecoveryPlan,
@@ -15,6 +16,7 @@ import {
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
+  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -41,6 +43,7 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
+  seedPromptCount: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -91,6 +94,7 @@ export function useResumeCommand(
     historyManager,
     loadHistory: loadHistoryOverride,
     startNewSession,
+    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -157,6 +161,7 @@ export function useResumeCommand(
       try {
         const cwd = config.getTargetDir();
         const sessionService = new SessionService(cwd);
+        sessionService.assertLegacySessionExecution(sessionId);
         const sessionData = await sessionService.loadSession(sessionId);
 
         if (!sessionData) {
@@ -233,8 +238,16 @@ export function useResumeCommand(
         //    The remaining steps (name, history items, notice) are display
         //    state for a swap that has already committed.
         startNewSession(sessionId);
+        // startNewSession resets the counter, so seed afterward.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            sessionData.conversation.messages,
+            sessionId,
+          ),
+        );
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
+        await getInteractiveModSession(config)?.syncSession('resume');
         setSessionName?.(customTitle ?? null);
         clearPendingState?.();
         clearItems();
@@ -345,6 +358,7 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
+      seedPromptCount,
       clearPendingState,
       setSessionName,
       remount,

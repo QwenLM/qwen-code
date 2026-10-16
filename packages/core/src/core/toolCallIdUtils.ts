@@ -7,6 +7,7 @@
 import type { Content, FunctionCall, Part } from '@google/genai';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
+import { carryIncompleteArgumentsMarker } from './incomplete-tool-call-args.js';
 
 const DUPLICATE_ID_SUFFIX = '__qwen_dup_';
 const GENERATED_ID_PREFIX = 'call_qwen_';
@@ -185,6 +186,10 @@ export function normalizeModelToolCallIds(
         enumerable: false,
       });
     }
+    // The spread above copies enumerable own properties only, so the
+    // non-enumerable incomplete-arguments marker must be re-attached or the
+    // scheduler's data-loss guard never sees it (QwenLM/qwen-code#12970).
+    carryIncompleteArgumentsMarker(functionCall, normalizedFunctionCall);
 
     normalized.push({
       ...part,

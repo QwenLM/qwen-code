@@ -109,6 +109,8 @@ export const CLIMcpServerConfigSchema = z.object({
   // Common
   timeout: z.number().optional(),
   versionNegotiation: z.enum(['auto', 'legacy']).optional(),
+  appResourceMaxBytes: z.number().optional(),
+  appResourceTimeoutMs: z.number().optional(),
   trust: z.boolean().optional(),
   // Metadata
   description: z.string().optional(),

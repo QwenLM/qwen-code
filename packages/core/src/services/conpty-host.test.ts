@@ -61,12 +61,12 @@ describe('conpty-host', () => {
     // human re-check the comment above describes. The WindowsPtyAgent field
     // shape and conpty.cc baton-erase semantics live in the win32 prebuilds, so
     // those keys must trip the same guard as the loader.
-    expect(Object.keys(corePins)).toHaveLength(6);
+    expect(Object.keys(corePins)).toHaveLength(7);
     expect(
       Object.values(corePins).every((version) => version === VERIFIED_NODE_PTY),
     ).toBe(true);
     // packages/cli declares no node-pty and resolves the root-hoisted copy, so
-    // the root manifest's six must stay in lockstep with core's six — the
+    // the root manifest's seven must stay in lockstep with core's seven — the
     // declaration agent-view actually loads in a dev tree.
     expect(corePins).toEqual(rootPins);
   });

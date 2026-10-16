@@ -399,15 +399,20 @@ describe('ToolApproval accessibility', () => {
   });
 
   it('renders generic parameter content even when it equals the title', () => {
+    const input = { key: 'value' };
+    const text = JSON.stringify(input, null, 2);
     const adapted = extractPendingPermission([
       {
         id: 'permission-input',
         kind: 'permission',
         requestId: 'request-input',
         sessionId: 'session-input',
-        title: '{}',
+        title: text,
         options: [],
-        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        toolCall: {
+          rawInput: input,
+          _meta: { toolName: 'mcp__sample__write' },
+        },
         preview: { kind: 'generic' },
         createdAt: 1,
         updatedAt: 1,
@@ -415,7 +420,7 @@ describe('ToolApproval accessibility', () => {
     ])!;
     render(undefined, { ...adapted, options: request.options });
     const preview = container!.querySelector('pre');
-    expect(preview?.textContent).toBe('{}');
+    expect(preview?.textContent).toBe(text);
     const describedBy = container!
       .querySelector('[role="alertdialog"]')
       ?.getAttribute('aria-describedby')
@@ -426,6 +431,324 @@ describe('ToolApproval accessibility', () => {
       'request-input',
       'reject',
     );
+  });
+
+  it('omits the empty MCP subtitle and content body without dangling descriptions', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-empty-input',
+        kind: 'permission',
+        requestId: 'request-empty-input',
+        sessionId: 'session-input',
+        title: '{}',
+        options: [],
+        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    expect(container!.querySelector('pre')).toBeNull();
+    expect(container!.querySelector('[class*="desc"]')).toBeNull();
+    expect(container!.textContent).toContain('mcp__sample__write');
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const descriptions = panel.getAttribute('aria-describedby')!.split(' ');
+    expect(descriptions).toHaveLength(1);
+    expect(document.getElementById(descriptions[0])?.textContent).toBe(
+      'Apply this change?',
+    );
+    expect(optionButtons()).toHaveLength(2);
+    pressKey(panel, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-empty-input',
+      'reject',
+    );
+  });
+
+  it.each([
+    {
+      name: 'whitespace around the placeholder',
+      title: '  {}  ',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: undefined,
+    },
+    {
+      name: 'MCP display-name prefix',
+      title: 'ping (sample MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'ping (sample MCP Server)',
+    },
+    {
+      name: 'provider-normalized MCP server key',
+      title: 'ask_question (mcp.deepwiki.com MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__mcp_deepwiki_com__ask_question_0gk4gom',
+      description: 'ask_question (mcp.deepwiki.com MCP Server)',
+    },
+    {
+      name: 'mismatched MCP tool name',
+      title: 'ping (sample MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping_other',
+      description: 'ping (sample MCP Server): {}',
+    },
+    {
+      name: 'meaningful title',
+      title: 'Check server health',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'Check server health',
+    },
+    {
+      name: 'prose ending in an empty object',
+      title: 'Expected response: {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'Expected response: {}',
+    },
+    {
+      name: 'explicit description',
+      title: '{}',
+      rawInput: { description: '  Check server health  ' },
+      toolName: 'mcp__sample__ping',
+      description: 'Check server health',
+    },
+    {
+      name: 'prose containing an MCP display name',
+      title: 'Expected response from ping (sample MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'Expected response from ping (sample MCP Server): {}',
+    },
+    {
+      name: 'serialized nonempty input',
+      title: '{"target":"health"}',
+      rawInput: { target: 'health' },
+      toolName: 'mcp__sample__ping',
+      description: '{"target":"health"}',
+    },
+    {
+      name: 'nonempty input with a {} title',
+      title: '{}',
+      rawInput: { target: 'health' },
+      toolName: 'mcp__sample__ping',
+      description: '{}',
+    },
+    {
+      name: 'missing input with a {} title',
+      title: '{}',
+      rawInput: undefined,
+      toolName: 'mcp__sample__ping',
+      description: '{}',
+    },
+    {
+      name: 'non-MCP tool',
+      title: '{}',
+      rawInput: {},
+      toolName: 'custom_tool',
+      description: '{}',
+    },
+  ])(
+    'renders the expected subtitle: $name',
+    ({ title, rawInput, toolName, description }) => {
+      render(undefined, { ...request, title, rawInput, toolName });
+      expect(container!.querySelector('[class*="desc"]')?.textContent).toBe(
+        description,
+      );
+      const panel = container!.querySelector('[role="alertdialog"]')!;
+      const descriptions = panel.getAttribute('aria-describedby')!.split(' ');
+      expect(
+        descriptions.map((id) => document.getElementById(id)?.textContent),
+      ).toEqual(
+        description === undefined
+          ? ['Apply this change?']
+          : ['Apply this change?', description],
+      );
+    },
+  );
+
+  it('renders the command block for an execute-kind tool under a non-canonical name', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-exec',
+        kind: 'permission',
+        requestId: 'request-exec',
+        sessionId: 'session-exec',
+        title: 'mcp__shell__run: ls -la',
+        options: [],
+        toolCall: {
+          kind: 'execute',
+          _meta: { toolName: 'mcp__shell__run' },
+          rawInput: { command: 'ls -la' },
+          content: [],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const command = container!.querySelector('pre');
+    expect(command?.textContent).toBe('ls -la');
+  });
+
+  it('neutralises bidi and C0 controls in the rendered command block', () => {
+    // Mirrors what `toManagedPermissionRequest` produces for an exec tool
+    // (`rawInput: tool.args` + `contentIsInput: true`), i.e. the shape from
+    // #13517: the card takes the `isExec && command` branch and renders
+    // `rawInput.command`, so escaping the `content` producer is not enough.
+    const craftedCommand = [
+      'rm -rf /tmp/\u202eppa', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'git push \u2066--force\u2069', // bidi isolates
+      'ls \u001b[31m--all\u001b[0m', // C0 ANSI escape
+    ].join('\n');
+    render(undefined, {
+      ...execRequest,
+      content: [{ type: 'text', text: JSON.stringify({ craftedCommand }) }],
+      contentIsInput: true,
+      rawInput: { command: craftedCommand },
+    });
+    const pre = container!.querySelector('pre')!;
+    const rendered = pre.textContent!;
+    // The invisible code points must not survive into the DOM, while the
+    // command stays legible and multi-line (`\n` is preserved on purpose).
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u2066');
+    expect(rendered).not.toContain('\u2069');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).toBe(
+      [
+        'rm -rf /tmp/\\u202eppa',
+        'git push \\u2066--force\\u2069',
+        'ls \\u001b[31m--all\\u001b[0m',
+      ].join('\n'),
+    );
+    // The tooltip must not re-introduce the raw payload either.
+    expect(pre.getAttribute('title')).toBe(rendered);
+  });
+
+  it('neutralises bidi and C0 controls in the model-supplied description text', () => {
+    // `.desc` renders `getDescriptionText`, which returns `rawInput.description`
+    // verbatim and otherwise falls back to `request.title` — on the daemon/ACP
+    // path that title is built from `ShellTool.getDescription()`, i.e. the raw
+    // command. #13566: this sibling of the sanitised command block was still
+    // rendered raw, in its body, in its tooltip and in the `aria-describedby`
+    // target a screen reader reads.
+    const craftedDescription = [
+      'Delete temporary data\u202e', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'ls \u001b[31m--all\u001b[0m\t--color', // C0 ANSI escape, tab kept
+      'rm -rf /tmp/data\u0007', // BEL
+    ].join('\n');
+    render(undefined, {
+      ...execRequest,
+      rawInput: {
+        command: 'rm -rf /tmp/data',
+        description: craftedDescription,
+      },
+    });
+    // `.desc` is a <div>, not a <pre>: reach it through the `aria-describedby`
+    // IDREF that references it, which also asserts the IDREF still resolves.
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const descEl = panel
+      .getAttribute('aria-describedby')!
+      .split(' ')
+      .map((id) => document.getElementById(id))
+      .find(
+        (el): el is HTMLElement =>
+          el?.tagName === 'DIV' && el.hasAttribute('title'),
+      )!;
+    expect(descEl).toBeTruthy();
+    const rendered = descEl.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).not.toContain('\u0007');
+    // `\n` and `\t` stay unescaped (the helper's own pin lives at
+    // toolFormatting.test.ts:51) so a multi-line description stays legible.
+    expect(rendered).toBe(
+      [
+        'Delete temporary data\\u202e',
+        'ls \\u001b[31m--all\\u001b[0m\t--color',
+        'rm -rf /tmp/data\\u0007',
+      ].join('\n'),
+    );
+    expect(descEl.getAttribute('title')).toBe(rendered);
+  });
+
+  it('neutralises bidi and C0 controls in the exec warnings block', () => {
+    // The warnings text is model-influenced: `buildOutsideWorkspaceWarning`
+    // (packages/core/src/utils/shell-utils.ts:2093) interpolates the raw
+    // `directory` argument verbatim, and real text content blocks reach
+    // `contentText` unescaped. #13566: this sibling <pre>, inside the same
+    // `isExec && command` fragment as the sanitised command block, was raw.
+    const craftedDirectory = '/tmp/\u202eevil\u001b[31m\u0007';
+    const warnings = `Runs outside the workspace in ${craftedDirectory}`;
+    render(undefined, {
+      ...execRequest,
+      content: [{ type: 'text', text: warnings }],
+      rawInput: { command: 'ls -la', description: 'List files' },
+    });
+    const warningPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent!.includes('Runs outside the workspace'),
+    )!;
+    expect(warningPre).toBeTruthy();
+    const rendered = warningPre.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).not.toContain('\u0007');
+    expect(rendered).toBe(
+      'Runs outside the workspace in /tmp/\\u202eevil\\u001b[31m\\u0007',
+    );
+    expect(warningPre.getAttribute('title')).toBe(rendered);
+    // The command block next to it keeps its own, separate payload intact.
+    const commandPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent === 'ls -la',
+    )!;
+    expect(commandPre).toBeTruthy();
+  });
+
+  it('renders exec warnings alongside the command block', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-monitor',
+        kind: 'permission',
+        requestId: 'request-monitor',
+        sessionId: 'session-monitor',
+        title: 'monitor: ls $(pwd)',
+        options: [],
+        toolCall: {
+          kind: 'execute',
+          _meta: { toolName: 'monitor' },
+          rawInput: { command: 'ls $(pwd)' },
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'Command substitution detected: $(pwd)',
+              },
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const blocks = Array.from(container!.querySelectorAll('pre')).map(
+      (el) => el.textContent,
+    );
+    expect(blocks).toContain('ls $(pwd)');
+    expect(blocks).toContain('Command substitution detected: $(pwd)');
+    const describedBy = container!
+      .querySelector('[role="alertdialog"]')
+      ?.getAttribute('aria-describedby');
+    for (const el of Array.from(container!.querySelectorAll('pre'))) {
+      expect(describedBy).toContain(el.id);
+    }
   });
 
   it('keeps the complete literal parameter body available without interpreting markup', () => {

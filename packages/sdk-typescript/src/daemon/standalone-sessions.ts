@@ -8,6 +8,7 @@ import { DaemonHttpError } from './DaemonHttpError.js';
 import { DAEMON_APPROVAL_MODES, DAEMON_ERROR_KINDS } from './types.js';
 import type {
   DaemonApprovalMode,
+  SessionStartupConfig,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionArchiveState,
@@ -25,6 +26,7 @@ export type DaemonStandaloneSessionOptions = Omit<
 >;
 
 export interface CreateStandaloneSessionOptions {
+  startupConfig?: SessionStartupConfig;
   sessionId?: string;
   modelServiceId?: string;
   approvalMode?: DaemonApprovalMode;

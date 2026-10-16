@@ -18,6 +18,8 @@ If you configured nothing under `tools.webSearch`, the tool registers whenever t
 | Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                              |
 | Alibaba ModelStudio → **Token Plan**                                                                                       | on                                              |
 | Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint is not verified for this API |
+| QwenCloud → **Standard API Key**                                                                                           | on                                              |
+| QwenCloud → **Token Plan**                                                                                                 | on                                              |
 | An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key | on                                              |
 | Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                 | off                                             |
 
@@ -86,7 +88,7 @@ Notes:
 
 - The selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider — only the search side request needs a DashScope entry. Qwen OAuth cannot back the tool.
 - Which providers can activate the tool is decided at startup. Once active, the search backend follows the currently selected model on the next search; switching to an unsupported provider makes that invocation fail, while switching from a session where the tool was absent still requires a restart to register it.
-- Automatic host detection intentionally accepts only known DashScope regional, Token Plan MaaS, and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways and `DASHSCOPE_PROXY_BASE_URL` are excluded because they are not known to forward the Responses search tools.
+- Automatic host detection intentionally accepts only known DashScope regional hosts, Model Studio and QwenCloud MaaS hosts (including their `token-plan.` subscription subdomains), and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways and `DASHSCOPE_PROXY_BASE_URL` are excluded because they are not known to forward the Responses search tools.
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
 - Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
 - There is no client-side model allowlist; a model the Responses endpoint does not serve fails loudly on first use.
@@ -306,5 +308,161 @@ qwen mcp add web-search-prime \
 ```
 
 Replace `${GLM_API_KEY}` with your actual ZhipuAI API key, or set it as an environment variable.
+
+---
+
+### Firecrawl
+
+The official hosted MCP server from Firecrawl, providing web search, page scraping, website crawling and mapping, browser interaction, and file parsing. Search results can include each page's content as Markdown, so the model can read its sources without a separate fetch step. The hosted server works without an API key for search, scrape, and parse. Search queries, the URLs you ask it to read, and any files you parse are sent to Firecrawl.
+
+- **Documentation:** https://docs.firecrawl.dev/mcp-server
+- **Cost:** No API key needed for search, scrape, and parse (daily limit per IP); paid plans for higher limits
+- **Get API Key:** https://www.firecrawl.dev/app/api-keys
+- **Best for:** Web search where the model also needs to read the pages it finds, and trying MCP web search without an API key
+
+#### Available Tools
+
+- `firecrawl_search` — Web search, optionally returning each result's page content as Markdown
+- `firecrawl_scrape` — Get a single page as clean Markdown
+- `firecrawl_parse` — Convert a local file (PDF, Word, spreadsheet, and more) to Markdown
+
+With an API key, the server also offers tools to map and crawl websites, interact with pages (click, type, navigate), and search developer sources like GitHub issues and docs.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add firecrawl \
+  -t http \
+  "https://mcp.firecrawl.dev/v2/mcp" \
+  -H "Authorization: Bearer ${FIRECRAWL_API_KEY}"
+```
+
+To try it without a key, leave out the `-H` line. You get `firecrawl_search`, `firecrawl_scrape`, and `firecrawl_parse` within a daily per-IP limit.
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "firecrawl": {
+      "httpUrl": "https://mcp.firecrawl.dev/v2/mcp",
+      "headers": {
+        "Authorization": "Bearer ${FIRECRAWL_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${FIRECRAWL_API_KEY}` with your actual API key, or set it as an environment variable. If the key is empty, the server still connects but only offers the three keyless tools.
+
+**Method 3: `settings.json` (Local NPX)**
+
+```json
+{
+  "mcpServers": {
+    "firecrawl-mcp": {
+      "command": "npx",
+      "args": ["-y", "firecrawl-mcp@latest"],
+      "env": {
+        "FIRECRAWL_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
+---
+
+### SerpApi
+
+The official hosted MCP server by SerpApi, providing real-time structured search results from Google, Baidu, Bing and other search engines through a single tool. Search queries and their parameters are sent to SerpApi.
+
+- **Documentation:** https://serpapi.com/integrations/mcp
+- **Cost:** Paid (free plan available)
+- **Get API Key:** https://serpapi.com/manage-api-key
+- **Best for:** Structured results from a broad choice of search engines
+
+#### Available Tools
+
+- `search` — Web search, optionally returning results as Markdown
+
+#### Setup
+
+**Method 1: CLI command**
+
+```bash
+qwen mcp add serpapi \
+  -t http \
+  "https://mcp.serpapi.com/mcp" \
+  -H "Authorization: Bearer ${SERPAPI_API_KEY}"
+```
+
+**Method 2: `settings.json`**
+
+```json
+{
+  "mcpServers": {
+    "serpapi": {
+      "httpUrl": "https://mcp.serpapi.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SERPAPI_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${SERPAPI_API_KEY}` with your actual API key, or set it as an environment variable. The key is only needed for searches. Without a valid API key, the server still connects and lists its tools, but `search` returns an error.
+
+---
+
+### looot
+
+A hosted MCP server from looot with web search, Google SERP results, news search and web page reading. Search queries and the URLs you ask it to read are sent to looot.
+
+- **Documentation:** https://docs.looot.ai
+- **Cost:** Paid (prepaid balance, no free tier)
+- **Get API Key:** https://looot.ai
+- **Best for:** Web search, Google SERP and news results, and reading a page as text
+
+#### Available Tools
+
+- `web_search` — Web search
+- `google_search_results` — Google SERP results
+- `news_search` — News search
+- `read_web_page` — Read a single page as text
+
+The server also exposes company and email lookups.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add looot \
+  -t http \
+  "https://api.looot.ai/mcp" \
+  -H "Authorization: Bearer ${LOOOT_API_KEY}"
+```
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "looot": {
+      "httpUrl": "https://api.looot.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LOOOT_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${LOOOT_API_KEY}` with your actual API key, or set it as an environment variable.
 
 ---

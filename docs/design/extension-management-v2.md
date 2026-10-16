@@ -41,23 +41,31 @@ The layout is:
     ├── state.json
     ├── state.previous.json
     ├── staging/
-    ├── rollback/
+    ├── rollback/          <transaction>/ and, mid copy swap, <transaction>.partial
     └── transactions/
 ```
 
 The store and artifacts share a filesystem so artifact swaps are directory
-renames. An in-process mutex and a `proper-lockfile` lock serialize commits
+renames. On Windows a rename can be refused because a process holds a handle
+inside the artifact; the transaction then switches to a copy swap recorded as
+`swapStrategy: 'copy'` in its journal, which is not atomic - see
+[extension-store-windows-directory-lock.md](extension-store-windows-directory-lock.md).
+An in-process mutex and a `proper-lockfile` lock serialize commits
 across all V2-aware processes. Every mutation re-reads state while holding the
 lock and increments a monotonic generation, preventing lost updates.
 
 Install/update preparation happens outside the final artifact directory. The
-commit writes a `prepared` journal, moves the old artifact to rollback, moves
-staging into place, and atomically writes `state.json`. That state rename is the
+commit writes a `prepared` journal, moves the old artifact to rollback (or copies
+it, in a copy swap), moves staging into place - copied over the installed tree
+there - and atomically writes `state.json`. That state rename is the
 commit point. Before it, recovery rolls back; after it, recovery only completes
 projection and cleanup. A committed policy is never rolled back because one
-runtime refresh failed. If both a pre-commit operation and its rollback fail,
-the caller receives both errors and the journal remains for fail-closed recovery;
-the store does not continue writing through an ambiguous artifact state.
+runtime refresh failed. If both a pre-commit operation and its rollback fail, the
+caller receives both errors and the journal remains; a lock-defeated rollback is
+retried on a later operation instead of stopping every one - once a deferred
+retry window has elapsed, and only while a retry can still leave a loadable
+artifact behind; a rollback that could not is refused rather than retried, so
+reads never report an installed extension with no artifact.
 
 Store files use owner-only permissions and atomic no-follow writes. Extension
 ids, direct-child artifact paths, transaction paths, and names are validated.

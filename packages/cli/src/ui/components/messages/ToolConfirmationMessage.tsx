@@ -29,6 +29,7 @@ import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { useLaunchEditor } from '../../hooks/useLaunchEditor.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import { theme } from '../../semantic-colors.js';
@@ -67,6 +68,15 @@ export const ToolConfirmationMessage: React.FC<
   const hidesAlwaysAllow =
     'hideAlwaysAllow' in confirmationDetails &&
     confirmationDetails.hideAlwaysAllow === true;
+
+  // An open right-click context menu owns the keyboard while it is up. The
+  // dispatch in KeypressContext is a broadcast that discards return values,
+  // so an overlay cannot consume a key for the dialog — the dialog has to go
+  // quiet itself, or one Enter aimed at "Open Link" also approves the
+  // pending tool call. Mirrors the main view's InputPrompt gate; the
+  // teammate tab renders this same dialog (via HistoryItemDisplay).
+  const { menu: contextMenu } = useContextMenu();
+  const inputActive = isFocused && contextMenu === null;
 
   const settings = useSettings();
   const preferredEditor = settings.merged.general?.preferredEditor as
@@ -165,7 +175,7 @@ export const ToolConfirmationMessage: React.FC<
 
   useKeypress(
     (key) => {
-      if (!isFocused) return;
+      if (!inputActive) return;
       if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
         handleConfirm(ToolConfirmationOutcome.Cancel);
         return;
@@ -179,7 +189,7 @@ export const ToolConfirmationMessage: React.FC<
         openFullPlanInEditor();
       }
     },
-    { isActive: isFocused },
+    { isActive: inputActive },
   );
 
   const handleSelect = (item: ToolConfirmationOutcome) => handleConfirm(item);
@@ -643,7 +653,7 @@ export const ToolConfirmationMessage: React.FC<
     return (
       <AskUserQuestionDialog
         confirmationDetails={confirmationDetails}
-        isFocused={isFocused}
+        isFocused={inputActive}
         availableWidth={contentWidth}
         onConfirm={onConfirm}
       />
@@ -811,7 +821,7 @@ export const ToolConfirmationMessage: React.FC<
         <RadioButtonSelect
           items={renderedOptions}
           onSelect={handleSelect}
-          isFocused={isFocused}
+          isFocused={inputActive}
         />
       </Box>
     </Box>

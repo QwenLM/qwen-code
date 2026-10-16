@@ -1,3 +1,4 @@
+import type { WebShellModelManagementOptions } from '../../modelManagement';
 import { useEffect, useId, useState } from 'react';
 import type {
   DaemonModelConfiguration,
@@ -11,6 +12,7 @@ import type {
   DaemonWorkspaceProviderStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { isDiscontinuedSettingsModel } from '../../utils/composerModels';
 import styles from './ModelManagementSection.module.css';
 
 export interface ModelDeleteTarget {
@@ -20,7 +22,7 @@ export interface ModelDeleteTarget {
   baseUrl?: string;
 }
 
-export interface ModelManagementProps {
+export interface ModelManagementProps extends WebShellModelManagementOptions {
   providers: DaemonWorkspaceProviderStatus[];
   configurations?: DaemonModelConfiguration[];
   onUpdateContextWindow?: (
@@ -73,6 +75,8 @@ function findCurrentRowKey(
 }
 
 export function ModelManagementSection({
+  allowAdd = true,
+  allowDelete = true,
   providers,
   configurations = [],
   onUpdateContextWindow,
@@ -86,6 +90,10 @@ export function ModelManagementSection({
 }: ModelManagementProps) {
   const { t } = useI18n();
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!allowDelete) setConfirmKey(null);
+  }, [allowDelete]);
 
   // Escape dismisses the inline delete confirmation — the conventional gesture,
   // so keyboard users don't have to Tab to Cancel.
@@ -137,6 +145,16 @@ export function ModelManagementSection({
       isRuntime: false,
     });
   }
+  // Settings is the third surface that has to drop the discontinued built-in
+  // OAuth entry, so it asks the shared policy rather than restating it. The
+  // filter runs on the merged list, not on `providers`, because the loop above
+  // recreates the row from a persisted configuration after the provider input
+  // has been read (issue #13965).
+  for (const provider of displayProviders) {
+    provider.models = provider.models.filter(
+      (model) => !isDiscontinuedSettingsModel(provider, model),
+    );
+  }
   const hasModels = displayProviders.some((p) => p.models.length > 0);
   const currentRowKey = findCurrentRowKey(providers, currentModelId);
 
@@ -144,14 +162,16 @@ export function ModelManagementSection({
     <div className={styles.section} data-testid="model-management">
       <div className={styles.header}>
         <span className={styles.title}>{t('settings.models.title')}</span>
-        <button
-          type="button"
-          className={styles.addButton}
-          disabled={busy}
-          onClick={onAddModel}
-        >
-          {t('settings.models.add')}
-        </button>
+        {allowAdd && (
+          <button
+            type="button"
+            className={styles.addButton}
+            disabled={busy}
+            onClick={onAddModel}
+          >
+            {t('settings.models.add')}
+          </button>
+        )}
       </div>
 
       {error && <div className={styles.hint}>{error.message}</div>}
@@ -291,7 +311,8 @@ export function ModelManagementSection({
                         {t('settings.models.setCurrent')}
                       </button>
                     )}
-                    {!model.isRuntime &&
+                    {allowDelete &&
+                      !model.isRuntime &&
                       (confirming ? (
                         <>
                           <button
@@ -300,6 +321,7 @@ export function ModelManagementSection({
                             disabled={busy}
                             aria-label={`${t('settings.models.confirmDelete')} ${modelLabel}`}
                             onClick={() => {
+                              if (!allowDelete) return;
                               setConfirmKey(null);
                               onDeleteModel({
                                 ...(model.configurationKey

@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  artifactDisplayName,
   artifactKindLabel,
   artifactPreviewDocument,
   loadArtifactPreviewDocument,
@@ -13,11 +14,38 @@ import {
   getReviewDownloadMimeType,
   isDownloadOnlyWorkspaceArtifact,
   isOfficeDocumentPath,
+  isExcelFile,
   normalizePath,
   readWorkspaceFileAsBlob,
 } from './artifactUtils';
 
 describe('artifactUtils', () => {
+  it('shows a workspace file by filename and keeps a title without a file', () => {
+    expect(
+      artifactDisplayName({
+        title: 'Pretty name',
+        workspacePath: 'reports/summary.html',
+      }),
+    ).toBe('summary.html');
+    expect(
+      artifactDisplayName({
+        title: 'Pretty name',
+        workspacePath: 'reports\\summary.html',
+      }),
+    ).toBe('reports\\summary.html');
+    expect(
+      artifactDisplayName({
+        title: 'Table details',
+      }),
+    ).toBe('Table details');
+    expect(
+      artifactDisplayName({
+        title: 'Fallback',
+        workspacePath: '',
+      }),
+    ).toBe('Fallback');
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -49,7 +77,7 @@ describe('artifactUtils', () => {
         kind: 'file',
         workspacePath: 'a.xlsx',
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isDownloadOnlyWorkspaceArtifact({
         kind: 'pdf',
@@ -68,6 +96,21 @@ describe('artifactUtils', () => {
         workspacePath: 'notes.md',
       }),
     ).toBe(false);
+  });
+
+  it('recognizes xlsx paths and extensionless Excel attachments', () => {
+    const mime =
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    expect(isExcelFile('reports/Q3.XLSX', 'application/octet-stream')).toBe(
+      true,
+    );
+    expect(isExcelFile('attachment-id', mime)).toBe(true);
+    expect(isExcelFile(undefined, `${mime}; charset=utf-8`)).toBe(true);
+    expect(isExcelFile('legacy.xls', mime)).toBe(false);
+    expect(isExcelFile('notes.txt', mime)).toBe(false);
+    expect(isExcelFile('attachment-id', 'application/octet-stream')).toBe(
+      false,
+    );
   });
 
   it('prefers recognized file types before the artifact kind', () => {
@@ -117,7 +160,7 @@ describe('artifactUtils', () => {
 
   it.each([
     ['report.docx', 'text/html'],
-    ['report.xlsx', 'image/png'],
+    ['report.xls', 'image/png'],
     ['report.pdf', 'text/markdown'],
     ['clip.mp4', 'image/png'],
   ])(
@@ -290,6 +333,51 @@ describe('artifactUtils', () => {
       }),
     ).rejects.toThrow('too large');
     expect(readFileBytes).not.toHaveBeenCalled();
+  });
+
+  it('downloads without host link interception and retains the URL until the browser can consume it', async () => {
+    vi.useFakeTimers();
+    const createObjectURL = vi.fn().mockReturnValue('blob:workspace-file');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
+    const hostClick = vi.fn((event: Event) => event.preventDefault());
+    window.addEventListener('click', hostClick);
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        expect(this.isConnected).toBe(true);
+        expect(this.href).toBe('blob:workspace-file');
+        expect(
+          this.dispatchEvent(
+            new Event('click', { bubbles: true, cancelable: true }),
+          ),
+        ).toBe(true);
+      });
+    try {
+      await downloadWorkspaceFile(
+        {
+          stat: vi.fn().mockResolvedValue({ sizeBytes: 2, modifiedMs: 1 }),
+          readFileBytes: vi.fn().mockResolvedValue({
+            contentBase64: btoa('ab'),
+            offset: 0,
+            returnedBytes: 2,
+            sizeBytes: 2,
+          }),
+        },
+        'reports/result.txt',
+        'text/plain',
+      );
+      expect(click).toHaveBeenCalledOnce();
+      expect(document.querySelector('a[download="result.txt"]')).toBeNull();
+      expect(hostClick).not.toHaveBeenCalled();
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+      vi.runAllTimers();
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:workspace-file');
+    } finally {
+      window.removeEventListener('click', hostClick);
+      click.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('rejects downloads larger than the default Blob limit', async () => {

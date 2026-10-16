@@ -31,6 +31,7 @@ export type ResumeRefusal =
   | 'no-report' // no previous fetch report at the plan path
   | 'pr-mismatch' // the report on disk is another PR's
   | 'effort-mismatch' // an explicit --effort differs from the recorded run's
+  | 'model-mismatch' // the recorded run's identity is not the one running now
   | 'no-diff-hash' // the previous run predates diffSha256 (or captured no diff)
   | 'worktree-gone' // the interrupted attempt's worktree no longer exists
   | 'worktree-sha-mismatch' // the worktree is not checked out at fetchedSha
@@ -53,6 +54,7 @@ export interface PreviousReport {
   fetchedSha?: unknown;
   diffSha256?: unknown;
   effort?: unknown;
+  reviewModelId?: unknown;
 }
 
 /** What the world looks like now, probed by the caller. */
@@ -82,6 +84,14 @@ export interface ResumeProbes {
    * work, not a continuation; absent effort keeps the recorded level.
    */
   requestedEffort: string | null;
+  /**
+   * The identity running THIS invocation (`roundModelIdFrom`), `''` when the
+   * runtime published none. A continuation republishes the interrupted
+   * attempt's report and cache candidate verbatim, both stamped with ITS
+   * identity — so under another identity Step 8 would promote an anchor
+   * naming a model that never finished the review.
+   */
+  runningModelId: string;
 }
 
 /**
@@ -154,6 +164,21 @@ export function assessResume(
   // profile-not-resumable would bypass the restart accounting.
   if (prev.reviewProfile === DOCS_NAV_PROFILE) {
     return { ok: false, reason: 'profile-not-resumable' };
+  }
+  // The same-model contract the anchor rests on, applied to the continuation
+  // that would inherit it (R26-1). Below head-moved for the reason the
+  // profile check is: a moved head must still be charged as a restart.
+  //
+  // Plain equality, NOT `certifierMatchesRound`: both-empty resumes. That
+  // helper answers "may this anchor be HONOURED", where an unknown certifier
+  // must fail; the question here is "would the continuation republish a
+  // certificate naming someone else", and a run with no identity recorded
+  // none — `fetch-pr` omits `reviewModelId` and withholds the candidate —
+  // so refusing it would only disable `--resume` on such a runtime.
+  const recorded =
+    typeof prev.reviewModelId === 'string' ? prev.reviewModelId.trim() : '';
+  if (recorded !== probes.runningModelId) {
+    return { ok: false, reason: 'model-mismatch' };
   }
   if (probes.resumeCount >= RESUME_MAX) {
     return { ok: false, reason: 'resume-cap' };
