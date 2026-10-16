@@ -275,7 +275,7 @@ Rollout notes:
 | `store/WorkspaceRecoveryReader.java`                      | `resource_collected` named check                                                                                                                                                                |
 | `config/ToolPublicationConfiguration.java`                | Collector bean on the existing scheduler                                                                                                                                                        |
 | `store/SessionResourceCollectionCollectorTest.java` (new) | Predicate, blockers, paging, fencing, byte-exact accounting, retirement-fenced outcomes                                                                                                         |
-| `packages/sdk-java/managed-agent-server/README.md`        | Operations paragraph                                                                                                                                                                            |
+| `packages/managed-agent-server/README.md`                 | Operations paragraph                                                                                                                                                                            |
 
 Out of this change: `ToolPublicationRetentionStore`,
 `ToolPublicationCollector`, and every TS package are untouched except for
