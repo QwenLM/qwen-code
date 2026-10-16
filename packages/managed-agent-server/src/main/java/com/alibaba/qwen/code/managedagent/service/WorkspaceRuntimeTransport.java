@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
@@ -418,7 +419,8 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !runtime.getRequest().getScope().equals(session.getScope())
                 || (originalCsi
                         ? !"workspace".equals(session.getScope().getIsolationClass()) || runtime.getRequest().getIsolationKey() != null
-                        : !session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey()))
+                        : !HarnessOwnership.sharesRuntimeSessions(runtime.getRequest())
+                                && !session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey()))
                 || !binding.getStorageId().equals(runtime.getRequest().getStorageId())
                 || !binding.getTenantId().equals(session.getScope().getTenantId())
                 || !binding.getWorkspaceId().equals(session.getScope().getWorkspaceId())

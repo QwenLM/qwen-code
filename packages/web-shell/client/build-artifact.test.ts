@@ -510,19 +510,25 @@ describe('build artifact — transcript entry (#11031)', () => {
     // preview puts its ten excel.* strings into that same shared table in
     // both locales; its parser, worker and markup stay inside the lazily
     // imported SpreadsheetPreview chunk, so only the copy enters this graph.
-    // Merging 6212189f with that copy measured 1,330,011 UTF-16 code units.
+    // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
+    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
     // File-tree mutation actions are excluded from the transcript build.
     // At 31e02ace main measures 1,330,293; the read-only artifact hook with
-    // those actions excluded measures 1,330,497.
+    // those actions excluded measures 1,330,497, below the same ceiling.
+    // Managed home, Workspace creation, approval and model/context copy also
+    // enter the shared table. With main 17d5f774 that work measures
+    // 1,334,173 UTF-16 units. Managed interactive code remains excluded here.
     // Teammate activity notices add attributed tool and inter-agent message
-    // bubbles to this entry; merged with main at 3071807d the remainder
-    // measures 1,332,271, which the 1,333,500 ceiling still bounds.
+    // bubbles to this entry on top of that copy. Merged with main 87dcc4a7
+    // the remainder measures 1,336,727 UTF-16 units, past the 1,336,000
+    // ceiling either side alone stayed under, so the bound moves to 1,338,500
+    // and retains 1,773 units of margin.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_333_500);
+    expect(js.length).toBeLessThan(1_338_500);
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {
@@ -532,6 +538,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       'writeWorkspaceFile',
       'createWorkspaceDirectory',
       'deleteWorkspaceDirectory',
+      'deleteWorkspaceFile',
       'uploadWorkspaceFile',
     ]) {
       expect(packaged).toContain(method);
@@ -557,6 +564,10 @@ describe('build artifact — transcript entry (#11031)', () => {
       'files.sourceTooLarge',
     ] as const)
       expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
+    for (const key of Object.keys(FILES_MESSAGES_EN)) {
+      expect(bundle).not.toContain(`"${key}"`);
+      expect(bundle).not.toContain(`'${key}'`);
+    }
   });
 
   it('carries no Live Voice strings and looks none up', () => {
