@@ -72,9 +72,9 @@ The facts below are from `main` at `415925cbda`, after the schema consolidation 
    - **Why a copy.** The view stays as it was at launch while the parent goes on writing, and the parent's tree is never the child's working directory.
 
 4. **"Cannot write" is the profile, and the store sets it.**
-   - **The profile.** A new hosted profile, `hosted-workspace-read/1`, declares `read_file` and `glob` and nothing else, whatever lanes, child orchestration or MCP the Session has: no `write_file`, `edit`, `run_shell_command` or `monitor`, no Agent or team tool, no `send_message` and no MCP tool.
+   - **The profile.** A new hosted profile, `hosted-workspace-read/1`, declares `read_file` and `glob` and nothing else, whatever lanes, child orchestration or MCP the Session has: no `write_file`, `edit`, `run_shell_command` or `monitor`, no Agent or team tool, no `send_message`, no MCP tool and no `skill` tool. A read-profile Session takes no skill catalog from its agent definition either: the catalog's instructions would name a tool the profile refuses, and an undeclared call fails the Turn.
    - **Who sets it.** `insertChildSession` gives a child the read profile whenever the child Workspace row it binds records `snapshot`. It reads that row in the same transaction that checks it is ready, so no caller can bind a snapshot copy to a writing profile. Only the profile changes; the approval mode is still the parent's.
-   - **Approvals.** `read_file` and `glob` are pre-approved under `default` and `auto-edit`, so a snapshot child never asks.
+   - **Approvals.** `read_file` and `glob` are pre-approved under `default` and `auto-edit`, so a snapshot child asks nothing of its own. Since #14319 it inherits its agent definition's hook catalog like any child: a `PreToolUse` hook may still ask, and a hook command runs against the copy, which is discarded.
    - **What makes it hold.** Each piece already holds for every hosted Session:
      - the declaration set carries no tool that writes;
      - the tool turn refuses any other name before the Broker is acquired, and ends the Turn;
@@ -153,7 +153,7 @@ The facts below are from `main` at `415925cbda`, after the schema consolidation 
   - `write_file`, `edit`, `run_shell_command`, `monitor`, `agent` and `send_message` are each refused before the Broker is acquired;
   - both read tools are pre-approved under `default` and `auto-edit`, and `glob` is pre-approved only on the `/2` and read profiles.
 - **Messages** (`hosted-session-message-session.test.ts`): a snapshot child is refused while it runs, before and after it attaches, with nothing committed, while a running worktree child still takes a message; once completed, a snapshot is continued only where snapshots are served, as a `snapshot` run; a closing Session's refusal promises no continuation.
-- **Host flag and recovery** (`hosted-harness-session.test.ts`, 2 new cases; `workspace-recovery-session.test.ts`): `snapshot` advertised only while a create or load restates both flags (not for the snapshot flag alone or for `"true"` as text); a read-profile Session is created and declares its two tools; recovery accepts the read profile and still refuses it with a capture size.
+- **Host flag and recovery** (`hosted-harness-session.test.ts`, 3 new cases; `workspace-recovery-session.test.ts`): `snapshot` advertised only while a create or load restates both flags (not for the snapshot flag alone or for `"true"` as text); a read-profile Session is created and declares its two tools, and one whose agent definition publishes Skills takes no skill catalog; recovery accepts the read profile and still refuses it with a capture size.
 - **Replaced Runtime** (`hosted-recovery.test.ts`, 2 new cases): a read-profile child whose `read_file` result committed before its Runtime was replaced resumes the saved model request without rerunning the tool, releases the original owner, and refuses a new tool call in that Turn.
 - **Relay** (`ChildResultRelayTest`, 6 new cases):
   - a snapshot run prepares its copy with its own mode and creates its child isolated;

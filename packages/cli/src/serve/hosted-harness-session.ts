@@ -246,7 +246,10 @@ import {
   type HostedRuntimeRecoveryReport,
 } from './hosted-runtime-recovery.js';
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
-import { hostedShellLaneAttachesChildAgents } from './hosted-workspace-profiles.js';
+import {
+  hostedShellLaneAttachesChildAgents,
+  isHostedWorkspaceReadProfile,
+} from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
@@ -4259,6 +4262,11 @@ export function registerHostedHarnessSessionRoutes(
         isHostedWorkspaceProfile(savedProfile)
       )
         toolProfile = savedProfile;
+      // #13753 I3: the read profile declares only read_file and glob, so a
+      // snapshot child takes no skill catalog. Its instructions would name
+      // a skill tool the profile does not declare, and an undeclared call
+      // fails the Turn.
+      if (isHostedWorkspaceReadProfile(toolProfile)) skills = undefined;
       if (
         !create &&
         lifecycle &&

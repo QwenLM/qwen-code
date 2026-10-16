@@ -72,9 +72,9 @@ Issue #13753 对 I3 提出两点：
    - **为什么用副本。** 父继续写入时，视图保持在 launch 时的样子，而且父的目录树永远不会成为 child 的工作目录。
 
 4. **“不能写”就是 profile，并由存储层设置。**
-   - **Profile。** 新的 hosted profile `hosted-workspace-read/1` 只声明 `read_file` 与 `glob`，无论 Session 有什么 lane、child 编排或 MCP：不声明 `write_file`、`edit`、`run_shell_command` 或 `monitor`，不声明 Agent 或团队工具，不声明 `send_message`，也不声明 MCP 工具。
+   - **Profile。** 新的 hosted profile `hosted-workspace-read/1` 只声明 `read_file` 与 `glob`，无论 Session 有什么 lane、child 编排或 MCP：不声明 `write_file`、`edit`、`run_shell_command` 或 `monitor`，不声明 Agent 或团队工具，不声明 `send_message`、MCP 工具或 `skill` 工具。只读 profile 的 Session 也不从 agent definition 获取 skill 目录：目录的说明会提到一个该 profile 拒绝的工具，而未声明的调用会让 Turn 失败。
    - **由谁设置。** 只要 child 绑定的 child Workspace 行记录的是 `snapshot`，`insertChildSession` 就给 child 只读 profile。它在检查该行就绪的同一个事务中读取该行，所以任何调用方都无法把快照副本绑定到可写的 profile 上。只有 profile 不同；审批模式仍是父的。
-   - **审批。** `read_file` 与 `glob` 在 `default` 与 `auto-edit` 下都预先批准，所以 snapshot child 从不发起审批询问。
+   - **审批。** `read_file` 与 `glob` 在 `default` 与 `auto-edit` 下都预先批准，所以 snapshot child 自身不发起审批询问。自 #14319 起，它像任何 child 一样继承 agent definition 的 hook 目录：`PreToolUse` hook 仍可能发起询问，hook 命令作用于副本，而副本最终会被丢弃。
    - **凭什么成立。** 每一环本来就对所有 hosted Session 成立：
      - 声明集合中没有任何会写入的工具；
      - tool turn 在获取 Broker 之前拒绝任何其他名称，并结束该 Turn；
@@ -153,7 +153,7 @@ Issue #13753 对 I3 提出两点：
   - `write_file`、`edit`、`run_shell_command`、`monitor`、`agent` 与 `send_message` 都在获取 Broker 之前被拒绝；
   - 两个读工具在 `default` 与 `auto-edit` 下都预先批准，且 `glob` 只在 `/2` 与只读 profile 上预先批准。
 - **消息**（`hosted-session-message-session.test.ts`）：snapshot child 运行期间（attach 前后）都会被拒绝，且不提交任何东西，而运行中的 worktree child 仍能收到消息；快照完成后，只有在提供快照的主机上才续跑，续跑为 `snapshot` run；正在关闭的 Session 的拒绝不承诺续跑。
-- **主机标志与恢复**（`hosted-harness-session.test.ts`，新增 2 个用例；`workspace-recovery-session.test.ts`）：只有创建或加载重申了两个标志时才宣告 `snapshot`（只有 snapshot 标志或文本 `"true"` 都不算）；只读 profile 的 Session 可以创建，并声明它的两个工具；恢复接受只读 profile，带捕获容量时仍会拒绝。
+- **主机标志与恢复**（`hosted-harness-session.test.ts`，新增 3 个用例；`workspace-recovery-session.test.ts`）：只有创建或加载重申了两个标志时才宣告 `snapshot`（只有 snapshot 标志或文本 `"true"` 都不算）；只读 profile 的 Session 可以创建，并声明它的两个工具；agent definition 发布了 Skills 时也不获取 skill 目录；恢复接受只读 profile，带捕获容量时仍会拒绝。
 - **Runtime 被替换**（`hosted-recovery.test.ts`，新增 2 个用例）：只读 profile 的 child 在 `read_file` 结果提交后 Runtime 被替换，恢复已保存的模型请求而不重跑工具，释放原 owner，并拒绝该 Turn 中的新工具调用。
 - **Relay**（`ChildResultRelayTest`，新增 6 个用例）：
   - snapshot run 以自己的模式准备副本，并以隔离方式创建 child；
