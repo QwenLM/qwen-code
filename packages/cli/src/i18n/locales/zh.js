@@ -228,12 +228,6 @@ export default {
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
-  'toolDisplayName.ThreadPost': '发帖到线程',
-  'toolDisplayName.ThreadWait': '等待协作方',
-  'toolDisplayName.ThreadBlock': '提出阻塞问题',
-  'toolDisplayName.ThreadReview': '提交待评审',
-  'toolDisplayName.ThreadCreate': '创建子线程',
-  'toolDisplayName.ThreadRead': '读取线程',
   'toolDisplayName.DownsampleImage': '降采样图像',
   'toolDisplayName.DownscaleVideo': '降采样视频',
   'toolDisplayName.DownsampleAudio': '降采样音频',
@@ -2153,6 +2147,10 @@ export default {
   'API key cannot be empty.': 'API Key 不能为空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '无效的 API Key。Coding Plan API Key 以 "sk-sp-" 开头，请检查。',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    '无效的 API Key。按量付费 Key 以 "sk-" 或 "sk-ws-" 开头。Token Plan Key（"sk-sp-"）请使用 Token Plan 入口。',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    '无效的 API Key。Token Plan API Key 以 "sk-sp-" 开头。请从 Token Plan 控制台生成，或使用 Standard API Key 入口绑定按量付费 Key。',
   'You can get your Coding Plan API key here':
     '您可以在这里获取 Coding Plan API Key',
   'You can get your Token Plan API key here':
@@ -2179,6 +2177,17 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  QwenCloud: '千问AI平台',
+  'QwenCloud · Access Method': '千问AI平台 · 接入方式',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推荐配置：Token Plan 或 Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    '按量付费 · 使用已有的平台 API Key 连接',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    '按月 Credit 额度订阅 · 专用 endpoint（个人版与团队版）',
+  'China — 千问AI平台': '中国 — 千问AI平台',
+  'International — QwenCloud': '国际 — QwenCloud',
+  Platform: '平台',
   Custom: '自定义',
   'Select Region for Coding Plan': '选择 Coding Plan 区域',
   'Choose based on where your account is registered':

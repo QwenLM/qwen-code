@@ -337,6 +337,9 @@ export class ManagedMcpRuntime {
   private readonly gates = new ManagedOperationGrantGate();
   private generation = 0;
   private closing = false;
+  private admissionSealed = false;
+  private grantInstalled = false;
+  private pendingStarts = 0;
 
   constructor(
     private readonly workspace: {
@@ -350,6 +353,34 @@ export class ManagedMcpRuntime {
     manifest: ManagedMcpManifest,
   ) {
     this.definitions = parseManifest(manifest);
+  }
+
+  sealAdmission(): void {
+    this.admissionSealed = true;
+  }
+
+  getDrainInspection(): {
+    pendingStarts: number;
+    pendingInvocations: number;
+    hasActivity: boolean;
+  } {
+    return {
+      pendingStarts: this.pendingStarts,
+      pendingInvocations: [...this.operations.values()].filter(
+        (operation) =>
+          operation.view.state === 'running' ||
+          operation.connection?.pending.has(operation.control.operationId),
+      ).length,
+      hasActivity:
+        this.grantInstalled ||
+        this.operations.size > 0 ||
+        this.connections.size > 0,
+    };
+  }
+
+  private assertAdmission(control: ManagedMcpControl): void {
+    if (this.admissionSealed && control.kind !== 'mcp-release')
+      throw new ManagedMcpError('managed_mcp_closed');
   }
 
   async control(
@@ -392,6 +423,7 @@ export class ManagedMcpRuntime {
       return structuredClone(existing.view);
     }
     if (this.closing) throw new ManagedMcpError('managed_mcp_closed');
+    this.assertAdmission(control);
     const phase = control.kind.slice(4);
     const grant = parseOperationGrant(control.grant);
     if (
@@ -409,6 +441,7 @@ export class ManagedMcpRuntime {
       throw new ManagedMcpError('managed_mcp_grant_invalid');
     try {
       this.gates.install(grant);
+      this.grantInstalled = true;
     } catch {
       throw new ManagedMcpError('managed_mcp_grant_invalid');
     }
@@ -421,15 +454,21 @@ export class ManagedMcpRuntime {
       )
     )
       throw new ManagedMcpError('managed_mcp_grant_invalid');
-    const directory =
-      control.kind === 'mcp-release'
-        ? undefined
-        : await this.sessionDirectory(runtimeSessionId);
+    let directory: string | undefined;
+    if (control.kind !== 'mcp-release') {
+      this.pendingStarts++;
+      try {
+        directory = await this.sessionDirectory(runtimeSessionId);
+      } finally {
+        this.pendingStarts--;
+      }
+    }
     if (!directory && control.kind !== 'mcp-release')
       throw new ManagedMcpError('managed_mcp_session_unavailable');
     // Another identical request may have entered while its directory was checked.
     if (this.operations.has(key))
       return this.control(runtimeSessionId, control, allowTool);
+    this.assertAdmission(control);
     if (
       this.closing ||
       !this.gates.admits(
