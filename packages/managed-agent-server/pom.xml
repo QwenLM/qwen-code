@@ -335,12 +335,15 @@
                                  covered, so a contended main runner killed
                                  the fork before any test reported (#14125).
                                  1800 s restores the 2× headroom. The FG8
-                                 monitor/run fault gates
-                                 (HostedMonitorRunFaultGatesIT: seven cases
-                                 with real background processes and >16 MiB
-                                 captures) add ~310 s measured on the lane,
-                                 inside the same 1800 s fork. -->
-                            <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                                 monitor/run fault gates grew to five
+                                 letters / twenty-one cases with drain and
+                                 cancel choreography: on #14334's lane
+                                 (run 38848525079) the first three letters
+                                 finished by ~700 s into the fork, but the
+                                 1800 s budget still killed the fork JVM
+                                 before fg8d settled, so it doubles to
+                                 keep the same 2× headroom. -->
+                            <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -426,8 +429,11 @@
                          are independent fixtures sharing one fork: each
                          letter's @Timeout ceiling (600 s) plus the healthy
                          runtime must fit, the per-ceiling relation the CI
-                         profile pins. -->
-                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                         profile pins. Fork measured on the lane (run
+                         38848525079): four letters finished green by
+                         ~700 s, the budget still cut fg8d mid-choreography
+                         at exactly 1800 s — 3600 s keeps the 2× headroom. -->
+                    <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

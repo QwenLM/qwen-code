@@ -372,12 +372,12 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (45 + 16x10 + 20 + 50); the uncapped setup steps
+    // Step ceilings today (75 + 16x10 + 20 + 50); the uncapped setup steps
     // need their own allowance — the job comment estimates it at ~13, so
     // the enforced floor moves with that estimate, not the older 10.
-    expect(summed).toBe(275);
+    expect(summed).toBe(305);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
-    expect(job['timeout-minutes']).toBe(290);
+    expect(job['timeout-minutes']).toBe(320);
   });
 
   it('runs every failover arm with its own runner arguments', () => {
@@ -474,7 +474,7 @@ describe('Hosted real-process gates', () => {
       // above tolerates anything up to step*60, so the value is pinned
       // literally here — an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(1800);
+        expect(forkSeconds).toBe(3600);
       }
     },
   );
@@ -482,11 +482,15 @@ describe('Hosted real-process gates', () => {
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
   // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
-  // the FG8 monitor/run letters add ~310s measured on the lane (~450s with
-  // CI headroom); with the fork itself ~14s, 1100s covers them. A larger
-  // ceiling lets failsafe kill the fork mid-run, and the classes left
-  // unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 1100;
+  // the FG8 monitor/run letters grew from two letters / seven cases to five
+  // letters / twenty-one cases in #14334 — on that PR's lane (run
+  // 38848525079 at fee23d2d3c) four letters finished by ~700s into the
+  // fork, the fork was still killed at the old 1800s budget before the last
+  // letter reported, and the fork now sits at 3600s for the same 2×
+  // headroom. A larger ceiling lets failsafe kill the fork mid-run, and the
+  // classes left unrun never report, failing the gate undiagnosably
+  // (#13780).
+  const hostedForkHealthySeconds = 2400;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
