@@ -1026,6 +1026,28 @@ class HostedHarnessClientTest {
         assertEquals(lifecycle.get("lifecycleAuthority"), reversed.get("lifecycleAuthority"));
     }
 
+    // #13753 I3: the snapshot capability rides beside the child Workspace
+    // one, through every copy, and never alone.
+    @Test
+    void carriesTheSnapshotCapabilityOnlyBesideChildWorkspaces() {
+        CreateHarnessSession.Builder create = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .approvalMode(DaemonApprovalMode.DEFAULT);
+        assertFalse(create.childSnapshots(true).build().toJson().containsKey("childSnapshots"));
+        Map<String, Object> both = create.childWorkspaces(true).childSnapshots(true).build().toJson();
+        assertEquals(Boolean.TRUE, both.get("childWorkspaces"));
+        assertEquals(Boolean.TRUE, both.get("childSnapshots"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID, null, true);
+        assertFalse(load.withChildWorkspaces(false, true).toJson().containsKey("childSnapshots"));
+        assertFalse(load.withChildWorkspaces(true).toJson().containsKey("childSnapshots"));
+        LoadHarnessSession enabled = load.withChildWorkspaces(true, true);
+        assertEquals(Boolean.TRUE, enabled.toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.forLifecycle("op-1", 3).toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.withStoppedMessages().toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, load.forLifecycle("op-1", 3).withChildWorkspaces(true, true)
+                .toJson().get("childSnapshots"));
+    }
+
     @Test
     void extensionPinsSurviveCreateAndEveryLoadCopy() {
         var mcp = java.util.List.<Map<String, Object>>of(Map.of("serverId", "docs", "serverRevision", 1,
@@ -8899,6 +8921,96 @@ class HostedHarnessClientTest {
                 + "\"protocolVersions\":{\"current\":1,"
                 + "\"supported\":[1]},\"bootId\":\"" + bootId
                 + "\",\"capabilityDigest\":\"" + digest + "\"}}";
+    }
+
+    @Test
+    void modelSelectionIsOptionalNegotiatedAndPartOfActivePromptIdentity() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"model-selection/1\"],"));
+        AtomicReference<String> sent = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/prompt", exchange -> {
+            sent.set(readBody(exchange));
+            sendSessionJson(exchange, 202, "{\"promptId\":\"" + PROMPT_ID
+                    + "\",\"lastEventId\":0,\"eventEpoch\":\"" + EVENT_EPOCH + "\"}");
+        });
+        Map<String, Object> block = Map.of("type", "text", "text", "hello");
+        String digest = SubmitHarnessTurn.computePayloadDigest(List.of(block));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            var first = SubmitHarnessTurn.builder().session(session).promptId(PROMPT_ID).addContent(block)
+                    .payloadDigest(digest).modelSelection("model-a", 1).build();
+            client.submitTurn(first);
+            assertTrue(sent.get().contains("\"modelSelection\""));
+            assertTrue(sent.get().contains("\"modelId\":\"model-a\""));
+            assertTrue(sent.get().contains("\"revision\":1"));
+            client.submitTurn(first);
+            assertThrows(DaemonException.class, () -> client.submitTurn(SubmitHarnessTurn.builder()
+                    .session(session).promptId(PROMPT_ID).addContent(block).payloadDigest(digest)
+                    .modelSelection("model-b", 2).build()));
+            assertThrows(IllegalArgumentException.class,
+                    () -> SubmitHarnessTurn.builder().modelSelection("model-a", 0));
+            assertThrows(IllegalArgumentException.class,
+                    () -> SubmitHarnessTurn.builder().modelSelection("model-a", 9_007_199_254_740_992L));
+        }
+    }
+
+    @Test
+    void refusesModelSelectionWhenTheHostDidNotAdvertiseIt() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        Map<String, Object> block = Map.of("type", "text", "text", "hello");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            var request = SubmitHarnessTurn.builder().session(session).promptId(PROMPT_ID).addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(List.of(block)))
+                    .modelSelection("model-a", 1).build();
+            assertThrows(DaemonException.class, () -> client.submitTurn(request));
+        }
+    }
+
+    @Test
+    void approvalSelectionIsOptionalNegotiatedAndPartOfActivePromptIdentity() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"approval-selection/1\"],"));
+        AtomicReference<String> sent = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/prompt", exchange -> {
+            sent.set(readBody(exchange));
+            sendSessionJson(exchange, 202, "{\"promptId\":\"" + PROMPT_ID
+                    + "\",\"lastEventId\":0,\"eventEpoch\":\"" + EVENT_EPOCH + "\"}");
+        });
+        Map<String, Object> block = Map.of("type", "text", "text", "hello");
+        String digest = SubmitHarnessTurn.computePayloadDigest(List.of(block));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            var first = SubmitHarnessTurn.builder().session(session).promptId(PROMPT_ID).addContent(block)
+                    .payloadDigest(digest).approvalSelection("yolo", 1).build();
+            client.submitTurn(first);
+            assertTrue(sent.get().contains("\"approvalSelection\""));
+            assertTrue(sent.get().contains("\"mode\":\"yolo\""));
+            assertTrue(sent.get().contains("\"revision\":1"));
+            client.submitTurn(first);
+            assertThrows(DaemonException.class, () -> client.submitTurn(SubmitHarnessTurn.builder()
+                    .session(session).promptId(PROMPT_ID).addContent(block).payloadDigest(digest)
+                    .approvalSelection("auto-edit", 2).build()));
+            assertThrows(IllegalArgumentException.class,
+                    () -> SubmitHarnessTurn.builder().approvalSelection("yolo", -1));
+            assertThrows(IllegalArgumentException.class,
+                    () -> SubmitHarnessTurn.builder().approvalSelection("yolo", 9_007_199_254_740_992L));
+        }
+    }
+
+    @Test
+    void refusesApprovalSelectionWhenTheHostDidNotAdvertiseIt() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        Map<String, Object> block = Map.of("type", "text", "text", "hello");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            var request = SubmitHarnessTurn.builder().session(session).promptId(PROMPT_ID).addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(List.of(block)))
+                    .approvalSelection("yolo", 1).build();
+            assertThrows(DaemonException.class, () -> client.submitTurn(request));
+        }
     }
 
     private static String capabilitiesJsonWithoutJournalToken(String digest,

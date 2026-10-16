@@ -279,8 +279,17 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         ensureOpen();
         HarnessSessionRef session = requireSessionRef(request.getSession());
+        if (request.getModelSelection() != null
+                && !capabilities().getFeatures().contains("model-selection/1")) {
+            throw new DaemonException("Hosted model selection is unavailable");
+        }
+        if (request.getApprovalSelection() != null
+                && !capabilities().getFeatures().contains("approval-selection/1")) {
+            throw new DaemonException("Hosted approval selection is unavailable");
+        }
         ActivePrompt candidate = new ActivePrompt(request.getPromptId(),
-                request.getPayloadDigest(), session.getHarnessClientId());
+                request.getPayloadDigest(), session.getHarnessClientId(),
+                request.getModelSelection(), request.getApprovalSelection());
         // Publish (or join) the admission marker and open this call's send
         // attempt under the same bin lock: a status read may clear the
         // marker only while no send attempt is in flight, so the attempt
@@ -2374,6 +2383,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         // answers an absent session and a client-id mismatch with the same
         // 404.
         private final String clientId;
+        private final Map<String, Object> modelSelection;
+        private final Map<String, Object> approvalSelection;
         // The identity of the latest same-identity retry that joined this
         // entry from a different client id (a re-load's dispatcher retrying
         // the prompt): the entry then speaks for that identity's attempt
@@ -2401,10 +2412,13 @@ public final class HostedHarnessClient implements AutoCloseable {
         private volatile boolean releaseBlocked;
 
         ActivePrompt(String promptId, String payloadDigest,
-                String clientId) {
+                String clientId, Map<String, Object> modelSelection,
+                Map<String, Object> approvalSelection) {
             this.promptId = promptId;
             this.payloadDigest = payloadDigest;
             this.clientId = clientId;
+            this.modelSelection = modelSelection;
+            this.approvalSelection = approvalSelection;
         }
 
         void beginSend() {
@@ -2434,7 +2448,9 @@ public final class HostedHarnessClient implements AutoCloseable {
 
         boolean matches(ActivePrompt other) {
             return promptId.equals(other.promptId)
-                    && payloadDigest.equals(other.payloadDigest);
+                    && payloadDigest.equals(other.payloadDigest)
+                    && java.util.Objects.equals(modelSelection, other.modelSelection)
+                    && java.util.Objects.equals(approvalSelection, other.approvalSelection);
         }
     }
 
