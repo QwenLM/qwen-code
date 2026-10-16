@@ -35,6 +35,7 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 // The handler reads the raw string from fd 0 (`--stdin`) and writes the
 // verdict to `--out`; both are intercepted so the wiring tests below can run
@@ -2109,12 +2110,12 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     );
   });
 
-  // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable
-  // there. The case skips rather than running into the OTHER branch — a
-  // readable tree, whose digest merely differs — and failing red against
-  // assertions that match only the unmeasured message.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // chmod is the only lever this case has: on Windows it is a no-op, and
+  // root with its DAC capabilities reads through it, so the branch under test
+  // is unreachable there. The case skips rather than running into the OTHER
+  // branch — a readable tree, whose digest merely differs — and failing red
+  // against assertions that match only the unmeasured message.
+  it.skipIf(!arePermissionBitsEnforced())(
     'says it could not check when a source cannot be read',
     () => {
       // Distinct from an installed package: the roots are on disk, so the
@@ -2149,7 +2150,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'says it could not check when the roots cannot even be statted',
     () => {
       // An archive extracted with the wrong ownership, or a cache restored

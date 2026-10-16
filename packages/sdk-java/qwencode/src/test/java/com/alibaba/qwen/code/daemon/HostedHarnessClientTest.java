@@ -16,20 +16,20 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import java.util.stream.Stream;
 
 class HostedHarnessClientTest {
     private static final String BOOT_ID =
@@ -758,6 +758,27 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void extensionPinsSurviveCreateAndEveryLoadCopy() {
+        var mcp = java.util.List.<Map<String, Object>>of(Map.of("serverId", "docs", "serverRevision", 1,
+                "definitionDigest", "a".repeat(64)));
+        Map<String, Object> hooks = Map.of("catalogId", "review", "catalogRevision", 1,
+                "definitionDigest", "b".repeat(64));
+        Map<String, Object> created = CreateHarnessSession.builder().harnessSessionId(SESSION_ID)
+                .mcpServers(mcp).hookCatalog(hooks).build().toJson();
+        assertEquals(mcp, created.get("mcpServers"));
+        assertEquals(hooks, created.get("hookCatalog"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID).withMcpServers(mcp).withHookCatalog(hooks);
+        for (LoadHarnessSession copy : java.util.List.of(load, load.withChildWorkspaces(true),
+                load.forLifecycle("op-1", 3, 2), load.withStoppedMessages(),
+                load.withStoppedMessages().forLifecycle("op-1", 3, 2).withChildWorkspaces(true))) {
+            assertEquals(mcp, copy.toJson().get("mcpServers"));
+            assertEquals(hooks, copy.toJson().get("hookCatalog"));
+        }
+        assertFalse(new LoadHarnessSession(SESSION_ID).toJson().containsKey("mcpServers"));
+        assertFalse(CreateHarnessSession.builder().harnessSessionId(SESSION_ID).build().toJson().containsKey("hookCatalog"));
+    }
+
+    @Test
     void parsesAnAgentWaitRuntimeRecovery() {
         server.createContext("/session/" + SESSION_ID + "/load",
                 exchange -> sendSessionJson(exchange, 200,
@@ -860,6 +881,29 @@ class HostedHarnessClientTest {
             assertEquals(EVENT_EPOCH, receipt.getEventEpoch());
             assertTrue(continuationBody.get().contains(
                     "\"checkpointId\":\"checkpoint-2\""));
+        }
+    }
+
+    @Test
+    void parsesAnAbandonedRuntimeRecoveryAsCancellable() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithAbandonedRuntimeRecovery()));
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
+
+            // A terminally fenced record keeps its distinction: the report
+            // parses, and the coordinator may drive the cancellation over it.
+            assertNotNull(recovery);
+            assertEquals("await_runtime", recovery.getPhase());
+            assertFalse(recovery.hasUnknownOutcome());
+            assertTrue(recovery.isCancellationReady());
+            assertFalse(recovery.isContinuationReady());
+            assertEquals("abandoned", recovery.getExecutions().get(0)
+                    .getStatus().get("state"));
         }
     }
 
@@ -1635,6 +1679,24 @@ class HostedHarnessClientTest {
                 + "\"progressCursor\":\"cursor-2\","
                 + "\"outcome\":\"known\","
                 + "\"status\":{\"state\":\"settled\"}}]}}}";
+    }
+
+    private static String sessionJsonWithAbandonedRuntimeRecovery() {
+        return "{\"sessionId\":\"" + SESSION_ID
+                + "\",\"workspaceCwd\":\"/control\","
+                + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
+                + "\",\"lastEventId\":0,\"eventEpoch\":\""
+                + EVENT_EPOCH
+                + "\",\"_meta\":{\"qwen.daemon.managedRuntimeRecovery\":{"
+                + "\"phase\":\"await_runtime\","
+                + "\"checkpointId\":\"checkpoint-1\","
+                + "\"activationId\":\"activation-1\",\"executions\":[{"
+                + "\"functionCallId\":\"function-1\","
+                + "\"toolName\":\"write_file\","
+                + "\"executionCallId\":\"execution-1\","
+                + "\"runtimeSessionId\":\"runtime-1\","
+                + "\"progressCursor\":null,\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"abandoned\"}}]}}}";
     }
 
     private static String terminalEvent(long id, String promptId) {
