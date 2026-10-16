@@ -10,6 +10,7 @@ import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
+import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 
 let server: Server;
@@ -56,6 +57,28 @@ async function fixture(
     'turn',
   );
 }
+
+it.each([false, true])(
+  'carries the original cleanup fence with drain=%s',
+  async (drain) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const broker = await fixture((_path, body) => {
+      requests.push(body);
+      return { body: { ...identity, released: true } };
+    });
+    await broker.release({
+      bindingId: 'original-binding',
+      generation: '7',
+      ...(drain ? { drain: true } : {}),
+    });
+    expect(requests[0]).toMatchObject({
+      runtimeSessionId: 'turn',
+      cleanupBindingId: 'original-binding',
+      cleanupGeneration: '7',
+    });
+    expect(requests[0]['drain']).toBe(drain ? true : undefined);
+  },
+);
 
 it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
   'rejects a mismatched %s at acquisition',
@@ -683,6 +706,82 @@ it('forwards hook recovery to the original owner and rejects a changed receipt i
   );
 });
 
+it('forwards a Monitor stop on the control route and admits only a watch answer (#13896)', async () => {
+  const control = {
+    kind: 'monitor-stop' as const,
+    sessionKey: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: 'session',
+    },
+    operationId: 'execution',
+    targetOperationId: 'runtime-call',
+  };
+  const exited = {
+    operationId: 'runtime-call',
+    state: 'exited',
+    unitName: 'qwen-mon-runtime-call',
+    evidence: { exitCode: null, exitSignal: 'SIGTERM' },
+  };
+  let answer: Record<string, unknown> = exited;
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/tool-sessions/turn/control');
+    expect(body['operation']).toEqual(control);
+    return { body: { ...identity, result: answer } };
+  });
+  expect(await broker.monitorControl(control)).toEqual(exited);
+  // An unproven answer is still a watch answer: the handle, not the
+  // wrapper, maps it to an unproven stop.
+  for (const accepted of [
+    {
+      operationId: 'runtime-call',
+      state: 'running',
+      unitName: 'qwen-mon-runtime-call',
+    },
+    { operationId: 'runtime-call', state: 'unknown' },
+  ]) {
+    answer = accepted;
+    expect(await broker.monitorControl(control)).toEqual(accepted);
+  }
+  for (const invalid of [
+    { ...exited, operationId: 'another-call' },
+    // A Hook/MCP settlement state is not a watch answer.
+    { operationId: 'runtime-call', state: 'settled' },
+    // `exited` is the proof, so it never arrives without its evidence.
+    { operationId: 'runtime-call', state: 'exited' },
+  ]) {
+    answer = invalid;
+    await expect(broker.monitorControl(control)).rejects.toThrow(
+      'Runtime Monitor response is invalid.',
+    );
+  }
+});
+
+it('surfaces the refusal of a Monitor control that names another Session (#13896)', async () => {
+  const broker = await fixture(() => ({
+    code: 400,
+    body: {
+      code: 'runtime_control_operation_invalid',
+      error: 'Monitor operation does not belong to the acquired Session.',
+    },
+  }));
+  await expect(
+    broker.monitorControl({
+      kind: 'monitor-stop',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: 'another-session',
+      },
+      operationId: 'execution',
+      targetOperationId: 'runtime-call',
+    }),
+  ).rejects.toMatchObject({
+    status: 400,
+    code: 'runtime_control_operation_invalid',
+  });
+});
+
 it('preserves a worker history refusal reason', async () => {
   const broker = await fixture(() => ({
     code: 409,
@@ -749,6 +848,9 @@ it('distinguishes unknown outcomes from definitive not-found records', async () 
   }));
   await expect(missing.status('execution')).resolves.toBeUndefined();
 
+  // A terminally abandoned record carries the terminal marker and reaches
+  // the caller as its own state — never folded into the not-found sentinel
+  // the stop path reads as "already stopped".
   const abandoned = await fixture(() => ({
     code: 409,
     body: {
@@ -757,9 +859,11 @@ it('distinguishes unknown outcomes from definitive not-found records', async () 
     },
   }));
   await expect(abandoned.status('execution')).resolves.toEqual({
-    state: 'unknown',
+    state: 'abandoned',
   });
 
+  // A still-reconcilable UNKNOWN carries no marker, so it reaches the caller
+  // as a state instead of reading as stopped.
   const unknown = await fixture(() => ({
     code: 409,
     body: { code: 'runtime_broker_execution_unknown' },
@@ -807,6 +911,133 @@ it('refuses a status answer for a different execution', async () => {
     },
   }));
   await expect(broker.status('execution')).rejects.toThrow(
+    'Runtime execution identity changed.',
+  );
+});
+
+it('lists the held Runtime Sessions the read-only route answers (#13930 R1-2)', async () => {
+  let seenBody: Record<string, unknown> | undefined;
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/tool-sessions:active-holds');
+    seenBody = body;
+    return {
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        // The Harness-scoped answer carries no Runtime Session identity.
+        heldRuntimeSessionIds: ['turn-a', `wake-${'b'.repeat(64)}`],
+      },
+    };
+  });
+  await expect(broker.activeHoldRuntimeSessionIds()).resolves.toEqual([
+    'turn-a',
+    `wake-${'b'.repeat(64)}`,
+  ]);
+  expect(seenBody?.['harnessSessionId']).toBe('session');
+
+  const empty = await fixture(() => ({
+    body: {
+      protocolVersion: 1,
+      harnessSessionId: 'session',
+      heldRuntimeSessionIds: [],
+    },
+  }));
+  await expect(empty.activeHoldRuntimeSessionIds()).resolves.toEqual([]);
+});
+
+it.each([
+  { heldRuntimeSessionIds: 'not-an-array' },
+  { heldRuntimeSessionIds: [7] },
+  { heldRuntimeSessionIds: ['.'] },
+  { heldRuntimeSessionIds: ['..'] },
+  { heldRuntimeSessionIds: ['a/b'] },
+  { heldRuntimeSessionIds: [''] },
+])('refuses the malformed active-holds answer %j', async (answer) => {
+  const broker = await fixture(() => ({
+    body: { protocolVersion: 1, harnessSessionId: 'session', ...answer },
+  }));
+  await expect(broker.activeHoldRuntimeSessionIds()).rejects.toThrow(
+    'Runtime Broker active-holds answer is invalid.',
+  );
+});
+
+it('accepts exactly the id shape the close drain maps idempotently (#13930 R1-4)', async () => {
+  // The validator and hostedRuntimeSessionId's pass-through are one
+  // invariant kept in two places: a drift between them makes a legitimate
+  // Broker answer fail validation, and the load then restores nothing.
+  const accepted = [
+    'turn',
+    `wake-${'b'.repeat(64)}`,
+    'a.b-c_d',
+    'x'.repeat(512),
+  ];
+  const broker = await fixture(() => ({
+    body: {
+      protocolVersion: 1,
+      harnessSessionId: 'session',
+      heldRuntimeSessionIds: accepted,
+    },
+  }));
+  await expect(broker.activeHoldRuntimeSessionIds()).resolves.toEqual(accepted);
+  for (const id of accepted) expect(hostedRuntimeSessionId(id)).toBe(id);
+
+  for (const rejected of [
+    '.',
+    '..',
+    'a..b',
+    'a/b',
+    'a b',
+    '',
+    'x'.repeat(513),
+  ]) {
+    expect(hostedRuntimeSessionId(rejected)).not.toBe(rejected);
+    const refusing = await fixture(() => ({
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        heldRuntimeSessionIds: [rejected],
+      },
+    }));
+    await expect(refusing.activeHoldRuntimeSessionIds()).rejects.toThrow(
+      'Runtime Broker active-holds answer is invalid.',
+    );
+  }
+});
+it('owns the :process ledger key behind a plain execution id', async () => {
+  const paths: string[] = [];
+  const found = await fixture((path) => {
+    paths.push(path);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'call-1:process',
+        status: { state: 'executing' },
+      },
+    };
+  });
+  await expect(found.backgroundProcessStatus('call-1')).resolves.toEqual({
+    state: 'executing',
+  });
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/call-1%3Aprocess',
+  ]);
+
+  const missing = await fixture(() => ({
+    code: 404,
+    body: { code: 'runtime_execution_not_found' },
+  }));
+  await expect(
+    missing.backgroundProcessStatus('call-1'),
+  ).resolves.toBeUndefined();
+
+  const unsuffixed = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'call-1',
+      status: { state: 'executing' },
+    },
+  }));
+  await expect(unsuffixed.backgroundProcessStatus('call-1')).rejects.toThrow(
     'Runtime execution identity changed.',
   );
 });

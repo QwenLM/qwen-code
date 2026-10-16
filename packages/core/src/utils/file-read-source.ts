@@ -6,6 +6,7 @@
 
 import type { Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
 export type DescriptorFileReadSource = {
   kind: 'descriptor';
@@ -54,4 +55,28 @@ export async function readFileHandleBytes(
     position += bytesRead;
   }
   return bytes.subarray(0, position);
+}
+
+export async function digestFileReadSource(
+  source: DescriptorFileReadSource,
+): Promise<string> {
+  const length = source.stats.size;
+  if (!Number.isSafeInteger(length) || length < 0) {
+    throw new RangeError('File read extent must be a non-negative integer.');
+  }
+  const digest = createHash('sha256');
+  const bytes = Buffer.allocUnsafe(64 * 1024);
+  let position = 0;
+  while (position < length) {
+    const { bytesRead } = await source.fileHandle.read(
+      bytes,
+      0,
+      Math.min(bytes.length, length - position),
+      position,
+    );
+    if (bytesRead === 0) throw new Error('File changed while hashing.');
+    digest.update(bytes.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+  return digest.digest('hex');
 }
