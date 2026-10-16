@@ -30,6 +30,7 @@ import { PermissionManager } from '../../permissions/permission-manager.js';
 import { DiscoveredTool } from '../tool-registry.js';
 import { AgentCore } from '../../agents/runtime/agent-core.js';
 import type { LlmChat } from '../../core/llm-chat.js';
+import type { Content, Part } from '@google/genai';
 import {
   EXECUTION_TOOL_NAMES,
   type ExecutionEnvironment,
@@ -74,6 +75,19 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     (parent as any).toolRegistry = parentRegistry;
     return parent;
   }
+
+  /** A registry-backed parent (default: a fresh bare Config) and its `mode` override. */
+  async function createOverride(mode: ApprovalMode, parent?: Config) {
+    const base = await createParentWithRegistry(parent);
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      base,
+      mode,
+    );
+    return { parent: base, child, cleanup };
+  }
+
+  /** The Config a registry tool was bound to at construction. */
+  const boundConfig = (tool: unknown) => (tool as { config: Config }).config;
 
   it('registers only execution facades and delegates file access through the child environment', async () => {
     const parent = await createParentWithRegistry();
@@ -250,8 +264,18 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
       },
     ];
     let round = 0;
-    const sendMessageStream = vi.fn(async function* () {
+    // Record turns like a real LlmChat: the tool_call review gate rebuilds
+    // its reviewed schemas from the subagent's own history.
+    const history: Content[] = [];
+    const sendMessageStream = vi.fn(async function* (
+      _model: string,
+      params: { message: Part[] },
+    ) {
+      history.push({ role: 'user', parts: params.message });
       const call = calls[round++];
+      if (call) {
+        history.push({ role: 'model', parts: [{ functionCall: call }] });
+      }
       yield {
         type: 'chunk',
         value: call
@@ -261,6 +285,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     });
     const chat = {
       getHistoryToolCallFingerprints: () => new Map(),
+      getHistoryShallow: () => history,
       sendMessageStream,
     } as unknown as LlmChat;
     try {
@@ -287,21 +312,13 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
           },
         ]
       >;
-      expect(
-        requests[0][1].config.tools[0].functionDeclarations.map(
+      const declaredNames = (round: number) =>
+        requests[round][1].config.tools[0].functionDeclarations.map(
           (tool) => tool.name,
-        ),
-      ).not.toContain(ToolNames.READ_FILE);
-      expect(
-        requests[1][1].config.tools[0].functionDeclarations.map(
-          (tool) => tool.name,
-        ),
-      ).not.toContain(ToolNames.READ_FILE);
-      expect(
-        requests[1][1].config.tools[0].functionDeclarations.map(
-          (tool) => tool.name,
-        ),
-      ).toContain(ToolNames.TOOL_CALL);
+        );
+      expect(declaredNames(0)).not.toContain(ToolNames.READ_FILE);
+      expect(declaredNames(1)).not.toContain(ToolNames.READ_FILE);
+      expect(declaredNames(1)).toContain(ToolNames.TOOL_CALL);
       expect(JSON.stringify(requests[2][1].message)).toContain(
         'worker file content',
       );
@@ -329,6 +346,27 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     return { stripDangerousRulesForAutoMode, restoreDangerousRules };
   }
 
+  /**
+   * Parent with a fake permission manager (optionally already in trusted
+   * AUTO mode), then its `mode` override.
+   */
+  async function overrideWithFakeRules(
+    mode: ApprovalMode,
+    { parentInAuto = false } = {},
+  ) {
+    const parent = await createParentWithRegistry();
+    const rules = attachFakePermissionManager(parent);
+    if (parentInAuto) {
+      vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+      parent.setApprovalMode(ApprovalMode.AUTO);
+    }
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      parent,
+      mode,
+    );
+    return { child, cleanup, ...rules };
+  }
+
   it('copies the current plan-exit event before isolating approval mode', async () => {
     const parent = await createParentWithRegistry();
     parent.setApprovalMode(ApprovalMode.PLAN);
@@ -352,38 +390,18 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
   });
 
   it('returns a Config whose registry is a distinct instance from the parent', async () => {
-    const parent = new Config(baseParams);
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
     // Parent's getToolRegistry() is what subagents would walk through if
-    // we did NOT rebuild — make it return parentRegistry so the comparison
-    // is meaningful.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
-
-    const { config: child } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.AUTO_EDIT,
-    );
+    // we did NOT rebuild — so the parent gets a real registry to compare.
+    const { parent, child } = await createOverride(ApprovalMode.AUTO_EDIT);
     const childRegistry = child.getToolRegistry();
 
     expect(childRegistry).toBeDefined();
-    expect(childRegistry).not.toBe(parentRegistry);
+    expect(childRegistry).not.toBe(parent.getToolRegistry());
   });
 
   it('binds Edit / WriteFile / ReadFile on the override registry to the override Config, not the parent', async () => {
-    const parent = new Config(baseParams);
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
-
-    const { config: child } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.AUTO_EDIT,
-    );
+    const { parent, child } = await createOverride(ApprovalMode.AUTO_EDIT);
+    const parentRegistry = parent.getToolRegistry();
     const childRegistry = child.getToolRegistry();
 
     // Force lazy factories to instantiate their tools on both registries.
@@ -401,31 +419,16 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     // resolves to child. The parent and child are distinct Config
     // instances, so this also implies their FileReadCaches and
     // ApprovalModes are independent.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((parentEdit as any).config).toBe(parent);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((childEdit as any).config).toBe(child);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((parentRead as any).config).toBe(parent);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((childRead as any).config).toBe(child);
+    expect(boundConfig(parentEdit)).toBe(parent);
+    expect(boundConfig(childEdit)).toBe(child);
+    expect(boundConfig(parentRead)).toBe(parent);
+    expect(boundConfig(childRead)).toBe(child);
   });
 
   it('routes child tools through the child FileReadCache, not the parent', async () => {
-    const parent = new Config(baseParams);
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
+    const { parent, child } = await createOverride(ApprovalMode.AUTO_EDIT);
 
-    const { config: child } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.AUTO_EDIT,
-    );
-    const childRegistry = child.getToolRegistry();
-
-    const childEdit = await childRegistry.ensureTool(ToolNames.EDIT);
+    const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
     expect(childEdit).toBeInstanceOf(EditTool);
 
     // The bound tool's `this.config.getFileReadCache()` must resolve to
@@ -433,19 +436,13 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     // call EditTool's execute here (it would reach the filesystem); we
     // just observe that the cache instance the bound tool would touch
     // is the child's, not the parent's.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const boundConfig = (childEdit as any).config as Config;
-    expect(boundConfig.getFileReadCache()).toBe(child.getFileReadCache());
-    expect(boundConfig.getFileReadCache()).not.toBe(parent.getFileReadCache());
+    const cache = boundConfig(childEdit).getFileReadCache();
+    expect(cache).toBe(child.getFileReadCache());
+    expect(cache).not.toBe(parent.getFileReadCache());
   });
 
   it('preserves the override approval mode on the bound tools', async () => {
-    const parent = new Config(baseParams);
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
+    const parent = await createParentWithRegistry();
 
     expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
 
@@ -456,18 +453,11 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(child.getApprovalMode()).toBe(ApprovalMode.YOLO);
 
     const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const boundConfig = (childEdit as any).config as Config;
-    expect(boundConfig.getApprovalMode()).toBe(ApprovalMode.YOLO);
+    expect(boundConfig(childEdit).getApprovalMode()).toBe(ApprovalMode.YOLO);
   });
 
   it('lets a plan-mode override leave plan mode without changing the parent', async () => {
-    const parent = await createParentWithRegistry();
-
-    const { config: child } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.PLAN,
-    );
+    const { parent, child } = await createOverride(ApprovalMode.PLAN);
 
     expect(child.getApprovalMode()).toBe(ApprovalMode.PLAN);
 
@@ -500,15 +490,12 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
   // override's write-through would land as an OWN property on the
   // worktree wrapper and shadow the session-global revision.
   it('forwards Session Workflow revision mutations through a worktree wrapper beneath the approval override', async () => {
-    const parent = new Config({
-      ...baseParams,
-      sessionWorkflowEnabled: true,
-    });
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
+    const parent = await createParentWithRegistry(
+      new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+      }),
+    );
     const worktree = deriveWorktreeConfig(parent, '/tmp/worktree');
     installSessionWorkflowRevisionWriteThrough(worktree, parent);
     const { config: child } = await createApprovalModeOverride(
@@ -532,12 +519,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
   });
 
   it('stops plan-mode blocking exec tools after a child override exits plan mode', async () => {
-    const parent = await createParentWithRegistry();
-
-    const { config: child } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.PLAN,
-    );
+    const { child } = await createOverride(ApprovalMode.PLAN);
 
     child.setApprovalMode(ApprovalMode.DEFAULT);
 
@@ -610,14 +592,8 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
   });
 
   it('restores AUTO rules when an AUTO child finishes still in AUTO mode', async () => {
-    const parent = await createParentWithRegistry();
-    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
-      attachFakePermissionManager(parent);
-
-    const { cleanup } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.AUTO,
-    );
+    const { cleanup, stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      await overrideWithFakeRules(ApprovalMode.AUTO);
 
     expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
 
@@ -642,14 +618,12 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
   });
 
   it('does not need cleanup restore after a child leaves AUTO mode itself', async () => {
-    const parent = await createParentWithRegistry();
-    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
-      attachFakePermissionManager(parent);
-
-    const { config: child, cleanup } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.AUTO,
-    );
+    const {
+      child,
+      cleanup,
+      stripDangerousRulesForAutoMode,
+      restoreDangerousRules,
+    } = await overrideWithFakeRules(ApprovalMode.AUTO);
 
     expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
 
@@ -661,16 +635,8 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
   });
 
   it('does not restore AUTO rules on cleanup when the parent is already in AUTO mode', async () => {
-    const parent = await createParentWithRegistry();
-    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
-      attachFakePermissionManager(parent);
-    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
-    parent.setApprovalMode(ApprovalMode.AUTO);
-
-    const { cleanup } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.AUTO,
-    );
+    const { cleanup, stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      await overrideWithFakeRules(ApprovalMode.AUTO, { parentInAuto: true });
 
     expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
 
@@ -679,16 +645,12 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
   });
 
   it('does not restore AUTO rules when a child leaves AUTO while the parent stays in AUTO', async () => {
-    const parent = await createParentWithRegistry();
-    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
-      attachFakePermissionManager(parent);
-    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
-    parent.setApprovalMode(ApprovalMode.AUTO);
-
-    const { config: child, cleanup } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.AUTO,
-    );
+    const {
+      child,
+      cleanup,
+      stripDangerousRulesForAutoMode,
+      restoreDangerousRules,
+    } = await overrideWithFakeRules(ApprovalMode.AUTO, { parentInAuto: true });
 
     child.setApprovalMode(ApprovalMode.DEFAULT);
 
@@ -723,14 +685,12 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
   });
 
   it('restores AUTO rules when a non-AUTO child enters AUTO and finishes there', async () => {
-    const parent = await createParentWithRegistry();
-    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
-      attachFakePermissionManager(parent);
-
-    const { config: child, cleanup } = await createApprovalModeOverride(
-      parent,
-      ApprovalMode.PLAN,
-    );
+    const {
+      child,
+      cleanup,
+      stripDangerousRulesForAutoMode,
+      restoreDangerousRules,
+    } = await overrideWithFakeRules(ApprovalMode.PLAN);
 
     child.setApprovalMode(ApprovalMode.AUTO);
     expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
@@ -740,12 +700,8 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
   });
 
   it('copies discovered tools from the parent registry without re-discovering', async () => {
-    const parent = new Config(baseParams);
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
+    const parent = await createParentWithRegistry();
+    const parentRegistry = parent.getToolRegistry();
 
     // Bare mode keeps the parent registry small; this test mostly
     // guards that copyDiscoveredToolsFrom is invoked. We verify the
@@ -793,33 +749,21 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
 
     // Spy-side check via plain reflection: ensure WriteFile import path
     // is wired correctly by switching to non-bare and re-running.
-    const parentNonBare = new Config({ ...baseParams, bareMode: false });
-    const parentNonBareRegistry = await parentNonBare.createToolRegistry(
-      undefined,
-      { skipDiscovery: true },
-    );
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parentNonBare as any).toolRegistry = parentNonBareRegistry;
-
-    const { config: childNonBare } = await createApprovalModeOverride(
-      parentNonBare,
+    const { child: childNonBare } = await createOverride(
       ApprovalMode.AUTO_EDIT,
+      new Config({ ...baseParams, bareMode: false }),
     );
     const childNonBareWrite = await childNonBare
       .getToolRegistry()
       .ensureTool(ToolNames.WRITE_FILE);
     expect(childNonBareWrite).toBeInstanceOf(WriteFileTool);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((childNonBareWrite as any).config).toBe(childNonBare);
+    expect(boundConfig(childNonBareWrite)).toBe(childNonBare);
   });
 
   it('applies persisted launch flags before rebuilding the child registry', async () => {
-    const parent = new Config({ ...baseParams, bareMode: false });
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
+    const parent = await createParentWithRegistry(
+      new Config({ ...baseParams, bareMode: false }),
+    );
 
     const { config: child } = await createApprovalModeOverride(
       parent,
@@ -873,17 +817,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     // chain through normal lookup. These tests pin that contract.
 
     it('hasRebuiltToolRegistry returns true even when checked on an Object.create wrapper above the rebuilt Config', async () => {
-      const parent = new Config(baseParams);
-      const parentRegistry = await parent.createToolRegistry(undefined, {
-        skipDiscovery: true,
-      });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (parent as any).toolRegistry = parentRegistry;
-
-      const { config: upstream } = await createApprovalModeOverride(
-        parent,
-        ApprovalMode.AUTO_EDIT,
-      );
+      const { child: upstream } = await createOverride(ApprovalMode.AUTO_EDIT);
       expect(hasRebuiltToolRegistry(upstream)).toBe(true);
 
       // bgConfig pattern: Object.create wrapper above the rebuilt
@@ -913,12 +847,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     });
 
     it('rebuildToolRegistryOnOverride installs the marker and an own getToolRegistry', async () => {
-      const parent = new Config(baseParams);
-      const parentRegistry = await parent.createToolRegistry(undefined, {
-        skipDiscovery: true,
-      });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (parent as any).toolRegistry = parentRegistry;
+      const parent = await createParentWithRegistry();
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const override = Object.create(parent) as any;

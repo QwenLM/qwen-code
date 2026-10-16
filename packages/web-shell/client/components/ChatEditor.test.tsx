@@ -154,8 +154,6 @@ const composerCoreState = vi.hoisted(() => ({
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
   imageDragActive: false,
-  navigatePrevHistory: vi.fn(),
-  navigateNextHistory: vi.fn(),
   hasContent: false,
   pendingImageBatchCount: 0,
   shellMode: false,
@@ -302,8 +300,6 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           handleSearchInput: vi.fn(),
           handleSearchCompositionEnd: vi.fn(),
         },
-        navigatePrevHistory: composerCoreState.navigatePrevHistory,
-        navigateNextHistory: composerCoreState.navigateNextHistory,
         showShortcutHints: false,
         followupState: { isVisible: false, suggestion: '' },
         disabled: Boolean(options?.disabled),
@@ -379,8 +375,6 @@ afterEach(() => {
   composerCoreState.ingestFiles.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
-  composerCoreState.navigatePrevHistory.mockReset();
-  composerCoreState.navigateNextHistory.mockReset();
   composerCoreState.setShellMode.mockReset();
   composerCoreState.toggleShellMode.mockReset();
   composerCoreState.submitText.mockReset();
@@ -434,6 +428,7 @@ interface ChatEditorRenderProps
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   currentMode?: string;
+  availableModes?: readonly string[];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
@@ -441,6 +436,7 @@ interface ChatEditorRenderProps
   onSubmit?: ComponentProps<typeof ChatEditor>['onSubmit'];
   onCancel?: () => void;
   currentModel?: string;
+  modelControlsDisabled?: boolean;
   availableModels?: Array<{ id: string; label?: string }>;
   sessionWorkflowEnabled?: boolean;
   onSelectMode?: (mode: string) => void;
@@ -454,6 +450,7 @@ interface ChatEditorRenderProps
   }) => void;
   tokenCount?: number;
   contextWindow?: number;
+  contextUsageKnown?: boolean;
   onShowContextUsage?: () => void;
   contextUsageAlwaysVisible?: boolean;
   commands?: ComponentProps<typeof ChatEditor>['commands'];
@@ -970,6 +967,48 @@ describe('ChatEditor context usage ring', () => {
       '[data-web-shell-context-usage]',
     );
 
+  it('shows observed zero and enables a read-only popup without inventing action handlers', async () => {
+    const container = renderChatEditor({
+      tokenCount: 0,
+      contextWindow: 1000,
+      contextUsageKnown: true,
+      visibleToolbarActions: ['contextUsage'],
+    });
+    expect(ring(container)!.disabled).toBe(false);
+    expect(ring(container)!.textContent).toBe('0.0%');
+    await act(async () => ring(container)!.click());
+    const card = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(card.querySelector('dl')?.textContent).toContain('0 tokens');
+    expect(card.querySelectorAll('button')).toHaveLength(0);
+    await act(async () => ring(container)!.click());
+    expect(
+      document.querySelector('[data-web-shell-context-popover]'),
+    ).toBeNull();
+  });
+
+  it('keeps explicit unknown separate from Local inferred counts and preserves the Local details action', async () => {
+    const openDetails = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 123,
+      contextWindow: 1000,
+      contextUsageKnown: false,
+      contextUsageAlwaysVisible: true,
+      onOpenContextUsage: openDetails,
+    });
+    expect(ring(container)!.textContent).toBe('');
+    await act(async () => ring(container)!.click());
+    expect(openDetails).toHaveBeenCalledOnce();
+    expect(
+      document.querySelector('[data-web-shell-context-popover]'),
+    ).toBeNull();
+    rerenderChatEditor(container, {
+      tokenCount: 123,
+      contextWindow: 1000,
+      onOpenContextUsage: openDetails,
+    });
+    expect(ring(container)!.textContent).toBe('12.3%');
+  });
+
   it('renders in toolbarRight before the voice actions', () => {
     const container = renderChatEditor({
       tokenCount: 34_298,
@@ -1082,7 +1121,27 @@ describe('ChatEditor context usage ring', () => {
     expect(getContextUsage).not.toHaveBeenCalled();
   });
 
-  it('opens the context breakdown when clicked', () => {
+  it('opens the details panel when clicked', () => {
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage,
+      onShowContextUsage,
+    });
+
+    act(() => {
+      ring(container)!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(onOpenContextUsage).toHaveBeenCalledTimes(1);
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a transcript snapshot when the host has no details panel', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
       tokenCount: 100,
@@ -1097,6 +1156,24 @@ describe('ChatEditor context usage ring', () => {
     });
 
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the conversation hint once the click opens the details panel', async () => {
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage: vi.fn(),
+    });
+
+    await act(async () => {
+      ring(container)!.focus();
+    });
+
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(tooltip.textContent).toContain('Context Usage');
+    expect(tooltip.textContent).not.toContain(
+      'Click to view the breakdown in the conversation.',
+    );
   });
 
   it('shows the used/total detail in the hover card on focus', async () => {
@@ -1681,6 +1758,16 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
     ).toBe(true);
+    renderChatEditor({
+      composerScopeKey: 'managed:tenant:actor:session',
+      workspaceFeaturesEnabled: false,
+      disableLegacyHistoryFallback: true,
+      shellModeEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(true);
+    expect(latestComposerCoreOptions.current?.shellModeEnabled).toBe(false);
   });
 
   it('shows the workspace indicator when the workspace action is visible', () => {
@@ -1699,6 +1786,23 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(chip?.getAttribute('title')).toBeNull();
     expect(
       container.querySelector('[data-web-shell-workspace]'),
+    ).not.toBeNull();
+  });
+
+  it('retains the native Workspace selector for a sole explicit Managed choice', () => {
+    const container = renderChatEditor({
+      workspaces: [
+        { id: 'ws-a', cwd: 'ws-a', label: 'A', primary: false, trusted: true },
+      ],
+      onSelectWorkspace: vi.fn(),
+      workspaceSelectorAlwaysVisible: true,
+      contextChipPlacement: 'below',
+      visibleToolbarActions: ['workspace'],
+    });
+    expect(
+      container.querySelector(
+        '[data-web-shell-composer-context-row] button[aria-label="Workspace"]',
+      ),
     ).not.toBeNull();
   });
 
@@ -2743,6 +2847,84 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
     ).toBeNull();
   });
 
+  it('disables a pinned model and closes an existing model menu without changing Local defaults', () => {
+    const select = vi.fn();
+    const props = {
+      visibleToolbarActions: ['model'] as const,
+      currentModel: 'pinned-model',
+      availableModels: [{ id: 'pinned-model' }, { id: 'other-model' }],
+      onSelectModel: select,
+    };
+    const container = renderChatEditor(props);
+    const trigger = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-model-button]',
+      )!;
+    expect(trigger().disabled).toBe(false);
+    act(() => trigger().click());
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, { ...props, modelControlsDisabled: true });
+    expect(trigger().disabled).toBe(true);
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    act(() => trigger().click());
+    expect(select).not.toHaveBeenCalled();
+    rerenderChatEditor(container, props);
+    act(() => trigger().click());
+    const option = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ].find((button) => button.textContent?.includes('other-model'))!;
+    act(() => option.click());
+    expect(select).toHaveBeenCalledWith('other-model');
+  });
+
+  it('filters policies for a host while retaining all Local policies when omitted', () => {
+    const onSelectMode = vi.fn();
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      currentMode: 'default',
+      onSelectMode,
+    };
+    const container = renderChatEditor({
+      ...props,
+      availableModes: ['default', 'auto-edit'],
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const choices = () => [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ];
+    expect(choices().map((item) => item.textContent)).toHaveLength(2);
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]')?.textContent,
+    ).not.toContain('Classifier');
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]')?.textContent,
+    ).not.toContain('Full Access');
+    const edit = choices().find((item) =>
+      item.textContent?.includes('Auto Edit'),
+    )!;
+    act(() => edit.click());
+    expect(onSelectMode).toHaveBeenCalledWith('auto-edit');
+    rerenderChatEditor(container, props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    expect(choices()).toHaveLength(4);
+  });
+
   it('omits Plan from permissions and retains every execution policy', () => {
     const onSelectMode = vi.fn();
     const container = renderChatEditor({
@@ -3576,6 +3758,24 @@ describe('ChatEditor mobile composer actions', () => {
     expect(composerCoreState.openHistorySearch).toHaveBeenCalledOnce();
   });
 
+  it('hides the mobile Shell entry for Managed while retaining the ordinary default', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      shellModeEnabled: false,
+    });
+    expect(
+      container.querySelector('[data-web-shell-mobile-editing-actions]'),
+    ).not.toBeNull();
+    const shellButton = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Shell mode',
+      );
+    expect(shellButton()).toBeUndefined();
+    rerenderChatEditor(container, { visibleToolbarActions: [] });
+    expect(shellButton()).toBeDefined();
+  });
+
   it('returns focus to the composer after entering Shell from the drawer', async () => {
     mobileComposer('draft');
     renderChatEditor({ visibleToolbarActions: ['addMenu'] });
@@ -3587,36 +3787,6 @@ describe('ChatEditor mobile composer actions', () => {
     expect(
       document.querySelector('[data-web-shell-mobile-add-menu]'),
     ).toBeNull();
-  });
-
-  it('calls history navigation directly without submitting or moving focus', async () => {
-    const backend = mobileComposer('working draft');
-    const onSubmit = vi.fn();
-    const container = renderChatEditor({ onSubmit });
-    act(() => backend.textareaRef.current!.focus());
-    const previous = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Previous input"]',
-    )!;
-    const pointerDown = new Event('pointerdown', {
-      bubbles: true,
-      cancelable: true,
-    });
-    previous.dispatchEvent(pointerDown);
-    expect(pointerDown.defaultPrevented).toBe(false);
-    const mouseDown = new MouseEvent('mousedown', {
-      bubbles: true,
-      cancelable: true,
-    });
-    previous.dispatchEvent(mouseDown);
-    expect(mouseDown.defaultPrevented).toBe(true);
-    composerCoreState.focus.mockClear();
-    await clickButton('Previous input');
-    await clickButton('Next input');
-    expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledOnce();
-    expect(composerCoreState.navigateNextHistory).toHaveBeenCalledOnce();
-    expect(composerCoreState.focus).not.toHaveBeenCalled();
-    expect(onSubmit).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(backend.textareaRef.current);
   });
 
   it('prevents mousedown default on the remaining migrated buttons', async () => {
@@ -3659,18 +3829,17 @@ describe('ChatEditor mobile composer actions', () => {
     );
   });
 
-  it('disables both history buttons when the composer is disabled', () => {
+  it('disables the editing row actions when the composer is disabled', () => {
     mobileComposer('draft');
     const container = renderChatEditor({ disabled: true });
-    for (const label of ['Previous input', 'Next input', 'Expand editor']) {
+    for (const label of ['Input history', 'Expand editor']) {
       const button = container.querySelector<HTMLButtonElement>(
         `[aria-label="${label}"]`,
       )!;
       expect(button.disabled).toBe(true);
       act(() => button.click());
     }
-    expect(composerCoreState.navigatePrevHistory).not.toHaveBeenCalled();
-    expect(composerCoreState.navigateNextHistory).not.toHaveBeenCalled();
+    expect(composerCoreState.openHistorySearch).not.toHaveBeenCalled();
   });
 
   it.each([['approvalMode', 'model'], ['commands']] as const)(
@@ -4065,12 +4234,6 @@ describe('ChatEditor mobile composer actions', () => {
       height.mockRestore();
       restore();
     }
-  });
-
-  it('keeps the history arrow controls out of the desktop composer', () => {
-    const container = renderChatEditor({});
-    expect(container.querySelector('[aria-label="Previous input"]')).toBeNull();
-    expect(container.querySelector('[aria-label="Next input"]')).toBeNull();
   });
 
   it('gates the drawer Live entry by support and host voice opt-in and opens the controlled dialog', async () => {

@@ -172,6 +172,7 @@ class PublicationClient {
         'X-Qwen-Tenant-Id': String(this.key['tenantId']),
         'X-Qwen-Tool-Publication-Token': this.installed.publicationToken,
         'X-Qwen-Tool-Publication-Operation': operationId,
+        'X-Qwen-Tool-Publication-Async': '1',
         'Cache-Control': 'no-store',
         ...headers,
       },
@@ -210,9 +211,20 @@ class PublicationClient {
     const deadline = Date.now() + 30 * 60_000;
     let recoveries = 0;
     const statusPath = `/operations/${encodeURIComponent(operationId)}`;
+    const resumableRefusal = (failure: PublicationRejection): boolean =>
+      failure.status === 409 &&
+      [
+        'managed_tool_publication_operation_expired',
+        'managed_tool_publication_claim_expired',
+        'managed_tool_publication_claim_lost',
+        'managed_tool_publication_busy',
+      ].includes(failure.code);
     const retryable = (failure: unknown): boolean =>
       failure instanceof PublicationRejection
-        ? failure.status === 429 || failure.status >= 500
+        ? failure.status === 429 ||
+          failure.status >= 500 ||
+          (failure.status === 409 &&
+            failure.code === 'managed_tool_publication_busy')
         : failure instanceof TypeError ||
           (failure instanceof DOMException &&
             ['AbortError', 'TimeoutError'].includes(failure.name));
@@ -253,7 +265,7 @@ class PublicationClient {
             failure.status >= 400 &&
             failure.status < 500 &&
             failure.status !== 429 &&
-            failure.code !== 'managed_tool_publication_operation_expired' &&
+            !resumableRefusal(failure) &&
             status['state'] !== 'SUCCEEDED'
           )
             throw failure;
@@ -268,6 +280,23 @@ class PublicationClient {
       let status = initial;
       while (Date.now() < deadline) {
         if (status['state'] === 'SUCCEEDED') return record(status['receipt']);
+        if (status['state'] === 'FAILED') {
+          const error = record(status['error']);
+          if (
+            !Number.isInteger(error['status']) ||
+            Number(error['status']) < 400 ||
+            Number(error['status']) > 599 ||
+            typeof error['code'] !== 'string' ||
+            !error['code']
+          )
+            throw new Error('Invalid publication failure response.');
+          if (error['code'] === 'managed_tool_publication_quota_exhausted')
+            throw new Error('quota_exhausted');
+          throw new PublicationRejection(
+            Number(error['status']),
+            error['code'],
+          );
+        }
         if (status['state'] === 'RETRYABLE') break;
         if (status['state'] === 'EXPIRED' && recoveries < 3) {
           recoveries++;
@@ -279,6 +308,13 @@ class PublicationClient {
             );
           } catch (failure) {
             if (!retryable(failure)) throw failure;
+            if (
+              failure instanceof PublicationRejection &&
+              [409, 429].includes(failure.status) &&
+              failure.code === 'managed_tool_publication_busy'
+            )
+              recoveries--;
+            await new Promise((resolve) => setTimeout(resolve, 250));
             status = (await observe()) ?? status;
           }
           continue;
@@ -305,6 +341,10 @@ class PublicationClient {
 export class RemoteShellResultPublisher {
   private readonly grants = new Map<string, InstalledPublication>();
   private readonly clients = new Map<string, PublicationClient>();
+
+  get hasInstalledPublication(): boolean {
+    return this.grants.size > 0;
+  }
 
   hasExecution(executionCallId: string): boolean {
     return this.grants.has(executionCallId);
@@ -606,7 +646,11 @@ export class RemoteShellResultPublisher {
       throw new Error('Publication finish was not confirmed.');
   }
 
-  registerInstallRoute(app: Application, boot: ManagedContextBoot): void {
+  registerInstallRoute(
+    app: Application,
+    boot: ManagedContextBoot,
+    admissionOpen: () => boolean = () => true,
+  ): void {
     app.post(
       PUBLICATION_INSTALL_ROUTE.path,
       managedRuntimeNoStore,
@@ -614,6 +658,8 @@ export class RemoteShellResultPublisher {
       managedRuntimeJsonBody(PUBLICATION_INSTALL_ROUTE.requestBodyLimitBytes),
       (req: Request, res: Response) => {
         try {
+          if (!admissionOpen())
+            throw new Error('Publication admission is sealed.');
           this.install(req.body, boot);
           res.json({
             protocolVersion: 3,

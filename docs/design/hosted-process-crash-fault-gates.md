@@ -29,21 +29,22 @@ The database must identify itself as MySQL or MariaDB; H2 is not sufficient.
 | `worker-kill`     | Real worker is executing a tool                              | Worker receives SIGKILL; uncertain outcome remains blocked |
 | `worker-stop`     | Real worker is executing a tool                              | Worker receives SIGSTOP; uncertain outcome remains blocked |
 
-An OS-level tool barrier must prove execution has begun before injecting a
-signal. No timing guess, mock worker, fake result, or production debug endpoint
+A worker-local file-read barrier must prove native Edit has been entered before
+injecting a signal. No timing guess, mock worker, fake result, or production debug endpoint
 may substitute for that proof. The test controller owns process signals and
 cleanup; the HTTP proxy forwards real Store/Broker bytes except at the selected
 Harness crash boundary. Spring is a separate JVM, using normal application
 wiring. Test-only startup code seeds the saved Session and publishes listener
 addresses; it adds no production route or recovery behavior.
 
-For the in-flight cases, the saved child directory contains a POSIX FIFO named
-`proof.txt`. A nonblocking writer can open it only after the real Edit has opened
-its reader. Holding the writer without data prevents completion. The
-`harness-start` case supplies `x` after killing Harness, allowing Edit to replace
-the FIFO atomically with `xx`. Spring/worker cases withhold data throughout the
-assertions, so the FIFO remains and there is no effect. `harness-prepare` and
-`harness-result` use a regular file. No tool implementation is substituted.
+All cases use a regular `proof.txt` containing `x`. For in-flight cases the
+driver creates `proof.txt.read-gate` after backup preparation and before forwarding
+start. The worker imports `hosted-file-read-gate.mjs`, which writes
+`proof.txt.read-entered` on the native Edit read, waits for the gate to disappear,
+then calls the original `fs.promises.readFile`. The `harness-start` case removes
+the gate after killing Harness, allowing Edit to write `xx`. Spring/worker cases
+keep the gate throughout assertions, so the regular file remains `x` with no
+effect. No tool result or implementation is substituted.
 
 Spring loss leaves the durable execution `EXECUTING` without a result; the
 restarted local provisioner cannot adopt the orphan. Worker loss or suspension
@@ -75,13 +76,14 @@ a decoy file, and the saved workspace parent must remain untouched.
 The original storage owner must remain held throughout crash and reload. The
 fixture must never reclaim or adopt it. SIGSTOP cleanup resumes or kills and
 reaps the exact worker; all owned child processes and listeners are cleaned up
-on failures as well as success.
+on failures as well as success. The parent fixture owns worker teardown; do not
+release the read gate of an uncertain Edit just to finish cleanup.
 
 ## Scope, files, and risks
 
 Changes are confined to test fixtures, the Java integration-test profile and CI
 budget, and this bilingual design. Existing reply-loss and Store-failure gates
-remain enabled. POSIX signals and the tool barrier require Linux or macOS; this
+remain enabled. POSIX signals and process cleanup require Linux or macOS; this
 Hosted database gate runs on Linux CI. Windows process-crash coverage is outside
 this increment. Cancellation semantics, SSE reconnect, Shell/provider effects,
 automatic continuation, orphan adoption, and W0e reclamation are not exercised

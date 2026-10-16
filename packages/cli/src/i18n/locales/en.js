@@ -23,6 +23,8 @@ export default {
   'Project level': 'Project level',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -234,12 +236,6 @@ export default {
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
-  'toolDisplayName.ThreadPost': 'toolDisplayName.ThreadPost',
-  'toolDisplayName.ThreadWait': 'toolDisplayName.ThreadWait',
-  'toolDisplayName.ThreadBlock': 'toolDisplayName.ThreadBlock',
-  'toolDisplayName.ThreadReview': 'toolDisplayName.ThreadReview',
-  'toolDisplayName.ThreadCreate': 'toolDisplayName.ThreadCreate',
-  'toolDisplayName.ThreadRead': 'toolDisplayName.ThreadRead',
   'toolDisplayName.DownsampleImage': 'toolDisplayName.DownsampleImage',
   'toolDisplayName.DownscaleVideo': 'toolDisplayName.DownscaleVideo',
   'toolDisplayName.DownsampleAudio': 'toolDisplayName.DownsampleAudio',
@@ -2383,6 +2379,10 @@ export default {
   'API key cannot be empty.': 'API key cannot be empty.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.',
   'You can get your Coding Plan API key here':
     'You can get your Coding Plan API key here',
   'You can get your Token Plan API key here':
@@ -2410,6 +2410,17 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  QwenCloud: 'QwenCloud',
+  'QwenCloud · Access Method': 'QwenCloud · Access Method',
+  'Official recommended setup: Token Plan or Standard API Key':
+    'Official recommended setup: Token Plan or Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    'Pay-as-you-go · Connect with an existing platform API key',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)',
+  'China — 千问AI平台': 'China — 千问AI平台',
+  'International — QwenCloud': 'International — QwenCloud',
+  Platform: 'Platform',
   Custom: 'Custom',
   'Select Region for Coding Plan': 'Select Region for Coding Plan',
   'Choose based on where your account is registered':

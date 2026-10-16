@@ -15,6 +15,7 @@ import {
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '../core/environmentContext.js';
+import { modelText, userText } from '../test-utils/model-fixtures.js';
 
 const user = (text: string): Content => ({
   role: 'user',
@@ -24,10 +25,8 @@ const model = (text: string): Content => ({
   role: 'model',
   parts: [{ text }],
 });
-const reminder = (text: string): Content => ({
-  role: 'user',
-  parts: [{ text: `${SYSTEM_REMINDER_OPEN}${text}${SYSTEM_REMINDER_CLOSE}` }],
-});
+const reminder = (text: string): Content =>
+  userText(`${SYSTEM_REMINDER_OPEN}${text}${SYSTEM_REMINDER_CLOSE}`);
 const toolResult = (): Content => ({
   role: 'user',
   parts: [{ functionResponse: { name: 'x', response: { output: 'ok' } } }],
@@ -44,10 +43,7 @@ const toolResult = (): Content => ({
 const compressedPrefix = (): Content[] => [
   reminder('startup'),
   user('<summary>…</summary>\nResume the prior task from where it left off.'),
-  {
-    role: 'model',
-    parts: [{ text: 'Got it. Thanks for the additional context!' }],
-  },
+  modelText('Got it. Thanks for the additional context!'),
 ];
 
 const CLEARED_MEDIA = '[Old inline media cleared: image/png]';

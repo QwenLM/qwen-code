@@ -291,6 +291,21 @@ it('reopens MCP chains and resource closure without tasks, preserves unknown ope
       ),
     ).rejects.toThrow('active committed configuration');
     await reopened.authority.commitExtensionRecord(
+      command('drain-receipt'),
+      {
+        domain: 'mcp_configuration',
+        record: { ...releasing, releaseState: 'drained' },
+      },
+      actor,
+    );
+    await expect(
+      reopened.authority.commitExtensionRecord(
+        command('operation-after-drain'),
+        { domain: 'mcp_operation', record: newOperation },
+        actor,
+      ),
+    ).rejects.toThrow('active committed configuration');
+    await reopened.authority.commitExtensionRecord(
       command('release-result'),
       {
         domain: 'mcp_configuration',

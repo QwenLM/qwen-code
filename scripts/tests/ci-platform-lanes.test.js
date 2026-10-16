@@ -104,13 +104,16 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
 
 it('keeps browser gates hosted independently of the shared Linux runner', () => {
   expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
-  // 30, not 20: at 184 smoke tests plus ~7.5 min of setup, passing runs hit
-  // 20 flat (tests done at 20:07:49, cancelled 20:07:53; the last of 184
-  // still running at 02:04:58, cancelled 02:05:04). Sharding is the fix at
-  // the source once the suite keeps growing.
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(30);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(30);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(30);
+  // Slow hosted browser installs took over 23 min, so reserve time in the
+  // 60-minute job for transcript/smoke tests and artifact upload, while the
+  // install step itself stays bounded.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(60);
+  const hostedInstall = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Install Playwright Chromium and WebKit (hosted)',
+  );
+  expect(hostedInstall['timeout-minutes']).toBe(30);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
@@ -373,7 +376,11 @@ describe('post-merge push lane', () => {
     // dispatch and push; widening this — say by copying `test`'s block when
     // adding a reporter — hands write tokens to that code. `test`'s own
     // wider block is legitimate: dorny/test-reporter needs `checks: write`.
-    expect(ci.jobs.lint_and_static.permissions).toEqual({ contents: 'read' });
+    // The contract guard reads the PR file list; it needs no write access.
+    expect(ci.jobs.lint_and_static.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'read',
+    });
   });
 
   it('keeps every shared prelude step identical between test and lint_and_static', () => {
@@ -479,8 +486,8 @@ describe('post-merge push lane', () => {
       'Run i18n check',
       'Generate settings schema',
       'Check settings schema is up-to-date',
-      'Generate VS Code companion notices',
-      'Check VS Code companion notices are up-to-date',
+      'Generate Web Shell and VS Code companion notices',
+      'Check Web Shell and VS Code companion notices are up-to-date',
       'Check serve fast-path bundle closure',
       'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
@@ -500,6 +507,30 @@ describe('post-merge push lane', () => {
         )
         .map((x) => x.name),
     ).toEqual(FULL_PAYLOAD);
+    const generateNotices = stepByName.get(
+      'Generate Web Shell and VS Code companion notices',
+    ).run;
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=@qwen-code/web-shell',
+    );
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=qwen-code-vscode-ide-companion',
+    );
+    expect(
+      stepByName.get(
+        'Check Web Shell and VS Code companion notices are up-to-date',
+      ).run,
+    ).toContain(
+      'git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt',
+    );
+    const checkNotices = stepByName.get(
+      'Check Web Shell and VS Code companion notices are up-to-date',
+    );
+    expect(checkNotices['continue-on-error']).toBeUndefined();
+    expect(checkNotices.run).toContain(
+      'if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then',
+    );
+    expect(checkNotices.run).toContain('exit 1');
     for (const n of FULL_PAYLOAD) {
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
     }
@@ -609,10 +640,16 @@ describe('post-merge push lane', () => {
     // the most common head_ref there is. Dropping the ref half entirely would
     // collapse every PR into one group and leave this suite green.
     //
-    // cancel-in-progress: flipping it to `true` was measured to be invisible
-    // to all 1854 test:scripts tests, while consecutive merges would cancel
-    // each other — the history this repo already recorded once, when 67 of
-    // 100 push runs were cancelled and only 25 ever reported.
+    // cancel-in-progress: `main` stays out of cancellation on purpose, not by
+    // accident. A shared group holds at most one running plus one pending run,
+    // and a newer pending run REPLACES the older one even while this reads
+    // `false`, so back-to-back merges still coalesce onto the newest tree —
+    // but the in-flight run always finishes and reports, which matters
+    // because with no merge queue this lane is the only fast witness of a
+    // merged tree and its coverage upload is `always()`-gated. The history of
+    // flipping it the other way is recorded once already: 67 of 100 push runs
+    // cancelled and only 25 ever reported (#5859). Pinning the literal keeps
+    // a later "make main cancellable" change from landing unnoticed.
     expect(String(ci.concurrency.group)).toBe(
       '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}',
     );

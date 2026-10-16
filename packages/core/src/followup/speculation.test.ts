@@ -14,6 +14,7 @@ import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import type { CacheSafeParams } from '../agents/forkedAgent.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
   getCacheSafeParams: vi.fn<
@@ -115,13 +116,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-permission-deferred',
-                        name: 'read_file',
-                        args: { path: '.env' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: '.env' },
+                      'call-permission-deferred',
+                    ),
                   ],
                 },
               },
@@ -176,13 +175,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-guard',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-guard',
+                    ),
                   ],
                 },
               },
@@ -247,13 +244,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-guard-allow',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-guard-allow',
+                    ),
                   ],
                 },
               },
@@ -321,13 +316,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-reject',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-reject',
+                    ),
                   ],
                 },
               },
@@ -405,13 +398,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-metadata',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-metadata',
+                    ),
                   ],
                 },
               },
@@ -467,15 +458,7 @@ describe('startSpeculation', () => {
             candidates: [
               {
                 content: {
-                  parts: [
-                    {
-                      functionCall: {
-                        id: 'call_123',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
-                  ],
+                  parts: [fnCall('read_file', { path: 'a.ts' }, 'call_123')],
                 },
               },
             ],
@@ -657,13 +640,7 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-image',
-                        name: 'read_file',
-                        args: { path: 'image.png' },
-                      },
-                    },
+                    fnCall('read_file', { path: 'image.png' }, 'call-image'),
                   ],
                 },
               },
@@ -804,24 +781,12 @@ describe('ensureToolResultPairing', () => {
   it('preserves paired functionCall + functionResponse', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'edit file' }] },
-      {
-        role: 'model',
-        parts: [
-          { text: 'editing...' },
-          { functionCall: { name: 'edit', args: { file: 'a.ts' } } },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'edit',
-              response: { output: 'done' },
-            },
-          },
-        ],
-      },
+      content(
+        'model',
+        { text: 'editing...' },
+        fnCall('edit', { file: 'a.ts' }),
+      ),
+      content('user', fnResponse('edit', { output: 'done' })),
       { role: 'model', parts: [{ text: 'file edited' }] },
     ];
     const result = ensureToolResultPairing(messages);
@@ -831,13 +796,7 @@ describe('ensureToolResultPairing', () => {
   it('strips unpaired functionCalls from last model message (keeps text)', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'do something' }] },
-      {
-        role: 'model',
-        parts: [
-          { text: 'I will edit the file' },
-          { functionCall: { name: 'edit', args: {} } },
-        ],
-      },
+      content('model', { text: 'I will edit the file' }, fnCall('edit', {})),
       // No functionResponse follows — boundary truncation
     ];
     const result = ensureToolResultPairing(messages);
@@ -848,13 +807,7 @@ describe('ensureToolResultPairing', () => {
   it('removes last model message entirely if only functionCalls', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'do something' }] },
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'edit', args: {} } },
-          { functionCall: { name: 'shell', args: {} } },
-        ],
-      },
+      content('model', fnCall('edit', {}), fnCall('shell', {})),
     ];
     const result = ensureToolResultPairing(messages);
     expect(result).toHaveLength(1);
@@ -865,17 +818,7 @@ describe('ensureToolResultPairing', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'hello' }] },
       { role: 'model', parts: [{ text: 'response' }] },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'tool',
-              response: { output: 'result' },
-            },
-          },
-        ],
-      },
+      content('user', fnResponse('tool', { output: 'result' })),
     ];
     const result = ensureToolResultPairing(messages);
     expect(result).toEqual(messages);
