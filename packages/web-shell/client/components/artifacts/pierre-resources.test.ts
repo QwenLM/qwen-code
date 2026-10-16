@@ -31,8 +31,14 @@ it('keeps common aliases highlighted and unsupported names readable as text', ()
     'component.tsx': 'tsx',
     'data.json': 'json',
     'README.md': 'markdown',
+    'README.MD': 'markdown',
     'config.yml': 'yaml',
+    'config.YML': 'yaml',
     'build.kts': 'kotlin',
+    // Whole-name detector keys are case-sensitive and must survive the
+    // extension-only fold: Gemfile is ruby, gemfile is not.
+    Gemfile: 'ruby',
+    gemfile: 'text',
     'run.sh': 'zsh',
     Dockerfile: 'dockerfile',
     'proof.lean': 'text',
@@ -77,6 +83,18 @@ it('loads every selected grammar and both themes with the JavaScript engine', as
         .map((token) => token.content)
         .join(''),
     ).toBe('def unsupported := 42');
+    // Pins the theme name -> module mapping: shiki assigns the theme fg to
+    // every token when a theme has no rules, so every(color) cannot tell a
+    // real theme from an empty or swapped one.
+    const { tokens } = highlighter.codeToTokens('const answer = 42;', {
+      lang: 'typescript',
+      theme: 'github-dark',
+    });
+    expect([...new Set(tokens.flat().map((token) => token.color))]).toEqual([
+      '#F97583',
+      '#E1E4E8',
+      '#79B8FF',
+    ]);
   } finally {
     highlighter.dispose();
   }

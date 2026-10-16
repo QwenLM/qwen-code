@@ -12,7 +12,11 @@ import { useTheme } from '../../themeContext';
 export function getPreviewLanguage(
   path: string,
 ): keyof typeof bundledLanguages | 'text' {
-  const detected = getFiletypeFromFileName(path);
+  // Fold case on the extension only: a whole-path toLowerCase() would break
+  // the detector's uppercase-only whole-name keys (Gemfile, BUILD, ...).
+  const detected = getFiletypeFromFileName(
+    path.replace(/\.([^./\\]+)$/, (dot) => dot.toLowerCase()),
+  );
   const language =
     detected === 'yml' ? 'yaml' : detected === 'kts' ? 'kotlin' : detected;
   return Object.hasOwn(bundledLanguages, language)

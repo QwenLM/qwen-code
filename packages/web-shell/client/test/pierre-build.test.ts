@@ -4,7 +4,7 @@ import { pierreResources } from '../../pierre-build';
 it('redirects only Pierre imports, including development query strings', () => {
   const { resolveId } = pierreResources();
   if (typeof resolveId !== 'function') throw new Error('Missing resolver');
-  const resolve = (source: string, importer: string) =>
+  const resolve = (source: string, importer?: string) =>
     Reflect.apply(resolveId, undefined, [source, importer, {}]);
   for (const suffix of ['', '?v=cold-cache', '?v=cache#fragment']) {
     expect(
@@ -28,6 +28,8 @@ it('redirects only Pierre imports, including development query strings', () => {
       'C:/repo/node_modules/@pierre/diffs/dist/index.js?v=cache',
     ),
   ).toMatch(/pierre-highlighter\.ts$/);
+  // Rollup calls resolveId without an importer for entry modules.
+  expect(resolve('shiki')).toBeUndefined();
   expect(resolve('shiki', '/repo/client/code-highlighter.ts')).toBeUndefined();
   for (const subpath of ['wasm', 'core', 'engine/javascript', 'textmate']) {
     expect(
@@ -63,9 +65,34 @@ it('counts static and lazy descendants and requires an adapter for Pierre', () =
     [grammar]: { importedIds: [entry], dynamicallyImportedIds: [] },
     [theme]: { importedIds: [], dynamicallyImportedIds: [] },
   };
-  const check = (ids: string[], grammarBytes = 100, themeBytes = 100) => {
-    const { generateBundle } = pierreResources();
-    if (typeof generateBundle !== 'function') throw new Error('Missing gate');
+  const check = (
+    ids: string[],
+    grammarBytes = 100,
+    themeBytes = 100,
+    redirectedBytes = 0,
+  ) => {
+    // resolveId and generateBundle must run on one plugin instance:
+    // redirectedModules is populated by resolveId and read by generateBundle.
+    const plugin = pierreResources();
+    const { resolveId, generateBundle } = plugin;
+    if (typeof resolveId !== 'function' || typeof generateBundle !== 'function')
+      throw new Error('Missing hooks');
+    const modules: Record<string, { renderedLength: number }> = {
+      [grammar]: { renderedLength: grammarBytes },
+      [theme]: { renderedLength: themeBytes },
+    };
+    if (redirectedBytes > 0) {
+      const redirected = Reflect.apply(resolveId, undefined, [
+        'shiki/wasm',
+        pierre,
+        {},
+      ]);
+      if (typeof redirected !== 'string') throw new Error('Missing redirect');
+      // The redirected id is absent from the graph, so the stub's
+      // getModuleInfo returns undefined for it, exercising the
+      // module?.importedIds ?? [] tolerance.
+      modules[redirected] = { renderedLength: redirectedBytes };
+    }
     Reflect.apply(
       generateBundle,
       {
@@ -85,10 +112,7 @@ it('counts static and lazy descendants and requires an adapter for Pierre', () =
           },
           lazy: {
             type: 'chunk',
-            modules: {
-              [grammar]: { renderedLength: grammarBytes },
-              [theme]: { renderedLength: themeBytes },
-            },
+            modules,
           },
         },
         false,
@@ -98,6 +122,10 @@ it('counts static and lazy descendants and requires an adapter for Pierre', () =
   expect(() => check([entry, pierre])).not.toThrow();
   expect(() => check([entry, pierre], 4 * 1024 * 1024)).toThrow('4 MiB budget');
   expect(() => check([entry, pierre], 100, 4 * 1024 * 1024)).toThrow(
+    '4 MiB budget',
+  );
+  expect(() => check([entry, pierre], 100, 100, 100)).not.toThrow();
+  expect(() => check([entry, pierre], 100, 100, 4 * 1024 * 1024)).toThrow(
     '4 MiB budget',
   );
   expect(() => check([pierre])).toThrow('no Pierre highlighter resource');
@@ -131,6 +159,8 @@ it('budgets resource modules without counting unrelated shared chunk code', () =
               '/repo/client/App.tsx': { renderedLength: 5 * 1024 * 1024 },
             },
           },
+          // A real build emits assets next to chunks; they carry no modules.
+          'favicon.png': { type: 'asset' },
         },
         false,
       ],
