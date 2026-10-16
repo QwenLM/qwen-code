@@ -62,6 +62,7 @@ import {
   SUBMITTED_PROMPT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  getPromptCancelAbortReason,
   type BridgeBranchedSession,
   type BridgeRestoredSession,
   type HttpAcpBridge,
@@ -209,7 +210,11 @@ import {
   type JsonRpcResponse,
 } from './json-rpc.js';
 
-/** Sources only the daemon's own dispatcher may create a session under. */
+/**
+ * Sources only the daemon itself may create a session under: `agent` sessions
+ * are spawned in-process by the session-agents orchestrator, and acpAgent
+ * additionally requires a persisted session-agents binding for them.
+ */
 function isAgentSessionSourceType(sourceType: unknown): boolean {
   return (
     sourceType === AGENT_HOST_SESSION_SOURCE_TYPE ||
@@ -1519,6 +1524,15 @@ export class AcpDispatcher {
     return value;
   }
 
+  private parseRequireIdle(params: Record<string, unknown>): boolean {
+    const value = params['requireIdle'];
+    if (value === undefined) return false;
+    if (typeof value !== 'boolean') {
+      throw new AcpParamError('`requireIdle` must be a boolean');
+    }
+    return value;
+  }
+
   private rejectActiveLiveSessionMutation(
     conn: AcpConnection,
     id: JsonRpcId | undefined,
@@ -2001,8 +2015,8 @@ export class AcpDispatcher {
             return;
           }
           const sessionRuntime = this.getSessionRuntimeContext();
-          // Same reservation as the REST route: only the daemon's dispatcher
-          // creates agent-host and agent sessions.
+          // Same reservation as the REST route: only the daemon creates
+          // agent-host and agent sessions.
           if (isAgentSessionSourceType(params['sourceType'])) {
             conn.sendConn(
               error(
@@ -2697,6 +2711,7 @@ export class AcpDispatcher {
             await this.bridge.closeSession(
               sessionId,
               this.sessionCtx(conn, sessionId, loopback),
+              { cancelReason: 'user' },
             );
           };
           try {
@@ -2832,7 +2847,9 @@ export class AcpDispatcher {
             // Abort our local in-flight prompt controller too — cancelSession
             // tells the agent to wind down, but the HTTP-side `sendPrompt`
             // await must also be released so the session FIFO unblocks.
-            conn.sessions.get(sessionId)?.promptAbort?.abort();
+            conn.sessions
+              .get(sessionId)
+              ?.promptAbort?.abort(getPromptCancelAbortReason(params['_meta']));
             await this.bridge.cancelSession(
               sessionId,
               // Forward client-supplied cancel fields (reason/context) while
@@ -5361,6 +5378,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/archive`: {
           const ids = this.parseSessionIds(params);
           const resolveConflicts = this.parseResolveConflicts(params);
+          const requireIdle = this.parseRequireIdle(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
@@ -5374,6 +5392,7 @@ export class AcpDispatcher {
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
                 resolveConflicts,
+                requireIdle,
                 assertCanMutate: assertGenerationOpen,
               }),
           );

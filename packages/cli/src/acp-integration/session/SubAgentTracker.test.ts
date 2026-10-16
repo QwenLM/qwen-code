@@ -157,6 +157,70 @@ describe('SubAgentTracker', () => {
     abortController = new AbortController();
   });
 
+  it('forwards lifecycle metadata after cancellation for an admitted tool without replacing output', async () => {
+    const cleanups = tracker.setup(eventEmitter, abortController.signal);
+    const call = createToolCallEvent({ name: 'shell', callId: 'same' });
+    eventEmitter.emit(AgentEventType.TOOL_CALL, call);
+    const lifecycle = {
+      v: 1 as const,
+      kind: 'tool' as const,
+      sessionId: 'original',
+      executionId: 'execution',
+      callId: 'same',
+      toolName: 'shell',
+      subagentId: call.subagentId,
+      phase: 'started' as const,
+      executionStatus: 'running' as const,
+      startedAt: 100,
+    };
+    eventEmitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+      subagentId: call.subagentId,
+      round: 1,
+      callId: 'same',
+      outputChunk: '',
+      timestamp: 100,
+      lifecycle,
+    });
+    abortController.abort();
+    cleanups[0]();
+    const ended = {
+      ...lifecycle,
+      phase: 'ended' as const,
+      executionStatus: 'cancelled' as const,
+      outcome: 'cancelled' as const,
+      endedAt: 120,
+      executionDurationMs: 20,
+    };
+    eventEmitter.emit(
+      AgentEventType.TOOL_RESULT,
+      createToolResultEvent({
+        name: 'shell',
+        callId: 'same',
+        success: false,
+        lifecycle: ended,
+      }),
+    );
+    await Promise.resolve();
+    const frames = sendUpdateSpy.mock.calls
+      .map(([update]) => update)
+      .filter((update) => update._meta?.toolLifecycle);
+    expect(frames.map((update) => update._meta.toolLifecycle)).toEqual([
+      lifecycle,
+      ended,
+    ]);
+    expect(
+      frames.every(
+        (update) => update.content === undefined && update.status === undefined,
+      ),
+    ).toBe(true);
+    cleanups[0]();
+    expect(
+      (eventEmitter as unknown as EventEmitter).listenerCount(
+        AgentEventType.TOOL_OUTPUT_UPDATE,
+      ),
+    ).toBe(0);
+  });
+
   describe('setup', () => {
     it('should return cleanup function', () => {
       const cleanups = tracker.setup(eventEmitter, abortController.signal);

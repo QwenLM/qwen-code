@@ -428,6 +428,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'POST /session/:id/mid-turn-message',
   },
   {
+    method: 'POST',
+    path: '/session/:id/mid-turn-messages/send-now',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mid-turn-messages/send-now',
+  },
+  {
     method: 'DELETE',
     path: '/session/:id/mid-turn-messages/:messageId',
     attribution: 'handler_resolved',
@@ -736,6 +742,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/file/write' ||
         suffix === '/workspace/file/edit' ||
         suffix === '/workspace/file/upload' ||
+        suffix === '/workspace/file/delete' ||
         suffix === '/workspace/mcp/servers' ||
         suffix === '/workspace/memory' ||
         suffix === '/workspace/agents' ||

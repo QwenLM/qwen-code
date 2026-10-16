@@ -44,6 +44,7 @@ import {
   type SessionAgentStopReason,
 } from '../session-agents/orchestrator.js';
 import { getSessionAgentEventHub } from '../session-agents/events.js';
+import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { detectFromLoopback } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -232,11 +233,23 @@ export function registerSessionAgentRoutes(
 
   /**
    * Stops a workspace's agents when its runtime goes away, is replaced,
-   * becomes untrusted, or opts out. Mirrors the recovery sweep in
-   * `registerWorkspaceAgentRoutes`, which additionally closes every
-   * `sourceType: 'agent'` session (hidden session-agent sessions included)
-   * when collaboration is turned off.
+   * becomes untrusted, or opts out. Opting out also cancels and closes every
+   * `sourceType: 'agent'` session (the agents' hidden native sessions):
+   * nothing resumes them, and the bridge would otherwise keep them until its
+   * idle reaper.
    */
+  const closeAgentSessions = async (runtime: WorkspaceRuntime) => {
+    const { bridge } = runtime;
+    await Promise.all(
+      bridge
+        .listWorkspaceSessions(runtime.workspaceCwd)
+        .filter((session) => session.sourceType === AGENT_SESSION_SOURCE_TYPE)
+        .map(async (session) => {
+          await bridge.cancelSession(session.sessionId).catch(() => {});
+          await bridge.closeSession(session.sessionId).catch(() => {});
+        }),
+    );
+  };
   const teardownCheck = () => {
     const runtimes = deps.workspaceRegistry.list();
     // Bring up each enabled workspace's orchestrator without waiting for a
@@ -280,9 +293,12 @@ export function registerSessionAgentRoutes(
       }
       if (!reason) continue;
       owners.delete(workspaceCwd);
-      void disposeSessionAgentOrchestrator(workspaceCwd, reason).catch(
-        () => {},
-      );
+      const optedOut =
+        reason === 'collaboration_disabled' ? runtime : undefined;
+      void disposeSessionAgentOrchestrator(workspaceCwd, reason)
+        .catch(() => {})
+        .then(() => optedOut && closeAgentSessions(optedOut))
+        .catch(() => {});
     }
   };
   const teardownTimer = setInterval(teardownCheck, TEARDOWN_CHECK_MS);

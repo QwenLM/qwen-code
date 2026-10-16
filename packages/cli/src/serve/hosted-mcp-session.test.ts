@@ -666,6 +666,58 @@ it.each(['refresh', 'close'] as const)(
   },
 );
 
+it('separates effect reconciliation from H1 release and restores the exact v2 owner', async () => {
+  await mcp.ensureReady();
+  const owner = mcp.broker.runtimeSessionId;
+  const restored = new HostedMcpSession(
+    {
+      baseUrl: 'http://127.0.0.1:1',
+      token: 'test',
+      lifecycleAuthority: () => ({
+        operationId: 'delete-1',
+        claimGeneration: 2,
+      }),
+    },
+    session,
+    [pin],
+  );
+  await restored.reconcileEffects();
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    0,
+  );
+  expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockClear();
+  await restored.closeResources();
+  expect(restored.broker.runtimeSessionId).toBe(owner);
+  expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledWith({
+    runtimeBindingId: 'binding',
+    generation: '1',
+  });
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    1,
+  );
+  expect(
+    parseMcpConfiguration(
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
+    ).releaseState,
+  ).toBe('released');
+});
+
+it('does not release a v2 owner while a dispatched business result is unknown', async () => {
+  unknown = true;
+  await mcp.invoke(randomUUID(), 'demo', {
+    kind: 'resource_read',
+    uri: 'memory://blob',
+  });
+  await expect(mcp.closeResources()).rejects.toBeInstanceOf(
+    HostedMcpRecoveryRequiredError,
+  );
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    0,
+  );
+  expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+});
+
 it('restores the original owner before close and uses fresh identities after confirmed release', async () => {
   await mcp.ensureReady();
   const original = mcp.broker.runtimeSessionId;
@@ -967,6 +1019,46 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
   expect(
     requests.filter((request) => request.kind === 'mcp-invoke'),
   ).toHaveLength(1);
+  await mcp.close();
+});
+
+it('hands its mount back after a recovery block only once its MCP work settles, then claims it again (#13800)', async () => {
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  const operationId = randomUUID();
+  unknown = true;
+  await mcp.invoke(operationId, 'demo', {
+    kind: 'prompt_get',
+    name: 'greet',
+    arguments: {},
+  });
+  // The Broker cannot see an MCP operation: an unknown effect keeps the
+  // Session-scoped mount, as does a Hook run sharing this owner.
+  await expect(mcp.mountHandback(() => false)!()).rejects.toThrow(/unproven/);
+  replies.set(operationId, {
+    operationId,
+    state: 'settled',
+    response: {
+      messages: [{ role: 'user', content: { type: 'text', text: 'one' } }],
+    },
+  });
+  await mcp.status(operationId);
+  await expect(mcp.mountHandback(() => true)!()).rejects.toThrow(/unproven/);
+  expect(releaseMount).not.toHaveBeenCalled();
+  await mcp.mountHandback(() => false)!();
+  expect(releaseMount).toHaveBeenCalledWith('mcp-claim');
+  const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+  acquire.mockClear();
+  unknown = false;
+  await mcp.invoke(randomUUID(), 'demo', {
+    kind: 'resource_read',
+    uri: 'memory://blob',
+  });
+  expect(acquire).toHaveBeenCalled();
   await mcp.close();
 });
 

@@ -38,6 +38,14 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/hosted-harness-contract.ts',
+    {
+      reason:
+        'The Hosted lifecycle v2 profile advertisement is a process-scoped deployment gate fixed when the daemon contract is created.',
+      accesses: { 'computed:HOSTED_LIFECYCLE_V2_PROFILES_ENV': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/workspace-recovery-worker.ts',
     {
       reason:
@@ -184,6 +192,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-csi-file-worker.ts',
+    {
+      reason:
+        'The Kubernetes Downward API supplies Pod identity for the dedicated file worker process; startup freezes that identity for its one immutable Session, independently of workspace environment overlays.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 1,
+        'key:QWEN_POD_NAMESPACE': 1,
+        'key:QWEN_POD_UID': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-csi-worker.ts',
     {
       reason:
@@ -213,6 +233,22 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       reason:
         'MCP stdio children use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup; their remaining environment comes from the verified workspace directory and deployment-owned definition.',
       accesses: { 'key:PATH': 1, 'key:SystemRoot': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-bootstrap.ts',
+    {
+      reason:
+        'The one-shot SSH bootstrap copies a fixed allowlist from its host process into a detached worker without forwarding credentials or Node loader overrides.',
+      accesses: { 'computed:key': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-ssh-worker.ts',
+    {
+      reason:
+        'The dedicated SSH worker removes launch-only QWEN_MANAGED variables and Node loader overrides before executing workspace tools.',
+      accesses: { 'computed:key': 1, whole: 1 },
     },
   ],
   [
