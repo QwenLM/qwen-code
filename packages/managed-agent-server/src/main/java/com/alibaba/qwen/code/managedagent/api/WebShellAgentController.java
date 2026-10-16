@@ -4,14 +4,20 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCancelRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeCwdRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeModelRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCreateRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionModels;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionModelsRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionOptions;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionOptionsRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
@@ -154,6 +160,11 @@ public class WebShellAgentController {
                     "unsupported_feature",
                     "Standalone Phase 1 has no environment templates.");
         }
+        if (selection == null && request.approvalMode() != null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "unsupported_approval_mode",
+                    "Approval mode selection requires a bound Workspace.");
+        }
         // The WebShell handlers forward no metadata at all (null in its
         // slot): whatever the client sends is accepted and ignored, so no
         // clientId-only contract is asserted here and immediately
@@ -165,8 +176,16 @@ public class WebShellAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection));
+                        request.input(), selection, request.approvalMode()));
         return ResponseEntity.accepted().body(admission);
+    }
+
+    @PostMapping("/session-options/query")
+    public ResponseEntity<WebShellSessionOptions> sessionOptions(TenantContext tenant,
+            @Valid @RequestBody WebShellSessionOptionsRequest request) {
+        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+                .body(service.queryWebShellSessionOptions(tenant.tenantId(),
+                        tenant.requireActorId(), request.agentId()));
     }
 
     @PostMapping("/turns/submit")
@@ -244,6 +263,21 @@ public class WebShellAgentController {
                         tenant.actorId(), request.sessionId(),
                         request.idempotencyKey(), request.cwdRelative(),
                         request.expectedContextRevision()));
+    }
+
+    @PostMapping("/session-models/query")
+    public WebShellSessionModels querySessionModels(TenantContext tenant,
+            @Valid @RequestBody WebShellSessionModelsRequest request) {
+        return service.queryWebShellSessionModels(tenant.tenantId(), tenant.actorId(), request.sessionId());
+    }
+
+    @PostMapping("/session-models/change")
+    public WebShellModelChangeResult changeSessionModel(TenantContext tenant,
+            @Valid @RequestBody WebShellChangeModelRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
+        return service.changeWebShellSessionModel(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                request.idempotencyKey(), request.modelId(), request.expectedRevision());
     }
 
     private ResponseEntity<WebShellCommandOperation> operation(

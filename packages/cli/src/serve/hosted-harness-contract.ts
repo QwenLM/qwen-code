@@ -73,6 +73,7 @@ export function createHostedHarnessContract(
     features: Object.freeze([
       'hosted_approval_resume_v1',
       'hosted_model_round_recovery_v1',
+      'model-selection/1',
     ]),
   });
 }

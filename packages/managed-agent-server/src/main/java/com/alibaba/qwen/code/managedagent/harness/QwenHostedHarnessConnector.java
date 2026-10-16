@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
@@ -52,6 +53,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final WriterCredentialPolicy credentials;
     /** #13753 I2: this control plane serves child Workspaces (startup checks the shape). */
     private final boolean childWorkspaces;
+    private final boolean childSnapshots;
     private volatile HostedHarnessClient client;
     private volatile boolean closed;
     private final ReentrantLock clientLock = new ReentrantLock();
@@ -97,6 +99,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.workspaceExecution = workspaceExecution;
         this.credentials = new WriterCredentialPolicy(properties);
         this.childWorkspaces = properties.getRuntimeBroker().isChildWorkspacesEnabled();
+        this.childSnapshots = childWorkspaces && properties.getRuntimeBroker().isChildSnapshotsEnabled();
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
                 || this.properties.getCapabilityDigest() == null
@@ -218,7 +221,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     false, toolProfile(session), false, false,
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
-                    .withChildWorkspaces(childWorkspaces)
+                .withMcpServers(mcpServers(session))
+                .withHookCatalog(hookCatalog(session))
+                    .withChildWorkspaces(childWorkspaces, childSnapshots)
                     .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
         }
@@ -405,6 +410,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
+    @Override
+    public boolean supportsModelSelection() {
+        try {
+            return client().capabilities().getFeatures().contains("model-selection/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
     private Admission doSubmit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
@@ -414,6 +428,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 .promptId(promptId)
                 .payloadDigest(payloadDigest)
                 .deadline(properties.getTurnDeadline());
+        var selection = sessions.findTurnModelSelection(tenantId, sessionId, promptId);
+        if (selection != null) {
+            if (!supportsModelSelection()) {
+                throw new IllegalStateException("Hosted model selection is unavailable");
+            }
+            builder.modelSelection(selection.modelId(), selection.revision());
+        }
         input.forEach(builder::addContent);
         PromptReceipt receipt = client().submitTurn(builder.build());
         return new Admission(receipt.getLastEventId(),
@@ -707,7 +728,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         false, false,
                         WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                         .withAgentDefinition(agentDefinition(session, false))
-                        .withChildWorkspaces(childWorkspaces)
+                        .withMcpServers(mcpServers(session))
+                        .withHookCatalog(hookCatalog(session))
+                        .withChildWorkspaces(childWorkspaces, childSnapshots)
                         .withStoppedMessages());
         if (session.workspace() != null && !actions.approvalMode(tenantId,
                 sessionId).equals(attached.getApprovalMode())) {
@@ -922,7 +945,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                                                             session.sessionId())))
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
                             .toolProfile(profile)
-                            .childWorkspaces(childWorkspaces);
+                            .childWorkspaces(childWorkspaces)
+                            .childSnapshots(childSnapshots);
             if (WorkspaceToolProfiles.isPublicShell(profile)) {
                 builder.suppressChildAgents();
             }
@@ -935,6 +959,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     session);
             if (store != null) {
                 builder.managedSessionStore(store);
+            }
+            List<Map<String, Object>> mcp = mcpServers(session);
+            if (mcp != null) {
+                builder.mcpServers(mcp);
+            }
+            Map<String, Object> hooks = hookCatalog(session);
+            if (hooks != null) {
+                builder.hookCatalog(hooks);
             }
             Map<String, Object> definition = agentDefinition(session, true);
             if (definition != null) {
@@ -980,7 +1012,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 driveRuntimeRecovery, cancellationTakeover,
                 WorkspaceToolProfiles.isPublicShell(profile))
                 .withAgentDefinition(agentDefinition(session, false))
-                .withChildWorkspaces(childWorkspaces));
+                .withMcpServers(mcpServers(session))
+                .withHookCatalog(hookCatalog(session))
+                .withChildWorkspaces(childWorkspaces, childSnapshots));
     }
 
     @Override
@@ -1177,7 +1211,34 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     "kind", ref.kind(), "schemaVersion", ref.schemaVersion(),
                     "byteLength", ref.byteLength(), "digest", ref.digest()));
         }
+        List<Map<String, Object>> skills = AgentDefinitionExtensions.skills(
+                content.get("skills"), session.workspace() != null);
+        if (!skills.isEmpty()) {
+            String workspace = session.workspace().getWorkspaceId();
+            var ref = resources.publishAgentSkills(session.tenantId(), workspace,
+                    session.sessionId(), skills);
+            pin.put("skillsRef", Map.of("resourceId", ref.resourceId(),
+                    "kind", ref.kind(), "schemaVersion", ref.schemaVersion(),
+                    "byteLength", ref.byteLength(), "digest", ref.digest()));
+        }
         return pin;
+    }
+
+    private List<Map<String, Object>> mcpServers(SessionRecord session) {
+        if (session.agentDefinitionDigest() == null || definitions == null) {
+            return null;
+        }
+        List<Map<String, Object>> pins = AgentDefinitionExtensions.mcpServers(
+                definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile());
+        return pins.isEmpty() ? null : pins;
+    }
+
+    private Map<String, Object> hookCatalog(SessionRecord session) {
+        if (session.agentDefinitionDigest() == null || definitions == null) {
+            return null;
+        }
+        return AgentDefinitionExtensions.hookCatalog(
+                definitions.pinnedContent(session).get("hook_catalog"), session.workspace() != null);
     }
 
     private ManagedSessionStoreConnection managedSessionStore(

@@ -46,6 +46,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private List<String> definitionToolProfiles =
             List.of("hosted-workspace-files/1");
     private List<String> definitionModels = List.of();
+    private List<ModelOption> modelCatalog = List.of();
     private String trustedActorHeader = "";
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
     private Environment environment;
@@ -121,6 +122,24 @@ public class ManagedAgentProperties implements EnvironmentAware {
         this.definitionModels = definitionModels;
     }
 
+    public List<ModelOption> getModelCatalog() {
+        return modelCatalog;
+    }
+
+    public void setModelCatalog(List<ModelOption> modelCatalog) {
+        this.modelCatalog = List.copyOf(modelCatalog);
+    }
+
+    public static class ModelOption {
+        private String modelId;
+        private String label;
+
+        public String getModelId() { return modelId; }
+        public void setModelId(String modelId) { this.modelId = modelId; }
+        public String getLabel() { return label; }
+        public void setLabel(String label) { this.label = label; }
+    }
+
     public String getTrustedActorHeader() {
         return trustedActorHeader;
     }
@@ -160,7 +179,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         || !runtimeBroker.isEnabled()
                         || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
-                        || runtimeBroker.getWorkspaceMounts().isEmpty()
+                        || (runtimeBroker.getWorkspaceMounts().isEmpty()
+                                && runtimeBroker.getWorkspaceCreationRoot().isBlank())
                         || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
                                 .contains(
@@ -169,6 +189,13 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     "Hosted Workspace files require"
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
+        }
+        if (!runtimeBroker.getWorkspaceCreationRoot().isBlank()
+                && (!harness.isWorkspaceFilesEnabled()
+                        || !runtimeBroker.isDurableLocalProcess()
+                        || !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled())) {
+            throw new IllegalStateException("Workspace creation requires Workspace files, durable"
+                    + " local-process execution and verified Workspace recovery");
         }
         // A definition Session publishes its instructions through the
         // Session Store at Harness create, so the Harness implies the
@@ -197,6 +224,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         "Automation scan-delay, lease, late-tolerance and lookback must be positive durations.");
             }
         }
+        // Snapshot children (#13753 I3) are read-only child Workspaces: they
+        // need the capability itself. Their switch is separate so it can be
+        // turned on once every replica runs a relay that knows the mode.
+        if (runtimeBroker.isChildSnapshotsEnabled() && !runtimeBroker.isChildWorkspacesEnabled()) {
+            throw new IllegalStateException("Child snapshots require child Workspaces");
+        }
         // The child Workspace capability (#13753 I1) runs Git in this
         // control plane against an administrator mount, so it needs the
         // local-process Broker that mounts the storage here.
@@ -207,7 +240,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                     || !"session".equals(runtimeBroker.getIsolationClass())
                     || !runtimeBroker.isDurableLocalProcess()
-                    || runtimeBroker.getWorkspaceMounts().isEmpty()) {
+                    || (runtimeBroker.getWorkspaceMounts().isEmpty()
+                                && runtimeBroker.getWorkspaceCreationRoot().isBlank())) {
                 throw new IllegalStateException("Child Workspaces require a Session-isolated"
                         + " durable local-process Broker with Workspace mounts");
             }
@@ -736,6 +770,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration retryMaxDelay = Duration.ofMinutes(1);
         private int maxPreAdmissionRetries = 5;
+        private int maxPostAdmissionRetries = 10;
+        private int maxOperationRetries = 10;
 
         public Duration getLeaseDuration() {
             return leaseDuration;
@@ -775,6 +811,22 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setMaxPreAdmissionRetries(int maxPreAdmissionRetries) {
             this.maxPreAdmissionRetries = maxPreAdmissionRetries;
+        }
+
+        public int getMaxPostAdmissionRetries() {
+            return maxPostAdmissionRetries;
+        }
+
+        public void setMaxPostAdmissionRetries(int maxPostAdmissionRetries) {
+            this.maxPostAdmissionRetries = maxPostAdmissionRetries;
+        }
+
+        public int getMaxOperationRetries() {
+            return maxOperationRetries;
+        }
+
+        public void setMaxOperationRetries(int maxOperationRetries) {
+            this.maxOperationRetries = maxOperationRetries;
         }
     }
 
@@ -892,6 +944,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
         private List<WorkspaceMount> workspaceMounts = List.of();
+        private String workspaceCreationRoot = "";
         private String isolationClass = "session";
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
@@ -909,6 +962,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
         private boolean childWorkspacesEnabled;
+        private boolean childSnapshotsEnabled;
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
@@ -1037,6 +1091,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
             this.workspaceMounts = workspaceMounts;
         }
 
+        public String getWorkspaceCreationRoot() {
+            return workspaceCreationRoot;
+        }
+
+        public void setWorkspaceCreationRoot(String workspaceCreationRoot) {
+            this.workspaceCreationRoot = workspaceCreationRoot;
+        }
+
         public record WorkspaceMount(String tenantId, String storageId, String root) {
         }
 
@@ -1078,6 +1140,20 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {
             this.childWorkspacesEnabled = childWorkspacesEnabled;
+        }
+
+        /**
+         * Whether hosted Sessions may launch read-only snapshot children
+         * (#13753 I3). A relay from before snapshots would create one as a
+         * shared writer, so this is turned on only after every control-plane
+         * replica runs this version.
+         */
+        public boolean isChildSnapshotsEnabled() {
+            return childSnapshotsEnabled;
+        }
+
+        public void setChildSnapshotsEnabled(boolean childSnapshotsEnabled) {
+            this.childSnapshotsEnabled = childSnapshotsEnabled;
         }
 
         public String getChildWorkspaceGit() {
