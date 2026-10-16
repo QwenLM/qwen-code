@@ -549,7 +549,6 @@ describe('build artifact — transcript entry (#11031)', () => {
       expect(transcript).not.toContain(method);
     }
     expect(transcript).toContain('dirList');
->>>>>>> upstream/main
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {
