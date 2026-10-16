@@ -3419,8 +3419,11 @@ async function executeHostedTurn(
     // that never runs again must not hold it against every later Session
     // on the same storage (#13800). finish() kept it for the uncertain
     // case; the block transition is exactly where the turn proves it will
-    // never replay, so this is where the exclusion ends.
-    if (monitorWakeNeedsRecovery(cause))
+    // never replay, so this is where the exclusion ends. A turn whose
+    // terminal record never landed skipped the cleanup its release is owed
+    // to; the route may park it blocked over that write, and the durable
+    // cleanup debt keeps owing the full release, so its mount goes back too.
+    if (monitorWakeNeedsRecovery(cause) || toolTurn?.cleanupPending)
       await toolTurn?.releaseForRecoveryBlock();
     throw cause;
   }

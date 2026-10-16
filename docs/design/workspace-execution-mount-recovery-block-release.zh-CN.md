@@ -4,7 +4,7 @@
 
 ## 状态与范围
 
-已实现。本切片终结 [#13800](https://github.com/QwenLM/qwen-code/issues/13800) 的跨会话楔死：进入 recovery-blocked 的 Hosted Workspace 工具轮归还其 Workspace 执行挂载，使同一存储上无关会话的后续工具轮得以继续，而不是在 `409 workspace_busy` 上永久停摆。覆盖普通工具 lane、Hook lane 的会话级 owner 与 MCP lane 的会话级 owner，并覆盖持有挂载的轮次把会话停在 blocked 的每个入口：prompt 路由的 recovery block、已结算轮次的欠账 cleanup 释放失败，以及恢复队列使用的 `POST /session/:id/managed-runtime/continue` 的每个停驻分支。不在范围内：A1 本身（[#13533](https://github.com/QwenLM/qwen-code/issues/13533)，已由 [#13789](https://github.com/QwenLM/qwen-code/pull/13789) 修复）、daemon 死亡残留（LOST 族既有清扫，`#12670` 族）、`POST /session/:id/files/rewind` 通道的按请求挂载（失败的 rewind 会把会话停在 blocked 而不归还其挂载——既有泄漏，已记入跟踪后续），以及启用 `monitor_run` 或 `child_run` 的 `shell` kind。
+已实现。本切片终结 [#13800](https://github.com/QwenLM/qwen-code/issues/13800) 的跨会话楔死：进入 recovery-blocked 的 Hosted Workspace 工具轮归还其 Workspace 执行挂载，使同一存储上无关会话的后续工具轮得以继续，而不是在 `409 workspace_busy` 上永久停摆。覆盖普通工具 lane、Hook lane 的会话级 owner 与 MCP lane 的会话级 owner，并覆盖持有挂载的轮次把会话停在 blocked 的每个入口：prompt 路由的 recovery block、释放欠在 cleanup 欠账上的轮次其 cleanup 失败或因终态记录未落地而从未执行，以及恢复队列使用的 `POST /session/:id/managed-runtime/continue` 的每个停驻分支。不在范围内：A1 本身（[#13533](https://github.com/QwenLM/qwen-code/issues/13533)，已由 [#13789](https://github.com/QwenLM/qwen-code/pull/13789) 修复）、daemon 死亡残留（LOST 族既有清扫，`#12670` 族）、`POST /session/:id/files/rewind` 通道的按请求挂载（失败的 rewind 会把会话停在 blocked 而不归还其挂载——既有泄漏，已记入跟踪后续），以及启用 `monitor_run` 或 `child_run` 的 `shell` kind。
 
 ## 问题与被点名的机制
 
@@ -30,7 +30,7 @@
 
 **Worker 侧 detach。** worker 保留被归还会话的安装，因为重驱动会复用它。`WorkspaceRuntimeTransport` 在清除 `READY` 会话的持有者时，或清除因 cleanup 释放在 worker 侧失败而仍持有挂载的 `RELEASING` 会话的持有者时，把 detach 记为欠账，因此该会话之后的完整释放仍会派发 provider release 与 Workspace 去激活，而不走无持有者捷径；这条捷径继续服务于从未安装过任何东西的会话，这类会话本就没有可归还的挂载。欠账在内存中；Broker 重启后退回到 worker 自身的生命周期。
 
-**Daemon。** `HostedWorkspaceBroker.acquire` 在请求发出之前记录一个新的 claim，因此在授予之后丢失的回复仍能指明它，`releaseMount(claim)` 会携带它。停在 blocked 的轮次在每个入口调用 `releaseForRecoveryBlock()`：`executeHostedTurn` 在四类 recovery-required 错误上（`monitorWakeNeedsRecovery`）以及已结算轮次的欠账 cleanup 释放失败时（cleanup 欠账继续重试其完整释放，挂载不等它），以及 continue 路由为每个让重驱动停在 blocked 的分支所设的唯一出口。由 lane 选择 owner：
+**Daemon。** `HostedWorkspaceBroker.acquire` 在请求发出之前记录一个新的 claim，因此在授予之后丢失的回复仍能指明它，`releaseMount(claim)` 会携带它。停在 blocked 的轮次在每个入口调用 `releaseForRecoveryBlock()`：`executeHostedTurn` 在四类 recovery-required 错误上（`monitorWakeNeedsRecovery`）、已结算轮次的欠账 cleanup 释放失败时，以及欠着该 cleanup 的轮次因终态记录未落地而在执行 cleanup 前退出时（持久化的 cleanup 欠账继续重试其完整释放，挂载不等它），以及 continue 路由为每个让重驱动停在 blocked 的分支所设的唯一出口。由 lane 选择 owner：
 
 - 普通 lane 归还其 broker 的最新 claim，或 takeover 分支的原始身份；从未发出 acquire 的轮次不持有任何东西，也不发送任何东西。
 - Hook lane 的 owner（`HostedHookSession.mountHandback`）与 MCP lane 的 owner（`HostedMcpSession.mountHandback`）只在自身工作已被证实时归还会话级挂载。Broker 看不到 Hook 运行或 MCP 操作，因此既无结果又不能证明从未下发的 Hook 执行、待定的 occurrence、处于恢复中的 MCP 操作、进行中的配置，或共享 MCP owner 的 Hook 运行，都会保留挂载。每个 owner 仍记为已 acquire，因此其关闭仍会执行完整释放，而它的下一次 acquire 会重新占用挂载。
@@ -51,7 +51,7 @@
 - Broker 单元与契约测试：驻留会话的归还保持 `READY`，完整释放计数为零；跨 Harness 回答 `runtime_session_conflict`，被之后 acquire 取代的 claim 同样如此，而之后的 claim 能够归还；携带生命周期 authority 回答 `runtime_admission_closed`；非驻留会话回答 `runtime_reconciliation_required`；未结算执行、进行中的 control，以及后台进程仍在运行的已结算执行都回答 `runtime_session_busy`；存储投递停在 `pending` 的 `complete` capture 可以归还；`partial`/`producer_lost` 与 `unavailable`/`storage_failed` 回答 `workspace_writer_unproven`；归还之后的重新 acquire 会重新占用挂载。仓储探针的同一契约分别跑在内存存储和经 JDBC 存储的 H2 上。
 - Transport 测试（`WorkspaceRuntimeTest`）：归还不派发 detach，之后的完整释放各派发一次 provider release 与去激活，对手的 claim 保持不变；cleanup 释放在 worker 侧失败后的归还，使重试的释放仍到达 worker 并执行去激活，而从未安装的会话归还后仍无欠账；对手持有挂载时重新占用被拒，挂载空出后成功。
 - Daemon 单元测试：归还携带欠它的那次 acquire 的 claim，包括 acquire 回复丢失之后；从未 acquire 的轮次不发送任何东西；busy 拒绝让归还按节奏保持欠账并只记一次日志；丢失的回复会重发；每种终态拒绝在一次尝试后停止；block 判定不等待挂起的归还；daemon 关闭会停止这条链；Hook 与 MCP lane 通过其 owner 归还。Hook lane 在工作被证实后归还，在结果未知时保留挂载；MCP lane 对未知操作和共享的 Hook 运行同样处理，两者都在下一次 acquire 时重新占用挂载。
-- 路由测试：经四类 recovery-required 错误族进入 recovery-blocked 的 prompt 驱动轮次恰好归还一次挂载，且从不触发完整释放；欠账 cleanup 释放失败的已结算轮次，以及 continue 后再次进入 recovery-blocked 的轮次，同样如此。
+- 路由测试：经四类 recovery-required 错误族进入 recovery-blocked 的 prompt 驱动轮次恰好归还一次挂载，且从不触发完整释放；欠账 cleanup 释放失败的已结算轮次、欠着该 cleanup 但终态记录无法写入的轮次，以及 continue 后再次进入 recovery-blocked 的轮次，同样如此。
 - 真实栈 IT（`HostedWorkspaceConcurrencyIT#mountReleaseFreesHeldStorageAndKeepsTheSessionReady`）：持有期间对手 acquire 回答 `workspace_busy`；有未结算执行时归还拒绝为 `runtime_session_busy`，外来 claim 拒绝为 `runtime_session_conflict`，结算后归还成功；持有者列被清空；Runtime Session 保持 `READY`；对手完成 acquire；对手持有期间持有者的重驱动回答 `workspace_busy`，挂载空出后重新占用；持有者随后的完整释放结算为 `RELEASED`。
 - 故障门 IT（`HostedWorkspaceToolTurnIT`）：工作已结算的各故障族在 Runtime Session 保持 `READY` 的同时归还挂载——包括经欠账 cleanup 停驻会话的丢失 release——执行永不结算的 `prepare-twice` 保留挂载；前一个用例欠下的归还可能在下一个用例运行时仍在重试，driver 会在该用例的账本之外转发它。
 

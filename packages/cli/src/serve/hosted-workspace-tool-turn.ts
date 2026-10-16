@@ -1563,6 +1563,7 @@ export class HostedWorkspaceToolTurn {
   private readonly warmed: Promise<void>;
   private acquired = false;
   private cleanupOwed = false;
+  private cleanedUp = false;
   private retiredOwnerResults = false;
   private uncertain = false;
   // Agent calls never write a `tool.intent` (the Broker pipeline they
@@ -7261,6 +7262,16 @@ export class HostedWorkspaceToolTurn {
       );
     else if (this.acquired) await this.broker.release();
     this.acquired = false;
+    this.cleanedUp = true;
+  }
+
+  /**
+   * finish() leaves a turn owing the cleanup debt holding its mount for
+   * cleanup(), which runs only after the terminal record lands; a turn that
+   * exits before then still holds it (#13800).
+   */
+  get cleanupPending(): boolean {
+    return this.cleanupOwed && !this.cleanedUp;
   }
 
   async close(): Promise<void> {}
