@@ -2,9 +2,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import {
+  createDaemonTranscriptState,
+  reduceDaemonTranscriptEvents,
+} from '@qwen-code/sdk/daemon';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import { MessageItem } from '../MessageItem';
 import { UserMessage } from './UserMessage';
 
 (
@@ -162,6 +168,31 @@ describe('UserMessage', () => {
     },
   );
 
+  it('keeps a slash token plain right after a leading reference chip', () => {
+    const content = '@README.md/review x\n/help';
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, '@README.md', {
+            id: 'file:README.md',
+            kind: 'file',
+            value: 'README.md',
+            serialized: '@README.md',
+          }),
+        ]}
+      />,
+    );
+
+    expect(
+      Array.from(
+        container.querySelectorAll('[data-web-shell-user-slash-command]'),
+        (command) => command.textContent,
+      ),
+    ).toEqual(['/help']);
+    expect(findByTitle(container, '@README.md')).not.toBeNull();
+  });
+
   it('highlights slash commands around host-parsed tags', () => {
     const container = render(
       <WebShellCustomizationProvider
@@ -187,6 +218,32 @@ describe('UserMessage', () => {
       ),
     ).toEqual(['/review', '/help']);
     expect(container.textContent).toBe('/review orders/inline\n/help');
+  });
+
+  it('keeps a slash token plain right after a leading host-parsed tag', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: { id: 'context', value: 'orders' },
+            },
+            { type: 'text', text: '/inline\n/help' },
+          ],
+        }}
+      >
+        <UserMessage content="<context />/inline\n/help" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(
+      Array.from(
+        container.querySelectorAll('[data-web-shell-user-slash-command]'),
+        (command) => command.textContent,
+      ),
+    ).toEqual(['/help']);
+    expect(container.textContent).toBe('orders/inline\n/help');
   });
 
   it.each(['first line\n', 'first line\r\n', 'first line\r', ''])(
@@ -233,6 +290,27 @@ describe('UserMessage', () => {
         ?.textContent,
     ).toBe('/review');
     expect(container.textContent).toBe('/review changes');
+  });
+
+  it('keeps the slash highlight and links when a replayed transcript renders through MessageItem', () => {
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'user.text.delta', text: '/review see https://example.com/docs' },
+    ]);
+    const message = transcriptBlocksToDaemonMessages(state.blocks)[0];
+    expect(message?.role).toBe('user');
+    if (message?.role !== 'user') throw new Error('Expected a user message');
+    const container = render(<MessageItem message={message} />);
+
+    expect(
+      container.querySelector('[data-web-shell-user-slash-command]')
+        ?.textContent,
+    ).toBe('/review');
+    expect(
+      container.querySelector('a[href="https://example.com/docs"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain(
+      '/review see https://example.com/docs',
+    );
   });
 
   it('edits the message in place and submits the edited text', () => {
