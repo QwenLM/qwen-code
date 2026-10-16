@@ -8,11 +8,14 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -41,23 +44,75 @@ public final class ToolPublicationRetentionStore {
     }
 
     static void lockTenant(JdbcTemplate jdbc, String tenant) {
+        // A zero statement timeout is unlimited, the historical shape.
+        lockTenant(jdbc, tenant, 0);
+    }
+
+    /**
+     * Bounded variant for hot paths: each acquisition statement gives up
+     * after {@code timeoutSeconds} rather than out-waiting the caller
+     * (#13800).
+     */
+    static void lockTenant(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
         String key = hash(tenant);
-        jdbc.update(
-                "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?,"
-                        + " 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key",
-                key,
-                tenant);
-        String stored =
-                jdbc.queryForObject(
-                        "SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain ="
-                                + " 'output_publication' AND tenant_key = ? FOR UPDATE",
-                        String.class,
-                        key);
-        ToolPublicationContract.require(tenant.equals(stored), "Retention tenant conflicts");
+        jdbc.execute((ConnectionCallback<Void>) connection -> {
+            try (PreparedStatement insert = connection.prepareStatement(
+                    "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
+                            + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key")) {
+                insert.setQueryTimeout(timeoutSeconds);
+                insert.setString(1, key);
+                insert.setBytes(2, ManagedSchemaKeys.identity(tenant));
+                insert.executeUpdate();
+            }
+            try (PreparedStatement lock = connection.prepareStatement(
+                    "SELECT tenant_id FROM ma_tenant_guard"
+                            + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE")) {
+                lock.setQueryTimeout(timeoutSeconds);
+                lock.setString(1, key);
+                try (ResultSet result = lock.executeQuery()) {
+                    ToolPublicationContract.require(result.next() && tenant.equals(result.getString("tenant_id")),
+                            "Retention tenant conflicts");
+                }
+            }
+            return null;
+        });
     }
 
     static void lockSession(JdbcTemplate jdbc, String tenant, String session) {
         lockSessionHead(jdbc, tenant, session);
+    }
+
+    /**
+     * Per-Session root row only; takes no tenant-wide guard (#13800). Returns
+     * the root's {@code csi_guard} as committed now: the read is a locking one.
+     */
+    static boolean lockSessionRoot(JdbcTemplate jdbc, String tenant, String session) {
+        return lockSessionRoot(jdbc, tenant, session, false);
+    }
+
+    private static boolean lockSessionRoot(
+            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
+        long time = now(jdbc);
+        // Behind a tenant guard this root wait can close a cycle with a
+        // pinned CSI Session's continuation, which holds its root while it
+        // waits for that guard; a deadlock victim here answers
+        // tenant_guard_contended like the guard side (#13800 R1-1).
+        return ManagedSessionStore.namedRootDeadlock(() -> {
+            jdbc.update(
+                    "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tenant_key = VALUES(tenant_key), session_key = VALUES(session_key), session_scope_key = VALUES(session_scope_key)",
+                    tenant, session, hash(tenant), hash(session), ManagedSessionStore.sessionScopeKey(tenant, session), time, time);
+            return jdbc.query(
+                    "SELECT tenant_id, session_id, csi_guard FROM ma_session WHERE tenant_id = ? AND"
+                            + " session_id = ? FOR UPDATE",
+                    (row, index) -> {
+                        boolean guarded = row.getBoolean("csi_guard");
+                        if (legacyMutation) {
+                            ManagedLegacySessionGuard.requireLegacyMutation(guarded);
+                        }
+                        return guarded;
+                    },
+                    tenant, session).getFirst();
+        });
     }
 
     static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
@@ -66,21 +121,13 @@ public final class ToolPublicationRetentionStore {
 
     private static Map<String, Object> lockSessionHead(
             JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
-        lockTenant(jdbc, tenant);
-        long time = now(jdbc);
-        jdbc.update(
-                "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tenant_key = VALUES(tenant_key), session_key = VALUES(session_key), session_scope_key = VALUES(session_scope_key)",
-                tenant, session, hash(tenant), hash(session), ManagedSessionStore.sessionScopeKey(tenant, session), time, time);
-        jdbc.query(
-                "SELECT tenant_id, session_id, csi_guard FROM ma_session WHERE tenant_id = ? AND"
-                        + " session_id = ? FOR UPDATE",
-                (row, index) -> {
-                    if (legacyMutation) {
-                        ManagedLegacySessionGuard.requireLegacyMutation(row.getBoolean("csi_guard"));
-                    }
-                    return row.getString(1);
-                },
-                tenant, session);
+        // Retention-read callers reach the tenant CAS row here before the
+        // head row, so the acquisition runs bounded with the shared
+        // named-failure mapping: a held row answers tenant_guard_contended
+        // instead of out-waiting the caller's own request budget (#13800).
+        ManagedSessionStore.lockBounded(() -> lockTenant(jdbc, tenant,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockSessionRoot(jdbc, tenant, session, legacyMutation);
         var heads =
                 jdbc.query(
                         "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"

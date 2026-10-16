@@ -59,8 +59,10 @@ public class WorkspaceProfileLifecycleVerifier {
     }
 
     void verifyPublications(OperationRecord operation) {
+        var backgroundCalls = backgroundCalls(operation);
         for (ToolExecutionRecord execution : executions(operation)) {
-            if (execution.getReference().get("publicationId") != null && execution.getDispatchGeneration() > 0) {
+            if (execution.getReference().get("publicationId") != null && execution.getDispatchGeneration() > 0
+                    && !backgroundCalls.contains(execution.getExecutionCallId())) {
                 if (publications.getIfAvailable() == null
                         || publications.getIfAvailable().verifyReceiptForLifecycle(execution) == null) {
                     unsettled();
@@ -109,14 +111,7 @@ public class WorkspaceProfileLifecycleVerifier {
         }
         Map<String, ToolExecutionRecord> executions = executions(operation).stream()
                 .collect(Collectors.toMap(ToolExecutionRecord::getExecutionCallId, Function.identity()));
-        var backgroundCalls = new java.util.HashSet<String>();
-        for (String domain : List.of("child_run", "monitor_run")) {
-            for (JsonNode record : records.listRecords(operation.tenantId(), operation.sessionId(), domain)) {
-                if ("monitor_run".equals(domain) || "shell".equals(record.path("kind").asText())) {
-                    backgroundCalls.add(record.path("run").path("executionCallId").asText());
-                }
-            }
-        }
+        var backgroundCalls = backgroundCalls(operation);
         var sourcesByCall = jdbc.queryForList("SELECT request_json FROM ma_operation"
                 + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND session_scope_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
                 ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()), operation.tenantId(), operation.sessionId()).stream().map(this::source)
@@ -257,6 +252,19 @@ public class WorkspaceProfileLifecycleVerifier {
                 }
             }
         }
+    }
+
+    private java.util.Set<String> backgroundCalls(OperationRecord operation) {
+        // Detached output is verified against its record and physical exit, not a foreground receipt.
+        var calls = new java.util.HashSet<String>();
+        for (String domain : List.of("child_run", "monitor_run")) {
+            for (JsonNode record : records.listRecords(operation.tenantId(), operation.sessionId(), domain)) {
+                if ("monitor_run".equals(domain) || "shell".equals(record.path("kind").asText())) {
+                    calls.add(record.path("run").path("executionCallId").asText());
+                }
+            }
+        }
+        return calls;
     }
 
     private java.util.Set<String> nativeFileInputs(OperationRecord operation) {
