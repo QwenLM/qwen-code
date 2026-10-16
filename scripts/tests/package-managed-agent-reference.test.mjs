@@ -10,7 +10,6 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { parse } from 'yaml';
 
 import { createReferenceDistribution } from '../package-managed-agent-reference.mjs';
 
@@ -204,20 +203,25 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
 });
 
 test('verifies archives in fresh directories on a reused runner', async () => {
-  const workflow = parse(
-    await readFile(
-      new URL(
-        '../../.github/workflows/release-managed-agent-reference.yml',
-        import.meta.url,
-      ),
-      'utf8',
+  const workflow = await readFile(
+    new URL(
+      '../../.github/workflows/release-managed-agent-reference.yml',
+      import.meta.url,
     ),
+    'utf8',
   );
-  const script = workflow.jobs.build.steps.find(
-    (step) => step.name === 'Verify and boot the exact archive',
-  ).run;
-  const boundary = script.indexOf('server_port=');
-  assert.ok(boundary > 0);
+  const stepStart = workflow.indexOf(
+    "      - name: 'Verify and boot the exact archive'",
+  );
+  const runMarker = '        run: |-\n';
+  const runStart = workflow.indexOf(runMarker, stepStart);
+  const boundary = workflow.indexOf('          server_port=', runStart);
+  assert.ok(stepStart >= 0);
+  assert.ok(runStart > stepStart);
+  assert.ok(boundary > runStart);
+  const script = workflow
+    .slice(runStart + runMarker.length, boundary)
+    .replace(/^ {10}/gm, '');
   const temporary = await mkdtemp(
     path.join(os.tmpdir(), 'qwen-reference pool-'),
   );
@@ -240,7 +244,7 @@ test('verifies archives in fresh directories on a reused runner', async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = execFileSync(
         'bash',
-        ['-c', `${script.slice(0, boundary)}\nprintf '%s\\n' "$PWD"`],
+        ['-c', `${script}\nprintf '%s\\n' "$PWD"`],
         {
           env: {
             ...process.env,
