@@ -142,6 +142,34 @@ export class JavaManagedAgentClient {
     );
   }
 
+  createWorkspace(
+    request: Schemas['WebShellWorkspaceCreateRequest'],
+    signal?: AbortSignal,
+  ): Promise<JavaAgentWorkspace> {
+    return this.post('/workspaces/create', request, signal);
+  }
+
+  getSessionApproval(
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionApproval']> {
+    return this.post('/session-approval/query', { sessionId }, signal);
+  }
+
+  changeApproval(
+    request: Schemas['WebShellChangeApprovalRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellApprovalChangeResult']> {
+    return this.post('/session-approval/change', request, signal);
+  }
+
+  getSessionOptions(
+    agentId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionOptions']> {
+    return this.post('/session-options/query', { agentId }, signal);
+  }
+
   getTranscript(
     request: Schemas['WebShellTranscriptRequest'],
     signal?: AbortSignal,
@@ -177,6 +205,43 @@ export class JavaManagedAgentClient {
     return this.post('/actions/query', request, signal);
   }
 
+  listTasks(
+    request: Schemas['WebShellTaskQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellTaskPage']>(
+      '/tasks/query',
+      request,
+      signal,
+    );
+  }
+
+  getTask(request: Schemas['WebShellTaskGetRequest'], signal?: AbortSignal) {
+    return this.post<Schemas['WebShellTask']>('/tasks/get', request, signal);
+  }
+
+  listTaskEvents(
+    request: Schemas['WebShellTaskEventQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellTaskEventPage']>(
+      '/tasks/events/query',
+      request,
+      signal,
+    );
+  }
+
+  cancelTask(
+    request: Schemas['WebShellTaskCancelRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      '/tasks/cancel',
+      request,
+      signal,
+    );
+  }
+
   respondAction(
     request: Schemas['WebShellActionRespondRequest'],
     signal?: AbortSignal,
@@ -197,6 +262,25 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellCwdOperation']> {
     return this.post('/sessions/cwd/change', request, signal);
+  }
+
+  getSessionModels(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellSessionModels']>(
+      '/session-models/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  changeModel(
+    request: Schemas['WebShellChangeModelRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellModelChangeResult']>(
+      '/session-models/change',
+      request,
+      signal,
+    );
   }
 
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {

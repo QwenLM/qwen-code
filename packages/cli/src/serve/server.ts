@@ -3444,7 +3444,7 @@ export function createServeApp(
   const liveConversationWorkspaceForRoutes = deps.liveConversationWorkspace;
 
   registerSessionCatalogRoutes(app, workspaceRegistry);
-  registerSessionRoutes(app, {
+  const { resolveSubagentSessionRuntime } = registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspaceRegistry,
@@ -3924,6 +3924,7 @@ export function createServeApp(
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
     virtualSubagentSessions,
+    resolveSubagentSessionRuntime,
     conversationRuntimeActivity,
   });
 
@@ -4207,12 +4208,14 @@ export function createServeApp(
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
         stopSessionAgentOrchestrators?: () => void;
+        stopHostedMountHandbacks?: () => void;
       };
       stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopSessionAgentOrchestrators);
+      stopAppResource(locals.stopHostedMountHandbacks);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());
