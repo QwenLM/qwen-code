@@ -2235,7 +2235,7 @@ jobs:
     #   pin, upload, cleanup         ~5m
     #   java toolchain + Maven repo
     #   + sibling modules            ≤ ~20m, and only when the diff touches
-    #                                packages/sdk-java/. curl --max-time caps
+    #                                a Java module. curl --max-time caps
     #                                each download; `timeout 300` caps each
     #                                mvn install
     #   ------------------------------------
@@ -2365,10 +2365,10 @@ jobs:
             exit 0
           fi
           # Same full list, same `grep <<<` (a pipe would SIGPIPE under
-          # pipefail). Only packages/sdk-java/ pays for a JDK; the broader
+          # pipefail). Only the Maven package trees pay for a JDK; the broader
           # sdk-java.yml path list is mostly core/CLI, and those diffs still
           # cannot run the database-backed Java ITs this lane does not host.
-          if grep -qE '^packages/sdk-java/' <<< "$files"; then
+          if grep -qE '^packages/(sdk-java|managed-agent-server)/' <<< "$files"; then
             echo "java=true" >> "$GITHUB_OUTPUT"
           fi
           # Snapshot PR metadata for the token-free agent: the agent env
@@ -2698,7 +2698,7 @@ jobs:
             echo "Java toolchain ready at ${prefix} (Temurin ${TEMURIN_VERSION}, Maven ${MAVEN_VERSION})."
           else
             rm -rf -- "$prefix"
-            echo "::warning::Java toolchain install failed; sdk-java changes will be reported as not covered."
+            echo "::warning::Java toolchain install failed; Java changes will be reported as not covered."
           fi
           rm -rf -- "$work"
 
@@ -3219,7 +3219,7 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/verify-maven-repo'
-          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml') }}"
+          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml', 'packages/managed-agent-server/pom.xml') }}"
           restore-keys: 'verify-maven-repo-'
 
       - name: 'Install and build PR app'
@@ -4096,10 +4096,8 @@ jobs:
           {
             run_mvn packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
             qwencode_status=$?
-            run_mvn packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
-            broker_status=$?
           } >> "$log" 2>&1
-          printf 'qwencode=%s runtime-broker=%s\n' "$qwencode_status" "$broker_status" >> "$log"
+          printf 'qwencode=%s\n' "$qwencode_status" >> "$log"
 
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
