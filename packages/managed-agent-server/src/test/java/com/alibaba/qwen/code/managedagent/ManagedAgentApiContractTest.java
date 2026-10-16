@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.Fixt
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
 import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
 import com.alibaba.qwen.code.managedagent.api.ApiModels;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
@@ -58,6 +57,7 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.SshWorkspaceController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
 import com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator;
 import com.alibaba.qwen.code.managedagent.service.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
