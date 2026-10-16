@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { DAEMON_APPROVAL_MODES } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  EXECUTION_APPROVAL_MODES,
+  type WebShellApprovalMode,
+} from '../../utils/planMode';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
@@ -8,6 +11,7 @@ import styles from './ApprovalModeDialog.module.css';
 
 interface ApprovalModeDialogProps {
   currentMode: string;
+  availableModes?: readonly WebShellApprovalMode[];
   sessionWorkflowEnabled?: boolean;
   onSelect: (modeId: string) => void;
 }
@@ -20,13 +24,12 @@ interface ModeItem {
 
 export function ApprovalModeDialog({
   currentMode,
+  availableModes = EXECUTION_APPROVAL_MODES,
   onSelect,
 }: ApprovalModeDialogProps) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
-  const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.filter(
-    (id) => id !== 'plan',
-  ).map((id) => ({
+  const approvalModes: ModeItem[] = availableModes.map((id) => ({
     id,
     name: t(`mode.listLabel.${id}`),
     description: t(`mode.desc.${id}`),
@@ -51,6 +54,11 @@ export function ApprovalModeDialog({
     setActiveIndex(index);
   };
 
+  const highlightedIndex = Math.min(
+    activeIndex,
+    Math.max(0, approvalModes.length - 1),
+  );
+
   const confirm = (index: number) => {
     const mode = approvalModes[index];
     if (mode) onSelect(mode.id);
@@ -58,17 +66,17 @@ export function ApprovalModeDialog({
 
   const { keyboardMode } = useListboxKeyboard({
     itemCount: approvalModes.length,
-    activeIndex,
+    activeIndex: highlightedIndex,
     onActiveIndexChange: moveHighlight,
     onConfirm: confirm,
   });
 
   useEffect(() => {
-    const el = listRef.current?.children[activeIndex] as
+    const el = listRef.current?.children[highlightedIndex] as
       | HTMLElement
       | undefined;
     el?.scrollIntoView({ block: 'nearest' });
-  }, [activeIndex]);
+  }, [highlightedIndex]);
 
   return (
     <div
@@ -77,13 +85,13 @@ export function ApprovalModeDialog({
       role="listbox"
       tabIndex={0}
       aria-activedescendant={
-        approvalModes.length > 0 ? `mode-opt-${activeIndex}` : undefined
+        approvalModes.length > 0 ? `mode-opt-${highlightedIndex}` : undefined
       }
       aria-label={t('mode.select')}
       data-web-shell-approval-mode-dialog
     >
       {approvalModes.map((mode, index) => {
-        const selected = index === activeIndex;
+        const selected = index === highlightedIndex;
         const isCurrent = mode.id === currentMode;
         return (
           <div

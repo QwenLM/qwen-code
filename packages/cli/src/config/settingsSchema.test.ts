@@ -31,6 +31,18 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('declares a replace-only Web Shell approval mode allowlist', () => {
+    expect(
+      getSettingsSchema().ui.properties.allowedApprovalModes,
+    ).toMatchObject({
+      type: 'array',
+      default: undefined,
+      mergeStrategy: MergeStrategy.REPLACE,
+      showInDialog: false,
+      items: { type: 'string', enum: ['default', 'auto-edit', 'auto', 'yolo'] },
+    });
+  });
+
   describe('getSettingsSchema', () => {
     it('should describe prompt hooks supported by the runtime', () => {
       const hookProperties =

@@ -2871,6 +2871,29 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
+    it.each([{ workspaceModes: ['default'] }, { workspaceModes: [] }])(
+      'replaces the user approval mode list with workspace $workspaceModes',
+      ({ workspaceModes }) => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) =>
+            p === USER_SETTINGS_PATH ||
+            p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) =>
+            JSON.stringify({
+              ui: {
+                allowedApprovalModes:
+                  p === USER_SETTINGS_PATH ? ['auto', 'yolo'] : workspaceModes,
+              },
+            }),
+        );
+        expect(
+          loadSettings(MOCK_WORKSPACE_DIR).merged.ui?.allowedApprovalModes,
+        ).toEqual(workspaceModes);
+      },
+    );
+
     it('should resolve environment variables in user settings', () => {
       process.env['TEST_API_KEY'] = 'user_api_key_from_env';
       const userSettingsContent: TestSettings = {

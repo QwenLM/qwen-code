@@ -18,11 +18,12 @@ import type {
   ChangeEvent as ReactChangeEvent,
 } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import {
-  DAEMON_APPROVAL_MODES,
-  useOptionalWorkspace,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
+import {
+  EXECUTION_APPROVAL_MODES,
+  type WebShellApprovalMode,
+} from '../utils/planMode';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
@@ -222,6 +223,7 @@ interface ChatEditorProps {
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
+  availableModes?: readonly WebShellApprovalMode[];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
@@ -1415,6 +1417,7 @@ export const ChatEditor = memo(
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
+      availableModes = EXECUTION_APPROVAL_MODES,
       planMode = false,
       modeControlsDisabled = false,
       onTogglePlan,
@@ -2100,13 +2103,13 @@ export const ChatEditor = memo(
 
     const modeItems = useMemo<DropdownItem[]>(
       () =>
-        DAEMON_APPROVAL_MODES.filter((id) => id !== 'plan').map((id) => ({
+        availableModes.map((id) => ({
           id,
           label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
         })),
-      [t],
+      [availableModes, t],
     );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -2182,12 +2185,16 @@ export const ChatEditor = memo(
 
     const handleModeSelect = useCallback(
       (modeId: string) => {
-        if (modeControlsDisabled) return;
+        if (
+          modeControlsDisabled ||
+          !availableModes.some((mode) => mode === modeId)
+        )
+          return;
         onSelectMode?.(modeId);
         setModeDropdownOpen(false);
         core.focus();
       },
-      [onSelectMode, core, modeControlsDisabled],
+      [availableModes, onSelectMode, core, modeControlsDisabled],
     );
 
     // The add menu closes before this runs and leaves focus to the caller. The
@@ -3446,7 +3453,10 @@ export const ChatEditor = memo(
                               showModeLabel ? '' : styles.toolBtnCompact
                             }`}
                             data-web-shell-mode-button
-                            disabled={modeControlsDisabled}
+                            disabled={
+                              modeControlsDisabled ||
+                              availableModes.length === 0
+                            }
                             data-web-shell-toolbar-popover-trigger
                             onClick={(e) => {
                               e.stopPropagation();

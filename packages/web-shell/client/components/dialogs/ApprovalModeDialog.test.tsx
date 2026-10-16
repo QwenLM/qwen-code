@@ -109,3 +109,51 @@ describe('ApprovalModeDialog', () => {
     expect(activeDescendant()).toBe('mode-opt-1');
   });
 });
+
+it('uses the supplied choices for rendering and keyboard confirmation', () => {
+  const onSelect = vi.fn();
+  mount(
+    <ApprovalModeDialog
+      currentMode="yolo"
+      availableModes={['default', 'auto']}
+      onSelect={onSelect}
+    />,
+  );
+  expect(
+    Array.from(container!.querySelectorAll('[data-mode-id]')).map((el) =>
+      el.getAttribute('data-mode-id'),
+    ),
+  ).toEqual(['default', 'auto']);
+  press('Enter');
+  expect(onSelect).toHaveBeenCalledWith('default');
+  press('ArrowDown');
+  press('Enter');
+  expect(onSelect).toHaveBeenLastCalledWith('auto');
+});
+
+it('keeps keyboard confirmation valid when an open list shrinks', () => {
+  const onSelect = vi.fn();
+  mount(<ApprovalModeDialog currentMode="yolo" onSelect={onSelect} />);
+  press('ArrowUp');
+  rerender(
+    <ApprovalModeDialog
+      currentMode="yolo"
+      availableModes={['default']}
+      onSelect={onSelect}
+    />,
+  );
+  expect(activeDescendant()).toBe('mode-opt-0');
+  press('Enter');
+  expect(onSelect).toHaveBeenCalledWith('default');
+  rerender(
+    <ApprovalModeDialog
+      currentMode="yolo"
+      availableModes={[]}
+      onSelect={onSelect}
+    />,
+  );
+  onSelect.mockClear();
+  press('Enter');
+  expect(onSelect).not.toHaveBeenCalled();
+  expect(activeDescendant()).toBeNull();
+});

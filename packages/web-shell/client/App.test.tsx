@@ -10,6 +10,25 @@ import {
 import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
+const approvalModesProbe = vi.hoisted(() => ({
+  cwd: undefined as string | undefined,
+  setting: undefined as unknown,
+}));
+vi.mock('./hooks/useApprovalModes', async () => {
+  const { resolveApprovalModes } = await import('./utils/planMode');
+  return {
+    useApprovalModes: (
+      cwd: string | undefined,
+      allowed: readonly string[] | undefined,
+    ) => {
+      approvalModesProbe.cwd = cwd;
+      return resolveApprovalModes(
+        allowed ?? (cwd ? approvalModesProbe.setting : undefined),
+      );
+    },
+  };
+});
+
 const editorAddTags = vi.hoisted(() => vi.fn());
 import type {
   ContextUsageControls,
@@ -160,6 +179,8 @@ type ChatEditorTestProps = {
   skillsLoadError?: boolean;
   skillsLoaded?: boolean;
   currentMode?: string;
+  availableModes?: readonly string[];
+  onCycleMode?: () => void;
   planMode?: boolean;
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
@@ -11861,6 +11882,7 @@ beforeEach(() => {
   mockWorkspace.client.liveSetupStatus
     .mockReset()
     .mockResolvedValue({ enabled: false, install: { state: 'missing' } });
+  approvalModesProbe.setting = undefined;
   mockWorkspace.client.workspaceByCwd.mockReset();
   mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
     getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
@@ -47470,5 +47492,111 @@ describe('App sidebar toggle shortcut (#5074 rail follow-ups)', () => {
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
+  });
+});
+
+describe('approval mode allowlist', () => {
+  function configureModes(value: unknown) {
+    approvalModesProbe.setting = value;
+  }
+
+  it('defaults to all modes and resolves settings before passing choices to the composer', () => {
+    const { rerender } = renderApp();
+    expect(testState.latestChatEditorProps?.availableModes).toEqual([
+      'default',
+      'auto-edit',
+      'auto',
+      'yolo',
+    ]);
+    configureModes(['auto', 'default', 'plan', 'bogus', 'auto']);
+    rerender();
+    expect(testState.latestChatEditorProps?.availableModes).toEqual([
+      'default',
+      'auto',
+    ]);
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('passes the active workspace to the shared reader instead of using primary settings', () => {
+    testState.settings = [
+      {
+        key: 'ui.allowedApprovalModes',
+        type: 'array',
+        label: 'Modes',
+        category: 'UI',
+        requiresRestart: false,
+        values: { effective: ['default'] },
+      },
+    ];
+    configureModes(['auto']);
+    mockConnection.workspaceCwd = '/secondary';
+    const { rerender } = renderApp();
+    expect(approvalModesProbe.cwd).toBe('/secondary');
+    expect(testState.latestChatEditorProps?.availableModes).toEqual(['auto']);
+    mockConnection.sessionContext = { kind: 'standalone' };
+    rerender();
+    expect(approvalModesProbe.cwd).toBeUndefined();
+    expect(testState.latestChatEditorProps?.availableModes).toEqual([
+      'default',
+      'auto-edit',
+      'auto',
+      'yolo',
+    ]);
+  });
+
+  it('lets a host override settings and update the choices to empty', async () => {
+    configureModes(['default']);
+    const { rerender } = renderApp({ allowedApprovalModes: ['auto'] });
+    expect(testState.latestChatEditorProps?.availableModes).toEqual(['auto']);
+    rerender({ allowedApprovalModes: [] });
+    expect(testState.latestChatEditorProps?.availableModes).toEqual([]);
+    act(() => testState.latestChatEditorProps?.onCycleMode?.());
+    await flush();
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('cycles the visible list from a hidden current mode and wraps', async () => {
+    mockConnection.currentMode = 'yolo';
+    const { rerender } = renderApp({
+      allowedApprovalModes: ['default', 'auto'],
+    });
+    expect(testState.latestChatEditorProps?.currentMode).toBe('yolo');
+    act(() => testState.latestChatEditorProps?.onCycleMode?.());
+    await flush();
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'default',
+      { planMode: false },
+    );
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledTimes(1);
+    mockConnection.currentMode = 'auto';
+    rerender();
+    act(() => testState.latestChatEditorProps?.onCycleMode?.());
+    await flush();
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledTimes(2);
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'default',
+      { planMode: false },
+    );
+  });
+
+  it('skips a singleton current mode and rejects hidden direct selections', async () => {
+    mockConnection.currentMode = 'auto';
+    renderApp({ allowedApprovalModes: ['auto'] });
+    act(() => {
+      testState.latestChatEditorProps?.onCycleMode?.();
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+    });
+    await flush();
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('keeps Plan toggling independent when no execution choices are offered', async () => {
+    mockConnection.currentMode = 'yolo';
+    renderApp({ allowedApprovalModes: [] });
+    act(() => testState.latestChatEditorProps?.onTogglePlan?.());
+    await flush();
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: true,
+    });
   });
 });

@@ -199,7 +199,8 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { EXECUTION_APPROVAL_MODES, parsePlanCommand } from './utils/planMode';
+import { parsePlanCommand, type WebShellApprovalMode } from './utils/planMode';
+import { useApprovalModes } from './hooks/useApprovalModes';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -559,7 +560,6 @@ import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
 
-const MODES_CYCLE = EXECUTION_APPROVAL_MODES;
 const MAX_TOASTS = 4;
 const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
@@ -1459,6 +1459,8 @@ export interface WebShellProps {
    * needs them. Plan must be explicitly included.
    */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
+  allowedApprovalModes?: readonly WebShellApprovalMode[];
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -3424,6 +3426,7 @@ export function App({
   filterArtifact,
   shellRef,
   composerToolbarActions,
+  allowedApprovalModes,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3704,6 +3707,7 @@ export function App({
 
   const customization = useMemo(
     () => ({
+      allowedApprovalModes,
       artifact,
       filterArtifact,
       askUserFreeTextLabel,
@@ -3738,6 +3742,7 @@ export function App({
       fileDropAction,
     }),
     [
+      allowedApprovalModes,
       artifact,
       filterArtifact,
       askUserFreeTextLabel,
@@ -12781,6 +12786,10 @@ export function App({
     () => (projectFeaturesAvailable ? loadedWorkspaceSettings : []),
     [loadedWorkspaceSettings, projectFeaturesAvailable],
   );
+  const availableApprovalModes = useApprovalModes(
+    activeWorkspaceCwd,
+    allowedApprovalModes,
+  );
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -13577,9 +13586,15 @@ export function App({
   );
   const handleSetMode = useCallback(
     (modeId: string) => {
+      if (
+        isDaemonApprovalMode(modeId) &&
+        modeId !== 'plan' &&
+        !availableApprovalModes.some((mode) => mode === modeId)
+      )
+        return;
       void setComposerMode(modeId, currentModeRef.current === 'plan');
     },
-    [setComposerMode],
+    [availableApprovalModes, setComposerMode],
   );
   const handleTogglePlan = useCallback(() => {
     void setComposerMode(
@@ -14160,10 +14175,13 @@ export function App({
     // findIndex, not indexOf: narrowing currentMode to the tuple member type
     // silently degrades when the SDK's declaration bundle leaves its
     // permission-mode import dangling, and the build must survive both states.
-    const idx = MODES_CYCLE.findIndex((mode) => mode === executionMode);
-    const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
-    handleSetMode(next);
-  }, [executionMode, handleSetMode]);
+    const idx = availableApprovalModes.findIndex(
+      (mode) => mode === executionMode,
+    );
+    const next =
+      availableApprovalModes[(idx + 1) % availableApprovalModes.length];
+    if (next && next !== executionMode) handleSetMode(next);
+  }, [availableApprovalModes, executionMode, handleSetMode]);
 
   // Shared by the /context slash command and the status-bar context
   // indicator. Echoes the command when idle — that also makes the transcript
@@ -20630,6 +20648,7 @@ export function App({
             >
               <ApprovalModeDialog
                 currentMode={executionMode}
+                availableModes={availableApprovalModes}
                 sessionWorkflowEnabled={sessionWorkflowEnabled}
                 onSelect={(modeId) => {
                   handleSetMode(modeId);
@@ -23069,6 +23088,7 @@ export function App({
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={executionMode}
+                          availableModes={availableApprovalModes}
                           modeControlsDisabled={modeControlsBusy}
                           planMode={currentMode === 'plan'}
                           onTogglePlan={handleTogglePlan}
@@ -23276,7 +23296,7 @@ export function App({
                               goalSnapshot={goalSnapshot}
                               activeGoal={activeGoal}
                               tasks={footerTasks}
-                              availableModes={MODES_CYCLE}
+                              availableModes={availableApprovalModes}
                               availableModels={(connection.models ?? [])
                                 .filter(isVisibleComposerModel)
                                 .map((m) => ({
@@ -23304,7 +23324,7 @@ export function App({
                             goalSnapshot={goalSnapshot}
                             activeGoal={activeGoal}
                             tasks={footerTasks}
-                            availableModes={MODES_CYCLE}
+                            availableModes={availableApprovalModes}
                             availableModels={(connection.models ?? [])
                               .filter(isVisibleComposerModel)
                               .map((m) => ({

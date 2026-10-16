@@ -1326,3 +1326,46 @@ describe('web-shell settings alias drift', () => {
     );
   });
 });
+
+describe('Web Shell approval mode allowlist settings', () => {
+  it('serves the effective list and its settings scopes', async () => {
+    const { app } = makeApp({
+      userSettings: { ui: { allowedApprovalModes: ['default', 'auto'] } },
+      workspaceSettings: { ui: { allowedApprovalModes: [] } },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(
+      response.body.settings.find(
+        (setting: { key: string }) => setting.key === 'ui.allowedApprovalModes',
+      ),
+    ).toMatchObject({
+      values: { effective: [], user: ['default', 'auto'], workspace: [] },
+    });
+  });
+
+  it('reads the list from the selected runtime rather than primary', async () => {
+    const { app } = makeQualifiedApp({ workspaceCwd: '/selected-workspace' });
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        ({
+          merged: {
+            ui: {
+              allowedApprovalModes:
+                cwd === '/selected-workspace' ? ['default'] : ['yolo'],
+            },
+          },
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+    const response = await request(app).get('/workspaces/primary/settings');
+    expect(response.status).toBe(200);
+    expect(
+      response.body.settings.find(
+        (setting: { key: string }) => setting.key === 'ui.allowedApprovalModes',
+      )?.values.effective,
+    ).toEqual(['default']);
+  });
+});

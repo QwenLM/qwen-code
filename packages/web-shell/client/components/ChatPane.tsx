@@ -117,6 +117,7 @@ import { GoalStatusStrip } from './GoalStatusStrip';
 import composerStatusStyles from './ComposerStatusStack.module.css';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { parsePlanCommand } from '../utils/planMode';
+import { useApprovalModes } from '../hooks/useApprovalModes';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
 import { createContextUsageMessageData } from './messages/ContextUsageMessage';
@@ -300,12 +301,23 @@ export function ChatPane({
   planControlVisible = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
-  const { renderComposerFooter: CustomComposerFooter, askUserFreeTextLabel } =
-    useWebShellCustomization();
+  const {
+    renderComposerFooter: CustomComposerFooter,
+    askUserFreeTextLabel,
+    allowedApprovalModes,
+  } = useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
+  const paneSettingsCwd =
+    connection.sessionContext?.kind === 'standalone'
+      ? undefined
+      : (workspaceCwd ?? connection.workspaceCwd);
+  const availableApprovalModes = useApprovalModes(
+    paneSettingsCwd,
+    allowedApprovalModes,
+  );
   const capacityRecovery = useCapacityRecovery(
     workspace.client,
     workspace.capabilities?.features,
@@ -1477,10 +1489,24 @@ export function ChatPane({
   );
   const handleSelectMode = useCallback(
     (modeId: string) => {
+      if (
+        isDaemonApprovalMode(modeId) &&
+        modeId !== 'plan' &&
+        !availableApprovalModes.some((mode) => mode === modeId)
+      )
+        return;
       void setComposerMode(modeId, planMode);
     },
-    [setComposerMode, planMode],
+    [availableApprovalModes, setComposerMode, planMode],
   );
+  const handleCycleMode = useCallback(() => {
+    const idx = availableApprovalModes.findIndex(
+      (mode) => mode === executionMode,
+    );
+    const next =
+      availableApprovalModes[(idx + 1) % availableApprovalModes.length];
+    if (next && next !== executionMode) handleSelectMode(next);
+  }, [availableApprovalModes, executionMode, handleSelectMode]);
   const handleTogglePlan = useCallback(() => {
     void setComposerMode(executionMode, !planMode);
   }, [setComposerMode, executionMode, planMode]);
@@ -1951,6 +1977,8 @@ export function ChatPane({
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}
             currentMode={executionMode}
+            availableModes={availableApprovalModes}
+            onCycleMode={handleCycleMode}
             modeControlsDisabled={modeControlsBusy}
             planMode={planMode}
             onTogglePlan={handleTogglePlan}
