@@ -1055,7 +1055,7 @@ class RuntimeBrokerHttpServerTest {
                                 + " runtime_request_key, workspace_id, workspace_generation,"
                                 + " workspace_storage_id, cwd_relative, context_config_ref,"
                                 + " context_revision, workspace_config_ref, workspace_policy_ref,"
-                                + " created_at, updated_at) VALUES ('tenant', ?, 'qwen-code', ?, ?,"
+                                + " gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', ?, ?,"
                                 + " 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
             JdbcRepositorySupport.setIdentity(statement, 1, csiSession);
             statement.setString(2, CsiFilesRetirementProfile.PROFILE);
