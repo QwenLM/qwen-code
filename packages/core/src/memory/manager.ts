@@ -1378,7 +1378,7 @@ export class MemoryManager {
       if (
         covered?.pending !== undefined &&
         covered.pending.projectRoot === params.projectRoot &&
-        params.history.length >= covered.pending.history.length
+        (result.cursor.processedOffset ?? 0) >= covered.pending.history.length
       ) {
         delete covered.pending;
       }
@@ -1400,8 +1400,12 @@ export class MemoryManager {
     ) {
       return;
     }
-    // A failed run retries on the next turn as before; it never arms.
-    if (!result) {
+    // A failed or unconsumed run retries without dropping skipped history.
+    if (
+      !result ||
+      (!result.skippedReason &&
+        (result.cursor.processedOffset ?? 0) < params.history.length)
+    ) {
       const state = this.extractCadence.get(params.sessionId);
       if (state) {
         state.armed = false;
@@ -1597,7 +1601,13 @@ export class MemoryManager {
       // Nothing was extracted (session mismatch, memory pressure, a queued
       // slot, or the throw below): keep the entry so the next boundary retries
       // the same turns instead of a no-op consuming them.
-      if (!result || result.skippedReason) return false;
+      if (
+        !result ||
+        result.skippedReason ||
+        (result.cursor.processedOffset ?? 0) < pending.history.length
+      ) {
+        return false;
+      }
       // The run re-armed the cadence under the session this boundary is
       // leaving behind, and `/resume` restores that id — drop the entry so a
       // resumed session inherits no skip. The next completed run re-arms from

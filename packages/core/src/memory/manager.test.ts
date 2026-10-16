@@ -2088,14 +2088,16 @@ describe('MemoryManager', () => {
         ...extractParams(tmp.projectRoot, sessionId, turns(length)),
         belowCompactionWarn: true,
       });
-    const engagedNoop = (sessionId = 'sess') => ({
-      ...extractResult(sessionId),
+    const engagedNoop = (sessionId = 'sess', processedOffset = 2) => ({
+      ...extractResult(sessionId, [], processedOffset),
       extractorEngaged: true,
     });
 
     beforeEach(() => {
       vi.mocked(runAutoMemoryExtract).mockReset();
-      vi.mocked(runAutoMemoryExtract).mockResolvedValue(engagedNoop());
+      vi.mocked(runAutoMemoryExtract).mockImplementation(async (params) =>
+        engagedNoop(params.sessionId, params.history.length),
+      );
     });
     afterEach(() => {
       vi.unstubAllEnvs();
@@ -2179,6 +2181,42 @@ describe('MemoryManager', () => {
           await turn(mgr, 60);
         }
         expect(runAutoMemoryExtract).toHaveBeenCalledTimes(failed ? 3 : 2);
+        for (const [params] of vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.slice(1)) {
+          expect(params.skippedHistory).toEqual(turns(4).slice(2));
+        }
+      },
+    );
+
+    it.each(['next turn', 'close'])(
+      'retries skipped history after a text-only long run on %s',
+      async (boundary) => {
+        vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+        const mgr = new MemoryManager();
+        await turn(mgr, 2);
+        expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+        vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+          extractResult('sess', [], 2),
+        );
+        await turn(mgr, 60);
+
+        if (boundary === 'close') {
+          vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+            extractResult('sess', [], 2),
+          );
+          await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+            false,
+          );
+          await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+            true,
+          );
+        } else {
+          await turn(mgr, 62);
+        }
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(
+          boundary === 'close' ? 4 : 3,
+        );
         for (const [params] of vi
           .mocked(runAutoMemoryExtract)
           .mock.calls.slice(1)) {
@@ -2364,9 +2402,10 @@ describe('MemoryManager', () => {
 
       let release!: () => void;
       vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
-        () =>
+        (params) =>
           new Promise((resolve) => {
-            release = () => resolve(engagedNoop());
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
           }),
       );
       const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -2470,9 +2509,10 @@ describe('MemoryManager', () => {
       // Turn 1 arms in the original root, parked so it settles last.
       let release!: () => void;
       vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
-        () =>
+        (params) =>
           new Promise((resolve) => {
-            release = () => resolve(engagedNoop());
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
           }),
       );
       const parked = turnAt(tmp.projectRoot, 2);
@@ -2557,9 +2597,10 @@ describe('MemoryManager', () => {
 
       let release!: () => void;
       vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
-        () =>
+        (params) =>
           new Promise((resolve) => {
-            release = () => resolve(engagedNoop('other'));
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
           }),
       );
       // Another session holds the slot while a newer extraction covers pending.
@@ -2595,9 +2636,10 @@ describe('MemoryManager', () => {
 
       let release!: () => void;
       vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
-        () =>
+        (params) =>
           new Promise((resolve) => {
-            release = () => resolve(engagedNoop('other'));
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
           }),
       );
       // Another session holds the slot while a newer skip replaces pending.
@@ -2639,9 +2681,10 @@ describe('MemoryManager', () => {
 
       let release!: () => void;
       vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
-        () =>
+        (params) =>
           new Promise((resolve) => {
-            release = () => resolve(engagedNoop('other'));
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
           }),
       );
       const other = turn(mgr, 2, 'other');
@@ -2668,9 +2711,11 @@ describe('MemoryManager', () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
       const releases: Array<() => void> = [];
-      const slowRun = () =>
+      const slowRun = (params: Parameters<typeof runAutoMemoryExtract>[0]) =>
         new Promise<ReturnType<typeof engagedNoop>>((resolve) => {
-          releases.push(() => resolve(engagedNoop()));
+          releases.push(() =>
+            resolve(engagedNoop(params.sessionId, params.history.length)),
+          );
         });
       vi.mocked(runAutoMemoryExtract)
         .mockImplementationOnce(slowRun)
@@ -2703,9 +2748,10 @@ describe('MemoryManager', () => {
       // `extractRunning` branch — skips instead of queueing behind it.
       let release!: () => void;
       vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
-        () =>
+        (params) =>
           new Promise((resolve) => {
-            release = () => resolve(engagedNoop());
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
           }),
       );
       const direct = mgr.scheduleExtract(
@@ -2770,9 +2816,10 @@ describe('MemoryManager', () => {
 
       let release!: () => void;
       vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
-        () =>
+        (params) =>
           new Promise((resolve) => {
-            release = () => resolve(engagedNoop('other'));
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
           }),
       );
       // Another session holds the project slot, so the flush parks behind it.
@@ -2858,7 +2905,7 @@ describe('MemoryManager', () => {
           getProjectRoot: () => relocated,
         } as unknown as Config),
       });
-      oldRootRun.resolve(engagedNoop());
+      oldRootRun.resolve(engagedNoop('sess', 6));
       await run;
 
       await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
@@ -2887,7 +2934,7 @@ describe('MemoryManager', () => {
         expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
       );
       mgr.discardExtractCadence('other-a', 'other-b');
-      activeRun.resolve(engagedNoop());
+      activeRun.resolve(engagedNoop('sess', 6));
       await run;
 
       await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
@@ -2933,9 +2980,11 @@ describe('MemoryManager', () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
       const releases: Array<() => void> = [];
-      const slowRun = () =>
+      const slowRun = (params: Parameters<typeof runAutoMemoryExtract>[0]) =>
         new Promise<ReturnType<typeof engagedNoop>>((resolve) => {
-          releases.push(() => resolve(engagedNoop()));
+          releases.push(() =>
+            resolve(engagedNoop(params.sessionId, params.history.length)),
+          );
         });
       vi.mocked(runAutoMemoryExtract)
         .mockImplementationOnce(slowRun)
@@ -2963,9 +3012,10 @@ describe('MemoryManager', () => {
 
       let release!: () => void;
       vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
-        () =>
+        (params) =>
           new Promise((resolve) => {
-            release = () => resolve(engagedNoop('other'));
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
           }),
       );
       const other = turn(mgr, 2, 'other');
@@ -2990,9 +3040,10 @@ describe('MemoryManager', () => {
 
       let release!: () => void;
       vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
-        () =>
+        (params) =>
           new Promise((resolve) => {
-            release = () => resolve(engagedNoop('other'));
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
           }),
       );
       const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000);
@@ -3924,7 +3975,7 @@ describe('MemoryManager', () => {
     it('clears the #13004 cadence state so a leaked skip cannot suppress the next test', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
-        ...extractResult('sess'),
+        ...extractResult('sess', [], 2),
         extractorEngaged: true,
       });
 
@@ -3965,7 +4016,10 @@ describe('MemoryManager', () => {
 
       mgr.resetExtractStateForTests();
 
-      inFlight.resolve({ ...extractResult('other'), extractorEngaged: true });
+      inFlight.resolve({
+        ...extractResult('other', [], 2),
+        extractorEngaged: true,
+      });
       await running;
       await mgr.drain();
 
