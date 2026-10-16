@@ -18,6 +18,8 @@ If you configured nothing under `tools.webSearch`, the tool registers whenever t
 | Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                              |
 | Alibaba ModelStudio → **Token Plan**                                                                                       | on                                              |
 | Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint is not verified for this API |
+| QwenCloud → **Standard API Key**                                                                                           | on                                              |
+| QwenCloud → **Token Plan**                                                                                                 | on                                              |
 | An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key | on                                              |
 | Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                 | off                                             |
 
@@ -86,7 +88,7 @@ Notes:
 
 - The selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider — only the search side request needs a DashScope entry. Qwen OAuth cannot back the tool.
 - Which providers can activate the tool is decided at startup. Once active, the search backend follows the currently selected model on the next search; switching to an unsupported provider makes that invocation fail, while switching from a session where the tool was absent still requires a restart to register it.
-- Automatic host detection intentionally accepts only known DashScope regional, Token Plan MaaS, and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways and `DASHSCOPE_PROXY_BASE_URL` are excluded because they are not known to forward the Responses search tools.
+- Automatic host detection intentionally accepts only known DashScope regional hosts, Model Studio and QwenCloud MaaS hosts (including their `token-plan.` subscription subdomains), and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways and `DASHSCOPE_PROXY_BASE_URL` are excluded because they are not known to forward the Responses search tools.
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
 - Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
 - There is no client-side model allowlist; a model the Responses endpoint does not serve fails loudly on first use.
@@ -414,5 +416,53 @@ qwen mcp add serpapi \
 ```
 
 Replace `${SERPAPI_API_KEY}` with your actual API key, or set it as an environment variable. The key is only needed for searches. Without a valid API key, the server still connects and lists its tools, but `search` returns an error.
+
+---
+
+### looot
+
+A hosted MCP server from looot with web search, Google SERP results, news search and web page reading. Search queries and the URLs you ask it to read are sent to looot.
+
+- **Documentation:** https://docs.looot.ai
+- **Cost:** Paid (prepaid balance, no free tier)
+- **Get API Key:** https://looot.ai
+- **Best for:** Web search, Google SERP and news results, and reading a page as text
+
+#### Available Tools
+
+- `web_search` — Web search
+- `google_search_results` — Google SERP results
+- `news_search` — News search
+- `read_web_page` — Read a single page as text
+
+The server also exposes company and email lookups.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add looot \
+  -t http \
+  "https://api.looot.ai/mcp" \
+  -H "Authorization: Bearer ${LOOOT_API_KEY}"
+```
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "looot": {
+      "httpUrl": "https://api.looot.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LOOOT_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${LOOOT_API_KEY}` with your actual API key, or set it as an environment variable.
 
 ---

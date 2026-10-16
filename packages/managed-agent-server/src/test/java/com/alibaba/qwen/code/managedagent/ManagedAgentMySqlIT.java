@@ -102,6 +102,7 @@ class ManagedAgentMySqlIT {
                     List.of(Map.of("name", "read_file")),
                     null,
                     null,
+                    null,
                     Map.of("mode", "default"),
                     null,
                     null);
@@ -2032,6 +2033,7 @@ class ManagedAgentMySqlIT {
                         DEFINITION.tools(),
                         null,
                         null,
+                        null,
                         DEFINITION.permissionPolicy(),
                         null,
                         null);
@@ -2040,6 +2042,7 @@ class ManagedAgentMySqlIT {
                         DEFINITION.model(),
                         "Loser",
                         DEFINITION.tools(),
+                        null,
                         null,
                         null,
                         DEFINITION.permissionPolicy(),
@@ -2217,6 +2220,36 @@ class ManagedAgentMySqlIT {
         if (marker != null) {
             assertThat(output).contains(marker);
         }
+    }
+
+    @Test
+    void publishesAndReadsStaticSkillResourcesAcrossStoreInstances() throws IOException {
+        DriverManagerDataSource source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        TransactionTemplate transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        ManagedSessionStore resources = new ManagedSessionStore(jdbc);
+        String tenant = "mysql-skills-" + UUID.randomUUID();
+        String session = UUID.randomUUID().toString();
+        String token = "s".repeat(32);
+        inTransaction(transactions, () -> resources.acquireWriter(tenant, session, token,
+                new AcquireWriterRequest("workspace", "writer", 60000L)));
+        List<Map<String, Object>> skills = List.of(Map.of("name", "评审:review", "description", "Review changes",
+                "body", "Read the original diff.\n", "base_directory", ".qwen/skills/review"));
+        var published = inTransaction(transactions,
+                () -> resources.publishAgentSkills(tenant, "workspace", session, skills));
+        assertThat(inTransaction(transactions,
+                () -> resources.publishAgentSkills(tenant, "workspace", session, skills))).isEqualTo(published);
+        var reloaded = new ManagedSessionStore(new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source))
+                .readResource(tenant, "workspace", session, published.resourceId(), token);
+        assertThat(new ObjectMapper().readTree(reloaded.bytes())).isEqualTo(new ObjectMapper().valueToTree(skills));
+        assertThat(reloaded.digest()).isEqualTo(published.digest());
+        assertThat(reloaded.kind()).isEqualTo("managed-agent-skills");
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                "[]".getBytes(StandardCharsets.UTF_8), tenant, session, published.resourceId());
+        assertThatThrownBy(() -> resources.readResource(tenant, "workspace", session, published.resourceId(), token))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_session_resource_corrupt"));
     }
 
     private static boolean isWindows() {

@@ -301,6 +301,14 @@ describe('DaemonClient', () => {
         },
       });
       expect(transportFetch).not.toHaveBeenCalled();
+
+      await client.continueSession('with/slash', {
+        clientId: 'client-1',
+        confirmCancellation: 'legacy-daemon',
+      });
+      expect(calls[1]?.body).toBe(
+        JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
+      );
     });
 
     it('returns clean no-ops and preserves rejection errors without retry', async () => {
@@ -5801,7 +5809,7 @@ describe('DaemonClient', () => {
 
       await client.archiveSessionsData(
         ['s-1'],
-        { resolveConflicts: true },
+        { resolveConflicts: true, requireIdle: true },
         'client-1',
       );
 
@@ -5809,6 +5817,7 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         sessionIds: ['s-1'],
         resolveConflicts: true,
+        requireIdle: true,
       });
     });
   });
@@ -10718,7 +10727,7 @@ describe('DaemonClient', () => {
       await expect(
         workspace.archiveSessionsData(
           ['s-1'],
-          { resolveConflicts: true },
+          { resolveConflicts: true, requireIdle: true },
           'client-2',
         ),
       ).resolves.toEqual(replies['/sessions/archive']);
@@ -10738,7 +10747,11 @@ describe('DaemonClient', () => {
       ]);
       expect(calls.map((call) => JSON.parse(call.body!))).toEqual([
         { sessionIds: ['s-1'] },
-        { sessionIds: ['s-1'], resolveConflicts: true },
+        {
+          sessionIds: ['s-1'],
+          resolveConflicts: true,
+          requireIdle: true,
+        },
         { sessionIds: ['s-1'] },
       ]);
     });
