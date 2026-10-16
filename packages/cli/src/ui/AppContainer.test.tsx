@@ -923,6 +923,30 @@ describe('AppContainer State Management', () => {
     });
   };
 
+  describe('session busy diagnostics', () => {
+    it('reads compaction activity live without a render', () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)![12];
+      const readReason = actions.readSessionBusyReason!;
+      let compressing = true;
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        ...mockConfig.getLlmClient(),
+        isInitialized: () => true,
+        getChat: () => ({ isCompressing: () => compressing }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      expect(readReason()).toContain('context compaction');
+      compressing = false;
+      expect(readReason()).toBeNull();
+    });
+  });
+
   describe('worktree branch wiring', () => {
     it('rejects direct worktree removal in tool sandbox', async () => {
       vi.spyOn(mockConfig, 'getShellExecutionSandbox').mockReturnValue({

@@ -241,6 +241,7 @@ describe('useSlashCommandProcessor', () => {
     extensionRefreshState?: ExtensionRefreshState,
     isIdleRef = { current: true },
     builtinCommandsPromise?: Promise<readonly SlashCommand[]>,
+    actions = createMockActions(),
   ) => {
     if (builtinCommandsPromise) {
       mockBuiltinLoadCommands.mockReturnValue(builtinCommandsPromise);
@@ -264,7 +265,7 @@ describe('useSlashCommandProcessor', () => {
         setIsProcessing,
         isIdleRef,
         vi.fn(), // setMemoryFileCount
-        createMockActions(),
+        actions,
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
         null, // logger
@@ -278,6 +279,28 @@ describe('useSlashCommandProcessor', () => {
   };
 
   describe('Initialization and Command Loading', () => {
+    it('exposes a live session busy reader to commands', async () => {
+      let reason: string | null = 'context compaction is in progress.';
+      const actions = createMockActions();
+      actions.readSessionBusyReason = () => reason;
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        actions,
+      );
+      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
+      const readReason = result.current.commandContext.ui.readSessionBusyReason;
+      expect(readReason?.()).toContain('compaction');
+      reason = null;
+      expect(readReason?.()).toBeNull();
+    });
+
     it('should initialize CommandService with all required loaders', async () => {
       const result = setupProcessorHook();
       await waitFor(() => {

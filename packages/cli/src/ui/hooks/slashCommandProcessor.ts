@@ -211,6 +211,7 @@ export interface SlashCommandProcessorActions {
   openDiffDialog: () => void;
   openHelpDialog: () => void;
   clearPendingState: () => void;
+  readSessionBusyReason?: () => string | null;
 }
 
 /**
@@ -549,6 +550,7 @@ export const useSlashCommandProcessor = (
         cancelBtw,
         btwAbortControllerRef,
         isIdleRef,
+        readSessionBusyReason: actions.readSessionBusyReason,
         toggleVimEnabled,
         setMemoryFileCount,
         reloadCommands,

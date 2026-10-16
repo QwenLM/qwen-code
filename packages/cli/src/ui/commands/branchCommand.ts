@@ -7,6 +7,7 @@
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { getSessionBusyMessage } from '../utils/session-busy.js';
 
 export const branchCommand: SlashCommand = {
   name: 'branch',
@@ -26,13 +27,12 @@ export const branchCommand: SlashCommand = {
 
     // Guard: streaming or awaiting tool confirmation — forking mid-flight
     // would tear the new session's parent chain.
-    if (context.ui.isIdleRef?.current === false) {
+    const busyMessage = getSessionBusyMessage(context, 'branch');
+    if (busyMessage) {
       return {
         type: 'message',
         messageType: 'error',
-        content: t(
-          'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
-        ),
+        content: busyMessage,
       };
     }
 

@@ -61,6 +61,22 @@ describe('branchCommand', () => {
     expect(result).toEqual({ type: 'dialog', dialog: 'branch' });
   });
 
+  it('reports the live blocker before reading session records', async () => {
+    const context = makeCtx({ isIdle: false });
+    context.ui.readSessionBusyReason = () =>
+      'tool "run_shell_command" is awaiting approval. Resolve the pending approval.';
+    const result = await branchCommand.action!(context, '');
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Cannot branch: tool "run_shell_command" is awaiting approval. Resolve the pending approval.',
+    });
+    expect(
+      context.services.config!.getSessionService().sessionExists,
+    ).not.toHaveBeenCalled();
+  });
+
   it('returns dialog action with trimmed name when args are provided', async () => {
     const result = await branchCommand.action!(makeCtx(), '  my-branch  ');
     expect(result).toEqual({

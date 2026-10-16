@@ -40,7 +40,11 @@ const mocks = vi.hoisted(() => {
     bootOrder: [] as string[],
     warmupRejects: false,
     waitingCalls: [] as Array<{ callId: string }>,
-    appProps: null as { renderMain?: () => unknown } | null,
+    readSessionBusyReason: () => 'context compaction is in progress.',
+    appProps: null as {
+      renderMain?: () => unknown;
+      readSessionBusyReason?: () => string | null;
+    } | null,
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -104,7 +108,10 @@ vi.mock('./opentui-runtime.js', () => ({
   },
 }));
 vi.mock('./opentui-app-shell.js', () => ({
-  OpenTuiApp: (props: { renderMain?: () => unknown }) => {
+  OpenTuiApp: (props: {
+    renderMain?: () => unknown;
+    readSessionBusyReason?: () => string | null;
+  }) => {
     mocks.state.appProps = props;
     return null;
   },
@@ -114,6 +121,7 @@ vi.mock('./transcript-view.js', () => ({
 }));
 vi.mock('./live-turn.js', () => ({
   useOpenTuiLiveTurn: () => ({
+    readSessionBusyReason: mocks.state.readSessionBusyReason,
     items: [],
     streaming: false,
     streamingCharsRef: { current: 0 },
@@ -354,6 +362,9 @@ describe('startOpenTuiUI fallback contract', () => {
       | { props?: { children?: { props?: Record<string, unknown> } } }
       | undefined;
     const props = main?.props?.children?.props;
+    expect(mocks.state.appProps?.readSessionBusyReason).toBe(
+      mocks.state.readSessionBusyReason,
+    );
     expect(props?.['awaitingCallId']).toBe('q1');
     expect(props?.['showToolCallArgs']).toBe(true);
     expect(props?.['mouseTracking']).toBe(false);

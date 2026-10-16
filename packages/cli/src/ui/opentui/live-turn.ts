@@ -49,6 +49,11 @@ import {
   nextLivePromptId,
   type WaitingCallInfo,
 } from './live-session.js';
+import {
+  getSessionBusyReason,
+  type SessionBusyToolCall,
+} from '../utils/session-busy.js';
+import { StreamingState } from '../types.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 /** Extension → MIME for composer attachments (core SUPPORTED subset). */
@@ -120,6 +125,7 @@ export interface OpenTuiSubmitOptions {
 }
 
 export interface OpenTuiLiveTurn {
+  readSessionBusyReason(): string | null;
   items: readonly LiveHistoryItem[];
   streaming: boolean;
   /**
@@ -180,6 +186,7 @@ export function useOpenTuiLiveTurn(
   const abortRef = useRef<AbortController | null>(null);
 
   const streamingRef = useRef(false);
+  const toolCallsRef = useRef<readonly SessionBusyToolCall[]>([]);
   // Output chars streamed this turn (ink streamingResponseLengthRef parity):
   // the loading indicator divides by 4 to estimate tokens and polls this ref,
   // so per-delta events must not re-render anything.
@@ -247,6 +254,7 @@ export function useOpenTuiLiveTurn(
       // A runTurn is a new user query, so the counter restarts; tool-result
       // continuations happen inside this same loop and keep accumulating.
       streamingCharsRef.current = 0;
+      toolCallsRef.current = [];
       setReceiving(false);
       setBusy(true);
       try {
@@ -257,6 +265,9 @@ export function useOpenTuiLiveTurn(
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           drainSteering: drainQueue,
           restoreSteering: restoreQueue,
+          onToolCallsUpdate: (calls) => {
+            if (seq === turnSeqRef.current) toolCallsRef.current = calls;
+          },
           onWaitingCall: (call) => {
             if (seq !== turnSeqRef.current) return;
             setWaitingCalls((prev) =>
@@ -315,6 +326,7 @@ export function useOpenTuiLiveTurn(
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
+          toolCallsRef.current = [];
           setBusy(false);
           // One queued submission per chained turn: a decline (e.g. an abort
           // landing inside an @-expansion read) must consume only its own
@@ -401,6 +413,7 @@ export function useOpenTuiLiveTurn(
       setWaitingCalls([]);
       // Synchronous: a submit right after the reset must start a fresh turn,
       // not land in the dying one's queue.
+      toolCallsRef.current = [];
       setBusy(false);
       setItems(foldBatch(events));
     },
@@ -422,7 +435,18 @@ export function useOpenTuiLiveTurn(
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  const readSessionBusyReason = useCallback(() => {
+    const client = config.getLlmClient();
+    return getSessionBusyReason(
+      streamingRef.current ? StreamingState.Responding : StreamingState.Idle,
+      toolCallsRef.current,
+      receivingRef.current,
+      client.isInitialized() && client.getChat().isCompressing(),
+    );
+  }, [config]);
+
   return {
+    readSessionBusyReason,
     items,
     streaming,
     streamingCharsRef,
