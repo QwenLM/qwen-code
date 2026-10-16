@@ -2860,6 +2860,12 @@ class OperationRetryTerminalStateTest {
         when(actions.find("tenant", "session", "action-1")).thenReturn(
                 Optional.of(new ManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
+        // Every renewal succeeds, so the renewals counted below are real
+        // renewals of a held lease, not ticks of one already lost (review
+        // round 1, R1-7).
+        when(sessions.renewLifecycleOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), eq(3L),
+                eq(Duration.ofMillis(30)))).thenReturn(true);
         // The Harness answers 200 after outlasting the 30ms lease.
         doAnswer(invocation -> {
             Thread.sleep(150);
@@ -2874,11 +2880,13 @@ class OperationRetryTerminalStateTest {
             coordinator.dispatch("tenant", "session", "op-action");
 
             // The renewal period is a third of the lease (10ms here), so
-            // the 150ms call leaves room for about 14 renewals. Three pins
-            // the cadence: a period at or above the lease would fit at most
-            // one renewal into the window and let the lease lapse mid-call
-            // (review round 3, R3-2).
-            verify(sessions, atLeast(3)).renewLifecycleOperation(
+            // the 150ms call leaves room for about 14 renewals. A period
+            // equal to the lease renews on the expiry boundary, where
+            // scheduler jitter lets the lease lapse mid-call, yet still fits
+            // about five renewals into the window; eight sits above that and
+            // well below the expected count (review round 3, R3-2; review
+            // round 1, R1-7).
+            verify(sessions, atLeast(8)).renewLifecycleOperation(
                     eq("tenant"), eq("session"), eq("op-action"), anyString(),
                     eq(3L), eq(Duration.ofMillis(30)));
             // The answer is still recorded budget-exempt afterwards.

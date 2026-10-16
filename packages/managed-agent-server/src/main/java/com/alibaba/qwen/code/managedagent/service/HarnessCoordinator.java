@@ -79,7 +79,12 @@ public class HarnessCoordinator {
     // it, though, and the exemption alone would retry such a Turn forever
     // with nothing to tell it from a healthy retry. The exemption therefore
     // lapses once the Turn has gone this many budgets without journaled
-    // progress (review round 3, R3-6).
+    // progress (review round 3, R3-6). The cap reads consecutive_failures,
+    // so it bounds the whole run without progress that ends on a generation
+    // wait, whatever wait family filled the run: no counter tells the
+    // families apart, and the other exempt waits stay uncapped while they
+    // are the current failure. A zero budget is floored to one so a single
+    // change still re-attaches (review round 1, R1-1 and R1-8).
     private static final int GENERATION_CHURN_BUDGET_FACTOR = 4;
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
@@ -287,8 +292,7 @@ public class HarnessCoordinator {
             // lease, so only that path escapes the retry budget — up to the
             // churn cap transientFailure applies to generation waits.
             terminal = transientFailure(claimed,
-                    submissionAttempted.get(), error, recoveryPath.get(),
-                    true);
+                    submissionAttempted.get(), error, recoveryPath.get());
         } catch (DaemonProtocolException error) {
             terminal = failTerminally(claimed, "hosted_harness_protocol_error",
                     "Hosted Harness returned an invalid protocol response.",
@@ -1126,13 +1130,6 @@ public class HarnessCoordinator {
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error,
             boolean exemptFromRetryBudget) {
-        return transientFailure(turn, submissionAttempted, error,
-                exemptFromRetryBudget, false);
-    }
-
-    private boolean transientFailure(TurnRecord turn,
-            boolean submissionAttempted, RuntimeException error,
-            boolean exemptFromRetryBudget, boolean generationWait) {
         if (!submissionAttempted && isHarnessDisabled(error)) {
             return deferOutage(turn, "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"
@@ -1157,11 +1154,17 @@ public class HarnessCoordinator {
         // Past it, the arm for the Turn's phase fails it with that phase's
         // unavailable code, as if the budget were spent (review round 3,
         // R3-6).
+        // The wait is read off the failure itself, like every other fact
+        // this method derives from it, so no caller can route a generation
+        // change here without the cap (review round 1, R1-5).
+        boolean generationWait =
+                error instanceof HostedHarnessGenerationException;
         int budget = submissionAttempted ? maxPostAdmissionRetries
                 : maxPreAdmissionRetries;
         boolean generationChurn = generationWait && exemptFromRetryBudget
                 && current.consecutiveFailures()
-                        >= (long) budget * GENERATION_CHURN_BUDGET_FACTOR;
+                        >= (long) Math.max(1, budget)
+                                * GENERATION_CHURN_BUDGET_FACTOR;
         boolean exempt = exemptFromRetryBudget && !generationChurn;
         if (!submissionAttempted
                 && !exempt

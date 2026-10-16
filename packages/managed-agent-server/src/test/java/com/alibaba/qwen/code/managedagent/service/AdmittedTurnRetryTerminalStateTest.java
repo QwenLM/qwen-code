@@ -337,6 +337,44 @@ class AdmittedTurnRetryTerminalStateTest {
                 anyString(), anyString(), anyLong(), anyBoolean());
     }
 
+    // Zero budgets are a supported "no retries" policy, but the exempt
+    // waits keep their exemption under it, and a generation change is one
+    // of them: the cap floors the budget to one, so an admitted Turn still
+    // re-attaches across a single change and only a run of four fails it
+    // (review round 1, R1-1).
+    @ParameterizedTest(name = "consecutive exempt failures = {0}")
+    @CsvSource({"0, false", "3, false", "4, true"})
+    void aZeroBudgetStillAdoptsAGenerationChange(int failures,
+            boolean terminal) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setMaxPreAdmissionRetries(0);
+        properties.getDispatch().setMaxPostAdmissionRetries(0);
+        properties.getDispatch().setMaxOperationRetries(0);
+        Dispatched dispatched = dispatchTransientFailure(failures, failures,
+                properties, mock(HostedHarnessGenerationException.class),
+                "epoch-1");
+        AgentStateStore store = dispatched.store();
+
+        if (terminal) {
+            InOrder order = inOrder(store, dispatched.harness());
+            order.verify(dispatched.harness()).cancel("tenant", "session");
+            order.verify(store).failTurn(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(),
+                    eq("hosted_harness_unavailable_after_admission"),
+                    anyString());
+            verify(store, never()).scheduleTurnRetry(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyBoolean());
+        } else {
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(), anyLong(), eq(true));
+            verify(store, never()).failTurn(anyString(), anyString(),
+                    anyString(), anyString(), anyString(), anyString());
+            verify(dispatched.harness(), never()).cancel(anyString(),
+                    anyString());
+        }
+    }
+
     // The budget counts consecutive failures without journaled progress: a
     // Turn at the budget whose delivery admitted and journaled new events
     // since the last failure reschedules instead of terminating — the fenced

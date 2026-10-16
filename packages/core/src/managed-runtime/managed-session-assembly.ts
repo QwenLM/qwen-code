@@ -262,9 +262,11 @@ export async function openManagedSession(
     // renewal it started; only the lease itself stays with its owner.
     // The seal runs even when releasing the activation failed: a writer left
     // unsealed can neither resume cleanly nor be taken over. A release
-    // failure rejects the close; when the seal fails too, the seal error
-    // rejects and carries the release failure as its cause, so neither is
-    // lost to a debug line that is off by default (review round 1, R1-4).
+    // failure rejects the close; when the seal fails too, the close rejects
+    // with both, so neither is lost to a debug line that is off by default
+    // (review round 1, R1-4). The seal error itself is left untouched: the
+    // lease hands the same memoized rejection to every later seal, and the
+    // seal often carries a cause of its own (review round 1, R1-3 and R1-4).
     close: async (options) => {
       renewal.stop();
       if (adopted) return;
@@ -284,14 +286,11 @@ export async function openManagedSession(
       try {
         await authority.close();
       } catch (sealError) {
-        if (
-          !released &&
-          sealError instanceof Error &&
-          sealError.cause === undefined
-        ) {
-          sealError.cause = releaseError;
-        }
-        throw sealError;
+        if (released) throw sealError;
+        throw new AggregateError(
+          [sealError, releaseError],
+          `Managed Session close failed to seal the writer (${describeRenewalError(sealError)}) after releasing the activation failed (${describeRenewalError(releaseError)})`,
+        );
       }
       if (!released) throw releaseError;
     },

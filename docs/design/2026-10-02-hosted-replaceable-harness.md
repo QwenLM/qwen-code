@@ -513,7 +513,13 @@ happen.
   4 × `max-post-admission-retries`). The Turn then fails as a spent budget
   would, `hosted_harness_unavailable` or
   `hosted_harness_unavailable_after_admission`, rather than retrying forever
-  indistinguishable from a healthy retry (#13182 follow-up, R3-6).
+  indistinguishable from a healthy retry (#13182 follow-up, R3-6). The cap
+  counts every attempt of the run, whatever wait filled it: no counter tells
+  the wait families apart, so a Turn that waited out a predecessor's
+  lease-bounded 409 or an approval for four budgets fails on the first
+  generation change that follows, while those other waits stay uncapped as
+  long as they are the current failure. A zero budget is floored to one, so
+  even then a single change still re-attaches (the cap is four attempts).
 - **D9b, request timeout vs takeover load.** `HostedHarnessClient.loadSession`
   uses a dedicated `load-timeout` (default 120 s, env-overridable like the
   other knobs) only when the request carries a recovery flag

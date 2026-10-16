@@ -1691,10 +1691,17 @@ class HarnessCoordinatorTest {
     // never reached it retrying forever. 19 consecutive exempt failures is
     // the last run below the churn cap (4 × the pre-admission budget of 5)
     // and still retries exempt; at the cap the Turn fails with the
-    // pre-admission unavailable code (review round 3, R3-6).
-    @ParameterizedTest(name = "consecutive exempt failures = {0}")
-    @CsvSource({"19, false", "20, true", "33, true"})
-    void boundsTheGenerationExemptionBeforeAdmission(int failures,
+    // pre-admission unavailable code (review round 3, R3-6). The cap reads
+    // consecutive_failures, not budget_exempt_failures: a run of 20 with
+    // four charged failures in it is at the cap although only 16 of its
+    // waits were exempt. A zero budget is floored to one, so its cap is 4
+    // and the first change still re-attaches (review round 1, R1-1, R1-6).
+    @ParameterizedTest(name = "budget {0}, consecutive {1}, exempt {2}")
+    @CsvSource({"5, 19, 19, false", "5, 20, 20, true", "5, 33, 33, true",
+            "5, 20, 16, true", "0, 0, 0, false", "0, 3, 3, false",
+            "0, 4, 4, true"})
+    void boundsTheGenerationExemptionBeforeAdmission(int budget,
+            int consecutiveFailures, int budgetExemptFailures,
             boolean terminal) {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
@@ -1703,8 +1710,15 @@ class HarnessCoordinatorTest {
         TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
                 "prompt", List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", false, null, 0L,
-                "previous-owner", Long.MAX_VALUE, failures, failures,
-                failures, null, null, null, 1, 1, null, 1);
+                "previous-owner", Long.MAX_VALUE, consecutiveFailures,
+                consecutiveFailures, budgetExemptFailures, null, null, null,
+                1, 1, null, 1);
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setMaxPreAdmissionRetries(budget);
+        if (budget == 0) {
+            properties.getDispatch().setMaxPostAdmissionRetries(0);
+            properties.getDispatch().setMaxOperationRetries(0);
+        }
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -1715,8 +1729,7 @@ class HarnessCoordinatorTest {
                 .thenThrow(mock(HostedHarnessGenerationException.class));
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
                 new HarnessEventProjector(), runtimeWarmer,
-                directExecutor(), Clock.systemUTC(),
-                new ManagedAgentProperties());
+                directExecutor(), Clock.systemUTC(), properties);
         try {
             coordinator.dispatch("tenant", "session", "turn");
         } finally {
