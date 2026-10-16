@@ -376,6 +376,22 @@ describe('dreamAgentPlanner', () => {
     ).rejects.toThrow('Model timed out');
   });
 
+  it('words a turn-cap stop instead of surfacing MAX_TURNS', async () => {
+    // The issue's headline reproduction: /dream reaches the user through
+    // this throw, and the case above feeds a free-form reason that passes
+    // through either way, so only this one fails if the call site stops
+    // using the shared wording.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'MAX_TURNS',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      planManagedAutoMemoryDreamByAgent(config, projectRoot),
+    ).rejects.toThrow('Agent stopped: maximum turns reached.');
+  });
+
   it('throws when the agent terminates as cancelled', async () => {
     // runForkedAgent maps AgentTerminateMode.CANCELLED to a resolved
     // `{status: 'cancelled'}` rather than a rejection. Without
@@ -393,8 +409,11 @@ describe('dreamAgentPlanner', () => {
 
     vi.mocked(runForkedAgent).mockResolvedValue(mockResult);
 
+    // Exact text, not /cancelled/i: the raw CANCELLED token matches that
+    // pattern too, so a loose match would pass even if the conversion to
+    // the shared wording were reverted.
     await expect(
       planManagedAutoMemoryDreamByAgent(config, projectRoot),
-    ).rejects.toThrow(/cancelled/i);
+    ).rejects.toThrow('Dream agent cancelled before completion');
   });
 });

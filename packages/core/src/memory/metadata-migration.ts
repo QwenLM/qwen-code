@@ -20,6 +20,7 @@ import { deriveConfig, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { stringify as stringifyYaml } from '../utils/yaml-parser.js';
 import {
   rebuildAutoMemoryIndexAtRoot,
@@ -509,8 +510,14 @@ async function generateMemoryMetadataWithAgent(
     suppressChatRecording: true,
   });
   if (result.status !== 'completed') {
+    // No cancelled arm: the caller only rethrows this on an aborted
+    // signal, and the manager then logs a cancelled event without the
+    // message, so the text would never reach anyone.
     throw new Error(
-      result.terminateReason || 'Metadata migration agent failed',
+      terminateReasonMessage(
+        result.terminateReason,
+        'Metadata migration agent failed',
+      ),
     );
   }
   return {
