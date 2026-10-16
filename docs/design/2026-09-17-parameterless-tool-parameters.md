@@ -157,7 +157,14 @@ hostname-gated, so it applies wherever the user opted in.
   explicit `generationConfig.toolParametersMandatory` on the side model's own
   entry always wins, including `false`.
 - The field is added, never removed. A route whose server rejects a present
-  `parameters` object stays out of the opt-in and is unaffected.
+  `parameters` object stays out of the opt-in and is unaffected: with the
+  setting off the map does not run at all. A route that never opts in is still
+  not untouched by this change, because MiniMax requires the field and calls the
+  shared map whatever this setting says. Its guards leave an `extra_body` entry
+  that claims `type: 'function'` while carrying no `function` object alone
+  instead of aborting request building with a `TypeError` naming no tool, as the
+  unguarded MiniMax map did. That malformed entry is the one place where the
+  setting being off is not the whole story about what changed.
 - The injected `properties` object is added after conversion, so it survives the
   step where `relaxSchemaForFunctionCalling` strips an empty `properties` from a
   schema whose source validated locally. A server that rejects an empty
@@ -190,8 +197,11 @@ hostname-gated, so it applies wherever the user opted in.
   the entry explicitly sets `false`, and the schema when opted in, including a
   tool that declares no schema at all. DashScope asserts the opt-in, the
   explicit `false` opt-out and the default omission; MiniMax asserts the
-  injection with and without the opt-in. A declared schema passes through
-  unchanged and a request without tools stays tool-free. With the repair
+  injection with and without the opt-in, and that an `extra_body` entry claiming
+  `type: 'function'` with no `function` object is left alone on that route with
+  the setting off — the one case where a guard, not the flag, is what keeps
+  request building alive. A declared schema passes through unchanged and a
+  request without tools stays tool-free. With the repair
   disabled every flag-gated case goes red while the MiniMax, omission and
   passthrough cases stay green, so the suite discriminates on the flag rather
   than on the provider class.

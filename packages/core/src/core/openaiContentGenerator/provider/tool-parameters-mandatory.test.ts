@@ -487,6 +487,35 @@ describe('generationConfig.toolParametersMandatory', () => {
       );
       expect(request.max_tokens).toBe(32_000);
     });
+
+    // The injection on this route is not gated on the opt-in, so the guards in
+    // the shared map are the one part of the change that reaches a route with
+    // the setting off. The unguarded MiniMax map this replaced read
+    // `tool.function.parameters` straight off the entry, so a flat entry merged
+    // from `extra_body` aborted request building with a `TypeError` naming no
+    // tool; a converter-shaped entry merged next to it still gets the schema.
+    it('leaves a flat function entry from extra_body untouched on MiniMax without the opt-in', () => {
+      const config: ContentGeneratorConfig = {
+        ...createConfig('local-model', 'https://api.minimaxi.com/v1'),
+        extra_body: { tools: [CONVERTER_SHAPE, FLAT_FUNCTION_TOOL] },
+      };
+      const provider = determineProvider(config, mockCliConfig);
+
+      expect(provider).toBeInstanceOf(MiniMaxOpenAICompatibleProvider);
+      const request = outboundRequest(config, provider);
+
+      expect(request.tools).toEqual([
+        {
+          ...CONVERTER_SHAPE,
+          function: {
+            ...CONVERTER_SHAPE.function,
+            parameters: EMPTY_PARAMETERS,
+          },
+        },
+        FLAT_FUNCTION_TOOL,
+      ]);
+      expect(request.max_tokens).toBe(32_000);
+    });
   });
 
   describe('tools that already declare a schema', () => {

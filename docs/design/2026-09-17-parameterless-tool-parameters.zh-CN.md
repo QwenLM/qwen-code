@@ -135,7 +135,12 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
   时则保留。侧模型自身条目上的 `generationConfig.toolParametersMandatory`
   总是优先，包括显式 `false`。
 - 只新增字段，从不删除。服务器会拒绝存在的 `parameters` 对象的路由不会开启该开关，
-  因而不受影响。
+  因而不受影响：开关关闭时这份映射根本不会运行。但一条从未开启该开关的路由
+  并非完全没有被这次改动触及 —— MiniMax 恰恰要求该字段存在，
+  无论该开关取值都会调用共享映射。它的守卫会让一个声称 `type: 'function'`
+  却不带 `function` 对象的 `extra_body` 条目被原样保留，不再像此前未加守卫的
+  MiniMax 映射那样，以一个不指明工具名的 `TypeError` 中断请求构建。
+  这个畸形条目，就是"开关关闭即一切未变"唯一不成立的地方。
 - 注入的 `properties` 对象发生在转换之后，因此它不会被
   `relaxSchemaForFunctionCalling` 在转换中删除空 `properties` 的那一步影响。
   拒绝空 `properties` 对象的服务器不应开启该开关。
@@ -162,7 +167,9 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
   穿过按主机名门控的 reasoning 重排。无厂商判定的普通路由断言默认省略、
   条目显式设为 `false` 时的省略、开启后发出的 schema，以及完全没有声明
   schema 的工具。DashScope 断言开启、显式 `false` 退出与默认省略三种状态；
-  MiniMax 断言开启与不开启开关时的注入。已声明的 schema 原样透传，
+  MiniMax 断言开启与不开启开关时的注入，并断言在开关关闭时，经由 `extra_body`
+  合入、声称 `type: 'function'` 却不带 `function` 对象的条目会被原样保留 ——
+  在这条路由上撑起请求构建的是守卫而不是开关。已声明的 schema 原样透传，
   不含 tools 的请求仍然不带 tools。关闭修复时，每一个受开关门控的用例都会变红，
   而 MiniMax、省略与透传类用例仍为绿，因此测试套件区分的是开关，
   而不是 provider 类。
