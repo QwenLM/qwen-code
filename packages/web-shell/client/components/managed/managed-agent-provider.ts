@@ -32,6 +32,18 @@ export interface ManagedSessionOptions {
   availableApprovalModes: ManagedApprovalMode[];
 }
 
+export interface ManagedSessionApproval extends ManagedSessionOptions {
+  approvalRevision: number;
+  supported: boolean;
+}
+
+export interface ManagedApprovalChangeResult {
+  sessionId: string;
+  approvalMode: ManagedApprovalMode;
+  approvalRevision: number;
+  replayed: boolean;
+}
+
 export interface ManagedModelContext {
   modelId: string;
   inputTokens?: number;
@@ -60,6 +72,8 @@ export interface ManagedAgentSessionSummary {
   sessionId: string;
   agentId?: string;
   approvalMode?: ManagedApprovalMode;
+  initialApprovalMode?: ManagedApprovalMode;
+  approvalRevision?: number;
   modelContext?: ManagedModelContext;
   modelSelection?: ManagedModelSelection;
   activeTurnId?: string;
@@ -87,6 +101,7 @@ export interface ManagedAgentSessionSummary {
     workspaceTurns?: boolean;
     cwdChange?: boolean;
     modelChange?: boolean;
+    approvalModeChange?: boolean;
   };
   failure?: { code: string; message: string };
 }
@@ -155,6 +170,35 @@ export type ManagedTaskEventPage =
   components['schemas']['WebShellTaskEventPage'];
 export type ManagedTaskCancelOperation =
   components['schemas']['WebShellCommandOperation'] & { type: 'task_cancel' };
+
+export type ManagedRuntimeNode = components['schemas']['WebShellRuntimeNode'];
+
+export type ManagedWorkspaceDirectory =
+  components['schemas']['WebShellWorkspaceDirectory'];
+
+export type ManagedWorkspaceCreateOperation =
+  components['schemas']['WebShellWorkspaceCreateOperation'];
+
+export interface ManagedWorkspaceRegistration {
+  listNodes(
+    options: ManagedAgentRequestOptions,
+  ): Promise<components['schemas']['WebShellRuntimeNodePage']>;
+  checkDirectory(
+    request: components['schemas']['WebShellWorkspaceDirectoryRequest'],
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedWorkspaceDirectory>;
+  create(
+    request: Omit<
+      components['schemas']['WebShellWorkspaceRegisterRequest'],
+      'idempotencyKey' | 'requestId'
+    >,
+    options: ManagedAgentCommandOptions,
+  ): Promise<ManagedWorkspaceCreateOperation>;
+  query(
+    operationId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedWorkspaceCreateOperation>;
+}
 
 /** A Hosted tool approval waiting for the Session owner's answer. */
 export interface ManagedAgentPendingAction {
@@ -230,6 +274,17 @@ export interface ManagedAgentProvider {
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedCwdOperation>;
   };
+  readonly approvalChange?: {
+    queryOptions(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionApproval>;
+    submit(
+      sessionId: string,
+      request: { approvalMode: ManagedApprovalMode; expectedRevision: number },
+      options: ManagedAgentCommandOptions & { requestId: string },
+    ): Promise<ManagedApprovalChangeResult>;
+  };
   readonly modelChange?: {
     queryOptions(
       sessionId: string,
@@ -243,6 +298,7 @@ export interface ManagedAgentProvider {
   };
   readonly workspaceBinding?: {
     readonly agentId: string;
+    readonly registration?: ManagedWorkspaceRegistration;
     /** Host-published model-specific AgentDefinitions available for new Sessions. */
     readonly modelPresets?: readonly { agentId: string; label: string }[];
     list(

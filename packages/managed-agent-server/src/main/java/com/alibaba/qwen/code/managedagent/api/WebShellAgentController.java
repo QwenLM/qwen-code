@@ -265,6 +265,21 @@ public class WebShellAgentController {
                         request.expectedContextRevision()));
     }
 
+    @PostMapping("/session-approval/query")
+    public ApiModels.WebShellSessionApproval querySessionApproval(TenantContext tenant,
+            @Valid @RequestBody ApiModels.WebShellSessionApprovalRequest request) {
+        return service.queryWebShellSessionApproval(tenant.tenantId(), tenant.actorId(), request.sessionId());
+    }
+
+    @PostMapping("/session-approval/change")
+    public ApiModels.WebShellApprovalChangeResult changeSessionApproval(TenantContext tenant,
+            @Valid @RequestBody ApiModels.WebShellChangeApprovalRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
+        return service.changeWebShellSessionApproval(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                request.idempotencyKey(), request.approvalMode(), request.expectedRevision());
+    }
+
     @PostMapping("/session-models/query")
     public WebShellSessionModels querySessionModels(TenantContext tenant,
             @Valid @RequestBody WebShellSessionModelsRequest request) {

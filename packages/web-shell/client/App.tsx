@@ -109,6 +109,7 @@ import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
 import {
+  SESSION_ARCHIVE_BATCH_SIZE,
   SESSION_LIST_PAGE_SIZE,
   SESSION_LIVE_STATE_FEATURE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
@@ -2854,6 +2855,20 @@ interface SideTaskCatalogState {
   loaded: boolean;
 }
 
+export function canArchiveSideTaskSummary(
+  session: Pick<
+    DaemonSessionSummary,
+    'activeWorkState' | 'hasActivePrompt' | 'hasRunningBackgroundTasks'
+  >,
+): boolean {
+  return (
+    !session.hasActivePrompt &&
+    !session.hasRunningBackgroundTasks &&
+    (session.activeWorkState === undefined ||
+      session.activeWorkState === 'idle')
+  );
+}
+
 // Merge a fresh side-task listing into the cached catalog. The listing is
 // authoritative: a cached item survives only while it is still listed or is a
 // locally created draft the daemon has not echoed back yet (optimisticIds).
@@ -5306,6 +5321,13 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const sideTaskRestoreAvailable =
+    sideTasksAvailable &&
+    connection.capabilities?.features.includes('session_archive') === true;
+  const sideTaskArchiveAvailable =
+    sideTaskRestoreAvailable &&
+    connection.capabilities?.features.includes('session_archive_idle_guard') ===
+      true;
   const filesAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('files') &&
@@ -5345,18 +5367,41 @@ export function App({
     items: [],
     loaded: false,
   });
+  const [archivedSideTaskCatalog, setArchivedSideTaskCatalog] =
+    useState<SideTaskCatalogState>({
+      items: [],
+      loaded: false,
+    });
+  const [sideTaskCatalogRefreshNonce, setSideTaskCatalogRefreshNonce] =
+    useState(0);
+  const refreshSideTaskCatalog = useCallback(() => {
+    setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+  }, []);
+  const sideTaskCatalogRequestGenerationRef = useRef(0);
+  const removedSideTaskSessionIdsRef = useRef(new Set<string>());
   useLayoutEffect(() => {
+    sideTaskCatalogRequestGenerationRef.current += 1;
+    removedSideTaskSessionIdsRef.current.clear();
     setSideTaskCatalog({ items: [], loaded: false });
+    setArchivedSideTaskCatalog({ items: [], loaded: false });
   }, [logicalSessionKey]);
   const optimisticSideTaskIdsRef = useRef(new Set<string>());
   const visibleSideTasks =
     sideTaskCatalog.parentSessionId === connection.sessionId
       ? sideTaskCatalog.items
       : [];
+  const visibleArchivedSideTasks =
+    archivedSideTaskCatalog.parentSessionId === connection.sessionId
+      ? archivedSideTaskCatalog.items
+      : [];
   const sideTasksLoading =
     visibleSideTasks.length === 0 &&
+    visibleArchivedSideTasks.length === 0 &&
     (sideTaskCatalog.parentSessionId !== connection.sessionId ||
-      !sideTaskCatalog.loaded);
+      !sideTaskCatalog.loaded ||
+      (sideTaskRestoreAvailable &&
+        (archivedSideTaskCatalog.parentSessionId !== connection.sessionId ||
+          !archivedSideTaskCatalog.loaded)));
   const nextSideTaskTabIdRef = useRef(0);
   const createSideTask = useCallback(
     (initialPrompt?: string) => {
@@ -5560,6 +5605,7 @@ export function App({
               title: sideTaskTab.title,
               workspaceCwd: sideTaskTab.workspaceCwd,
               updatedAt: new Date().toISOString(),
+              archivable: false,
             },
           ],
         };
@@ -5626,6 +5672,7 @@ export function App({
     (sideTask: SideTaskListItem) => {
       const parentSessionId = connection.sessionId;
       if (!parentSessionId) return;
+      removedSideTaskSessionIdsRef.current.delete(sideTask.sessionId);
       const tab: ArtifactPanelTab = {
         id: `side-task:${sideTask.sessionId}`,
         kind: 'side_task',
@@ -5656,38 +5703,60 @@ export function App({
     const workspaceCwd = connection.workspaceCwd;
     if (!sideTasksAvailable || !parentSessionId || !workspaceCwd) {
       setSideTaskCatalog({ items: [], loaded: false });
+      setArchivedSideTaskCatalog({ items: [], loaded: false });
       return;
     }
     if (!artifactPanelOpen) return;
+    const requestGeneration = ++sideTaskCatalogRequestGenerationRef.current;
     setSideTaskCatalog((catalog) =>
       catalog.parentSessionId === parentSessionId
         ? { ...catalog, loaded: false }
         : { parentSessionId, items: [], loaded: false },
     );
+    setArchivedSideTaskCatalog((catalog) =>
+      catalog.parentSessionId === parentSessionId
+        ? { ...catalog, loaded: !sideTaskRestoreAvailable }
+        : {
+            parentSessionId,
+            items: [],
+            loaded: !sideTaskRestoreAvailable,
+          },
+    );
     let cancelled = false;
-    void loadSessionCatalogOnce(
-      workspace.client,
-      {
-        routeKind: 'legacy',
-        workspaceCwd,
-        options: {
-          pageSize: SESSION_LIST_PAGE_SIZE,
-          archiveState: 'active',
-          sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
-          sourceId: parentSessionId,
+    const requestIsCurrent = () =>
+      !cancelled &&
+      sideTaskCatalogRequestGenerationRef.current === requestGeneration;
+    const toSideTaskListItem = (
+      session: DaemonSessionSummary,
+    ): SideTaskListItem => ({
+      sessionId: session.sessionId,
+      title:
+        session.displayName?.trim() ||
+        `${t('sideTask.title')} ${session.sessionId.slice(0, 8)}`,
+      workspaceCwd: session.workspaceCwd || workspaceCwd,
+      updatedAt: session.updatedAt || session.createdAt,
+    });
+    const loadSideTasks = (archiveState: 'active' | 'archived') =>
+      loadSessionCatalogOnce(
+        workspace.client,
+        {
+          routeKind: 'legacy',
+          workspaceCwd,
+          options: {
+            pageSize: SESSION_LIST_PAGE_SIZE,
+            archiveState,
+            sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
+            sourceId: parentSessionId,
+          },
         },
-      },
-      { fresh: true },
-    )
+        { fresh: true },
+      );
+    void loadSideTasks('active')
       .then((page) => {
-        if (cancelled) return;
+        if (!requestIsCurrent()) return;
         const listedItems = page.sessions.map((session) => ({
-          sessionId: session.sessionId,
-          title:
-            session.displayName?.trim() ||
-            `${t('sideTask.title')} ${session.sessionId.slice(0, 8)}`,
-          workspaceCwd: session.workspaceCwd || workspaceCwd,
-          updatedAt: session.updatedAt || session.createdAt,
+          ...toSideTaskListItem(session),
+          archivable: canArchiveSideTaskSummary(session),
         }));
         for (const item of listedItems) {
           optimisticSideTaskIdsRef.current.delete(item.sessionId);
@@ -5702,13 +5771,32 @@ export function App({
         );
       })
       .catch(() => {
-        if (cancelled) return;
+        if (!requestIsCurrent()) return;
         setSideTaskCatalog((catalog) =>
           catalog.parentSessionId === parentSessionId
             ? { ...catalog, loaded: true }
             : catalog,
         );
       });
+    if (sideTaskRestoreAvailable) {
+      void loadSideTasks('archived')
+        .then((page) => {
+          if (!requestIsCurrent()) return;
+          setArchivedSideTaskCatalog({
+            parentSessionId,
+            loaded: true,
+            items: page.sessions.map(toSideTaskListItem),
+          });
+        })
+        .catch(() => {
+          if (!requestIsCurrent()) return;
+          setArchivedSideTaskCatalog((catalog) =>
+            catalog.parentSessionId === parentSessionId
+              ? { ...catalog, loaded: true }
+              : catalog,
+          );
+        });
+    }
     return () => {
       cancelled = true;
     };
@@ -5716,6 +5804,8 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
     artifactPanelOpen,
+    sideTaskCatalogRefreshNonce,
+    sideTaskRestoreAvailable,
     sideTasksAvailable,
     t,
     workspace.client,
@@ -7163,8 +7253,15 @@ export function App({
         ...mergedRestoredTabs.map((tab) => openedById.get(tab.id) ?? tab),
         ...tabsOpenedDuringRestore.filter((tab) => !restoredIds.has(tab.id)),
       ];
-      const mergedTabs = candidateTabs.filter(
-        (tab) =>
+      const mergedTabs = candidateTabs.filter((tab) => {
+        if (
+          tab.kind === 'side_task' &&
+          tab.sessionId &&
+          removedSideTaskSessionIdsRef.current.has(tab.sessionId)
+        ) {
+          return false;
+        }
+        return (
           // Once the split decision is final, drop stale pane-bound tabs before
           // they can be selected active and mount a foreign collection; while
           // the decision is pending, commit and let the settled sweep reclaim.
@@ -7175,8 +7272,9 @@ export function App({
             (mainViewRef.current !== 'split' ||
               tab.sessionId === undefined ||
               !splitSessionIdsRef.current.includes(tab.sessionId))
-          ),
-      );
+          )
+        );
+      });
       const reclaimEmptiedPanel =
         mergedTabs.length === 0 && candidateTabs.length > 0;
       const activeTabId = mergedTabs.some(
@@ -7784,6 +7882,82 @@ export function App({
   );
   const closeArtifactPanelTab = useCallback(
     (tabId: string) => closeArtifactPanelTabs(new Set([tabId])),
+    [closeArtifactPanelTabs],
+  );
+  const removeSideTaskTabs = useCallback(
+    (sessionIds: ReadonlySet<string>) => {
+      for (const sessionId of sessionIds) {
+        removedSideTaskSessionIdsRef.current.add(sessionId);
+      }
+      const matches = (tab: { kind: string; sessionId?: string }) =>
+        tab.kind === 'side_task' &&
+        tab.sessionId !== undefined &&
+        sessionIds.has(tab.sessionId);
+      closeArtifactPanelTabs(
+        new Set(
+          artifactPanelTabsRef.current.filter(matches).map((tab) => tab.id),
+        ),
+      );
+      for (const [
+        sessionKey,
+        state,
+      ] of artifactPanelStateBySessionRef.current) {
+        const removedIds = new Set(
+          state.tabs.filter(matches).map((tab) => tab.id),
+        );
+        if (removedIds.size === 0) continue;
+        const tabs = state.tabs.filter((tab) => !removedIds.has(tab.id));
+        artifactPanelStateBySessionRef.current.set(sessionKey, {
+          ...state,
+          open: tabs.length > 0 && state.open,
+          tabs,
+          activeTabId:
+            state.activeTabId && removedIds.has(state.activeTabId)
+              ? (tabs[0]?.id ?? null)
+              : state.activeTabId,
+        });
+      }
+      for (const [
+        sessionKey,
+        tabs,
+      ] of artifactPanelDeferredPersistedTabsRef.current) {
+        const retained = tabs.filter((tab) => !matches(tab));
+        if (retained.length === tabs.length) continue;
+        if (retained.length === 0) {
+          artifactPanelDeferredPersistedTabsRef.current.delete(sessionKey);
+        } else {
+          artifactPanelDeferredPersistedTabsRef.current.set(
+            sessionKey,
+            retained,
+          );
+        }
+      }
+      let persistedChanged = false;
+      for (const [sessionKey, state] of Object.entries(
+        artifactPanelPersistedStatesRef.current,
+      )) {
+        const removedIds = new Set(
+          state.tabs.filter(matches).map((tab) => tab.id),
+        );
+        if (removedIds.size === 0) continue;
+        const tabs = state.tabs.filter((tab) => !removedIds.has(tab.id));
+        artifactPanelPersistedStatesRef.current[sessionKey] = {
+          open: tabs.length > 0 && state.open,
+          tabs,
+          activeTabId:
+            state.activeTabId && removedIds.has(state.activeTabId)
+              ? (tabs[0]?.id ?? null)
+              : state.activeTabId,
+        };
+        persistedChanged = true;
+      }
+      if (persistedChanged) {
+        writeStoredArtifactPanelStates(
+          RIGHT_PANEL_STATE_STORAGE_KEY,
+          artifactPanelPersistedStatesRef.current,
+        );
+      }
+    },
     [closeArtifactPanelTabs],
   );
   const closeUsageTabs = useCallback(
@@ -11301,6 +11475,169 @@ export function App({
       pushToast('error', message);
     },
     [pushToast, t],
+  );
+  const archiveSideTasks = useCallback(
+    async (sideTasks: readonly SideTaskListItem[]) => {
+      if (!sideTaskArchiveAvailable) return;
+      const eligibleTasks = sideTasks.filter(
+        (sideTask) => sideTask.archivable === true,
+      );
+      if (eligibleTasks.length === 0) return;
+      // Archive through each task's owning workspace runtime: the unscoped
+      // route resolves ids against the legacy-primary catalog, where a
+      // secondary-Workspace task answers notFound without migrating.
+      const idsByWorkspace = new Map<string | undefined, string[]>();
+      for (const sideTask of eligibleTasks) {
+        const key = sideTask.workspaceCwd?.trim()
+          ? sideTask.workspaceCwd
+          : undefined;
+        const ids = idsByWorkspace.get(key);
+        if (ids === undefined) idsByWorkspace.set(key, [sideTask.sessionId]);
+        else ids.push(sideTask.sessionId);
+      }
+      try {
+        const batches = [...idsByWorkspace.entries()].flatMap(([cwd, ids]) =>
+          Array.from(
+            { length: Math.ceil(ids.length / SESSION_ARCHIVE_BATCH_SIZE) },
+            (_, index) => ({
+              cwd,
+              ids: ids.slice(
+                index * SESSION_ARCHIVE_BATCH_SIZE,
+                (index + 1) * SESSION_ARCHIVE_BATCH_SIZE,
+              ),
+            }),
+          ),
+        );
+        const settledResults = await Promise.allSettled(
+          batches.map((batch) =>
+            batch.cwd === undefined
+              ? workspace.client.archiveSessionsData(batch.ids, {
+                  requireIdle: true,
+                })
+              : workspace.client
+                  .workspaceByCwd(batch.cwd)
+                  .archiveSessionsData(batch.ids, { requireIdle: true }),
+          ),
+        );
+        const results = settledResults.flatMap((result) =>
+          result.status === 'fulfilled' ? [result.value] : [],
+        );
+        const archived = new Set([
+          ...results.flatMap((result) => result.archived),
+          ...results.flatMap((result) => result.alreadyArchived),
+        ]);
+        if (archived.size > 0) {
+          sideTaskCatalogRequestGenerationRef.current += 1;
+          for (const sessionId of archived) {
+            optimisticSideTaskIdsRef.current.delete(sessionId);
+          }
+          setSideTaskCatalog((catalog) => ({
+            ...catalog,
+            items: catalog.items.filter(
+              (sideTask) => !archived.has(sideTask.sessionId),
+            ),
+          }));
+          removeSideTaskTabs(archived);
+          setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+        }
+        const errorMessages = [
+          ...results.flatMap((result) =>
+            result.notFound.map(
+              (sessionId) => `${sessionId}: not found in its workspace catalog`,
+            ),
+          ),
+          ...results.flatMap((result) =>
+            result.errors.map((entry) => `${entry.sessionId}: ${entry.error}`),
+          ),
+          ...settledResults.flatMap((result, index) =>
+            result.status === 'rejected'
+              ? batches[index]!.ids.map(
+                  (sessionId) =>
+                    `${sessionId}: ${formatError(result.reason, t('sidebar.archiveFailed'))}`,
+                )
+              : [],
+          ),
+        ];
+        if (errorMessages.length > 0) {
+          throw new Error(errorMessages.join('; '));
+        }
+      } catch (error) {
+        reportError(error, t('sidebar.archiveFailed'));
+      }
+    },
+    [
+      reportError,
+      removeSideTaskTabs,
+      sideTaskArchiveAvailable,
+      t,
+      workspace.client,
+    ],
+  );
+  const unarchiveSideTasks = useCallback(
+    async (sideTasks: readonly SideTaskListItem[]) => {
+      if (!sideTaskRestoreAvailable) return;
+      if (sideTasks.length === 0) return;
+      const idsByWorkspace = new Map<string | undefined, string[]>();
+      for (const sideTask of sideTasks) {
+        const key = sideTask.workspaceCwd?.trim()
+          ? sideTask.workspaceCwd
+          : undefined;
+        const ids = idsByWorkspace.get(key);
+        if (ids === undefined) idsByWorkspace.set(key, [sideTask.sessionId]);
+        else ids.push(sideTask.sessionId);
+      }
+      try {
+        const groups = [...idsByWorkspace.entries()];
+        const settledResults = await Promise.allSettled(
+          groups.map(([cwd, ids]) =>
+            cwd === undefined
+              ? workspace.client.unarchiveSessionsData(ids)
+              : workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
+          ),
+        );
+        const results = settledResults.flatMap((result) =>
+          result.status === 'fulfilled' ? [result.value] : [],
+        );
+        const restored = new Set([
+          ...results.flatMap((result) => result.unarchived),
+          ...results.flatMap((result) => result.alreadyActive),
+        ]);
+        if (restored.size > 0) {
+          sideTaskCatalogRequestGenerationRef.current += 1;
+          setArchivedSideTaskCatalog((catalog) => ({
+            ...catalog,
+            items: catalog.items.filter(
+              (sideTask) => !restored.has(sideTask.sessionId),
+            ),
+          }));
+          setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+        }
+        const errorMessages = [
+          ...results.flatMap((result) =>
+            result.notFound.map(
+              (sessionId) => `${sessionId}: not found in its workspace catalog`,
+            ),
+          ),
+          ...results.flatMap((result) =>
+            result.errors.map((entry) => `${entry.sessionId}: ${entry.error}`),
+          ),
+          ...settledResults.flatMap((result, index) =>
+            result.status === 'rejected'
+              ? groups[index]![1].map(
+                  (sessionId) =>
+                    `${sessionId}: ${formatError(result.reason, t('sidebar.unarchiveFailed'))}`,
+                )
+              : [],
+          ),
+        ];
+        if (errorMessages.length > 0) {
+          throw new Error(errorMessages.join('; '));
+        }
+      } catch (error) {
+        reportError(error, t('sidebar.unarchiveFailed'));
+      }
+    },
+    [reportError, sideTaskRestoreAvailable, t, workspace.client],
   );
   const refuseModelSetup = useCallback(
     (text: string) => {
@@ -20529,9 +20866,15 @@ export function App({
     items: isChatEmptyState ? emptyStateRightPanelItems : rightPanelItems,
     sideTaskAvailable: sideTasksAvailable,
     sideTasks: visibleSideTasks,
+    archivedSideTasks: visibleArchivedSideTasks,
     sideTasksLoading,
     onCreateSideTask: createEmptySideTask,
     onOpenSideTask: openSideTask,
+    onArchiveSideTasks: sideTaskArchiveAvailable ? archiveSideTasks : undefined,
+    onUnarchiveSideTasks: sideTaskRestoreAvailable
+      ? unarchiveSideTasks
+      : undefined,
+    onSideTaskMenuOpen: refreshSideTaskCatalog,
     onCreateSideTaskSession: createSideTaskSession,
     onSideTaskCreated: handleSideTaskCreated,
     onSideTaskTitleChange: handleSideTaskTitleChange,
