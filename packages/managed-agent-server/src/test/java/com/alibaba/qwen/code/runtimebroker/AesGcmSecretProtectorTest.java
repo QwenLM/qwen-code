@@ -104,8 +104,12 @@ class AesGcmSecretProtectorTest {
                 rotated.unprotect("binding-1", existing));
         assertArrayEquals("current-secret".getBytes(StandardCharsets.UTF_8),
                 rotated.unprotect("binding-2", current));
-        assertThrows(IllegalStateException.class,
+        IllegalStateException unavailable = assertThrows(
+                IllegalStateException.class,
                 () -> previous.unprotect("binding-2", current));
+
+        assertTrue(unavailable.getMessage()
+                .contains("Runtime credential key is unavailable"));
     }
 
     @Test

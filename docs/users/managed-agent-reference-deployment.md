@@ -116,13 +116,13 @@ Wrap every map key in `[ ... ]`. Spring's relaxed binder normalises plain keys â
 
 Restart the single Java control plane, verify that existing bindings load, and verify that new binding rows record `reference-v2`. New secrets use only the active key; old rows remain encrypted under their recorded key ID. The server does not re-encrypt old rows on read, and removing a still-referenced key makes those rows unreadable.
 
-Retire `reference-v1` only when no persisted row references it. `ma_runtime_binding.credential_key_id` and `ma_runtime_binding.runtime_credential_key_id` are the only persisted references; both store UTF-8 bytes, so read them as text:
+Retire `reference-v1` only when no persisted row references it. `ma_runtime_binding.credential_key_id` and `ma_runtime_binding.runtime_credential_key_id` are the only persisted references; both store UTF-8 bytes. Select them without `CONVERT` so the deduplication stays byte-exact, the way key selection is: a converted value carries the character set's default collation and would merge two IDs that differ only in case or accent, hiding a key that rows still reference.
 
 ```sql
-SELECT DISTINCT CONVERT(credential_key_id USING utf8mb4) AS key_id
+SELECT DISTINCT credential_key_id AS key_id
 FROM ma_runtime_binding WHERE credential_key_id IS NOT NULL
 UNION
-SELECT DISTINCT CONVERT(runtime_credential_key_id USING utf8mb4) AS key_id
+SELECT DISTINCT runtime_credential_key_id AS key_id
 FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL;
 ```
 

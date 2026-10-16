@@ -36,9 +36,6 @@ public final class AesGcmSecretProtector implements SecretProtector {
         if (random == null) {
             throw new IllegalArgumentException("random is required");
         }
-        if (keyBytes == null || !keyBytes.containsKey(this.activeKeyId)) {
-            throw new IllegalArgumentException("active AES-GCM key is required");
-        }
         Map<String, SecretKey> configured = new LinkedHashMap<>();
         keyBytes.forEach((id, bytes) -> {
             String configuredId = BrokerValues.requireId(id, "keyId");
