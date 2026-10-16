@@ -1,4 +1,8 @@
 export const FILES_MESSAGES_EN = {
+  'files.delete': 'Delete file',
+  'files.deleteTitle': 'Delete file?',
+  'files.deleteWarning':
+    'This will permanently delete the file. This cannot be undone.',
   'files.copyRelativePath': 'Copy relative path',
   'files.copyAbsolutePath': 'Copy absolute path',
   'files.reference': 'Reference',
@@ -22,6 +26,7 @@ export const FILES_MESSAGES_EN = {
   'files.noMatches': 'No matches in loaded paths',
   'files.resizeTree': 'Resize file preview and tree',
   'files.toggleTree': 'Toggle file tree',
+  'files.closePreview': 'Close file preview',
   'files.emptyDirectory': 'Empty folder',
   'files.truncated': 'Only the first 2,000 entries are shown',
   'files.loadFailed': 'File browser could not load',
@@ -33,6 +38,9 @@ export const FILES_MESSAGES_EN = {
 };
 
 export const FILES_MESSAGES_ZH = {
+  'files.delete': '删除文件',
+  'files.deleteTitle': '删除文件？',
+  'files.deleteWarning': '此操作将永久删除该文件。删除后不可恢复。',
   'files.copyRelativePath': '复制相对路径',
   'files.copyAbsolutePath': '复制绝对路径',
   'files.reference': '引用',
@@ -56,6 +64,7 @@ export const FILES_MESSAGES_ZH = {
   'files.noMatches': '已加载路径内无匹配',
   'files.resizeTree': '调整文件预览和目录树宽度',
   'files.toggleTree': '显示或隐藏文件树',
+  'files.closePreview': '关闭文件预览',
   'files.emptyDirectory': '空目录',
   'files.truncated': '仅显示前 2,000 个条目',
   'files.loadFailed': '无法加载文件浏览器',

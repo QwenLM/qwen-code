@@ -416,3 +416,51 @@ qwen mcp add serpapi \
 Replace `${SERPAPI_API_KEY}` with your actual API key, or set it as an environment variable. The key is only needed for searches. Without a valid API key, the server still connects and lists its tools, but `search` returns an error.
 
 ---
+
+### looot
+
+A hosted MCP server from looot with web search, Google SERP results, news search and web page reading. Search queries and the URLs you ask it to read are sent to looot.
+
+- **Documentation:** https://docs.looot.ai
+- **Cost:** Paid (prepaid balance, no free tier)
+- **Get API Key:** https://looot.ai
+- **Best for:** Web search, Google SERP and news results, and reading a page as text
+
+#### Available Tools
+
+- `web_search` — Web search
+- `google_search_results` — Google SERP results
+- `news_search` — News search
+- `read_web_page` — Read a single page as text
+
+The server also exposes company and email lookups.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add looot \
+  -t http \
+  "https://api.looot.ai/mcp" \
+  -H "Authorization: Bearer ${LOOOT_API_KEY}"
+```
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "looot": {
+      "httpUrl": "https://api.looot.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LOOOT_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${LOOOT_API_KEY}` with your actual API key, or set it as an environment variable.
+
+---

@@ -1783,6 +1783,7 @@ describe('verifyRecoverySession', () => {
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-read/1' },
   ])('recovers every saved Workspace profile (%j)', async (definition) => {
     // One refused profile would abort recovery for the whole Workspace,
     // so recovery reads the same profile vocabulary creation persists.
@@ -1795,6 +1796,7 @@ describe('verifyRecoverySession', () => {
   it.each([
     { toolProfile: 'hosted-workspace-files/3' },
     { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-read/1', captureBytes: 1024 },
   ])('still refuses an unknown Hosted definition (%j)', async (definition) => {
     const f = fixture(definition);
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(

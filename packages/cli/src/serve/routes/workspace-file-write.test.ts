@@ -18,6 +18,7 @@ import { createServeApp } from '../server.js';
 import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
+  type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { ServeOptions } from '../types.js';
@@ -32,6 +33,7 @@ interface Harness {
   workspace: string;
   scratch: string;
   events: BridgeEvent[];
+  fsFactory: WorkspaceFileSystemFactory;
   app: ReturnType<typeof createServeApp>;
 }
 
@@ -66,9 +68,9 @@ async function makeHarness(opts?: {
       hostname: opts?.hostname ?? baseOpts.hostname,
     },
     undefined,
-    { fsFactory },
+    { fsFactory, primaryWorkspaceTrusted: opts?.trusted ?? true },
   );
-  return { workspace, scratch, events, app };
+  return { workspace, scratch, events, app, fsFactory };
 }
 
 async function teardown(h: Harness): Promise<void> {
@@ -1564,5 +1566,95 @@ describe('fileUploadBodyParser 413 (oversized buffered body)', () => {
       .send(Buffer.from('x'));
     expect(res.status).toBe(415);
     expect(res.text).not.toContain('file_too_large');
+  });
+});
+
+describe('POST /workspaces/:workspace/file/delete', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness({ token: 'secret' });
+  });
+  afterEach(async () => teardown(h));
+  const endpoint = (workspace: string) =>
+    `/workspaces/${encodeURIComponent(workspace)}/file/delete`;
+
+  it('deletes a regular file through the qualified runtime', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'file.txt'), 'delete me');
+    const res = await request(h.app)
+      .post(endpoint(h.workspace))
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ path: 'file.txt' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ kind: 'file_delete', path: 'file.txt' });
+    expect(
+      await fsp.stat(path.join(h.workspace, 'file.txt')).catch(() => null),
+    ).toBeNull();
+  });
+
+  it('requires mutation auth and never deletes on an unknown workspace', async () => {
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    const denied = await request(h.app)
+      .post(endpoint(h.workspace))
+      .set('Host', loopbackHost())
+      .send({ path: 'keep.txt' });
+    expect(denied.status).toBe(401);
+    const unknown = await request(h.app)
+      .post(endpoint('unknown'))
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ path: 'keep.txt' });
+    expect(unknown.status).toBe(400);
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+
+  it('returns 422 without deleting when the runtime factory lacks delete support', async () => {
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    const fs = h.fsFactory.forRequest({ route: 'TEST /unsupported' });
+    fs.deleteFile = undefined;
+    h.fsFactory.forRequest = () => fs;
+    const res = await request(h.app)
+      .post(endpoint(h.workspace))
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ path: 'keep.txt' });
+    expect(res.status).toBe(422);
+    expect(res.body.errorKind).toBe('parse_error');
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+
+  it('rejects invalid bodies, directories and symlinks', async () => {
+    await fsp.mkdir(path.join(h.workspace, 'folder'));
+    await fsp.writeFile(path.join(h.workspace, 'keep.txt'), 'keep');
+    await fsp.symlink(
+      path.join(h.workspace, 'keep.txt'),
+      path.join(h.workspace, 'link'),
+    );
+    for (const [filePath, status, errorKind] of [
+      [null, 400, 'parse_error'],
+      ['', 400, 'parse_error'],
+      ['.', 400, 'parse_error'],
+      ['folder', 400, 'parse_error'],
+      ['link', 400, 'symlink_escape'],
+      ['a\0b.txt', 400, 'parse_error'],
+      ['file.', 400, 'parse_error'],
+      ['missing.txt', 404, 'path_not_found'],
+    ]) {
+      const res = await request(h.app)
+        .post(endpoint(h.workspace))
+        .set('Host', loopbackHost())
+        .set('Authorization', 'Bearer secret')
+        .send({ path: filePath });
+      expect(res.status).toBe(status);
+      expect(res.body.errorKind).toBe(errorKind);
+    }
+    expect(await fsp.readFile(path.join(h.workspace, 'keep.txt'), 'utf8')).toBe(
+      'keep',
+    );
+    expect(
+      (await fsp.lstat(path.join(h.workspace, 'link'))).isSymbolicLink(),
+    ).toBe(true);
   });
 });

@@ -92,6 +92,7 @@ import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 import {
@@ -245,6 +246,7 @@ const state = vi.hoisted(() => ({
       resumeFromToolResults?: readonly unknown[];
       textDeltas?: import('./hosted-text-deltas.js').HostedTextDeltaStream;
       workspaceContext?: { read(): string | undefined };
+      modelSelection?: { modelId: string; revision: number };
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -407,6 +409,14 @@ function expectFullStreamedAnswer(
 }
 
 const listeners = new Set<Server>();
+
+beforeEach(() => {
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'capabilityDigest',
+    'get',
+  ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
+});
 
 afterEach(async () => {
   await Promise.all(
@@ -1273,6 +1283,213 @@ describe('Hosted Harness no-tool session', () => {
     );
     vi.restoreAllMocks();
     await rm(state.root, { recursive: true, force: true });
+  });
+
+  it('persists model selection and refuses changed resident and cold prompt replays', async () => {
+    let server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    let clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'model selection' }];
+    const request = {
+      prompt,
+      promptId: PROMPT_ID,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      modelSelection: { modelId: 'model-a', revision: 1 },
+    };
+    const send = (body = request) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send(body);
+    const idle = () =>
+      vi.waitFor(async () => {
+        const result = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(result.body.hasActivePrompt).toBe(false);
+      });
+    await send().expect(202);
+    await idle();
+    expect(state.model.mock.calls[0][0].modelSelection).toEqual(
+      request.modelSelection,
+    );
+    await send({
+      ...request,
+      modelSelection: { modelId: 'model-b', revision: 2 },
+    }).expect(409);
+    await send().expect(202);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(204);
+    server = await app();
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    clientId = loaded.body.clientId as string;
+    await send({
+      ...request,
+      modelSelection: { modelId: 'model-b', revision: 2 },
+    }).expect(409);
+    await send().expect(202);
+    await send({
+      ...request,
+      promptId: randomUUID(),
+      modelSelection: { modelId: 'model-b', revision: 2 },
+    }).expect(202);
+    await idle();
+    expect(
+      state.model.mock.calls.map(([input]) => input.modelSelection),
+    ).toEqual([request.modelSelection, { modelId: 'model-b', revision: 2 }]);
+  });
+
+  it.each([undefined, { mode: 'yolo', revision: 1 }])(
+    'preserves approval selection %j and refuses changed resident and cold prompt replays',
+    async (approvalSelection) => {
+      let server = await app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+        approvalMode: 'default',
+      });
+      let clientId = created.body.clientId as string;
+      const prompt = [{ type: 'text', text: 'approval selection' }];
+      const request = {
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        approvalSelection,
+      };
+      const send = (body = request) =>
+        headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send(body);
+      const idle = () =>
+        vi.waitFor(async () => {
+          const result = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(result.body.hasActivePrompt).toBe(false);
+        });
+      await send().expect(202);
+      await idle();
+      expect(state.model).toHaveBeenCalledTimes(1);
+      await send({
+        ...request,
+        approvalSelection: { mode: 'auto-edit', revision: 2 },
+      }).expect(409);
+      await send().expect(202);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+      server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      });
+      expect(loaded.status).toBe(200);
+      clientId = loaded.body.clientId as string;
+      await send({
+        ...request,
+        approvalSelection: { mode: 'auto-edit', revision: 2 },
+      }).expect(409);
+      await send().expect(202);
+      await send({
+        ...request,
+        promptId: randomUUID(),
+        approvalSelection: { mode: 'auto-edit', revision: 2 },
+      }).expect(202);
+      await idle();
+      expect(state.model).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('restores the accepted model selection before re-running an interrupted model', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    state.model.mockImplementationOnce(async (input) => {
+      const prepare = (
+        input as unknown as {
+          prepareModel(
+            prepared: LlmPreparedRequest,
+            round: number,
+            pending: boolean,
+          ): Promise<
+            | import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionDurableRef
+            | undefined
+          >;
+        }
+      ).prepareModel;
+      const ref = await prepare(
+        {
+          request: {
+            model: 'model-b',
+            contents: [
+              { role: 'user', parts: [{ text: 'restore model selection' }] },
+            ],
+            config: {},
+          },
+          history: [],
+          completedToolCallIds: [],
+          routeSelector: 'openai:model-b',
+          providerPin: 'a'.repeat(64),
+          promptTokensForClamp: 0,
+        },
+        0,
+        false,
+      );
+      await input.modelScope!.beginMainAttempt('model-b', ref);
+      throw new HostedToolRecoveryRequiredError('interrupted');
+    });
+    const prompt = [{ type: 'text', text: 'restore model selection' }];
+    const modelSelection = { modelId: 'model-b', revision: 2 };
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        modelSelection,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', created.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(true);
+    });
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .expect(204);
+    const replacement = await app();
+    const loaded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+      .expect(200);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(2));
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(replacement).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(false);
+    });
+    expect(
+      state.model.mock.calls.map(([input]) => input.modelSelection),
+    ).toEqual([modelSelection, modelSelection]);
   });
 
   it('re-answers a drive takeover while the resident model turn is active', async () => {
@@ -13330,6 +13547,121 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  // #13753 I3: what a prompt's tool turn declares, read from inside it.
+  async function declaredDuring(
+    server: Parameters<typeof supertest>[0],
+    clientId: string,
+  ): Promise<{ tools: string[]; isolation?: unknown }> {
+    let declared: { tools: string[]; isolation?: unknown } | undefined;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const tools = await toolTurn!.declarations(signal);
+      const agent = tools.find((tool) => tool.name === 'agent');
+      declared = {
+        tools: tools.map((tool) => tool.name!),
+        isolation: ((
+          agent?.parametersJsonSchema as {
+            properties?: Record<string, { enum?: unknown }>;
+          }
+        )?.properties ?? {})['isolation']?.enum,
+      };
+      return { text: 'ok', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: randomUUID() }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: randomUUID(),
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    expect(declared).toBeDefined();
+    return declared!;
+  }
+
+  // #13753 I3: `childSnapshots` describes the host like `childWorkspaces`,
+  // and counts only beside it.
+  it('advertises snapshot isolation only while a create or load restates it beside child Workspaces', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      childWorkspaces: true,
+      childSnapshots: true,
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    expect((await declaredDuring(server, clientId)).isolation).toEqual([
+      'worktree',
+      'snapshot',
+    ]);
+    for (const [flags, isolation] of [
+      [{ childWorkspaces: true }, ['worktree']],
+      [{ childSnapshots: true }, undefined],
+      [{ childWorkspaces: true, childSnapshots: 'true' }, ['worktree']],
+      [
+        { childWorkspaces: true, childSnapshots: true },
+        ['worktree', 'snapshot'],
+      ],
+    ] as const) {
+      const resident = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+        ...flags,
+      });
+      expect(resident.status).toBe(200);
+      expect((await declaredDuring(server, clientId)).isolation).toEqual(
+        isolation,
+      );
+    }
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  // The read profile is a saved profile: it is created, and its turns
+  // declare the two read tools and no Agent tool, whatever the host serves.
+  it('serves the read profile with its two read tools', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-read/1',
+      approvalMode: 'default',
+      childWorkspaces: true,
+      childSnapshots: true,
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    expect(await declaredDuring(server, clientId)).toEqual({
+      tools: ['read_file', 'glob'],
+      isolation: undefined,
+    });
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
   it.each(['completed', 'model-error', 'execution-error'])(
     'closes the Shell publisher after a %s turn',
     async (ending) => {
@@ -18033,7 +18365,7 @@ describe('Hosted Harness tool approvals', () => {
     },
   );
 
-  it('keeps a yolo tool Session definition unchanged', async () => {
+  it('pins valid approval settings for a selectable yolo Session', async () => {
     const created = await headers(
       supertest(await app(true)).post('/session'),
     ).send({
@@ -18047,7 +18379,13 @@ describe('Hosted Harness tool approvals', () => {
     expect(created.status).toBe(200);
     expect(created.body.approvalMode).toBe('yolo');
     expect(await definitions()).toEqual([
-      { engine: 'managed', sessionId: SESSION_ID, toolProfile: files },
+      {
+        engine: 'managed',
+        sessionId: SESSION_ID,
+        toolProfile: files,
+        approvalMode: 'yolo',
+        approvalTimeoutMs: HOSTED_APPROVAL_TIMEOUT_MS,
+      },
     ]);
   });
 
@@ -31048,6 +31386,80 @@ describe('Hosted Harness stored definitions', () => {
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'Skill loaded',
+    });
+  });
+
+  // #13753 I3: a snapshot child's read profile declares only read_file and
+  // glob, so its Session takes no skill catalog: no instruction names a
+  // skill tool that the profile would refuse, failing the Turn.
+  it('gives a read-profile Session no skill catalog from its agent definition', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const server = await app(true);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const skillsRef = await resources.publish(
+      'managed-agent-skills',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'published',
+            description: 'Published instructions',
+            body: 'ORIGINAL_SKILL_BODY',
+            base_directory: 'docs',
+          },
+        ]),
+      ),
+    );
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        agentDefinition: {
+          agentId: `agent_${'a'.repeat(32)}`,
+          revision: '1',
+          digest: 'b'.repeat(64),
+          skillsRef,
+        },
+        toolProfile: 'hosted-workspace-read/1',
+        childWorkspaces: true,
+        childSnapshots: true,
+      })
+      .expect(200);
+    state.model.mockImplementationOnce(async (input) => {
+      expect((input as { skills?: unknown }).skills).toBeUndefined();
+      expect(
+        (await input.toolTurn!.declarations(input.signal)).map(
+          (tool) => tool.name,
+        ),
+      ).toEqual(['read_file', 'glob']);
+      return { text: 'read only', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'Review the change' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', created.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    expect(state.model).toHaveBeenCalledOnce();
+    await expect(state.model.mock.results[0].value).resolves.toMatchObject({
+      text: 'read only',
     });
   });
 

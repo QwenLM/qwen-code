@@ -29,6 +29,30 @@ import org.junit.jupiter.api.Test;
 
 class RuntimeBrokerHttpServerTest {
     @Test
+    void warmAndAcquireExposeTheOriginalScopeIsolationClass() throws Exception {
+        for (String capability : List.of("capability", ResidentWorkspaceProfile.CAPABILITY_DIGEST)) {
+            var scope = new RuntimeScope("tenant", "workspace", "generation", "/workspace", capability,
+                    ResidentWorkspaceProfile.CAPABILITY_DIGEST.equals(capability) ? "workspace" : "session");
+            try (Fixture fixture = new Fixture(false, null, scope)) {
+                HttpResponse<String> warmed = fixture.post("/runtimes:warm", Map.of(
+                        "protocolVersion", 1, "requestId", "warm", "harnessSessionId", "harness"));
+                HttpResponse<String> acquired = fixture.post("/tool-sessions:acquire", Map.of(
+                        "protocolVersion", 1, "requestId", "acquire", "harnessSessionId", "harness",
+                        "runtimeSessionId", "runtime", "turnKind", "bootstrap"));
+                for (var response : List.of(warmed, acquired)) {
+                    assertEquals(200, response.statusCode(), response.body());
+                    var actual = JSON.parseObject(response.body()).getJSONObject("scope");
+                    assertEquals(scope.getTenantId(), actual.getString("tenantId"));
+                    assertEquals(scope.getWorkspaceId(), actual.getString("workspaceId"));
+                    assertEquals(scope.getWorkspaceGeneration(), actual.getString("workspaceGeneration"));
+                    assertEquals(capability, actual.getString("capabilityDigest"));
+                    assertEquals(scope.getIsolationClass(), actual.getString("isolationClass"), response.body());
+                }
+            }
+        }
+    }
+
+    @Test
     void unsupportedOperationsNeverDispatchOrClaimResolution() throws Exception {
         try (Fixture fixture = new Fixture()) {
             HttpResponse<String> acquired = fixture.post("/tool-sessions:acquire", Map.of(
@@ -924,10 +948,12 @@ class RuntimeBrokerHttpServerTest {
             this(v3, null);
         }
 
-        private Fixture(boolean v3, HarnessSessionResolver resolverOverride)
-                throws Exception {
-            RuntimeScope scope = new RuntimeScope("tenant", "workspace",
-                    "generation", "/workspace", "capability", "workspace");
+        private Fixture(boolean v3, HarnessSessionResolver resolverOverride) throws Exception {
+            this(v3, resolverOverride, new RuntimeScope("tenant", "workspace",
+                    "generation", "/workspace", "capability", "workspace"));
+        }
+
+        private Fixture(boolean v3, HarnessSessionResolver resolverOverride, RuntimeScope scope) throws Exception {
             RuntimePublicationVerifier verifier = v3 ? new RuntimePublicationVerifier() {
                 @Override
                 public RuntimePublicationGrant verify(ToolExecutionRecord execution,
