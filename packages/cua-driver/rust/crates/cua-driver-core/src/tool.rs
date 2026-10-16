@@ -36,6 +36,14 @@ tokio::task_local! {
     /// Opaque generation for runtime-owned mutable resources. Nested
     /// dispatches inherit this key, while public arguments can never select it.
     static DISPATCH_RUNTIME_SCOPE: String;
+    static DISPATCH_COMPUTER_USE_NATIVE: bool;
+}
+
+#[doc(hidden)]
+pub fn computer_use_native_dispatch() -> bool {
+    DISPATCH_COMPUTER_USE_NATIVE
+        .try_with(|native| *native)
+        .unwrap_or(false)
 }
 
 /// Return the immutable authorization context bound to the current dispatch.
@@ -825,6 +833,12 @@ impl ToolRegistry {
             .push(RuntimeCleanup(Some(Box::new(cleanup))));
     }
 
+    pub(crate) async fn invoke_computer_use_native(&self, name: &str, args: Value) -> ToolResult {
+        DISPATCH_COMPUTER_USE_NATIVE
+            .scope(true, Box::pin(self.invoke(name, args)))
+            .await
+    }
+
     /// Register the four platform-independent recording/replay tools.
     /// Call this after all platform tools have been registered.
     pub fn register_recording_tools(&mut self) {
@@ -1129,7 +1143,11 @@ impl ToolRegistry {
         }
 
         if let Some(runtime) = &self.computer_use {
-            if cua_driver_contract::computer_use::is_app_call(name, &args) {
+            if !DISPATCH_COMPUTER_USE_NATIVE
+                .try_with(|native| *native)
+                .unwrap_or(false)
+                && cua_driver_contract::computer_use::is_app_call(name, &args)
+            {
                 return runtime.invoke(self, name, args).await;
             }
         }
@@ -1229,8 +1247,9 @@ impl ToolRegistry {
         // rejected action has no before/after evidence and must not leave a
         // pending recorder entry behind.
         if let Err(violation) = crate::capture_scope::enforce_tool(resolved_name, &args) {
-            let structured =
+            let mut structured =
                 violation.as_json(args.get("session").and_then(Value::as_str).unwrap_or(""));
+            structured["sent"] = serde_json::json!(false);
             let mut result = ToolResult::error(violation.message).with_structured(structured);
             restore_public_runtime_result(&mut result, &runtime_prefix);
             return result;
@@ -1603,6 +1622,11 @@ impl ToolRegistry {
         } else {
             None
         };
+        if is_physical_desktop_action(resolved_name) {
+            if let Err(result) = crate::desktop_keyboard::admit_input(resolved_name, &args) {
+                return result;
+            }
+        }
         let pending_turn = should_record
             .then(|| {
                 if private_consent_turn {
@@ -1921,7 +1945,7 @@ impl ToolRegistry {
             // checked against its approved manifest.
             return Ok(());
         }
-        let delivery_mode = if tool_name == "bring_to_front" {
+        let delivery_mode = if tool_name == "bring_to_front" || args["scope"] == "desktop" {
             "foreground"
         } else {
             args.get("delivery_mode")
@@ -2586,6 +2610,8 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "mouse_button_up"
             | "type_text"
             | "press_key"
+            | "key_down"
+            | "key_up"
             | "hotkey"
             | "set_value"
             | "paste"
@@ -4648,6 +4674,7 @@ resources:
 fn permission_denied_result(message: String) -> ToolResult {
     ToolResult::error(message.clone()).with_structured(serde_json::json!({
         "status": "refused",
+        "sent": false,
         "refusal": {
             "code": "permission_denied",
             "message": message,
@@ -4677,6 +4704,7 @@ fn protected_consent_refusal(error: crate::consent::ConsentError) -> ToolResult 
     let message = error.to_string();
     ToolResult::error(message.clone()).with_structured(serde_json::json!({
         "status": "refused",
+        "sent": false,
         "refusal": {
             "code": code,
             "message": message,
@@ -4691,6 +4719,7 @@ fn protected_scope_refusal(message: &str) -> ToolResult {
 fn protected_refusal(code: &str, message: &str) -> ToolResult {
     ToolResult::error(message).with_structured(serde_json::json!({
         "status": "refused",
+        "sent": false,
         "refusal": {
             "code": code,
             "message": message,

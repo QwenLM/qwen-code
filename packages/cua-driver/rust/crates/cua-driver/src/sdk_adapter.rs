@@ -107,7 +107,7 @@ impl SdkAdapter {
     }
 
     pub fn is_known_tool(&self, name: &str) -> bool {
-        name == "type_text_chars"
+        matches!(name, "type_text_chars" | "start_session" | "end_session")
             || self
                 .tools_list
                 .get("tools")

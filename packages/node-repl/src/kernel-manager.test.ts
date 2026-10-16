@@ -80,12 +80,31 @@ beforeEach(() => {
   manager = makeManager();
 });
 
-afterEach(() => {
-  manager.dispose();
+afterEach(async () => {
+  await manager.dispose();
   fs.rmSync(workDir, { recursive: true, force: true });
 });
 
 describe('NodeReplKernelManager', () => {
+  it('awaits Computer Use session cleanup on reset and disposal', async () => {
+    const marker = path.join(workDir, 'cua-cleanup.txt');
+    createEsmPackage(path.join(workDir, 'node_modules'), 'cua-cleanup-fixture', `
+      import fs from 'node:fs';
+      import { setTimeout } from 'node:timers/promises';
+      export const cua = { async [Symbol.asyncDispose]() {
+        await setTimeout(30);
+        fs.appendFileSync(${JSON.stringify(marker)}, ${JSON.stringify('released\n')});
+      } };
+    `);
+    const install = `globalThis.cua = (await import('cua-cleanup-fixture')).cua;`;
+    expect((await run(install)).status).toBe('ok');
+    await manager.reset();
+    expect(fs.readFileSync(marker, 'utf8')).toBe('released\n');
+    expect((await run(install)).status).toBe('ok');
+    await manager.dispose();
+    expect(fs.readFileSync(marker, 'utf8')).toBe('released\nreleased\n');
+  });
+
   it('preserves bounded error diagnostics without invoking getters or custom inspectors', async () => {
     const result = await run(`
       var invoked = 0;
@@ -1607,11 +1626,11 @@ describe('NodeReplKernelManager', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       const queuedReset = manager.reset();
-      manager.dispose();
+      const disposal = manager.dispose();
 
       expect((await pending).status).toBe('cancelled');
       await expect(queuedReset).rejects.toThrow(/disposed/);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await disposal;
       expect(() => process.kill(pid, 0)).toThrow();
       expect(fs.existsSync(tmpDir)).toBe(false);
       await expect(run('1;')).rejects.toThrow(/disposed/);

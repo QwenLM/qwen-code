@@ -32,15 +32,40 @@ fn tool(
         properties.remove("app");
     }
     properties.extend(parameters.as_object().expect("object schema").clone());
+    let desktop = matches!(
+        name,
+        "get_screenshot"
+            | "click"
+            | "double_click"
+            | "right_click"
+            | "scroll"
+            | "drag"
+            | "type_text"
+            | "press_key"
+            | "hotkey"
+            | "key_down"
+            | "key_up"
+    );
+    if desktop {
+        properties.insert("scope".into(), json!({"type":"string","enum":["desktop"],"description":"Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app."}));
+    }
+    let mut schema = json!({
+        "type":"object", "properties":properties,
+        "required":required.iter().filter(|field| !desktop || **field != "app").collect::<Vec<_>>(), "additionalProperties":false,
+    });
+    if desktop {
+        schema["oneOf"] = if matches!(name, "key_down" | "key_up") {
+            json!([{"required":["scope"],"not":{"required":["app"]}}])
+        } else {
+            json!([{"required":["app"],"not":{"required":["scope"]}}, {"required":["scope"],"not":{"required":["app"]}}])
+        };
+    }
     ComputerUseTool {
         name,
         method,
         description,
         read_only,
-        input_schema: json!({
-            "type":"object", "properties":properties,
-            "required":required, "additionalProperties":false,
-        }),
+        input_schema: schema,
     }
 }
 
@@ -84,6 +109,8 @@ pub fn tools() -> Vec<ComputerUseTool> {
         tool("set_value", "setValue", "Replace the entire value of the current short element ID and read back the result. Refuses a non-settable element or a write that was not applied.", false, json!({"element":{"type":"integer","minimum":0},"value":{"type":"string"}}), &["app","element","value"]),
         tool("press_key", "pressKey", "Press a key in the selected app. Optional modifiers form a chord. Observe before retrying an unconfirmed dispatch.", false, json!({"key":{"type":"string"},"modifiers":{"type":"array","items":{"type":"string"}}}), &["app","key"]),
         tool("hotkey", "hotkey", "Press a modifier/key chord in the selected app.", false, json!({"keys":{"type":"array","minItems":1,"items":{"type":"string"}}}), &["app","keys"]),
+        tool("key_down", "desktop.keyDown", "Hold a desktop key for this session. Release with key_up in finally. Session end releases owned keys. While keys are held, use key_down/key_up for chords and desktop pointer actions without explicit modifiers.", false, json!({"key":{"type":"string","minLength":1}}), &["scope","key"]),
+        tool("key_up", "desktop.keyUp", "Release a desktop key held by this session. Another session cannot release it.", false, json!({"key":{"type":"string","minLength":1}}), &["scope","key"]),
         tool("paste", "paste", "Paste text at the caret using a temporary clipboard value, then restore the previous clipboard even if the operation fails.", false, text, &["app","text"]),
         tool("select_text", "selectText", "Select one unambiguous text match inside a current short element ID. Does not change the field value.", false, json!({"element":{"type":"integer","minimum":0},"text":{"type":"string"}}), &["app","element","text"]),
         tool("perform_secondary_action", "performSecondaryAction", "Perform an explicitly named secondary accessibility action on a current short element ID.", false, json!({"element":{"type":"integer","minimum":0},"action":{"type":"string"}}), &["app","element","action"]),
@@ -114,5 +141,6 @@ pub fn is_app_call(name: &str, args: &Value) -> bool {
     matches!(
         name,
         "get_state" | "get_app" | "get_ax_state" | "get_screenshot" | "get_ax_state_and_screenshot"
-    ) || args.get("app").is_some() && tools().iter().any(|tool| tool.name == name)
+    ) || (args.get("app").is_some() || args["scope"] == "desktop")
+        && tools().iter().any(|tool| tool.name == name)
 }

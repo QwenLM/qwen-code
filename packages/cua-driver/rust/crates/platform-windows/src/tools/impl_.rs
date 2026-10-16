@@ -10371,6 +10371,10 @@ pub fn build_registry_with_provider(
             cua_driver_core::observation_revision::revision_tokens().clear_runtime(&runtime_scope);
         });
     }
+    cua_driver_core::desktop_keyboard::register(
+        &mut r,
+        Arc::new(crate::input::keyboard::DesktopKeyboard),
+    );
     r.register(Box::new(ListAppsTool));
     r.register(Box::new(ListWindowsTool));
     r.register(Box::new(GetWindowStateTool {

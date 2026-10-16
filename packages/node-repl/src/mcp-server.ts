@@ -67,7 +67,7 @@ function cellError(message: string): CallToolResult {
 
 export function createNodeReplMcpServer(context: NodeReplServerContext): {
   server: McpServer;
-  dispose: () => void;
+  dispose: () => Promise<void>;
 } {
   const manager = new NodeReplKernelManager({
     cwd: context.cwd,
@@ -184,9 +184,9 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
 
   return {
     server,
-    dispose() {
+    async dispose() {
       active?.abort();
-      manager.dispose();
+      await manager.dispose();
     },
   };
 }

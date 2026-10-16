@@ -31,7 +31,7 @@ const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System3
 const READY_TIMEOUT_MS = 15_000;
 const ADD_ROOT_TIMEOUT_MS = 10_000;
 const CANCEL_GRACE_MS = 5_000;
-const TERMINATE_GRACE_MS = 500;
+const TERMINATE_GRACE_MS = 2500;
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RAW_TEXT_EVENTS = 128 * 1024;
@@ -176,6 +176,7 @@ export class NodeReplKernelManager {
   private inflight: InflightExec | null = null;
   private operationChain: Promise<unknown> = Promise.resolve();
   private disposed = false;
+  private disposal: Promise<void> | undefined;
   private sessionTmpDir: string | null = null;
   private pendingReady: PendingReady | null = null;
   private readonly pendingAddRoot = new Map<
@@ -266,8 +267,8 @@ export class NodeReplKernelManager {
     return run;
   }
 
-  dispose(): void {
-    if (this.disposed) return;
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
     this.disposed = true;
     const inflight = this.inflight;
     if (inflight) {
@@ -281,11 +282,13 @@ export class NodeReplKernelManager {
     this.rejectPending('node_repl task disposed');
     const handle = this.kernel;
     this.kernel = null;
-    if (handle) {
-      this.signalProcessTree(handle, true);
-    }
-    this.cleanupTmpDir();
-    debugLogger.debug('[node-repl] disposed');
+    this.disposal = (
+      handle ? this.terminateHandle(handle) : Promise.resolve()
+    ).finally(() => {
+      this.cleanupTmpDir();
+      debugLogger.debug('[node-repl] disposed');
+    });
+    return this.disposal;
   }
 
   private async execInner(
@@ -997,9 +1000,12 @@ export class NodeReplKernelManager {
     } catch {
       // The hard stop below remains authoritative.
     }
-    this.signalProcessTree(handle, false);
     let exited = await this.waitForExit(handle.child, TERMINATE_GRACE_MS);
     let hardKill = false;
+    if (!exited) {
+      this.signalProcessTree(handle, false);
+      exited = await this.waitForExit(handle.child, 500);
+    }
     if (!exited) {
       hardKill = true;
       this.signalProcessTree(handle, true);

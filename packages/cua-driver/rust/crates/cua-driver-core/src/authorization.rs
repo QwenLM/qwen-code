@@ -270,6 +270,8 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "type_text",
     "type_text_chars",
     "press_key",
+    "key_down",
+    "key_up",
     "hotkey",
     "set_value",
     "paste",
@@ -859,6 +861,8 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "type_text"
         | "type_text_chars"
         | "press_key"
+        | "key_down"
+        | "key_up"
         | "hotkey"
         | "set_value"
         | "paste"
@@ -1158,6 +1162,8 @@ fn enforce_hard_invariants(
             | "type_text"
             | "type_text_chars"
             | "press_key"
+            | "key_down"
+            | "key_up"
             | "hotkey"
             | "set_value"
             | "paste"

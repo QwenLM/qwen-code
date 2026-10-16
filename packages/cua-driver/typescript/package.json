@@ -54,7 +54,8 @@
     "computer-use/runtime.js",
     "computer-use/runtime.d.ts",
     "computer-use/documentation.js",
-    "computer-use/interface.json"
+    "computer-use/interface.json",
+    "computer-use/browser.js"
   ],
   "engines": {
     "node": ">=22"

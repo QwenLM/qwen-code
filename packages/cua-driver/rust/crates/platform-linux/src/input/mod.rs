@@ -4953,3 +4953,58 @@ mod path_tests {
         assert_eq!(point_on_path(&path, &cum, total, 0.3), (5, 5));
     }
 }
+
+pub struct DesktopKeyboard;
+impl cua_driver_core::desktop_keyboard::DesktopKeyboard for DesktopKeyboard {
+    fn resolve(&self, key: &str) -> std::result::Result<u32, String> {
+        let _lock = KEYMAP_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let keysym = key_name_to_keysym(key).map_err(|error| error.to_string())?;
+        let (connection, _) = connect_x11_for_input().map_err(|error| error.to_string())?;
+        let mapping = connection
+            .get_keyboard_mapping(8, 248)
+            .map_err(|error| error.to_string())?
+            .reply()
+            .map_err(|error| error.to_string())?;
+        let width = mapping.keysyms_per_keycode as usize;
+        if width == 0 {
+            return Err("Empty X11 keyboard map".into());
+        }
+        mapping
+            .keysyms
+            .chunks(width)
+            .position(|codes| codes.contains(&keysym))
+            .map(|index| index as u32 + 8)
+            .ok_or_else(|| {
+                format!("Key {key} is not mapped. Held keys do not borrow temporary keycodes.")
+            })
+    }
+    fn transition(&self, code: u32, down: bool, _held: &[u32]) -> std::result::Result<(), String> {
+        use x11rb::protocol::xtest::ConnectionExt as _;
+        let _lock = KEYMAP_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let result = (|| -> Result<()> {
+            let (connection, _) = connect_x11_for_input()?;
+            connection
+                .xtest_fake_input(
+                    if down {
+                        KEY_PRESS_EVENT
+                    } else {
+                        KEY_RELEASE_EVENT
+                    },
+                    code as u8,
+                    0,
+                    x11rb::NONE,
+                    0,
+                    0,
+                    0,
+                )?
+                .check()?;
+            connection.get_input_focus()?.reply()?;
+            Ok(())
+        })();
+        result.map_err(|error| error.to_string())
+    }
+}

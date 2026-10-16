@@ -975,3 +975,21 @@ fn unit_events(unit: &TextUnit) -> [INPUT; 4] {
     };
     [d, u, sentinel_key_input(false), sentinel_key_input(true)]
 }
+
+pub struct DesktopKeyboard;
+impl cua_driver_core::desktop_keyboard::DesktopKeyboard for DesktopKeyboard {
+    fn resolve(&self, key: &str) -> Result<u32, String> {
+        key_name_to_vk(key)
+            .map(|key| u32::from(key.0))
+            .map_err(|error| error.to_string())
+    }
+    fn transition(&self, code: u32, down: bool, _held: &[u32]) -> Result<(), String> {
+        let event = key_input(VIRTUAL_KEY(code as u16), !down);
+        let sent = unsafe { SendInput(&[event], std::mem::size_of::<INPUT>() as i32) };
+        if sent == 1 {
+            Ok(())
+        } else {
+            Err("SendInput did not accept the key transition".into())
+        }
+    }
+}

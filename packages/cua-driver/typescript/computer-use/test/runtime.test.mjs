@@ -41,3 +41,39 @@ test('documentation is platform-specific and includes generated tool description
   assert.match(documentation('darwin'), /macOS/);
   assert.match(documentation('darwin'), /getAXStateAndScreenshot/);
 });
+
+test('desktop calls use explicit scope, serialize, return void and dispose the owning session', async () => {
+  const f = fixture();
+  await f.cua.desktop.getScreenshot();
+  assert.deepEqual(f.calls[0], ['get_screenshot', { scope: 'desktop' }]);
+  assert.equal(await f.cua.desktop.click({ x: 15, y: 32 }, { key: 'ctrl' }), undefined);
+  assert.deepEqual(f.calls[1], ['click', { key: 'ctrl', x: 15, y: 32, scope: 'desktop' }]);
+  await f.cua.desktop.keyDown('shift');
+  await f.cua.desktop.keyUp('shift');
+  assert.deepEqual(f.calls.slice(-2), [['key_down', { key: 'shift', scope: 'desktop' }], ['key_up', { key: 'shift', scope: 'desktop' }]]);
+  await f.cua[Symbol.asyncDispose]();
+  await assert.rejects(f.cua.desktop.keyDown('shift'), /closed/);
+});
+
+test('browser facade returns repository handles unchanged, requires unique URLs, and cleans up', async () => {
+  const written = []; const navigated = []; let closed = 0;
+  const tab = { id: 'tab-1', playwright: { domSnapshot: async () => 'DOM' }, goto: async (url) => navigated.push(url) };
+  const browser = { browserId: 'chrome-1', documentation: async () => 'BROWSER DOC', tabs: {
+    list: async () => [{ id: 'tab-1', url: 'https://example.com' }, { id: 'tab-2', url: 'https://example.com' }],
+    get: async (id) => { assert.equal(id, 'tab-1'); return tab; }, new: async () => tab,
+  } };
+  const browserModule = { setupBrowserRuntime: async () => ({ browsers: {
+    list: async () => [{ id: 'chrome-1', name: 'Chrome' }], get: async () => browser,
+  } }), closeBrowserRuntime: async () => { closed++; } };
+  const cua = createCua({ write: (value) => written.push(value) }, { browserModule });
+  assert.equal(await cua.getBrowser('Chrome'), browser);
+  assert.equal(await cua.getBrowser({ id: 'chrome-1' }), browser);
+  assert.equal(written.filter((text) => text === 'BROWSER DOC').length, 1);
+  await assert.rejects(cua.getTab({ url: 'https://example.com' }), /found 2/);
+  assert.equal(await cua.getTab('tab-1', { browser: 'Chrome' }), tab);
+  assert.equal(written.at(-1), 'DOM');
+  assert.equal(await cua.createBrowserTab('Chrome', 'https://example.org'), tab);
+  assert.deepEqual(navigated, ['https://example.org']);
+  await cua[Symbol.asyncDispose](); assert.equal(closed, 1);
+  await assert.rejects(cua.getBrowser('Chrome'), /closed/);
+});

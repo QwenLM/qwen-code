@@ -1,7 +1,10 @@
 import { ComputerUse } from './index.js';
 import { documentation } from './documentation.js';
+import { createBrowserFacade } from './browser.js';
 
-export function createCua(runtime, { computer } = {}) {
+export function createCua(runtime, { computer, browserModule } = {}) {
+  const browser = createBrowserFacade(runtime, browserModule && (() => Promise.resolve(browserModule)));
+  let closed = false;
   let connection = computer ? Promise.resolve(computer) : undefined;
   const handles = new WeakMap();
   const options = (value = {}) => ({ signal: runtime.signal, ...value });
@@ -11,6 +14,7 @@ export function createCua(runtime, { computer } = {}) {
   );
   const point = (value) => typeof value === 'number' ? { element: value } : value;
   async function connected() {
+    if (closed) throw new Error('Computer Use session is closed.');
     if (!connection) {
       connection = ComputerUse.create(options()).catch((error) => {
         connection = undefined;
@@ -58,7 +62,44 @@ export function createCua(runtime, { computer } = {}) {
     handles.set(app, wrapped);
     return wrapped;
   }
+  let desktopTail = Promise.resolve();
+  function desktopCall(name, args, input = {}) {
+    const next = desktopTail.catch(() => {}).then(async () => {
+      const result = await (await connected()).appCall(name, { ...parameters(input), ...args, scope: 'desktop' }, options(input));
+      const text = await display(result, input.emit !== false);
+      return name === 'get_screenshot' ? text : undefined;
+    });
+    desktopTail = next;
+    return next;
+  }
+  const desktop = Object.freeze({
+    getScreenshot: (input) => desktopCall('get_screenshot', {}, input),
+    click: (target, input) => desktopCall('click', target, input),
+    doubleClick: (target, input) => desktopCall('double_click', target, input),
+    rightClick: (target, input) => desktopCall('right_click', target, input),
+    scroll: (target, input) => desktopCall('scroll', target, input),
+    drag: (input) => desktopCall('drag', {}, input),
+    typeText: (text, input) => desktopCall('type_text', { text }, input),
+    pressKey: (key, input) => desktopCall('press_key', { key }, input),
+    hotkey: (keys, input) => desktopCall('hotkey', { keys }, input),
+    keyDown: (key, input) => desktopCall('key_down', { key }, input),
+    keyUp: (key, input) => desktopCall('key_up', { key }, input),
+  });
   return Object.freeze({
+    desktop,
+    getBrowser: browser.getBrowser,
+    getTab: browser.getTab,
+    createBrowserTab: browser.createBrowserTab,
+    async [Symbol.asyncDispose]() {
+      if (closed) return;
+      closed = true;
+      try {
+        await desktopTail.catch(() => {});
+        if (connection) await (await connection.catch(() => undefined))?.close();
+      } finally {
+        await browser.close();
+      }
+    },
     rewriteDocumentation() {
       const text = documentation();
       runtime.write(text);

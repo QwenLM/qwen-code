@@ -39,6 +39,54 @@ impl Tool for Entry {
 #[derive(Default)]
 pub(crate) struct ComputerUseRuntime {
     apps: Mutex<HashMap<(DispatchSessionIdentity, String), Arc<tokio::sync::Mutex<AppState>>>>,
+    desktops:
+        Mutex<HashMap<DispatchSessionIdentity, Arc<tokio::sync::Mutex<Option<DesktopFrame>>>>>,
+}
+
+#[derive(Clone, Copy)]
+struct DesktopFrame {
+    image: [f64; 2],
+    screen: [f64; 2],
+    scale: f64,
+}
+
+impl DesktopFrame {
+    fn from_capture(value: &Value) -> Option<Self> {
+        let frame = Self {
+            image: [
+                value["screenshot_width"].as_f64()?,
+                value["screenshot_height"].as_f64()?,
+            ],
+            screen: [
+                value["screen_width"].as_f64()?,
+                value["screen_height"].as_f64()?,
+            ],
+            scale: value["scale_factor"].as_f64().unwrap_or(1.0),
+        };
+        let valid = frame
+            .image
+            .iter()
+            .chain(frame.screen.iter())
+            .chain([&frame.scale])
+            .all(|n| n.is_finite() && *n > 0.0);
+        valid.then_some(frame)
+    }
+    fn map(&self, input: &mut Value, x: &str, y: &str) -> Result<(), ToolResult> {
+        for (axis, key) in [x, y].into_iter().enumerate() {
+            let value = input[key]
+                .as_f64()
+                .filter(|n| n.is_finite() && *n >= 0.0 && *n < self.image[axis])
+                .ok_or_else(|| {
+                    error(
+                        "invalid_arguments",
+                        format!("{key} must be inside the current desktop screenshot."),
+                        false,
+                    )
+                })?;
+            input[key] = json!(value * self.screen[axis] / self.image[axis]);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -145,6 +193,24 @@ fn validate(name: &str, args: &Value) -> Result<(), ToolResult> {
         ));
     };
     let properties = spec.input_schema["properties"].as_object().unwrap();
+    let desktop = input.get("scope").is_some_and(|scope| scope == "desktop");
+    if name != "get_state"
+        && (desktop == input.contains_key("app")
+            || matches!(name, "key_down" | "key_up") && !desktop)
+    {
+        return Err(error(
+            "invalid_arguments",
+            "Select exactly one app or scope:desktop. key_down/key_up require desktop scope.",
+            false,
+        ));
+    }
+    if desktop && input.contains_key("element") {
+        return Err(error(
+            "invalid_arguments",
+            "Desktop input requires screenshot coordinates, not an app element ID.",
+            false,
+        ));
+    }
     for field in spec.input_schema["required"]
         .as_array()
         .into_iter()
@@ -403,6 +469,9 @@ impl ComputerUseRuntime {
             .lock()
             .unwrap()
             .retain(|(owner, _), _| owner.session_id != session);
+        self.desktops.lock().unwrap().retain(|owner, _| {
+            owner.session_id != session && owner.transport_session_id != session
+        });
     }
 
     pub(crate) async fn invoke(
@@ -423,6 +492,9 @@ impl ComputerUseRuntime {
         args: Value,
     ) -> Result<ToolResult, ToolResult> {
         validate(name, &args)?;
+        if args["scope"] == "desktop" {
+            return self.desktop(registry, name, args).await;
+        }
         if name == "get_state" {
             authorize_app(name, &args, None, None)?;
         }
@@ -755,6 +827,10 @@ impl ComputerUseRuntime {
             input["delivery_mode"] = json!("foreground");
             result = Box::pin(registry.invoke(name, input)).await;
         }
+        Self::acknowledge(result)
+    }
+
+    fn acknowledge(result: ToolResult) -> Result<ToolResult, ToolResult> {
         let result = checked(result, true)?;
         let confirmed = result
             .action_record
@@ -763,11 +839,120 @@ impl ComputerUseRuntime {
         let mut output = ToolResult::text(if confirmed {
             ""
         } else {
-            "Sent but not confirmed. Observe the app state before retrying."
+            "Sent but not confirmed. Observe the target state before retrying."
         })
         .with_structured(json!({"computer_use":1,"sent":true}));
         output.action_record = result.action_record;
         Ok(output)
+    }
+
+    async fn desktop(
+        &self,
+        registry: &ToolRegistry,
+        name: &str,
+        mut input: Value,
+    ) -> Result<ToolResult, ToolResult> {
+        authorize_app(name, &input, None, None)?;
+        let owner = crate::tool::current_dispatch_session_identity().ok_or_else(|| {
+            error(
+                "session_unavailable",
+                "A bound driver session is required.",
+                false,
+            )
+        })?;
+        let state = self
+            .desktops
+            .lock()
+            .unwrap()
+            .entry(owner)
+            .or_default()
+            .clone();
+        let mut frame = state.lock().await;
+        let session = input.get("session").cloned();
+        let session_args = || {
+            session
+                .as_ref()
+                .map_or_else(|| json!({}), |id| json!({"session":id}))
+        };
+        if name == "get_screenshot" {
+            *frame = None;
+            let result = checked(
+                Box::pin(registry.invoke_computer_use_native("get_desktop_state", session_args()))
+                    .await,
+                false,
+            )?;
+            let captured = result
+                .structured_content
+                .as_ref()
+                .and_then(DesktopFrame::from_capture)
+                .filter(|_| {
+                    result
+                        .content
+                        .iter()
+                        .any(|part| matches!(part, Content::Image { .. }))
+                })
+                .ok_or_else(|| {
+                    error(
+                        "screenshot_unavailable",
+                        "The driver returned no valid desktop image geometry.",
+                        false,
+                    )
+                })?;
+            *frame = Some(captured);
+            return Ok(result);
+        }
+        if matches!(
+            name,
+            "click" | "double_click" | "right_click" | "scroll" | "drag"
+        ) {
+            let captured = frame.ok_or_else(|| {
+                error(
+                    "screenshot_required",
+                    "Observe cua.desktop.getScreenshot() before using desktop coordinates.",
+                    false,
+                )
+            })?;
+            let geometry = checked(
+                Box::pin(registry.invoke_computer_use_native("get_screen_size", session_args()))
+                    .await,
+                false,
+            )?;
+            let geometry = geometry.structured_content.unwrap_or_default();
+            if geometry["width"].as_f64() != Some(captured.screen[0])
+                || geometry["height"].as_f64() != Some(captured.screen[1])
+                || geometry["scale_factor"].as_f64().unwrap_or(1.0) != captured.scale
+            {
+                *frame = None;
+                return Err(error(
+                    "screenshot_required",
+                    "Display geometry changed. Observe a fresh desktop screenshot.",
+                    false,
+                ));
+            }
+            if name == "drag" {
+                captured.map(&mut input, "from_x", "from_y")?;
+                captured.map(&mut input, "to_x", "to_y")?;
+            } else {
+                captured.map(&mut input, "x", "y")?;
+            }
+        }
+        if name == "click" {
+            if let Some(key) = input.as_object_mut().unwrap().remove("key") {
+                input["modifier"] = if key.is_string() { json!([key]) } else { key };
+            }
+        }
+        let native = match name {
+            "double_click" => {
+                input["count"] = json!(2);
+                "click"
+            }
+            "right_click" => {
+                input["button"] = json!("right");
+                "click"
+            }
+            _ => name,
+        };
+        Self::acknowledge(Box::pin(registry.invoke_computer_use_native(native, input)).await)
     }
 }
 
@@ -793,6 +978,7 @@ mod tests {
     #[derive(Default)]
     struct Fixture {
         window: Mutex<u64>,
+        screen_width: Mutex<u64>,
         calls: Mutex<Vec<(String, Value)>>,
     }
     struct Native {
@@ -812,6 +998,11 @@ mod tests {
                 .push((self.def.name.clone(), args.clone()));
             let window = *self.fixture.window.lock().unwrap();
             match self.def.name.as_str() {
+                "get_desktop_state" => {
+                    let mut result = ToolResult::text("desktop").with_structured(json!({"platform":"macos","display":"primary","screenshot_mime_type":"image/png","screenshot_width":2000,"screenshot_height":1000,"screen_width":1000,"screen_height":500,"scale_factor":2.0}));
+                    result.content.push(Content::image_png("AQ==".into())); result
+                },
+                "get_screen_size" => ToolResult::text("geometry").with_structured(json!({"width":*self.fixture.screen_width.lock().unwrap(),"height":500,"scale_factor":2.0})),
                 "list_apps" => ToolResult::text("").with_structured(json!({"apps":[{
                     "name":"Fixture", "bundle_id":"org.qwen.fixture", "launch_path":"/Applications/Fixture.app", "pid":42,"running":true,
                 }]})),
@@ -833,6 +1024,7 @@ mod tests {
     ) {
         let fixture = Arc::new(Fixture {
             window: Mutex::new(7),
+            screen_width: Mutex::new(1000),
             ..Default::default()
         });
         let mut registry = ToolRegistry::new();
@@ -840,6 +1032,8 @@ mod tests {
             "list_apps",
             "list_windows",
             "get_window_state",
+            "get_desktop_state",
+            "get_screen_size",
             "click",
             "type_text",
         ] {
@@ -877,6 +1071,103 @@ mod tests {
             .invoke_with_context_and_evidence(name, args, context, evidence)
             .await
     }
+    #[tokio::test]
+    async fn desktop_maps_the_observed_frame_once_and_invalidates_changed_geometry() {
+        let (registry, fixture, context) = setup();
+        let result = call(
+            &registry,
+            context.clone(),
+            "click",
+            json!({"scope":"desktop","x":1500,"y":600}),
+            "desktop-a",
+        )
+        .await;
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "screenshot_required"
+        );
+        let result = call(
+            &registry,
+            context.clone(),
+            "get_screenshot",
+            json!({"scope":"desktop"}),
+            "desktop-a",
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        let result = call(
+            &registry,
+            context.clone(),
+            "click",
+            json!({"scope":"desktop","x":1500,"y":600,"key":"shift"}),
+            "desktop-a",
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        let action = fixture
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(name, _)| name == "click")
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(action["x"], 750.0);
+        assert_eq!(action["y"], 300.0);
+        assert_eq!(action["modifier"], json!(["shift"]));
+        assert!(action.get("pid").is_none());
+        let result = call(
+            &registry,
+            context.clone(),
+            "click",
+            json!({"scope":"desktop","x":2000,"y":0}),
+            "desktop-a",
+        )
+        .await;
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "invalid_arguments"
+        );
+        let result = call(
+            &registry,
+            context.clone(),
+            "click",
+            json!({"scope":"desktop","x":100,"y":100}),
+            "desktop-b",
+        )
+        .await;
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "screenshot_required"
+        );
+        *fixture.screen_width.lock().unwrap() = 800;
+        let result = call(
+            &registry,
+            context,
+            "click",
+            json!({"scope":"desktop","x":100,"y":100}),
+            "desktop-a",
+        )
+        .await;
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "screenshot_required"
+        );
+        let calls = fixture.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(name, _)| name == "get_desktop_state")
+                .count(),
+            1
+        );
+        assert_eq!(calls.iter().filter(|(name, _)| name == "click").count(), 1);
+        assert!(!calls
+            .iter()
+            .any(|(name, _)| matches!(name.as_str(), "list_apps" | "get_window_state")));
+    }
+
     #[tokio::test]
     async fn app_calls_resolve_in_the_driver_and_refuse_stale_ids_before_dispatch() {
         let (registry, fixture, context) = setup();

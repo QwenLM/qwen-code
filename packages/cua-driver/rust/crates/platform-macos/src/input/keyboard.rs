@@ -240,7 +240,7 @@ pub(super) fn with_global_modifier_keys<T>(
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
-    let mut active_flags = CGEventFlags::CGEventFlagNull;
+    let mut active_flags = held_flags();
     let mut pressed = Vec::new();
 
     for modifier in modifiers {
@@ -963,4 +963,42 @@ mod tests {
         assert!(!is_screen_sharing_bundle_id("com.apple.screensharing"));
         assert!(!is_screen_sharing_bundle_id("com.microsoft.rdc.macos"));
     }
+}
+
+pub struct DesktopKeyboard;
+impl cua_driver_core::desktop_keyboard::DesktopKeyboard for DesktopKeyboard {
+    fn resolve(&self, key: &str) -> Result<u32, String> {
+        key_name_to_code(key)
+            .map(u32::from)
+            .map_err(|error| error.to_string())
+    }
+    fn transition(&self, code: u32, down: bool, held: &[u32]) -> Result<(), String> {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| "Could not create a keyboard event source".to_owned())?;
+        let event = CGEvent::new_keyboard_event(source, code as u16, down)
+            .map_err(|_| "Could not create a keyboard event".to_owned())?;
+        event.set_flags(flags_for_codes(held));
+        event.post(core_graphics::event::CGEventTapLocation::HID);
+        Ok(())
+    }
+}
+
+fn flags_for_codes(codes: &[u32]) -> CGEventFlags {
+    codes
+        .iter()
+        .fold(CGEventFlags::CGEventFlagNull, |flags, code| {
+            flags
+                | match code {
+                    55 | 54 => CGEventFlags::CGEventFlagCommand,
+                    56 | 60 => CGEventFlags::CGEventFlagShift,
+                    58 | 61 => CGEventFlags::CGEventFlagAlternate,
+                    59 | 62 => CGEventFlags::CGEventFlagControl,
+                    63 => CGEventFlags::CGEventFlagSecondaryFn,
+                    _ => CGEventFlags::CGEventFlagNull,
+                }
+        })
+}
+
+pub(super) fn held_flags() -> CGEventFlags {
+    flags_for_codes(&cua_driver_core::desktop_keyboard::held_codes())
 }

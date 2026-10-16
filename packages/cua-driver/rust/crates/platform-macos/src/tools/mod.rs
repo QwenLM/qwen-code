@@ -612,6 +612,9 @@ pub fn load_driver_config() -> DriverConfig {
 /// used by CoreGraphics input APIs. Retina scaled modes cannot rely on the
 /// nominal backing factor alone, so derive the ratio from the actual PNG.
 pub async fn desktop_screenshot_point(x: f64, y: f64) -> (f64, f64) {
+    if cua_driver_core::tool::computer_use_native_dispatch() {
+        return (x, y);
+    }
     let ratio = tokio::task::spawn_blocking(|| {
         let logical_w = get_screen_size::main_screen_size().map(|(w, _, _)| w as f64);
         let shot_w = crate::capture::screenshot_display_bytes()
@@ -992,6 +995,10 @@ pub fn register_all(
         registry.retain_session_revive_hook(revive_registration);
     }
 
+    cua_driver_core::desktop_keyboard::register(
+        registry,
+        Arc::new(crate::input::keyboard::DesktopKeyboard),
+    );
     registry.register(Box::new(list_apps::ListAppsTool));
     registry.register(Box::new(list_windows::ListWindowsTool));
     registry.register(Box::new(get_window_state::GetWindowStateTool::new(

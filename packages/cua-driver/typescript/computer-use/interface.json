@@ -101,10 +101,39 @@
       "description": "Observe the current application window screenshot without an AX walk. Coordinates in actions use this image's pixels.",
       "input_schema": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            },
+            "required": [
+              "app"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
         "properties": {
           "app": {
             "description": "Exact application name, identifier or absolute path from get_state/get_app.",
             "minLength": 1,
+            "type": "string"
+          },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
             "type": "string"
           },
           "session": {
@@ -112,9 +141,7 @@
             "type": "string"
           }
         },
-        "required": [
-          "app"
-        ],
+        "required": [],
         "type": "object"
       },
       "method": "getScreenshot",
@@ -167,6 +194,28 @@
       "description": "Click a current short element ID or screenshot point. Optional key holds modifiers during the click. Observe the result before retrying an unconfirmed action.",
       "input_schema": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            },
+            "required": [
+              "app"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
         "properties": {
           "app": {
             "description": "Exact application name, identifier or absolute path from get_state/get_app.",
@@ -207,6 +256,13 @@
               }
             ]
           },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
+          },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
@@ -220,9 +276,7 @@
             "type": "number"
           }
         },
-        "required": [
-          "app"
-        ],
+        "required": [],
         "type": "object"
       },
       "method": "click",
@@ -233,6 +287,28 @@
       "description": "Double-click a current short element ID or screenshot point, then observe the result.",
       "input_schema": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            },
+            "required": [
+              "app"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
         "properties": {
           "app": {
             "description": "Exact application name, identifier or absolute path from get_state/get_app.",
@@ -242,6 +318,13 @@
           "element": {
             "minimum": 0,
             "type": "integer"
+          },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
@@ -254,9 +337,7 @@
             "type": "number"
           }
         },
-        "required": [
-          "app"
-        ],
+        "required": [],
         "type": "object"
       },
       "method": "doubleClick",
@@ -267,6 +348,28 @@
       "description": "Right-click a current short element ID or screenshot point, then observe the result.",
       "input_schema": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            },
+            "required": [
+              "app"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
         "properties": {
           "app": {
             "description": "Exact application name, identifier or absolute path from get_state/get_app.",
@@ -276,6 +379,13 @@
           "element": {
             "minimum": 0,
             "type": "integer"
+          },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
@@ -288,9 +398,7 @@
             "type": "number"
           }
         },
-        "required": [
-          "app"
-        ],
+        "required": [],
         "type": "object"
       },
       "method": "rightClick",
@@ -301,6 +409,28 @@
       "description": "Scroll at a current element or screenshot point. Observe the result before sending another scroll.",
       "input_schema": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            },
+            "required": [
+              "app"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
         "properties": {
           "amount": {
             "default": 3,
@@ -327,6 +457,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
+          },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
@@ -341,7 +478,6 @@
           }
         },
         "required": [
-          "app",
           "direction"
         ],
         "type": "object"
@@ -354,6 +490,28 @@
       "description": "Drag between current window screenshot points. Unsupported background gestures refuse before sending input; use semantic value operations when available.",
       "input_schema": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            },
+            "required": [
+              "app"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
         "properties": {
           "app": {
             "description": "Exact application name, identifier or absolute path from get_state/get_app.",
@@ -365,6 +523,13 @@
           },
           "from_y": {
             "type": "number"
+          },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
@@ -378,7 +543,6 @@
           }
         },
         "required": [
-          "app",
           "from_x",
           "from_y",
           "to_x",
@@ -394,10 +558,39 @@
       "description": "Insert text at the current text caret. This does not replace the whole field; use set_value for replacement.",
       "input_schema": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            },
+            "required": [
+              "app"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
         "properties": {
           "app": {
             "description": "Exact application name, identifier or absolute path from get_state/get_app.",
             "minLength": 1,
+            "type": "string"
+          },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
             "type": "string"
           },
           "session": {
@@ -409,7 +602,6 @@
           }
         },
         "required": [
-          "app",
           "text"
         ],
         "type": "object"
@@ -455,6 +647,28 @@
       "description": "Press a key in the selected app. Optional modifiers form a chord. Observe before retrying an unconfirmed dispatch.",
       "input_schema": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            },
+            "required": [
+              "app"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
         "properties": {
           "app": {
             "description": "Exact application name, identifier or absolute path from get_state/get_app.",
@@ -470,13 +684,19 @@
             },
             "type": "array"
           },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
+          },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
           }
         },
         "required": [
-          "app",
           "key"
         ],
         "type": "object"
@@ -489,6 +709,28 @@
       "description": "Press a modifier/key chord in the selected app.",
       "input_schema": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            },
+            "required": [
+              "app"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
         "properties": {
           "app": {
             "description": "Exact application name, identifier or absolute path from get_state/get_app.",
@@ -502,19 +744,121 @@
             "minItems": 1,
             "type": "array"
           },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
+          },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
           }
         },
         "required": [
-          "app",
           "keys"
         ],
         "type": "object"
       },
       "method": "hotkey",
       "name": "hotkey",
+      "read_only": false
+    },
+    {
+      "description": "Hold a desktop key for this session. Release with key_up in finally. Session end releases owned keys. While keys are held, use key_down/key_up for chords and desktop pointer actions without explicit modifiers.",
+      "input_schema": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
+        "properties": {
+          "app": {
+            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "key": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "key"
+        ],
+        "type": "object"
+      },
+      "method": "desktop.keyDown",
+      "name": "key_down",
+      "read_only": false
+    },
+    {
+      "description": "Release a desktop key held by this session. Another session cannot release it.",
+      "input_schema": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "app"
+              ]
+            },
+            "required": [
+              "scope"
+            ]
+          }
+        ],
+        "properties": {
+          "app": {
+            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "key": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "scope": {
+            "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "key"
+        ],
+        "type": "object"
+      },
+      "method": "desktop.keyUp",
+      "name": "key_up",
       "read_only": false
     },
     {

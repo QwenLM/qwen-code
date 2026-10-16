@@ -1077,10 +1077,18 @@ function handleAddModuleRoot(message) {
   });
 }
 
-function shutdown(removeSessionTmpDir = false) {
+async function shutdown(removeSessionTmpDir = false) {
   if (shuttingDown) return;
   shuttingDown = true;
+  activeExec?.abortController.abort();
   clearAllTimers();
+  const forceExit = hostSetTimeout(() => process.exit(0), 2000);
+  forceExit.unref();
+  try {
+    await untrustedContext?.cua?.[Symbol.asyncDispose]?.();
+  } catch (error) {
+    process.stderr.write(`Computer Use cleanup failed: ${error?.message ?? String(error)}\n`);
+  }
   if (removeSessionTmpDir) {
     try {
       if (config?.tmpDir) {
