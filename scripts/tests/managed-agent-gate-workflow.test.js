@@ -176,6 +176,9 @@ describe('Managed Agent gate required check', () => {
   it('always reports after the tier selection and the suite', () => {
     expect(gate.jobs.gate.if).toBe('${{ always() }}');
     expect(gate.jobs.gate.needs).toEqual(['scope', 'suite']);
+    // Same trust routing as the scope job, which the runner-routing
+    // inventory evaluates: a starved hosted queue must not hold the check.
+    expect(gate.jobs.gate['runs-on']).toBe(gate.jobs.scope['runs-on']);
   });
 
   const report = gate.jobs.gate.steps.find(

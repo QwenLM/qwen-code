@@ -714,6 +714,20 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       'pull_request_review',
       ['push', 'merge_group', 'workflow_dispatch'],
     ],
+    // The gate's own jobs report the would-be required check, so a starved
+    // hosted queue must not hold them; fork PRs and fork approvals stay hosted.
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request',
+      ['push', 'merge_group'],
+    ],
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request_review',
+      ['push', 'merge_group'],
+    ],
     [
       'assign-pr-owner.yml',
       'assign',

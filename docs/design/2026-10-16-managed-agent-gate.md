@@ -114,6 +114,12 @@ An approval of a fork PR raises `pull_request_review`, so the trust check now
 covers both events: untrusted fork code stays on hosted runners, and its full
 run there needs no secrets.
 
+The gate's own `scope` and `gate` jobs use the same routing. They report the
+would-be required check, so a backed-up hosted queue (123 queued runs
+repository-wide on 2026-10-16, when the first run of this workflow waited
+there) must not hold them. Trusted runs take the ECS pool with the shared
+pre-checkout hygiene steps; fork runs stay hosted.
+
 ### Failure reporting
 
 `main-ci-failure-issue.yml` also watches `Managed Agent gate`, so a red

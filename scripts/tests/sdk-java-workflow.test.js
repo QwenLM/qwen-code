@@ -796,6 +796,9 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
         'utf8',
       ),
     ),
+    'managed-agent-gate.yml': parse(
+      readFileSync('.github/workflows/managed-agent-gate.yml', 'utf8'),
+    ),
   };
   const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
   const ciSteps = Object.values(ci.jobs).flatMap((job) => job.steps ?? []);
@@ -813,6 +816,7 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
     ['sdk-java-flyway-open-prs.yml', 'recheck'],
     ['sdk-java-contract-open-prs.yml', 'recheck'],
     ['release-managed-agent-reference.yml', 'build'],
+    ['managed-agent-gate.yml', 'scope'],
   ];
 
   it.each(poolJobs)(

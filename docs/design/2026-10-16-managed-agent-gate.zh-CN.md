@@ -99,6 +99,11 @@ approve 或 **Re-run failed jobs** 会重试。
 fork PR 会产生 `pull_request_review`，所以信任检查现在同时覆盖这两个事件：不受信任的
 fork 代码留在托管 runner 上，在那里跑全量也不需要任何 secret。
 
+门禁自己的 `scope` 和 `gate` job 也用同样的路由。它们报告的是将来的必需检查，不能被
+拥堵的托管队列卡住（2026-10-16 本工作流第一次运行就在那里排队，当时全仓库有 123 个
+运行在排队）。受信任的运行走 ECS 池，并带上共享的 checkout 前清理步骤；fork 的运行
+留在托管 runner。
+
 ### 失败上报
 
 `main-ci-failure-issue.yml` 也监听 `Managed Agent gate`，合入后快闸变红会和其他 main
