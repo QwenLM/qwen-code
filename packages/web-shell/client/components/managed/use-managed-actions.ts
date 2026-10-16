@@ -14,6 +14,9 @@ const EXPIRY_GRACE_MS = 1_000;
 const LOAD_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 // The contract's codes for an Action that already ended: it expired, was
 // cancelled, or was answered elsewhere. Retrying the answer cannot succeed.
+// `action_response_delivery_failed` is deliberately absent: the service
+// re-admits a retried click whose Action is still requested, so a retry
+// after a delivery failure can succeed and the card must stay retryable.
 const ENDED_ACTION_CODES: ReadonlySet<string> = new Set([
   'action_expired',
   'action_cancelled',
