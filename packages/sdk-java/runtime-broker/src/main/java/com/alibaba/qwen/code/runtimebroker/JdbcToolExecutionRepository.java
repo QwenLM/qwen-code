@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
@@ -97,10 +99,7 @@ public final class JdbcToolExecutionRepository
         List<ToolExecutionRecord> result = new ArrayList<>();
         try (PreparedStatement statement =
                 connection.prepareStatement(
-                        "SELECT e.*, b.isolation_class, b.isolation_key FROM ma_tool_execution e"
-                                + " JOIN ma_runtime_binding b ON b.binding_id = e.binding_id WHERE"
-                                + " b.tenant_id = ? AND e.harness_session_id = ? ORDER BY"
-                                + " e.execution_call_id_hash FOR UPDATE")) {
+                        "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns("e") + ", b.isolation_class, b.isolation_key FROM ma_tool_execution e JOIN ma_runtime_binding b ON b.binding_id = e.binding_id WHERE b.tenant_id = ? AND e.harness_session_id = ? ORDER BY e.execution_call_id_hash FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet rows = statement.executeQuery()) {
@@ -796,6 +795,65 @@ public final class JdbcToolExecutionRepository
                                         batch.get(batch.size() - 1).getExecutionCallId());
                     }
                 });
+    }
+
+    @Override
+    public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
+            String harnessSessionId, String afterExecutionCallId, int limit) {
+        if (harnessSessionId == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException(
+                    "harnessSessionId and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<ToolExecutionRecord> matches = new ArrayList<>();
+            String cursor = after;
+            // Same windowing as findBackgroundProcesses, but scoped by the
+            // harness session instead of one Runtime Session, and WITHOUT the
+            // terminal-state filter: a hold row's settle discharges nothing —
+            // only the Runtime Session's recorded release does, and that
+            // filter is the caller's (#13930 R1-2 review).
+            for (;;) {
+                String sql = "SELECT " + EXECUTION_COLUMNS + " FROM ma_tool_execution "
+                        + "WHERE harness_session_id = ? AND execution_call_id_hash > ? "
+                        + "ORDER BY execution_call_id_hash LIMIT ?";
+                List<ToolExecutionRecord> batch = new ArrayList<>();
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
+                    statement.setString(2, cursor);
+                    statement.setInt(3, limit);
+                    try (ResultSet result = statement.executeQuery()) {
+                        while (result.next()) {
+                            batch.add(mapExecution(result));
+                        }
+                    }
+                }
+                if (batch.isEmpty()) {
+                    return List.copyOf(matches);
+                }
+                for (ToolExecutionRecord record : batch) {
+                    // The canonical schema stores identities in VARBINARY,
+                    // so the SQL's `=` is already byte-exact; this fence keeps
+                    // the exact Harness identity guarantee independent of the
+                    // store's comparison semantics (#13986 review).
+                    if (!harnessSessionId.equals(record.getHarnessSessionId())) {
+                        continue;
+                    }
+                    if (ManagedHoldFamily.of(record) != null) {
+                        matches.add(record);
+                        if (matches.size() == limit) {
+                            return List.copyOf(matches);
+                        }
+                    }
+                }
+                if (batch.size() < limit) {
+                    return List.copyOf(matches);
+                }
+                cursor = JdbcRepositorySupport.valueKey(
+                        batch.get(batch.size() - 1).getExecutionCallId());
+            }
+        });
     }
 
     @Override

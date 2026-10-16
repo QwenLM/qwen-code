@@ -1,41 +1,15 @@
 package com.alibaba.qwen.code.managedagent;
 
-import org.springframework.http.HttpStatus;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.junit.jupiter.params.provider.CsvSource;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
-import org.junit.jupiter.params.ParameterizedTest;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.never;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.AdditionalAnswers.delegatesTo;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
@@ -44,8 +18,29 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
@@ -54,21 +49,28 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
-import org.springframework.context.annotation.Primary;
-import org.springframework.http.MediaType;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.ResultActions;
-import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * Durable close, archive and delete: an operation outlives an unavailable
@@ -621,16 +623,16 @@ class ManagedSessionLifecycleTest {
             store.claimRename(candidate, "old", Duration.ofMinutes(1)).orElseThrow();
             store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), null);
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("PENDING");
-            jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'"
+            jdbc.update("UPDATE ma_operation SET claim_until = 0"
                     + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
             store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), "old");
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("PENDING");
             var current = store.claimRename(candidate, "new", Duration.ofMinutes(1)).orElseThrow();
-            var row = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
+            var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
                     tenant, sessionId);
             store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), "old");
             store.retryRename(candidate, "old", 0);
-            assertThat(jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
+            assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
                     tenant, sessionId)).isEqualTo(row);
             assertThat(store.beginSessionRename(tenant, "rename", "digest", sessionId, "new title").renameRevision())
                     .isEqualTo(command.renameRevision());
@@ -871,9 +873,10 @@ class ManagedSessionLifecycleTest {
         doAnswer(call -> {
             harness.setAvailable(false);
             return store.beginSessionRename(call.getArgument(0), call.getArgument(1),
-                    call.getArgument(2), call.getArgument(3), call.getArgument(4));
+                    call.getArgument(2), call.getArgument(3), call.getArgument(4),
+                    call.getArgument(5));
         }).when(faulted).beginSessionRename(anyString(), anyString(), anyString(),
-                anyString(), anyString());
+                anyString(), anyString(), any());
         ManagedAgentService subject = new ManagedAgentService(faulted,
                 new RequestDigests(), null, harness, null);
         if ("cleanup".equals(phase)) {
@@ -919,7 +922,7 @@ class ManagedSessionLifecycleTest {
         // completed and it replays; timing out here would also prove the row was never
         // re-queued.
         assertThat(jdbc.update("UPDATE ma_operation"
-                        + " SET available_at = 0, claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ?"
+                        + " SET available_at = 0, claim_until = 0 WHERE tenant_id = ?"
                         + " AND session_id = ?", tenant, sessionId)).isEqualTo(1);
         if (!"lookup".equals(phase)) {
             await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
@@ -938,8 +941,7 @@ class ManagedSessionLifecycleTest {
             if ("completion".equals(phase)) {
                 // Reconcile the original Harness result, retaining its owner and generation.
                 assertThat(harness.title(sessionId)).isEqualTo("renamed");
-                var original = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'RENAME'"
-                        + " AND tenant_id = ? AND session_id = ?", tenant, sessionId);
+                var original = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?", tenant, sessionId);
                 var delivery = new com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery(tenant, sessionId,
                         "key", "renamed", ((Number) original.get("target_revision")).longValue(),
                         ((Number) original.get("attempt_count")).intValue(), ((Number) original.get("claim_generation")).longValue());

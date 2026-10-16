@@ -4,6 +4,11 @@ import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
+import org.apache.rocketmq.client.apis.message.MessageView;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.Closeable;
 import java.nio.ByteBuffer;
 import java.util.OptionalLong;
@@ -15,10 +20,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
-import org.apache.rocketmq.client.apis.message.MessageView;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The message listener of both EventTransport consumer lanes (design

@@ -2,22 +2,23 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
-import java.util.List;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 @Repository
 public class WorkspaceExecutionStore {
@@ -377,8 +378,7 @@ public class WorkspaceExecutionStore {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             String key = storageKey(binding);
             WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
-            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ?"
-                    + " AND operation_kind = 'CHILD_WORKSPACE' AND claim_until > CURRENT_TIMESTAMP(6) FOR UPDATE",
+            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CHILD_WORKSPACE' AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE",
                     Long.class, WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, binding.getTenantId(), maintenanceId));
             if (generations.size() != 1 || generations.getFirst() != claimGeneration) {
                 throw unavailable();
@@ -441,8 +441,8 @@ public class WorkspaceExecutionStore {
     public boolean canStopDrained(RuntimeBindingRecord saved) {
         if ((saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST)
                 || !saved.isDrainRequested() || !saved.getRequest().isManagedContext() || saved.getOperationOwner() == null
-                || !"local-process".equals(saved.getRequest().getProvisionerKind())
-                || !"session".equals(saved.getRequest().getScope().getIsolationClass())) {
+                || !LocalProcessRuntimeProvisioner.KIND.equals(saved.getRequest().getProvisionerKind())
+                || !WorkspaceExecutionProfile.admitsIsolationClass(saved.getRequest().getScope().getIsolationClass())) {
             return false;
         }
         var claims = jdbc.query("SELECT binding_state, drain_requested, operation_owner, operation_generation,"
@@ -452,10 +452,9 @@ public class WorkspaceExecutionStore {
                         saved.getState().name().equals(row.getString("binding_state")) && row.getBoolean("drain_requested")
                         && saved.getOperationOwner().equals(row.getString("operation_owner"))
                         && saved.getOperationGeneration() == row.getLong("operation_generation")
-                        && row.getTimestamp("operation_lease_until") != null
-                        && row.getTimestamp("operation_lease_until", java.util.Calendar.getInstance(
-                                java.util.TimeZone.getTimeZone("UTC"))).toInstant().isAfter(java.time.Instant.ofEpochSecond(
-                                        row.getLong("db_seconds"), row.getLong("db_micros") * 1000))
+                        && ManagedSchemaTime.timestamp(row, "operation_lease_until") != null
+                        && ManagedSchemaTime.timestamp(row, "operation_lease_until").toInstant().isAfter(java.time.Instant.ofEpochMilli(
+                                        row.getLong("db_seconds") * 1000 + row.getLong("db_micros") / 1000))
                         && saved.getRequest().getScope().getTenantId().equals(row.getString("tenant_id"))
                         && saved.getRequest().getStorageId().equals(row.getString("storage_id")),
                 saved.getBindingId(), saved.getGeneration());
@@ -504,10 +503,9 @@ public class WorkspaceExecutionStore {
                             && saved.getVersion() == row.getLong("record_version")
                             && saved.getOperationOwner().equals(row.getString("operation_owner"))
                             && saved.getOperationGeneration() == row.getLong("operation_generation")
-                            && row.getTimestamp("operation_lease_until") != null
-                            && row.getTimestamp("operation_lease_until", java.util.Calendar.getInstance(
-                                    java.util.TimeZone.getTimeZone("UTC"))).toInstant().isAfter(java.time.Instant.ofEpochSecond(
-                                            row.getLong("db_seconds"), row.getLong("db_micros") * 1000))
+                            && ManagedSchemaTime.timestamp(row, "operation_lease_until") != null
+                            && ManagedSchemaTime.timestamp(row, "operation_lease_until").toInstant().isAfter(java.time.Instant.ofEpochMilli(
+                                            row.getLong("db_seconds") * 1000 + row.getLong("db_micros") / 1000))
                             && row.getString("loss_evidence_json") != null && row.getString("stop_evidence_json") != null,
                     saved.getBindingId());
             if (exact.size() != 1 || !exact.getFirst()
@@ -626,9 +624,8 @@ public class WorkspaceExecutionStore {
 
     private static String digest(String value) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.sha256Hex(value.getBytes(StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }

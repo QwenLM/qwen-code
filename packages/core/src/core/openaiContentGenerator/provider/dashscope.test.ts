@@ -22,7 +22,6 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import type { ChatCompletionToolWithCache } from './types.js';
 import {
   DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
@@ -286,6 +285,18 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
       ],
       [
+        'should return true for Model Studio workspace-dedicated URL',
+        'https://llm-abc123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for international workspace-dedicated URL',
+        'https://llm-abc123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for Model Studio trial URL',
+        'https://trial.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
         'should return true for internal aliyun-inc.com subdomain',
         'https://model-gateway.aliyun-inc.com/dashscope/v1',
       ],
@@ -353,8 +364,10 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://notaliyun-inc.com/v1',
         'https://alibaba-inc.com.evil.com/v1',
         'https://aliyun-inc.com.evil.com/v1',
-        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
+        'https://maas.aliyuncs.com/v1',
+        'https://notmaas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+        'https://evil.example.com/llm-abc123.cn-beijing.maas.aliyuncs.com/v1',
         'https://notalicloudapi.com/v1',
         'https://alicloudapi.com.evil.com/v1',
       ].forEach((baseUrl) => {
@@ -1386,13 +1399,13 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       // Neither the last message nor the tools get cache control when not streaming.
       expect(result.messages[3].role).toBe('user');
       expect(result.messages[3].content).toBe('Hello!');
-      const tools = result.tools as ChatCompletionToolWithCache[];
+      const tools = result.tools as Array<{ cache_control?: unknown }>;
       expect(tools).toBeDefined();
       expect(tools).toHaveLength(1);
       expect(tools[0].cache_control).toBeUndefined();
     });
 
-    it('should add cache control to system, last history message, and last tool definition for streaming requests', () => {
+    it('should add cache control to system and last history message but not tool definitions for streaming requests', () => {
       const result = provider.buildRequest(
         {
           ...baseRequest,
@@ -1404,10 +1417,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
       expectCachedSystemAndTools(result);
       expect(result.messages[3].content).toEqual([cachedText('Hello!')]);
-      const tools = result.tools as ChatCompletionToolWithCache[];
+      // DashScope ignores cache_control on tool definitions; the system
+      // marker already covers them because they render before the system.
+      const tools = result.tools as Array<{ cache_control?: unknown }>;
       expect(tools).toBeDefined();
       expect(tools).toHaveLength(1);
-      expect(tools[0].cache_control).toEqual(EPHEMERAL);
+      expect(tools[0].cache_control).toBeUndefined();
     });
 
     it('should not add cache control to tool messages when request.tools is undefined', () => {

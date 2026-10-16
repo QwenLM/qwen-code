@@ -1,22 +1,24 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.time.Instant;
-import java.util.HexFormat;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 /** Durable, exact-holder operator authority. The caller must independently verify quiescence. */
 public final class WorkspaceOperatorRecoveryStore {
@@ -67,8 +69,8 @@ public final class WorkspaceOperatorRecoveryStore {
     public String prepare(String bindingId, long generation, String expectedHolder,
             String operator, String reason) {
         if (expectedHolder == null || !expectedHolder.matches("[0-9a-f]{64}")
-                || operator == null || operator.isBlank() || operator.length() > 512
-                || reason == null || reason.isBlank() || reason.length() > 2048) {
+                || StringUtils.isBlank(operator) || operator.length() > 512
+                || StringUtils.isBlank(reason) || reason.length() > 2048) {
             throw blocked();
         }
         RuntimeBindingRecord saved = requireBinding(bindingId, generation);
@@ -225,7 +227,7 @@ public final class WorkspaceOperatorRecoveryStore {
     }
 
     private Map<String, Object> row(String recoveryId, boolean lock) {
-        List<Map<String, Object>> rows = jdbc.query("SELECT * FROM ma_operation WHERE operation_kind = ?"
+        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = ?"
                 + " AND operation_id = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> WorkspaceOperations.operation(row), KIND.name(), recoveryId.getBytes(StandardCharsets.UTF_8));
         if (rows.size() != 1) {
@@ -235,7 +237,7 @@ public final class WorkspaceOperatorRecoveryStore {
     }
 
     private Map<String, Object> findBindingOperation(RuntimeBindingRecord binding, boolean lock) {
-        List<Map<String, Object>> rows = jdbc.query("SELECT * FROM ma_operation WHERE operation_kind = ?"
+        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = ?"
                 + " AND tenant_id = ? AND target_key = ? AND target_revision = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> WorkspaceOperations.operation(row), KIND.name(), binding.getRequest().getScope().getTenantId(),
                 WorkspaceOperations.hash(binding.getBindingId()), binding.getGeneration());
@@ -250,7 +252,7 @@ public final class WorkspaceOperatorRecoveryStore {
         if (binding == null || binding.getGeneration() != generation
                 || !binding.getRequest().isManagedContext()
                 || binding.getResourceHandle() == null
-                || !"local-process".equals(binding.getResourceHandle().getKind())
+                || !LocalProcessRuntimeProvisioner.KIND.equals(binding.getResourceHandle().getKind())
                 || binding.getResourceHandle().getVersion() != 2
                 || binding.getProvisionSeed() == null || binding.getLease() == null) {
             throw blocked();
@@ -328,8 +330,8 @@ public final class WorkspaceOperatorRecoveryStore {
 
     private static String digest(byte[] value) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value));
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.sha256Hex(value);
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException(error);
         }
     }

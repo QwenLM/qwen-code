@@ -1,22 +1,13 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,6 +15,18 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class LocalStorageAliasTest {
     @TempDir Path temporary;
@@ -79,7 +82,22 @@ class LocalStorageAliasTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
         String physical = LocalStorageOwners.key(jdbc, "tenant", "storage");
         assertThat(LocalStorageOwners.key(jdbc, "other-tenant", "other-storage")).isEqualTo(physical);
-        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
+        String aliasKey = JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage");
+        assertThat(jdbc.queryForObject("SELECT gmt_create FROM ma_storage WHERE alias_key = ?",
+                Long.class, aliasKey)).isPositive();
+        String registrationOperation = WorkspaceRecoveryStore.parse(jdbc.queryForObject(
+                "SELECT registration_json FROM ma_storage WHERE alias_key = ?", String.class, aliasKey))
+                .path("operationId").asText();
+        jdbc.update("UPDATE ma_storage SET storage_kind = 'UNREGISTERED', gmt_modified = 1 WHERE alias_key = ?",
+                aliasKey);
+        guard.register("tenant", "storage", registrationOperation);
+        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE alias_key = ?",
+                Long.class, aliasKey)).isGreaterThan(1);
+        jdbc.update("UPDATE ma_storage SET gmt_modified = 1 WHERE alias_key = ?", aliasKey);
+        guard.register("tenant", "storage", registrationOperation);
+        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE alias_key = ?",
+                Long.class, aliasKey)).isEqualTo(1);
         byte[] marker = Files.readAllBytes(root.resolve(".qwen-managed-storage.json"));
         assertThat(owner.get("tenant_id")).isEqualTo("tenant");
         assertThat(owner.get("storage_id")).isEqualTo("storage");
@@ -91,7 +109,7 @@ class LocalStorageAliasTest {
         assertThatThrownBy(() -> guard.verify(binding("tenant", "storage"))).isInstanceOf(RuntimeBrokerException.class);
         guard.verify(binding("other-tenant", "other-storage"));
         assertThat(Files.readAllBytes(root.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(owner);
     }
 
     @Test
@@ -137,9 +155,9 @@ class LocalStorageAliasTest {
     @Test
     void uncoveredAliasSessionAuthorityRefusesPhysicalHandover() {
         session("other-tenant", "other-storage", "retained");
-        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
         assertUncovered(() -> guard.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(owner);
         jdbc.update("DELETE FROM ma_session WHERE tenant_id = ? AND session_id = ?", "other-tenant", "retained");
         guard.fence("tenant", "storage", 1, UUID.randomUUID().toString());
     }
@@ -214,7 +232,7 @@ class LocalStorageAliasTest {
         String original = LocalStorageOwners.key(jdbc, "tenant", "storage");
         String fence = UUID.randomUUID().toString();
         guard.fence("other-tenant", "other-storage", 1, fence);
-        var originalOwner = jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", original);
+        var originalOwner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ?", original);
         var source = guard.recoveryRegistration("other-tenant", "other-storage", 1, fence);
         Path target = Files.createDirectory(temporary.resolve("target")).toRealPath();
         Files.copy(root.resolve(".qwen-managed-storage.json"), target.resolve(".qwen-managed-storage.json"));
@@ -227,7 +245,7 @@ class LocalStorageAliasTest {
         String promoted = LocalStorageOwners.key(jdbc, "other-tenant", "other-storage");
         assertThat(promoted).isNotEqualTo(original);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", original)).isEqualTo(originalOwner);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ?", original)).isEqualTo(originalOwner);
         assertThat(LocalStorageOwners.key(jdbc, "tenant", "storage")).isEqualTo(original);
         assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = ?", Long.class, promoted)).isEqualTo(2);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("other-tenant", "other-storage", target.toString())));
@@ -273,7 +291,9 @@ class LocalStorageAliasTest {
         config.getToolPublication().setGcEnabled(true);
         config.getToolPublication().setDeletionGrace(java.time.Duration.ZERO);
         var collector = new SessionResourceCollectionCollector(jdbc, manager, config);
-        for (int page = 0; page < 20 && collector.runOnce(); page++) {}
+        for (int page = 0; page < 20 && collector.runOnce(); page++) {
+            // collector.runOnce() in the condition does the work; the body stays empty.
+        }
         assertThat(jdbc.queryForObject("SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
         assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'", String.class)).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isZero();
@@ -337,7 +357,7 @@ class LocalStorageAliasTest {
     }
 
     private void session(String tenant, String storage, String session) {
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id, tenant_key, session_key, session_scope_key, created_at, updated_at)"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 1, 1)", tenant, session, storage,
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session), ManagedSessionStore.sessionScopeKey(tenant, session));
     }

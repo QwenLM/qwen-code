@@ -1,13 +1,12 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,6 +18,9 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedSnapshotPoolTest {
     private DruidDataSource source;
@@ -35,14 +37,10 @@ class ManagedSnapshotPoolTest {
         source.init();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, created_at, updated_at,"
-                + " tenant_key, session_key, session_scope_key) VALUES ('tenant', 'session',"
-                    + " 'qwen-code', 0, 0, ?, ?, ?)",
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified, tenant_key, session_key, session_scope_key) VALUES ('tenant', 'session', 'qwen-code', 0, 0, ?, ?, ?)",
                 ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"),
                 ManagedSessionStore.sessionScopeKey("tenant", "session"));
-        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
-                + " last_sequence, covered_sequence, updated_at) VALUES ('tenant', 'session',"
-                    + " 'SESSION', X'', 1, 1, 0)");
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, covered_sequence, gmt_modified) VALUES ('tenant', 'session', 'SESSION', X'', 1, 1, 0)");
         snapshots = new ManagedSnapshotStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
                 (tenant, session, guard) -> {
                     guard.run();
@@ -69,18 +67,18 @@ class ManagedSnapshotPoolTest {
         snapshots.build("tenant", "session");
         var manager = new DataSourceTransactionManager(source);
         jdbc.update("UPDATE ma_snapshot SET retain_until = 0");
-        jdbc.update("UPDATE ma_resource SET retention_until = CURRENT_TIMESTAMP(6)");
+        jdbc.update("UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW);
         jdbc.update("UPDATE ma_session SET runtime_request_key = ?", "a".repeat(64));
-        var roots = jdbc.queryForList("SELECT * FROM ma_snapshot");
-        var resources = jdbc.queryForList("SELECT * FROM ma_resource");
-        var refs = jdbc.queryForList("SELECT * FROM ma_resource_ref");
+        var roots = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SNAPSHOT.columns() + " FROM ma_snapshot");
+        var resources = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource");
+        var refs = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE_REF.columns() + " FROM ma_resource_ref");
         var collector = new ManagedProjectionResourceCollector(jdbc, manager);
         assertThat(collector.runOnce()).isFalse();
-        assertThat(jdbc.queryForList("SELECT * FROM ma_snapshot")).isEqualTo(roots);
-        assertThat(jdbc.queryForList("SELECT * FROM ma_resource"))
+        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.SNAPSHOT.columns() + " FROM ma_snapshot")).isEqualTo(roots);
+        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource"))
                 .usingRecursiveComparison()
                 .isEqualTo(resources);
-        assertThat(jdbc.queryForList("SELECT * FROM ma_resource_ref")).isEqualTo(refs);
+        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE_REF.columns() + " FROM ma_resource_ref")).isEqualTo(refs);
     }
 
     @Test

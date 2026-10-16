@@ -1,16 +1,21 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -19,13 +24,9 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Delivery states of an operation on a store that no worker scans, with a
@@ -148,7 +149,7 @@ class ManagedSessionOperationStoreTest {
         String target = ManagedSchemaKeys.key(sessionId);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id, session_id,"
                         + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, claim_until,"
-                        + " created_at, updated_at) VALUES (?, ?, 'background', 'WORKSPACE_RECOVERY', ?, ?, 'SESSION', ?,"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, 'background', 'WORKSPACE_RECOVERY', ?, ?, 'SESSION', ?,"
                         + " 'digest', '{}', 'RUNNING', 'CAPTURING', 'LEASED', ?, 0, 0)",
                 ManagedSchemaKeys.key("background"), scope, TENANT, sessionId, target, new java.sql.Timestamp(0));
         assertThat(targets(store)).isEmpty();
@@ -196,8 +197,7 @@ class ManagedSessionOperationStoreTest {
             public Instant instant() {
                 return Instant.ofEpochMilli(now.get());
             }
-        }, ignored -> {
-        }, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
     }
 
     private List<String> targets(ManagedAgentStore store) {

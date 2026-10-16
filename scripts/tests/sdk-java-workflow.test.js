@@ -54,7 +54,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       // NONE, '') fail contains() and stay hosted.
       'contains(fromJSON(\'\'["OWNER","MEMBER","COLLABORATOR"]\'\'), github.event.pull_request.author_association)',
       'fromJSON(\'\'["self-hosted", "linux", "x64", "ecs-qwen"]\'\')',
-      "ref: '${{ github.sha }}'",
+      "ref: '${{ inputs.ref || github.sha }}'",
     ]) {
       expect(block).toContain(fragment);
     }
@@ -109,7 +109,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
       );
       expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
-        { test: 6, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
+        { test: 7, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
       );
       if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
@@ -156,8 +156,7 @@ describe('SDK Java Flyway migration version guard', () => {
     ]) {
       expect(block).toContain(fragment);
     }
-    // The merge result is the point: keep the default merge-ref checkout on
-    // the pool too, never the refs/pull/N/head the build lanes use.
+    // Every lane checks the release commit, or the event SHA on daily runs.
     expect(block).toContain('actions/checkout@');
     expect(block).not.toContain('refs/pull/');
     const steps = parsed.steps.map((s) => s.name);
@@ -199,6 +198,7 @@ describe('SDK Java Flyway migration version guard', () => {
     const yml = parse(workflow);
     expect(Object.keys(yml.on).sort()).toEqual([
       'schedule',
+      'workflow_call',
       'workflow_dispatch',
     ]);
     expect(yml.on.schedule).toEqual([{ cron: '47 19 * * *' }]);
@@ -244,6 +244,10 @@ describe('SDK Java contract version guard', () => {
     expect(step.if).toBe(
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
     );
+    expect(index).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
+    expect(
+      names.indexOf('Check Flyway migration versions are unique'),
+    ).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
     expect(index).toBeLessThan(
       parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
     );
@@ -262,6 +266,9 @@ describe('SDK Java contract version guard', () => {
     expect(step.run).toContain(CONTRACT_DOCUMENT);
     expect(parsed.permissions['pull-requests']).toBe('read');
     expect(step.run).toContain('--paginate');
+    expect(step.run).toContain(
+      "--jq '.[] | .filename, .previous_filename // empty'",
+    );
     expect(step.run).toContain(
       'grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"',
     );
@@ -676,4 +683,64 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
       );
     },
   );
+});
+
+describe('Java SDK release validation gate', () => {
+  const checks = parse(workflow);
+  const release = parse(
+    readFileSync('.github/workflows/release-sdk-java.yml', 'utf8'),
+  );
+
+  it('checks the prepared source in every lane before publishing', () => {
+    expect(checks.on.workflow_call.inputs.ref).toMatchObject({
+      required: true,
+      type: 'string',
+    });
+    for (const lane of Object.values(checks.jobs)) {
+      const checkout = lane.steps.find((entry) =>
+        entry.uses?.startsWith('actions/checkout@'),
+      );
+      expect(checkout.with.ref).toBe('${{ inputs.ref || github.sha }}');
+      expect(lane.if).toBeUndefined();
+      expect(lane['continue-on-error']).toBeUndefined();
+    }
+    expect(release.jobs.java_checks).toMatchObject({
+      needs: 'prepare',
+      uses: './.github/workflows/sdk-java.yml',
+      with: { ref: '${{ needs.prepare.outputs.release_sha }}' },
+    });
+    expect(release.jobs.java_checks['continue-on-error']).toBeUndefined();
+    expect(release.jobs.release.needs).toEqual(['prepare', 'java_checks']);
+    expect(release.jobs.release.if).toBeUndefined();
+    const checkout = release.jobs.release.steps.find((entry) =>
+      entry.uses?.startsWith('actions/checkout@'),
+    );
+    expect(checkout.with.ref).toBe('${{ needs.prepare.outputs.release_sha }}');
+  });
+
+  it('resolves an existing tag before checks and refuses a changed tag', () => {
+    const prepare = release.jobs.prepare;
+    expect(prepare.permissions).toEqual({ contents: 'read' });
+    expect(prepare.environment).toBeUndefined();
+    const preflight = prepare.steps.find((entry) => entry.id === 'preflight');
+    expect(prepare.outputs.release_sha).toBe(
+      '${{ steps.preflight.outputs.release_sha }}',
+    );
+    expect(preflight.run.indexOf('echo "release_sha=')).toBeGreaterThan(
+      preflight.run.indexOf('git checkout --detach "${tag_commit}"'),
+    );
+    const steps = release.jobs.release.steps;
+    const guard = steps.findIndex(
+      (entry) => entry.name === 'Verify release tag has not changed',
+    );
+    expect(guard).toBeGreaterThan(-1);
+    expect(steps[guard].run).toContain('"${peeled_tag}" != "${RELEASE_SHA}"');
+    expect(steps[guard].run).toContain('exit 1');
+    expect(steps[guard].env.RELEASE_SHA).toBe(
+      '${{ needs.prepare.outputs.release_sha }}',
+    );
+    expect(guard).toBeLessThan(
+      steps.findIndex((entry) => entry.name === 'Create and push release tag'),
+    );
+  });
 });

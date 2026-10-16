@@ -1,13 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
@@ -15,19 +7,11 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Base64;
-import java.util.HexFormat;
-import java.util.List;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -38,6 +22,24 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-session-store;MODE=MySQL;"
@@ -106,28 +108,36 @@ class ManagedSessionStoreIntegrationTest {
             for (String path : List.of("/restore", "/transactions", "/resources/resource-context")) {
                 var read = get(base + path).header(TenantContextFilter.HEADER, TENANT)
                         .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE);
-                if (!header.isEmpty()) read.header(ceiling, header);
+                if (!header.isEmpty()) {
+                    read.header(ceiling, header);
+                }
                 mvc.perform(read).andExpect(status().isConflict())
                         .andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
             }
             var replay = post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
                     .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                     .contentType(MediaType.APPLICATION_JSON).content(commit.toString());
-            if (!header.isEmpty()) replay.header(ceiling, header);
+            if (!header.isEmpty()) {
+                replay.header(ceiling, header);
+            }
             mvc.perform(replay).andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-            var before = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session);
+            var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session);
             var acquire = post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
                     .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                     .contentType(MediaType.APPLICATION_JSON).content(writer.toString());
-            if (!header.isEmpty()) acquire.header(ceiling, header);
+            if (!header.isEmpty()) {
+                acquire.header(ceiling, header);
+            }
             mvc.perform(acquire).andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
             var renewBody = objectMapper.createObjectNode().put("workspaceId", WORKSPACE).put("writerId", WRITER_A).put("writerGeneration", 1).put("leaseMillis", 60_000);
             var renew = post(base + "/writers:renew").header(TenantContextFilter.HEADER, TENANT)
                     .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).contentType(MediaType.APPLICATION_JSON).content(renewBody.toString());
-            if (!header.isEmpty()) renew.header(ceiling, header);
+            if (!header.isEmpty()) {
+                renew.header(ceiling, header);
+            }
             mvc.perform(renew).andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-            assertThat(jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session)).isEqualTo(before);
+            assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session)).isEqualTo(before);
         }
         mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).header(ceiling, "2")
@@ -144,7 +154,7 @@ class ManagedSessionStoreIntegrationTest {
         String storage = "storage-" + UUID.randomUUID();
         String base = "/internal/managed-session-store/v1/sessions/" + session;
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status,"
-                + " created_at, updated_at, workspace_storage_id, workspace_id, workspace_generation, cwd_relative,"
+                + " gmt_create, gmt_modified, workspace_storage_id, workspace_id, workspace_generation, cwd_relative,"
                 + " context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref)"
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1, ?, 'workspace', 1, '.', ?, 1, ?, ?)",
                 TENANT, session, storage, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
@@ -154,7 +164,7 @@ class ManagedSessionStoreIntegrationTest {
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_A).toString()))
                 .andExpect(status().isOk());
-        var original = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session);
+        var original = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session);
         new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new AesGcmSecretProtector("test", new byte[32]))
                 .requestStorageFence(TENANT, storage, UUID.randomUUID().toString());
         mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
@@ -165,7 +175,7 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"))
                 .andExpect(jsonPath("$.error.retryable").value(false));
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session))
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session))
                 .isEqualTo(original);
         jdbc.update("UPDATE ma_storage SET fence_operation_id = NULL WHERE tenant_id = ? AND storage_id = ?", TENANT, storage);
         mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
@@ -298,7 +308,7 @@ class ManagedSessionStoreIntegrationTest {
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(body.deepCopy().put("digest", "0".repeat(64)).toString()))
                 .andExpect(status().isBadRequest());
-        jdbc.update("UPDATE ma_session_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE session_id = ?", session);
+        jdbc.update("UPDATE ma_session_head SET writer_lease_until = 946684800000 WHERE session_id = ?", session);
         mvc.perform(post(base + "/tool-results:publish").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(body.toString())).andExpect(status().isConflict());
@@ -754,6 +764,62 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_journal_corrupt"));
+    }
+
+    @Test
+    void rejectsAnOverlongRecoveryDetailCodeBeforeTheColumnDoes()
+            throws Exception {
+        String session = "recovery-width-" + UUID.randomUUID();
+        String base = "/internal/managed-session-store/v1/sessions/"
+                + session;
+        mvc.perform(post(base + "/writers:acquire")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(writerRequest(WRITER_A).toString()))
+                .andExpect(status().isOk());
+
+        ObjectNode overlong = objectMapper.createObjectNode()
+                .put("workspaceId", WORKSPACE)
+                .put("writerId", WRITER_A)
+                .put("writerGeneration", 1)
+                .put("recoveryStatus", "BLOCKED_EXECUTION")
+                .put("recoveryDetailCode", "x".repeat(129));
+        // A code wider than the VARCHAR(128) column once fell through
+        // validation and the strict-mode truncation surfaced 500 with the
+        // one-way recovery block never recorded.
+        mvc.perform(post(base + "/recovery:block")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(overlong.toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+
+        // A code that fits the column still records the block.
+        ObjectNode fits = overlong.deepCopy()
+                .put("recoveryDetailCode", "x".repeat(128));
+        mvc.perform(post(base + "/recovery:block")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(fits.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.recoveryStatus")
+                        .value("BLOCKED_EXECUTION"))
+                .andExpect(jsonPath("$.recoveryDetailCode")
+                        .value("x".repeat(128)));
+        // The receipt echoes the request; the durable row must carry the
+        // full 128 characters, not a truncation of them.
+        assertThat(jdbc.queryForObject(
+                "SELECT recovery_detail_code FROM"
+                        + " ma_session_head WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                String.class, TENANT, session))
+                .isEqualTo("x".repeat(128));
     }
 
     @Test

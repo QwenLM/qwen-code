@@ -1,14 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedSessionToolProfileMigrationTest {
     @Test
@@ -22,7 +21,7 @@ class ManagedSessionToolProfileMigrationTest {
         var jdbc = new JdbcTemplate(source);
         for (String id : new String[] {"bound", "unbound", "explicit"}) {
             jdbc.update(
-                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,created_at,updated_at)"
+                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                         + " VALUES (?,?,?,?,?)",
                     "tenant",
                     id,

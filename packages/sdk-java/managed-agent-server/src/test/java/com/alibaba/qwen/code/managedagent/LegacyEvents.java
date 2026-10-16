@@ -1,12 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Events written before V14, and the identity that V15 must give them. */
 final class LegacyEvents {
@@ -76,7 +77,7 @@ final class LegacyEvents {
             String data) {
         jdbc.update("INSERT INTO managed_agent_event (tenant_id, session_id,"
                         + " sequence_id, event_id, turn_id, event_type,"
-                        + " data_json, terminal, source_key, created_at)"
+                        + " data_json, terminal, source_key, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)",
                 tenant, session, sequence, "evt_legacy_" + session + "_"
                         + sequence, turnId, type, data,

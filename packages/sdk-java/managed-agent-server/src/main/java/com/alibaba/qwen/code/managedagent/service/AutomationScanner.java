@@ -7,6 +7,12 @@ import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.OccurrenceRow;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.OccurrenceView;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.ScheduleRow;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -17,11 +23,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
 
 /**
  * H6b: the automation scanner. It discovers candidates and claims them; it
