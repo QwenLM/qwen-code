@@ -16,6 +16,9 @@ import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -316,7 +319,7 @@ class QwenHostedHarnessConnectorTest {
             assertThat(created).doesNotContainKey("suppressChildAgents");
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
-                .doesNotContainKeys("childWorkspaces", "captureBytes");
+                .doesNotContainKeys("childWorkspaces", "captureBytes", "childSnapshots");
         properties.getToolPublication().setExecutionBytes(2097152L);
         QwenHostedHarnessConnector restarted = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(restarted, "client", client);
@@ -410,15 +413,38 @@ class QwenHostedHarnessConnectorTest {
                 .containsEntry("childWorkspaces", true)
                 .containsEntry("toolProfile", profile)
                 .containsEntry("approvalMode", "yolo")
-                .doesNotContainKey("suppressChildAgents");
+                .doesNotContainKey("suppressChildAgents")
+                .doesNotContainKey("childSnapshots");
         for (LoadHarnessSession request : load.getAllValues()) {
             assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(request, "toJson"))
                     .containsEntry("childWorkspaces", true)
                     .containsEntry("toolProfile", profile)
-                    .doesNotContainKey("suppressChildAgents");
+                    .doesNotContainKey("suppressChildAgents")
+                    .doesNotContainKey("childSnapshots");
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getAllValues().get(2), "toJson"))
                 .containsEntry("lifecycleAuthority", Map.of("operationId", "close-1", "claimGeneration", 2L));
+
+        // #13753 I3: the snapshot switch adds its flag to the same requests.
+        properties.getRuntimeBroker().setChildSnapshotsEnabled(true);
+        org.mockito.Mockito.clearInvocations(client);
+        fresh.get().createOrLoad("tenant-a", SESSION_ID, false);
+        fresh.get().createOrLoad("tenant-a", SESSION_ID, true);
+        fresh.get().recoverManagedRuntime("tenant-a", SESSION_ID, false);
+        fresh.get().settleLifecycle(operation);
+        fresh.get().rename("tenant-a", SESSION_ID, "internal lead");
+        ArgumentCaptor<CreateHarnessSession> snapshotCreate = ArgumentCaptor.forClass(CreateHarnessSession.class);
+        ArgumentCaptor<LoadHarnessSession> snapshotLoad = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).createSession(snapshotCreate.capture());
+        verify(client, times(4)).loadSession(snapshotLoad.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(snapshotCreate.getValue(), "toJson"))
+                .containsEntry("childWorkspaces", true)
+                .containsEntry("childSnapshots", true);
+        for (LoadHarnessSession request : snapshotLoad.getAllValues()) {
+            assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(request, "toJson"))
+                    .containsEntry("childWorkspaces", true)
+                    .containsEntry("childSnapshots", true);
+        }
     }
 
     @ParameterizedTest
@@ -1124,6 +1150,9 @@ class QwenHostedHarnessConnectorTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        // #13753 I3: this load restates the host's capabilities too.
+        properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        properties.getRuntimeBroker().setChildSnapshotsEnabled(true);
         // The child's task Turn already ended, so there is no CANCELLING
         // Turn for a cancellation grant: the stop must not need one, nor
         // the mount a new-work grant verifies.
@@ -1143,6 +1172,8 @@ class QwenHostedHarnessConnectorTest {
                 .containsEntry("stopMessages", true)
                 .containsEntry("passiveManagedRuntimeRecovery", true)
                 .containsEntry("suppressChildAgents", true)
+                .containsEntry("childWorkspaces", true)
+                .containsEntry("childSnapshots", true)
                 .doesNotContainKey("driveRuntimeRecovery");
         verify(execution).authorizeCommittedStop(session);
         verify(execution, never()).authorize(session);
@@ -2670,6 +2701,50 @@ class QwenHostedHarnessConnectorTest {
                 () -> connector.createOrLoad("tenant-a", SESSION_ID, false))
                 .isSameAs(failure);
         verify(client, never()).loadSession(any());
+    }
+
+    @Test
+    void forwardsPinnedExtensionsAndPublishesSkillsOnlyOnCreate() {
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID,
+                "agent_00112233445566778899aabbccddeeff", "2", null, "ACTIVE",
+                null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "workspace-a", 1, "storage", ".", "config", 1),
+                "default", "hosted-workspace-mcp/1", "a".repeat(64));
+        List<Map<String, Object>> skills = List.of(Map.of("name", "review", "description", "Review", "body", "Read the diff."));
+        ManagedAgentDefinitionStore definitions = mock(ManagedAgentDefinitionStore.class);
+        when(definitions.pinnedContent(session)).thenReturn(Map.of("skills", skills,
+                "mcp_servers", List.of(Map.of("server_id", "docs", "server_revision", 1, "definition_digest", "b".repeat(64))),
+                "hook_catalog", Map.of("catalog_id", "review", "catalog_revision", 2, "definition_digest", "c".repeat(64))));
+        ManagedSessionStore resources = mock(ManagedSessionStore.class);
+        when(resources.publishAgentSkills("tenant-a", "workspace-a", SESSION_ID, skills))
+                .thenReturn(new ToolResultResourceRef("skills", "managed-agent-skills", 1, 100, "d".repeat(64)));
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties(), sessions(),
+                mock(WorkspaceExecutionStore.class), actions, definitions, resources);
+        ReflectionTestUtils.setField(connector, "client", client);
+        ReflectionTestUtils.invokeMethod(connector, "create", session, false);
+        ReflectionTestUtils.invokeMethod(connector, "load", session, false);
+        ArgumentCaptor<CreateHarnessSession> creates = ArgumentCaptor.forClass(CreateHarnessSession.class);
+        verify(client).createSession(creates.capture());
+        ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(loads.capture());
+        Map<String, Object> created = ReflectionTestUtils.invokeMethod(creates.getValue(), "toJson");
+        Map<String, Object> loaded = ReflectionTestUtils.invokeMethod(loads.getValue(), "toJson");
+        Map<String, Object> identity = Map.of("agentId", session.agentId(), "revision", "2", "digest", "a".repeat(64));
+        assertThat(loaded).containsEntry("agentDefinition", identity);
+        assertThat(created).containsEntry("mcpServers", List.of(Map.of("serverId", "docs", "serverRevision", 1L,
+                "definitionDigest", "b".repeat(64)))).containsEntry("hookCatalog", Map.of("catalogId", "review",
+                        "catalogRevision", 2L, "definitionDigest", "c".repeat(64)));
+        assertThat(loaded).containsEntry("mcpServers", created.get("mcpServers"))
+                .containsEntry("hookCatalog", created.get("hookCatalog"));
+        assertThat(new ObjectMapper().valueToTree(created).at("/agentDefinition/skillsRef/kind").asText())
+                .isEqualTo("managed-agent-skills");
+        verify(resources, times(1)).publishAgentSkills("tenant-a", "workspace-a", SESSION_ID, skills);
     }
 
     private static ManagedAgentProperties properties() {

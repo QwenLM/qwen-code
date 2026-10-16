@@ -496,7 +496,11 @@ public final class JdbcRuntimeBindingRepository
                                 connection,
                                 candidate.getSession().getScope(),
                                 candidate.getSession().getHarnessSessionId(),
-                                candidate.getSession().getScope().getLifecycleAuthority());
+                                candidate.getSession().getScope().getLifecycleAuthority(),
+                                false,
+                                false,
+                                false,
+                                HarnessOwnership.sharesRuntimeSessions(binding.getRequest()));
                     }
                     RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
                     RuntimeScope scope = candidate.getSession().getScope();
@@ -549,7 +553,8 @@ public final class JdbcRuntimeBindingRepository
             RuntimeBindingRecord binding = selectById(connection, candidate.getBindingId(), true);
             RuntimeAdmission.requireRelease(binding, candidate);
             requireHarnessAdmission(connection, scope, candidate.getSession().getHarnessSessionId(),
-                    scope.getLifecycleAuthority(), false, true, false);
+                    scope.getLifecycleAuthority(), false, true, false,
+                    HarnessOwnership.sharesRuntimeSessions(binding.getRequest()));
             RuntimeSessionRecord existing = JdbcRuntimeSessionRepository.selectSession(
                     connection, scope, candidate.getRuntimeSessionId(), true);
             if (existing != null) {
@@ -595,7 +600,13 @@ public final class JdbcRuntimeBindingRepository
                         JdbcCsiActivationAdmission.requireExecution(csiOriginal, candidate);
                         RuntimeBindingRecord binding =
                                 selectById(connection, candidate.getBindingId(), true);
-                        if (binding != null) {
+                        if (binding != null && HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
+                            requireStorageAdmission(connection, binding.getRequest());
+                            requireHarnessAdmission(connection, binding.getRequest().getScope(),
+                                    candidate.getHarnessSessionId(),
+                                    binding.getRequest().getScope().getLifecycleAuthority(),
+                                    false, false, false, true);
+                        } else if (binding != null) {
                             requireHarnessAdmission(connection, binding.getRequest());
                         }
                         RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
@@ -804,14 +815,19 @@ public final class JdbcRuntimeBindingRepository
 
     private static void requireHarnessAdmission(Connection connection, RuntimeProvisionRequest request)
             throws SQLException {
+        requireStorageAdmission(connection, request);
+        requireHarnessAdmission(connection, request.getScope(), request.getIsolationKey(),
+                request.getScope().getLifecycleAuthority());
+    }
+
+    private static void requireStorageAdmission(Connection connection, RuntimeProvisionRequest request)
+            throws SQLException {
         if (request.getStorageId() != null && storageFence(connection,
                 request.getScope().getTenantId(), request.getStorageId()) != null) {
             throw new RuntimeBrokerException(
                     409, "workspace_migrating", "Storage is under maintenance.", false);
         }
         requirePhysicalStorageAdmission(connection, request);
-        requireHarnessAdmission(connection, request.getScope(), request.getIsolationKey(),
-                request.getScope().getLifecycleAuthority());
     }
 
     @Override
@@ -824,7 +840,32 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
+    public void requireHarnessAdmission(RuntimeProvisionRequest binding, RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (!HarnessOwnership.sharesRuntimeSessions(binding)) {
+            requireHarnessAdmission(scope, harnessSessionId, authority);
+            return;
+        }
+        JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, scope.getTenantId());
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority, false, false, false, true);
+            return null;
+        });
+    }
+
+    @Override
     public boolean requireHarnessRecovery(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        return requireHarnessRecovery(scope, harnessSessionId, authority, false);
+    }
+
+    @Override
+    public boolean requireHarnessRecovery(RuntimeProvisionRequest binding, RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        return requireHarnessRecovery(scope, harnessSessionId, authority, HarnessOwnership.sharesRuntimeSessions(binding));
+    }
+
+    private boolean requireHarnessRecovery(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority,
+            boolean runtimeSessionOwner) {
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
@@ -869,7 +910,8 @@ public final class JdbcRuntimeBindingRepository
                                     authority,
                                     false,
                                     false,
-                                    true);
+                                    true,
+                                    runtimeSessionOwner);
                             return true;
                         }
                     }
@@ -894,6 +936,20 @@ public final class JdbcRuntimeBindingRepository
         });
     }
 
+    @Override
+    public void requireHookAdmission(RuntimeProvisionRequest binding, RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (!HarnessOwnership.sharesRuntimeSessions(binding)) {
+            requireHookAdmission(scope, harnessSessionId, authority);
+            return;
+        }
+        JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, scope.getTenantId());
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority, true, false, false, true);
+            return null;
+        });
+    }
+
     public static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority) throws SQLException {
         requireHarnessAdmission(connection, scope, harnessSessionId, authority, false);
@@ -906,7 +962,23 @@ public final class JdbcRuntimeBindingRepository
 
     private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority, boolean legacyHook, boolean retirement, boolean cleanup) throws SQLException {
-        if (!"session".equals(scope.getIsolationClass())) {
+        requireHarnessAdmission(connection, scope, harnessSessionId, authority, legacyHook, retirement, cleanup, false);
+    }
+
+    /**
+     * {@code runtimeSessionOwner} fences a shared binding by the Harness
+     * Session of the Runtime Session or execution being admitted. Lifecycle
+     * authority over a shared binding stays refused.
+     */
+    private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
+            String harnessSessionId, RuntimeLifecycleAuthority authority, boolean legacyHook, boolean retirement,
+            boolean cleanup, boolean runtimeSessionOwner) throws SQLException {
+        if (runtimeSessionOwner) {
+            if (authority != null) {
+                throw admissionClosed();
+            }
+            BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        } else if (!"session".equals(scope.getIsolationClass())) {
             if (authority != null) {
                 throw admissionClosed();
             }
