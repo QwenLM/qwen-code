@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -184,14 +185,29 @@ const proxy = createServer(async (req, res) => {
         return;
       }
       assert.equal(upstream.status, 500, bytes.toString());
+    } else if (url.pathname.endsWith(':release-mount')) {
+      assert(
+        isLegitimateMountRelease(upstream.status, json?.code),
+        `${upstream.status} ${url}: ${bytes}`,
+      );
     } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     if (restoring && store && url.pathname.endsWith('/transactions'))
       report.restoreTransactions.push(...json.transactions);
     if (!store) {
-      assert.equal(fields.runtimeSessionId, report.promptId);
       const operation =
         req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
-      report.operations.push(operation);
+      const harnessScoped =
+        req.method === 'POST' &&
+        [
+          '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/tool-sessions:active-holds',
+        ].includes(url.pathname);
+      assert.equal(
+        fields.runtimeSessionId,
+        harnessScoped ? undefined : report.promptId,
+      );
+      if (!(harnessScoped && operation === 'active-holds'))
+        report.operations.push(operation);
       if (operation === 'prepare') {
         assert.equal(report.executionCallId, '');
         report.executionCallId = json.executionCallId;

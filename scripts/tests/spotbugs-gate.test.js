@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 const read = (file) =>
   readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
 
-const GATED_MODULES = ['runtime-broker', 'managed-agent-server'];
+const GATED_MODULES = ['packages/managed-agent-server'];
 
 describe('SpotBugs gate witness', () => {
   // A Match whose only predicate is a wildcard class or package turns the
@@ -19,7 +19,7 @@ describe('SpotBugs gate witness', () => {
   // is 0` as a genuinely clean tree.
   it('rejects wildcard-only Match blocks in the per-module excludes files', () => {
     for (const mod of GATED_MODULES) {
-      const xml = read(`packages/sdk-java/${mod}/spotbugs-excludes.xml`);
+      const xml = read(`${mod}/spotbugs-excludes.xml`);
       for (const [, body] of xml.matchAll(/<Match>([\s\S]*?)<\/Match>/g)) {
         const specific =
           /<Bug\s+pattern="[^"]+"/.test(body) ||
@@ -29,7 +29,7 @@ describe('SpotBugs gate witness', () => {
           /<Package\s+name="(?!~)/.test(body);
         expect(
           specific,
-          `packages/sdk-java/${mod}/spotbugs-excludes.xml: every <Match> ` +
+          `${mod}/spotbugs-excludes.xml: every <Match> ` +
             'needs a Bug pattern, a Method/Field, or a concrete (non-~) ' +
             'Class/Package name — wildcard-only blocks silence the gate',
         ).toBe(true);
@@ -37,11 +37,9 @@ describe('SpotBugs gate witness', () => {
     }
   });
 
-  // The staging installs only produce jars for the next module: a SpotBugs
-  // rejection there aborts the job's real subject under a misleading step
-  // name. The `clean verify` invocations are the gate's CI coverage and must
-  // never carry the skip.
-  it('keeps the gate on the enforcing sdk-java.yml invocations and off the staging installs', () => {
+  // The combined Server verification checks both Server and Broker classes.
+  // The SDK is now its only staged dependency.
+  it('keeps the gate on combined Server verification without staging a Broker artifact', () => {
     const workflow = parse(read('.github/workflows/sdk-java.yml'));
     const steps = Object.values(workflow.jobs).flatMap(
       (job) => job.steps ?? [],
@@ -53,20 +51,17 @@ describe('SpotBugs gate witness', () => {
     const staging = byName('Install Managed Agent dependencies');
     expect(staging.length).toBe(4);
     for (const step of staging) {
-      const brokerInstall = step.run
-        .split('\n')
-        .find((line) => line.includes('runtime-broker/pom.xml'));
-      expect(brokerInstall).toContain('-Dspotbugs.skip=true');
+      expect(step.run).toContain('packages/sdk-java/qwencode/pom.xml');
+      expect(step.run).not.toContain('runtime-broker/pom.xml');
     }
 
     const enforcing = [
-      ...byName('Run Runtime Broker MySQL integration tests'),
       ...byName('Run Managed Agent tests, Checkstyle, and MySQL integration'),
       ...byName('Verify Hosted Java, Spring and MySQL processes'),
       ...byName('Verify the EventTransport broker gates'),
       ...byName('Verify the EventTransport multi-node gates'),
     ];
-    expect(enforcing.length).toBe(5);
+    expect(enforcing.length).toBe(4);
     for (const step of enforcing) {
       expect(step.run).toContain('verify');
       expect(step.run).not.toContain('spotbugs.skip');
@@ -86,11 +81,6 @@ describe('SpotBugs gate witness', () => {
     const withSkip = steps.filter((step) =>
       step.run?.includes('spotbugs.skip'),
     );
-    expect(withSkip.map((step) => step.name)).toEqual([
-      'Install Managed Agent dependencies',
-      'Install Managed Agent dependencies',
-      'Install Managed Agent dependencies',
-      'Install Managed Agent dependencies',
-    ]);
+    expect(withSkip).toEqual([]);
   });
 });
