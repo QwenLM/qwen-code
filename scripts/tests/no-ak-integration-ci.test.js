@@ -454,6 +454,8 @@ describe('no-AK integration CI wiring', () => {
       'OPENAI_MODEL',
       'OPENROUTER_API_KEY',
       'QWEN_API_KEY',
+      'QWENCLOUD_API_KEY',
+      'QWENCLOUD_TOKEN_PLAN_API_KEY',
       'QWEN_DEFAULT_AUTH_TYPE',
       'QWEN_MODEL',
       'REQUESTY_API_KEY',
