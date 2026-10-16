@@ -114,6 +114,10 @@ qwen:
 
 重启单 Java control plane，验证既有 binding 可以加载，并确认新 binding 记录写入 `reference-v2`。新 secret 只使用 active key；旧记录继续由其已记录的 key ID 加密。在数据库证据证明没有持久化凭据再引用 `reference-v1` 之前，持续配置该密钥。服务器不会在读取时重加密旧记录，删除仍被引用的密钥会使这些记录不可读。
 
+该 key ring 是映射结构，无法通过 `QWEN_MANAGED_AGENT_*` 环境变量提供：宽松绑定会把环境变量形式静默解析为空 ring 或键名错误的 ring，且启动时不报错。`previous-credential-keys` 只能在覆盖的 `application.yml` 中配置。只依赖环境变量的部署会以空 ring 启动，因此在未配置旧密钥的情况下轮换 `credential-key-id` 会使旧密钥写入的记录不可读。
+
+`operator-recovery` 入口和 CSI/迁移维护入口仍只配置单个 credential key pair，不会读取 `previous-credential-keys`。如需对轮换前写入的 binding 执行恢复，请以对应旧密钥作为该入口的 active credential pair 启动。
+
 ## 运维恢复
 
 `bin/qwen-managed-agent-operator-recovery` 启动独立打包的 recovery 入口。除非设置 recovery 专用环境，否则该入口保持关闭，并且不会启动 HTTP 服务或 worker。严格遵循 `docs/hosted-workspace-recovery.zh-CN.md`；不得推断物理停止，也不得通过删除 durable row 清除安全围栏。

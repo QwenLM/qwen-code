@@ -794,6 +794,14 @@ New credentials use only the active key. Reads select the active or previous
 key by the ID stored with the ciphertext; an unavailable ID fails closed. The
 server does not re-encrypt old rows during reads. See the [rotation design](../../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
 
+The ring is YAML-only: `previous-credential-keys` is a map and cannot be set
+through a `QWEN_MANAGED_AGENT_*` environment variable — relaxed binding
+silently produces an empty ring. A deployment that sets only environment
+variables and then rotates `credential-key-id` can no longer read rows
+written under the previous key. The operator-recovery and CSI/migration mains
+accept a single key pair only; run them with the previous key as the active
+pair when recovering pre-rotation bindings.
+
 Two optional knobs change how the Broker listens and how long it waits for a
 dispatched v3 execution's result:
 

@@ -114,6 +114,10 @@ qwen:
 
 Restart the single Java control plane, verify that existing bindings load, and verify that new binding rows record `reference-v2`. New secrets use only the active key; old rows remain encrypted under their recorded key ID. Keep `reference-v1` configured until database evidence shows no persisted credential references it. The server does not re-encrypt old rows on read, and removing a still-referenced key makes those rows unreadable.
 
+The key ring is a map and cannot be supplied through a `QWEN_MANAGED_AGENT_*` environment variable: relaxed binding silently resolves an env-var form to an empty or mis-keyed ring, with no startup error. Configure `previous-credential-keys` only in an overriding `application.yml`. A deployment that relies on environment variables alone starts with an empty ring, so rotating `credential-key-id` without configuration of the previous key makes rows written under it unreadable.
+
+The operator-recovery entry and the CSI/migration maintenance mains still configure a single credential key pair and do not read `previous-credential-keys`. To recover a binding written under a previous key, launch that entry with the previous key configured as its active credential pair.
+
 ## Operator recovery
 
 `bin/qwen-managed-agent-operator-recovery` starts the separately packaged recovery entry point. It is disabled unless the recovery-specific environment is set and does not start the HTTP service or worker. Follow `docs/hosted-workspace-recovery.md`; never infer physical stop or delete durable rows to clear a safety fence.
