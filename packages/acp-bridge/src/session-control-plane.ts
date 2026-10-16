@@ -6949,6 +6949,7 @@ export function createSessionControlPlane(
     opts?: {
       throwOnFailure?: boolean;
       requireFlush?: boolean;
+      onlyIfUnheld?: boolean;
       timeoutMs?: number;
       cancelReason?: 'user';
     },
@@ -6974,6 +6975,9 @@ export function createSessionControlPlane(
             opts?.timeoutMs ?? initTimeoutMs,
           ),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
+          ...(opts?.onlyIfUnheld === true
+            ? { [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true }
+            : {}),
           ...(opts?.cancelReason ? { cancelReason: opts.cancelReason } : {}),
         },
       );
@@ -9584,6 +9588,15 @@ export function createSessionControlPlane(
         'session_closing',
       );
     }
+    if (
+      closeOpts?.requireIdle === true &&
+      entryActiveWorkState(entry) !== 'idle'
+    ) {
+      throw new SessionBusyError(
+        sessionId,
+        `Session ${sessionId} has active or unconfirmed work`,
+      );
+    }
     let originatorClientId: string | undefined;
     if (context?.clientId !== undefined) {
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
@@ -9626,12 +9639,15 @@ export function createSessionControlPlane(
       );
     }
     let agentSessionClosed = false;
+    const requireIdle = closeOpts?.requireIdle === true;
     try {
       // Resolve permission waits before asking the agent to drain active turns;
       // otherwise a turn blocked in requestPermission can deadlock close.
-      permissionMediator.forgetSession(sessionId);
-      entry.pendingPermissionIds.clear();
-      entry.pendingInteractions.clear();
+      if (!requireIdle) {
+        permissionMediator.forgetSession(sessionId);
+        entry.pendingPermissionIds.clear();
+        entry.pendingInteractions.clear();
+      }
       agentSessionClosed = await notifyAgentSessionClose(
         entry,
         ci,
@@ -9639,6 +9655,7 @@ export function createSessionControlPlane(
         {
           throwOnFailure: true,
           requireFlush: closeOpts?.requireAgentClose === true,
+          onlyIfUnheld: requireIdle,
           cancelReason:
             closeOpts?.cause === 'workspace_runtime_stop'
               ? undefined
@@ -9684,6 +9701,21 @@ export function createSessionControlPlane(
         entry.closing = false;
       }
       throw error;
+    }
+    if (requireIdle && !agentSessionClosed) {
+      entry.closing = false;
+      if (deferredCloseStamp !== null) {
+        entry.promptSettledAt = deferredCloseStamp;
+      }
+      throw new SessionBusyError(
+        sessionId,
+        `Session ${sessionId} has active or unconfirmed work`,
+      );
+    }
+    if (requireIdle) {
+      permissionMediator.forgetSession(sessionId);
+      entry.pendingPermissionIds.clear();
+      entry.pendingInteractions.clear();
     }
     if (defaultEntry === entry) defaultEntry = undefined;
     if (ci && ci.channel === entry.channel) {
