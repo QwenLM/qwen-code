@@ -412,6 +412,104 @@ describe('cronTextHandler', () => {
     stderrSpy.mockRestore();
   });
 
+  it('delivers text that arrived during an in-flight cron send after the retries are exhausted', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // Attempt 1 and retry 1 fail transiently.
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-late', 'first');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // The last attempt is in flight when new text arrives; it fails too, so
+    // the ladder is exhausted while that text has never been attempted.
+    let rejectLast!: (e: unknown) => void;
+    mockSendQQMessage.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectLast = reject;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(10000);
+    triggerTextChunk('sess-late', 'late');
+    await flushSetImmediate();
+    rejectLast(new DeliveryError('RATE_LIMITED', 'rate limited'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    // Exhaustion must keep the never-attempted residual...
+    expect(cronBuffer.get('sess-late')?.buffer).toBe('late');
+
+    // ...and the re-armed flush must still deliver it.
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(4);
+    const body = mockSendQQMessage.mock.calls[3][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe('late');
+    expect(cronBuffer.has('sess-late')).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('keeps a successor entry created while a failed flush is being handled', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // The first flush's send stays in flight while a successor entry takes
+    // over the session (the old entry was dropped, then new text arrived).
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-overlap', 'first');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    cronBuffer.delete('sess-overlap');
+    triggerTextChunk('sess-overlap', 'D');
+    await flushSetImmediate();
+    expect(cronBuffer.get('sess-overlap')!.buffer).toBe('D');
+
+    // The old chain gives up permanently: it must not delete the successor.
+    rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'network error'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(cronBuffer.get('sess-overlap')?.buffer).toBe('D');
+
+    stderrSpy.mockRestore();
+  });
+
   it('transient failure, retry target is null → buffer cleaned up', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
