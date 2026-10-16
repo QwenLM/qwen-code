@@ -29,7 +29,11 @@
 
 当现有归档路由支持 `requireIdle: true` 时，daemon 声明 `session_archive_idle_guard`。归档前，所属 bridge 会在把 Session 标记为 closing 的前一刻检查 active-work 快照。仍在运行、状态未知或不支持判断的工作会失败，不会关闭 Session，也不会移动 transcript。实时子进程已回收时没有 bridge 条目，仍可沿用现有持久化 Session 归档路径。这个写入时校验可以阻止任务在列表快照之后恢复运行却仍被归档。
 
-仅当 daemon 同时声明 `session_archive` 与 `session_archive_idle_guard` 时，每个任务入口才显示“打开/归档”子菜单，任务列表同时显示“归档已完成任务”。两个入口共用同一个批量回调，以 `requireIdle: true` 调用现有归档路由。归档成功、已经归档和目标不存在的任务会离开活跃列表；单项错误保留在列表中，并通过现有 Web Shell 错误界面展示。当 daemon 声明 `session_archive` 时，同一菜单会列出当前父 Session 的已归档侧边任务，并通过现有 unarchive 路由恢复。两个路由都支持安全重试。
+仅当 daemon 同时声明 `session_archive` 与 `session_archive_idle_guard` 时，每个任务入口才显示“打开/归档”子菜单，任务列表同时显示“归档已完成任务”。两个入口共用同一个批量回调，以 `requireIdle: true` 调用现有归档路由。
+
+归档与恢复都必须带上 Workspace 限定。两个回调会先按任务自身的 `workspaceCwd` 分组，再通过对应 Workspace 的客户端调用 `/workspaces/:workspace/sessions/archive`（或 `.../unarchive`）；没有记录 Workspace 的 id 继续走原有未限定调用。未限定路由会按 primary workspace 目录解析 session id，因此缺少这一步时，属于普通 secondary workspace 的侧边任务只会返回 `notFound`，其 transcript 不会发生任何状态迁移。
+
+归档成功与已经归档的任务会离开活跃列表；`notFound` 不会——任务继续留在列表中，并把该 id 作为单项错误通过现有 Web Shell 错误界面展示，因此 UI 绝不会为 daemon 没有真正执行的操作清理状态。当 daemon 声明 `session_archive` 时，同一菜单会列出当前父 Session 的已归档侧边任务，并通过带 Workspace 限定的 unarchive 路由恢复。两个路由都支持安全重试。
 
 归档结果会先让旧的目录请求失效，再发起一次新目录请求；同时从当前面板、按 Session 保存的内存状态、延迟恢复列表和浏览器持久化状态中删除已归档的侧边任务标签。一个内存删除集合会阻止已经开始的面板恢复流程重新加入这些标签；用户之后显式打开已恢复的任务时会清除对应标记。
 
