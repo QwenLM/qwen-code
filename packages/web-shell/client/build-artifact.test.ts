@@ -511,13 +511,30 @@ describe('build artifact — transcript entry (#11031)', () => {
     // both locales; its parser, worker and markup stay inside the lazily
     // imported SpreadsheetPreview chunk, so only the copy enters this graph.
     // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
-    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
+    // File-tree mutation actions are excluded from the transcript build.
+    // At 31e02ace main measures 1,330,293; the read-only artifact hook with
+    // those actions excluded measures 1,330,497, below the same ceiling.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
     expect(js.length).toBeLessThan(1_331_500);
+  });
+
+  it('keeps workspace mutations out of the read-only transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const method of [
+      'writeWorkspaceFile',
+      'createWorkspaceDirectory',
+      'deleteWorkspaceDirectory',
+      'uploadWorkspaceFile',
+    ]) {
+      expect(packaged).toContain(method);
+      expect(transcript).not.toContain(method);
+    }
+    expect(transcript).toContain('dirList');
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {

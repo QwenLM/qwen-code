@@ -183,6 +183,11 @@ import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import { waitForTurn } from './hosted-turn-wait.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
 import {
+  HOSTED_SKILL_APPROVAL_REFUSAL,
+  HOSTED_SKILL_BATCH_REFUSAL,
+  type HostedSkillCatalog,
+} from './hosted-skill-catalog.js';
+import {
   endHostedAction,
   HOSTED_APPROVAL_OPTIONS,
   HOSTED_TOOL_APPROVAL_POLICY,
@@ -1472,6 +1477,7 @@ interface HostedPreparedRequest {
   team: boolean;
   message: boolean;
   command: boolean;
+  skill: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -1527,6 +1533,7 @@ export class HostedWorkspaceToolTurn {
   private readonly teams?: HostedTeamSession;
   /** H4e-b3: the member's command funnel to its parent, beside its messages. */
   private readonly commands?: HostedSessionCommandSession;
+  private readonly skills?: HostedSkillCatalog;
   /** b3b: whether this Session's run carries a member preamble (once read). */
   private memberPreamble?: boolean;
   /** b3b: the member board vocabulary declared, refreshed per declarations. */
@@ -1585,6 +1592,7 @@ export class HostedWorkspaceToolTurn {
       messages?: HostedSessionMessageSession;
       teams?: HostedTeamSession;
       commands?: HostedSessionCommandSession;
+      skills?: HostedSkillCatalog;
       /**
        * H4e-b3 decisions 5/9: this run's first input carried an unescaped
        * `plan-mode="required"` preamble; its calls admit reads only.
@@ -1612,6 +1620,7 @@ export class HostedWorkspaceToolTurn {
     this.messages = this.foregroundOnly ? undefined : extras?.messages;
     this.teams = this.foregroundOnly ? undefined : extras?.teams;
     this.commands = this.foregroundOnly ? undefined : extras?.commands;
+    this.skills = extras?.skills;
     this.memberPlanMode = extras?.memberPlanMode === true;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -1669,6 +1678,7 @@ export class HostedWorkspaceToolTurn {
     // b3c: a member's widened send_message rides the same gate as its
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
+    const skill = this.skills?.declaration();
     this.advertised = [
       ...(this.publication || this.shell
         ? search
@@ -1704,6 +1714,7 @@ export class HostedWorkspaceToolTurn {
             : tool;
         }),
       ...(this.mcp?.tools() ?? []),
+      ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
       // Shell-laned Session whose own child orchestrator exists (never in
       // a child's), behind the kind gate — files profiles and the public
@@ -1933,6 +1944,26 @@ export class HostedWorkspaceToolTurn {
 
   async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
     if (this.acquired) return;
+    if (this.skills && !this.hooks && !this.mcp) {
+      const history = (await this.session.sink.project()).filter(
+        (entry) => entry.daemonPromptId === this.promptId,
+      );
+      const calls = history.flatMap((entry) =>
+        (entry.message?.parts ?? []).flatMap((part) =>
+          part.functionCall ? [part.functionCall] : [],
+        ),
+      );
+      const answered = await journaledToolResultIds(
+        this.session,
+        this.promptId,
+        history,
+      );
+      if (
+        calls.length &&
+        calls.every((call) => call.name === 'skill' && answered.has(call.id!))
+      )
+        return;
+    }
     await this.warmed;
     const saved = await readHostedFileHistory(this.session);
     if (saved?.pendingTurn) {
@@ -2354,7 +2385,8 @@ export class HostedWorkspaceToolTurn {
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
-        ((HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
+        (((call.name === 'skill' && this.skills !== undefined) ||
+          HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
             this.commands?.command(
               sessionCommandId({
@@ -2592,6 +2624,7 @@ export class HostedWorkspaceToolTurn {
           team: false,
           message: false,
           command: false,
+          skill: item.call.name === 'skill' && this.skills !== undefined,
         });
       }
       this.logicalRound = plan.round;
@@ -2770,7 +2803,11 @@ export class HostedWorkspaceToolTurn {
     const declarations = this.advertised ?? (await this.declarations(signal));
     this.hookPermission.clear();
     this.agentDispatched.clear();
-    if (this.hooks && this.approval) {
+    const mixedSkillBatch =
+      this.skills !== undefined &&
+      calls.some((call) => call.name === 'skill') &&
+      calls.some((call) => call.name !== 'skill');
+    if (this.hooks && this.approval && !mixedSkillBatch) {
       calls = await Promise.all(
         calls.map(async (call) => {
           const asks = hostedApprovalAsks(
@@ -2778,7 +2815,7 @@ export class HostedWorkspaceToolTurn {
             call.name,
             this.searchProfile,
           );
-          if (!asks) return call;
+          if (!asks || (call.name === 'skill' && this.skills)) return call;
           const output = await this.hooks!.fire(
             HookEventName.PermissionRequest,
             `${this.promptId}:${call.callId}`,
@@ -2823,6 +2860,10 @@ export class HostedWorkspaceToolTurn {
           runtimeCallId,
         );
         const isShell = call.name === 'run_shell_command';
+        const skill =
+          mcpInput === undefined &&
+          call.name === 'skill' &&
+          this.skills !== undefined;
         if (
           !declarations.some((tool) => tool.name === call.name) ||
           ids.has(call.callId) ||
@@ -2880,6 +2921,11 @@ export class HostedWorkspaceToolTurn {
           input = { ...call.args };
         } else if (mcpInput) {
           input = { ...mcpInput.input };
+        } else if (skill) {
+          validationError = source.some((other) => other.name !== 'skill')
+            ? HOSTED_SKILL_BATCH_REFUSAL
+            : this.skills!.validationError(call.args);
+          input = { ...call.args };
         } else if (isShell) {
           const args = call.args;
           const unsupportedKey = Object.keys(args).find(
@@ -3443,6 +3489,7 @@ export class HostedWorkspaceToolTurn {
             mcpInput === undefined && messageAdmitted && !memberMessageCommand,
           team,
           command,
+          skill,
         };
       });
     };
@@ -3494,7 +3541,8 @@ export class HostedWorkspaceToolTurn {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
-    await waitForTurn(this.warmed, signal);
+    if (this.hooks || this.mcp || requests.some((request) => !request.skill))
+      await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
     // needs no Runtime at all — holding the parent's mount across the
     // child's wait is exactly the deadlock a shared Workspace creates
@@ -3512,7 +3560,8 @@ export class HostedWorkspaceToolTurn {
           request.workflow !== true &&
           request.message !== true &&
           !request.team &&
-          request.command !== true,
+          request.command !== true &&
+          !request.skill,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -3661,6 +3710,10 @@ export class HostedWorkspaceToolTurn {
               'PreToolUse Hook denied the call.';
             continue;
           }
+          if (request.skill && permission === 'ask') {
+            refusals[index] = HOSTED_SKILL_APPROVAL_REFUSAL;
+            continue;
+          }
           const input = output?.hookSpecificOutput?.['updatedInput'];
           if (
             input &&
@@ -3675,6 +3728,7 @@ export class HostedWorkspaceToolTurn {
             inputRefs.delete(index);
             if (
               this.approval &&
+              !request.skill &&
               hostedApprovalAsks(
                 this.approval.settings,
                 request.call.name,
@@ -3827,6 +3881,7 @@ export class HostedWorkspaceToolTurn {
           request.message ||
           request.team ||
           request.command ||
+          request.skill ||
           request.workflow
         )
           continue;
@@ -4262,6 +4317,20 @@ export class HostedWorkspaceToolTurn {
               commandRuns,
             )),
           );
+          continue;
+        }
+        if (request.skill) {
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text: this.skills!.response(request.call.args) }],
+          );
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted Skill result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
           continue;
         }
         if (request.team) {
@@ -6834,6 +6903,7 @@ export class HostedWorkspaceToolTurn {
       if (index < nextOrdinal) continue;
       if (
         refusals[index] ||
+        (request.call.name === 'skill' && this.skills !== undefined) ||
         this.hookPermission.get(request.call.callId) === 'allow' ||
         !hostedApprovalAsks(approval.settings, request.call.name, searchProfile)
       )

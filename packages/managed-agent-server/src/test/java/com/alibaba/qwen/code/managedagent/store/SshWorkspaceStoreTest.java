@@ -139,7 +139,9 @@ class SshWorkspaceStoreTest {
         var transaction = new org.springframework.transaction.support.TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
         String agent = "agent_" + "a".repeat(32);
         transaction.executeWithoutResult(ignored -> definitions.create("tenant", "definition", "digest", agent, "d".repeat(64),
-                "{\"tools\":[{\"type\":\"hosted_profile\",\"profile\":\"hosted-workspace-mcp/1\"}]}", 1));
+                "{\"tools\":[{\"type\":\"hosted_profile\",\"profile\":\"hosted-workspace-mcp/1\"}],"
+                        + "\"mcp_servers\":[{\"server_id\":\"docs\",\"server_revision\":1,\"definition_digest\":\""
+                        + "a".repeat(64) + "\"}]}", 1));
         var input = prompted ? List.<Map<String, Object>>of(Map.of("type", "text", "text", "Read")) : List.<Map<String, Object>>of();
         assertThatThrownBy(() -> transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "unsupported", "digest",
                 agent, null, null, input, "payload", new WorkspaceSelection(intent.workspaceId(), ".")))).isInstanceOf(ApiException.class);

@@ -1,4 +1,8 @@
 import {
+  TRAJECTORY_EXECUTION_MESSAGES_EN,
+  TRAJECTORY_EXECUTION_MESSAGES_ZH,
+} from './trajectory/execution-messages.js';
+import {
   FILES_MESSAGES_EN,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
@@ -927,8 +931,6 @@ const EN: Messages = {
   'composerMobile.commands': 'All commands',
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
-  'composerMobile.previousInput': 'Previous input',
-  'composerMobile.nextInput': 'Next input',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,
@@ -4397,6 +4399,7 @@ const EN: Messages = {
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
+  ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
@@ -5290,8 +5293,6 @@ const ZH: Messages = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜索命令',
   'composerMobile.history': '输入历史',
-  'composerMobile.previousInput': '上一条输入',
-  'composerMobile.nextInput': '下一条输入',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已添加附件/图片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此处没有可用的添加操作',
@@ -8477,6 +8478,7 @@ const ZH: Messages = {
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
+  ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };

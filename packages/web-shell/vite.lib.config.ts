@@ -162,6 +162,10 @@ function injectCssModules(): Plugin {
 // Windows build would blow the budget this exists to protect.
 const TRANSCRIPT_STUBS = new Map(
   [
+    [
+      './client/trajectory/execution-messages.ts',
+      './client/trajectory/execution-messages.transcript-stub.ts',
+    ],
     ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
     [
       './client/mcp-app/messages.ts',

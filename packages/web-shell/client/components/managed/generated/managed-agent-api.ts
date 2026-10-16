@@ -971,51 +971,6 @@ export interface components {
             sessionId: string;
             idempotencyKey: string;
         };
-        WebShellRuntimeNode: {
-            nodeId: string;
-            displayName: string;
-        };
-        /** @description Disabled registration returns supported=false and no nodes. This capability controls fresh registration only; existing operation queries remain available. */
-        WebShellRuntimeNodePage: {
-            /** @default false */
-            supported: boolean;
-            data: components["schemas"]["WebShellRuntimeNode"][];
-        } & unknown;
-        WebShellWorkspaceDirectoryRequest: {
-            nodeId: string;
-            /** @description Existing absolute directory on the selected node; no directory or repository is created. */
-            path: string;
-        };
-        WebShellWorkspaceDirectory: {
-            nodeId: string;
-            /** @description Canonical absolute path after remote directory validation. */
-            canonicalPath: string;
-            /** @enum {string} */
-            platform: "linux" | "darwin";
-        };
-        WebShellWorkspaceCreateRequest: {
-            nodeId: string;
-            path: string;
-            displayName: string;
-            /** @description Actor-scoped registration key. Reuse this key and the same semantic fields until the operation identity is known. */
-            idempotencyKey: string;
-            /** @description Trace correlation only; excluded from the request digest, so a retry with another requestId still replays. A header-safe value (1 to 128 visible ASCII characters) is echoed as X-Request-Id; any other value is replaced by a server-chosen id. */
-            requestId?: string | null;
-        };
-        WebShellWorkspaceOperationRequest: {
-            operationId: string;
-        };
-        /** @description workspaceId is returned only after completed registration. recovery_blocked preserves the original ownership and requires administrator review; a new browser draft does not release it. replayed=true identifies an existing operation returned by a repeated key or a query. */
-        WebShellWorkspaceCreateOperation: {
-            operationId: string;
-            /** @constant */
-            type: "workspace_create";
-            /** @enum {string} */
-            status: "pending" | "running" | "completed" | "failed" | "cancelled" | "recovery_blocked";
-            workspaceId?: string | null;
-            failureCode?: string | null;
-            replayed: boolean;
-        };
         WebShellWorkspaceQueryRequest: {
             cursor?: string | null;
             /** @default 50 */
@@ -1211,6 +1166,51 @@ export interface components {
              * @description Byte length of the complete payloadJson in UTF-8, before truncation.
              */
             byteLength: number;
+        };
+        WebShellRuntimeNode: {
+            nodeId: string;
+            displayName: string;
+        };
+        /** @description Disabled registration returns supported=false and no nodes. This capability controls fresh registration only; existing operation queries remain available. */
+        WebShellRuntimeNodePage: {
+            /** @default false */
+            supported: boolean;
+            data: components["schemas"]["WebShellRuntimeNode"][];
+        } & unknown;
+        WebShellWorkspaceDirectoryRequest: {
+            nodeId: string;
+            /** @description Existing absolute directory on the selected node; no directory or repository is created. */
+            path: string;
+        };
+        WebShellWorkspaceDirectory: {
+            nodeId: string;
+            /** @description Canonical absolute path after remote directory validation. */
+            canonicalPath: string;
+            /** @enum {string} */
+            platform: "linux" | "darwin";
+        };
+        WebShellWorkspaceCreateRequest: {
+            nodeId: string;
+            path: string;
+            displayName: string;
+            /** @description Actor-scoped registration key. Reuse this key and the same semantic fields until the operation identity is known. */
+            idempotencyKey: string;
+            /** @description Trace correlation only; excluded from the request digest, so a retry with another requestId still replays. A header-safe value (1 to 128 visible ASCII characters) is echoed as X-Request-Id; any other value is replaced by a server-chosen id. */
+            requestId?: string | null;
+        };
+        WebShellWorkspaceOperationRequest: {
+            operationId: string;
+        };
+        /** @description workspaceId is returned only after completed registration. recovery_blocked preserves the original ownership and requires administrator review; a new browser draft does not release it. replayed=true identifies an existing operation returned by a repeated key or a query. */
+        WebShellWorkspaceCreateOperation: {
+            operationId: string;
+            /** @constant */
+            type: "workspace_create";
+            /** @enum {string} */
+            status: "pending" | "running" | "completed" | "failed" | "cancelled" | "recovery_blocked";
+            workspaceId?: string | null;
+            failureCode?: string | null;
+            replayed: boolean;
         };
     };
     responses: {

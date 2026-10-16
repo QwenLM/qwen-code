@@ -69,6 +69,12 @@ import {
 } from './hosted-tool-approval.js';
 import * as stdio from '../utils/stdioHelpers.js';
 import { monitorUnitNameOf } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
+import {
+  HOSTED_SKILL_APPROVAL_REFUSAL,
+  HOSTED_SKILL_BATCH_REFUSAL,
+  HostedSkillCatalog,
+} from './hosted-skill-catalog.js';
+import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 
 const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
@@ -166,6 +172,7 @@ function createTurn(
   shell = false,
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
   hooks?: HostedHookSession,
+  skills?: HostedSkillCatalog,
 ) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -185,7 +192,7 @@ function createTurn(
       },
       waiters,
     },
-    { hooks },
+    { hooks, skills },
   );
 }
 const calls = ['read_file', 'edit'].map((name, index) => ({
@@ -292,6 +299,300 @@ afterEach(async () => {
     await expect(session.close()).rejects.toThrow(/writes stopped/);
   else await session?.close();
   await rm(root, { recursive: true, force: true });
+});
+
+const publishedSkills = () =>
+  new HostedSkillCatalog([
+    {
+      name: 'review',
+      description: 'Review code changes.',
+      body: 'Consult scripts/review.js before reviewing.',
+      base_directory: '.qwen/skills/review',
+    },
+  ]);
+
+it('loads a published static Skill durably without Runtime execution or approval', async () => {
+  const skills = publishedSkills();
+  turn = createTurn(false, { mode: 'default' }, undefined, skills);
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  const original: Part[] = [
+    { functionCall: { id: call.callId, name: call.name, args: call.args } },
+  ];
+  expect(await turn.declarations(new AbortController().signal)).toContainEqual(
+    skills.declaration(),
+  );
+  const responses = await turn.execute(
+    [call],
+    original,
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['output']).toBe(
+    skills.response(call.args),
+  );
+  const history = await session.sink.project();
+  expect(history.map((entry) => entry.type)).toEqual([
+    'assistant',
+    'tool_result',
+  ]);
+  expect(history[1].message?.parts).toEqual(responses);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .some((event) => event.kind === 'action.changed'),
+  ).toBe(false);
+  await turn.finish();
+  const reloaded = createTurn(false, undefined, undefined, skills);
+  await reloaded.resumeCommittedResults(new AbortController().signal);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
+  const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
+  turn = createTurn(
+    false,
+    { mode: 'default' },
+    hookSession(fire),
+    publishedSkills(),
+  );
+  const batch = [
+    { ...calls[0], name: 'skill', args: { skill: 'review' } },
+    {
+      ...calls[1],
+      name: 'write_file',
+      args: { file_path: 'output.txt', content: 'must not write' },
+    },
+  ];
+  const responses = await turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBe(
+    HOSTED_SKILL_BATCH_REFUSAL,
+  );
+  expect(responses[1].functionResponse?.response?.['error']).toContain(
+    'not executed',
+  );
+  expect(actionIds()).toEqual([]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(fire.mock.calls.map(([event]) => event)).toEqual([
+    HookEventName.PostToolBatch,
+  ]);
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .some((event) => event.kind === 'hosted.batch.planned'),
+  ).toBe(false);
+});
+
+it.each([{ skill: 'unknown' }, { skill: 'review', args: '--post' }])(
+  'persists a correctable Skill refusal without executing anything: %j',
+  async (args) => {
+    turn = createTurn(false, undefined, undefined, publishedSkills());
+    const call = { ...calls[0], name: 'skill', args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBeTypeOf(
+      'string',
+    );
+    expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('recovers the original Skill body after the assistant commits but its result does not', async () => {
+  const skills = publishedSkills();
+  const originalCommit = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('Store response lost');
+    return originalCommit(...args);
+  };
+  turn = createTurn(false, undefined, undefined, skills);
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+    'assistant',
+  ]);
+  const recovery = {
+    session,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    skills,
+  };
+  expect(await answerResumedTurnCalls(recovery)).toBe(1);
+  expect(await answerResumedTurnCalls(recovery)).toBe(0);
+  const history = await session.sink.project();
+  expect(history).toHaveLength(2);
+  expect(history[1].message?.parts?.[0].functionResponse).toMatchObject({
+    id: call.callId,
+    name: 'skill',
+    response: { output: skills.response(call.args) },
+  });
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('preserves a mixed-batch Skill refusal when its result was not committed', async () => {
+  const skills = publishedSkills();
+  const originalCommit = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('Store refusal lost');
+    return originalCommit(...args);
+  };
+  turn = createTurn(false, { mode: 'default' }, undefined, skills);
+  const batch = [
+    { ...calls[0], name: 'skill', args: { skill: 'review' } },
+    calls[1],
+  ];
+  await expect(
+    turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+    'assistant',
+  ]);
+  const recovery = {
+    session,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    skills,
+  };
+  expect(await answerResumedTurnCalls(recovery)).toBe(1);
+  expect(await answerResumedTurnCalls(recovery)).toBe(0);
+  const history = await session.sink.project();
+  expect(history).toHaveLength(2);
+  expect(history[1].message?.parts?.[0].functionResponse).toMatchObject({
+    id: batch[0].callId,
+    name: 'skill',
+    response: { error: HOSTED_SKILL_BATCH_REFUSAL },
+  });
+  expect(JSON.stringify(history[1])).not.toContain(
+    'Consult scripts/review.js before reviewing.',
+  );
+  expect(actionIds()).toEqual([]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it.each(['deny', 'ask'] as const)(
+  'preserves a PreToolUse %s for a static Skill without creating an Action',
+  async (permissionDecision) => {
+    const fire = vi.fn<HostedHookSession['fire']>(async (event) =>
+      event === HookEventName.PreToolUse
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              permissionDecision,
+              permissionDecisionReason: 'Skill policy refused the load.',
+            },
+          }
+        : undefined,
+    );
+    turn = createTurn(
+      false,
+      { mode: 'default' },
+      hookSession(fire),
+      publishedSkills(),
+    );
+    const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBe(
+      permissionDecision === 'ask'
+        ? HOSTED_SKILL_APPROVAL_REFUSAL
+        : 'Skill policy refused the load.',
+    );
+    expect(fire.mock.calls.map(([event]) => event)).toEqual([
+      HookEventName.PreToolUse,
+      HookEventName.PostToolBatch,
+    ]);
+    expect(actionIds()).toEqual([]);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('loads the Skill selected by PreToolUse updatedInput without a new approval', async () => {
+  const skills = new HostedSkillCatalog([
+    {
+      name: 'review',
+      description: 'Review code.',
+      body: 'Original review body.',
+    },
+    {
+      name: 'testing',
+      description: 'Test code.',
+      body: 'Replacement test body.',
+    },
+  ]);
+  const fire = vi.fn<HostedHookSession['fire']>(async (event) =>
+    event === HookEventName.PreToolUse
+      ? {
+          hookSpecificOutput: {
+            hookEventName: event,
+            updatedInput: { skill: 'testing' },
+          },
+        }
+      : undefined,
+  );
+  turn = createTurn(false, { mode: 'default' }, hookSession(fire), skills);
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['output']).toBe(
+    skills.response({ skill: 'testing' }),
+  );
+  expect(fire.mock.calls.map(([event]) => event)).toEqual([
+    HookEventName.PreToolUse,
+    HookEventName.PostToolUse,
+    HookEventName.PostToolBatch,
+  ]);
+  expect(actionIds()).toEqual([]);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
 });
 
 it('commits the whole batch before the first dispatch and each receipt before resolving it', async () => {
