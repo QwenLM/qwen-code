@@ -586,9 +586,9 @@ guard 在独立验收前保留。
 预期实现范围如下；当前 K2-A1 已修改快照 store、私有证据入口、原生校验器和
 共享结果转换：
 
-- `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/`：扩展 `WorkspaceCsiReservationStore`、`WorkspaceCsiCheckpointSnapshotStore`、`WorkspaceCsiWorkerAckStore` 和 publication/resource 权威；增加小型 aggregate coordinator 与增量 migration/evidence 表示。
-- `packages/sdk-java/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/`：binding/Session/execution repository 的快照与同连接转换边界、`WorkspaceExecutionProfile`，以及精确原 stop intent 处理。
-- `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/`：CSI provisioner、identity、resource guard、Workspace resolver/transport 与 embedded Broker；Spring 配置和 Hosted connector/store profile 校验。
+- `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/`：扩展 `WorkspaceCsiReservationStore`、`WorkspaceCsiCheckpointSnapshotStore`、`WorkspaceCsiWorkerAckStore` 和 publication/resource 权威；增加小型 aggregate coordinator 与增量 migration/evidence 表示。
+- `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/`：binding/Session/execution repository 的快照与同连接转换边界、`WorkspaceExecutionProfile`，以及精确原 stop intent 处理。
+- `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/`：CSI provisioner、identity、resource guard、Workspace resolver/transport 与 embedded Broker；Spring 配置和 Hosted connector/store profile 校验。
 - `packages/core/src/managed-runtime/`：原生文件结果/checkpoint 证明及同步 capability 契约；保留现有 receipt verifier 语义。
 - `packages/cli/src/serve/`：`managed-context-worker.ts`、`managed-runtime-tool-executor.ts`、CSI envelope/routes、Hosted Session/Broker/tool-turn 准入和确定性文件 outcome 转换；共享 Java/TS fixtures 覆盖新协议，不放宽旧 fixtures。
 - Deployment qualification adapter：具体打包方式和权限审查属于 K2-B。不向通用 Broker 加入特定云 CLI 调用。

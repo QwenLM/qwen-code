@@ -138,6 +138,11 @@ automatic replacement or ownership transfer in this release.
 
 ## Changes by layer
 
+The application and embedded Broker now share `packages/managed-agent-server`,
+while keeping their existing Java packages and classpath resource names. The
+resident additions follow that layout; builds install only the Java SDK
+prerequisite, with no separate Broker artifact or compatibility directory.
+
 - Managed server configuration: explicit resident mapping and Kubernetes inputs.
 - Creation and execution stores: single Session admission and exact Runtime
   Session ownership checks that retain the permanent physical reservation.

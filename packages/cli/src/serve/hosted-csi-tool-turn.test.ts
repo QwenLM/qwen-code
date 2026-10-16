@@ -261,7 +261,7 @@ it('fixes full Parts, original IDs, exact input bytes and final definitions befo
   const pinned = JSON.parse(
     await readFile(
       new URL(
-        '../../../sdk-java/runtime-broker/src/main/resources/csi-native-file-declarations.json',
+        '../../../managed-agent-server/src/main/resources/csi-native-file-declarations.json',
         import.meta.url,
       ),
       'utf8',

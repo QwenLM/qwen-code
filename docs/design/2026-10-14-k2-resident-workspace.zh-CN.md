@@ -109,6 +109,10 @@ Broker 重启恢复原持久化运行环境身份。worker 或 Pod 被替换、�
 
 ## 各层改动
 
+应用与内嵌 Broker 现在同属 `packages/managed-agent-server`，保留既有 Java
+包名和 classpath 资源名。常驻新增代码沿用这一布局；构建只需先安装 Java SDK，
+不再依赖独立 Broker 产物，也不增加旧目录兼容层。
+
 - Managed server 配置：显式常驻映射和 Kubernetes 参数。
 - 创建及执行 store：单 Session 准入，以及保留永久物理 reservation 的精确
   Runtime Session 归属检查。
