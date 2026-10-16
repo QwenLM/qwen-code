@@ -2678,6 +2678,41 @@ describe('WebShellSidebar workspace removal', () => {
     expect(onLoadSession).not.toHaveBeenCalled();
   });
 
+  it('ignores F2 pressed on an element inside the session row', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push(
+      {
+        sessionId: 'current-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Current session',
+      },
+      {
+        sessionId: 'other-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Other session',
+      },
+    );
+    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
+
+    renderSidebar();
+    await expandWorkspace('project');
+
+    const row = inlineSessionAction(
+      'Other session',
+      'Rename',
+    )!.closest<HTMLElement>('[role="button"]')!;
+    const inner = row.querySelector<HTMLElement>('span')!;
+    expect(inner).not.toBe(row);
+    await act(async () => {
+      inner.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('input')).toBeNull();
+  });
+
   it('keeps the next rename editor when an earlier rename settles late', async () => {
     connection.sessionId = 'current-session';
     active.sessions.push(
