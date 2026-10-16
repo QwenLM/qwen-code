@@ -23,6 +23,7 @@ import {
   MOD_END_TIMEOUT_MS,
   MOD_MAX_BYTES,
   type ModCommand,
+  type ModCommandPresentation,
   type ModLog,
   type ModReply,
   type ModRequest,
@@ -74,14 +75,15 @@ export class ModRuntime {
   private constructor(
     private readonly log: (entry: ModLog, plugin: string) => void,
     private readonly resolveTool?: ModToolResolver,
+    private readonly surface: 'terminal' | null = null,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
       stderr: true,
       workerData: this.cancelled.buffer,
     });
-    this.worker.stdout.resume();
-    this.worker.stderr.resume();
+    this.worker.stdout?.resume();
+    this.worker.stderr?.resume();
     this.worker.on('message', (reply: ModReply) => {
       if (reply.type === 'host-call') this.executeHost(reply);
       else if (reply.type === 'host-cancel') {
@@ -126,6 +128,7 @@ export class ModRuntime {
     log: (entry: ModLog, plugin: string) => void,
     signal: AbortSignal,
     resolveTool?: ModToolResolver,
+    surface: 'terminal' | null = null,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -137,10 +140,11 @@ export class ModRuntime {
       plugins.some((plugin) => plugin.toolDialect === 'claude')
         ? resolveTool
         : undefined,
+      surface,
     );
     try {
       const result = await runtime.request(
-        { type: 'load', plugins, cwd },
+        { type: 'load', plugins, cwd, surface },
         signal,
         60_000,
       );
@@ -211,6 +215,10 @@ export class ModRuntime {
     next: ModToolNext,
     signal: AbortSignal,
   ): Promise<ModToolResult> {
+    if (this.surface === 'terminal')
+      throw new Error(
+        'Mod tool middleware is not supported in terminal sessions.',
+      );
     if (this.tool || this.pending)
       throw new Error('A Mod dispatch is already running.');
     const owner: NonNullable<ModRuntime['tool']> = {
@@ -328,11 +336,19 @@ export class ModRuntime {
     command: string,
     args: string,
     signal: AbortSignal,
+    presentation?: ModCommandPresentation,
   ): Promise<string> {
     if (!this.commands.some((item) => item.name === command))
       throw new Error('Unknown Mod command.');
     const result = await this.request(
-      { type: 'command', command, args },
+      {
+        type: 'command',
+        command,
+        args,
+        ...(this.surface === 'terminal' && presentation
+          ? { presentation }
+          : {}),
+      },
       signal,
     );
     if (

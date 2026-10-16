@@ -2324,6 +2324,7 @@ const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 // trigger a continuation that skips `continueLastTurn()`'s accept/reject
 // pre-check. Mirrors how `DAEMON_RETRY_META_KEY` is stripped and re-armed.
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+const DAEMON_CONFIRM_CANCELLATION_META_KEY = 'qwen.daemon.confirmCancellation';
 /**
  * Backstop timeout for `qwen/control/session/recap`. The underlying
  * side-query is single-attempt with `maxOutputTokens: 300`, so a
@@ -6948,6 +6949,7 @@ export function createSessionControlPlane(
     opts?: {
       throwOnFailure?: boolean;
       requireFlush?: boolean;
+      onlyIfUnheld?: boolean;
       timeoutMs?: number;
       cancelReason?: 'user';
     },
@@ -6973,6 +6975,9 @@ export function createSessionControlPlane(
             opts?.timeoutMs ?? initTimeoutMs,
           ),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
+          ...(opts?.onlyIfUnheld === true
+            ? { [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true }
+            : {}),
           ...(opts?.cancelReason ? { cancelReason: opts.cancelReason } : {}),
         },
       );
@@ -9583,6 +9588,15 @@ export function createSessionControlPlane(
         'session_closing',
       );
     }
+    if (
+      closeOpts?.requireIdle === true &&
+      entryActiveWorkState(entry) !== 'idle'
+    ) {
+      throw new SessionBusyError(
+        sessionId,
+        `Session ${sessionId} has active or unconfirmed work`,
+      );
+    }
     let originatorClientId: string | undefined;
     if (context?.clientId !== undefined) {
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
@@ -9625,12 +9639,15 @@ export function createSessionControlPlane(
       );
     }
     let agentSessionClosed = false;
+    const requireIdle = closeOpts?.requireIdle === true;
     try {
       // Resolve permission waits before asking the agent to drain active turns;
       // otherwise a turn blocked in requestPermission can deadlock close.
-      permissionMediator.forgetSession(sessionId);
-      entry.pendingPermissionIds.clear();
-      entry.pendingInteractions.clear();
+      if (!requireIdle) {
+        permissionMediator.forgetSession(sessionId);
+        entry.pendingPermissionIds.clear();
+        entry.pendingInteractions.clear();
+      }
       agentSessionClosed = await notifyAgentSessionClose(
         entry,
         ci,
@@ -9638,6 +9655,7 @@ export function createSessionControlPlane(
         {
           throwOnFailure: true,
           requireFlush: closeOpts?.requireAgentClose === true,
+          onlyIfUnheld: requireIdle,
           cancelReason:
             closeOpts?.cause === 'workspace_runtime_stop'
               ? undefined
@@ -9683,6 +9701,21 @@ export function createSessionControlPlane(
         entry.closing = false;
       }
       throw error;
+    }
+    if (requireIdle && !agentSessionClosed) {
+      entry.closing = false;
+      if (deferredCloseStamp !== null) {
+        entry.promptSettledAt = deferredCloseStamp;
+      }
+      throw new SessionBusyError(
+        sessionId,
+        `Session ${sessionId} has active or unconfirmed work`,
+      );
+    }
+    if (requireIdle) {
+      permissionMediator.forgetSession(sessionId);
+      entry.pendingPermissionIds.clear();
+      entry.pendingInteractions.clear();
     }
     if (defaultEntry === entry) defaultEntry = undefined;
     if (ci && ci.channel === entry.channel) {
@@ -11415,6 +11448,7 @@ export function createSessionControlPlane(
                   // only `continueSession` (via the trusted `isContinue` flag
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
+                  delete meta[DAEMON_CONFIRM_CANCELLATION_META_KEY];
                   delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
@@ -11451,6 +11485,9 @@ export function createSessionControlPlane(
                   }
                   if (isContinue) {
                     meta[DAEMON_CONTINUE_META_KEY] = true;
+                    if (typeof context?.confirmCancellation === 'string')
+                      meta[DAEMON_CONFIRM_CANCELLATION_META_KEY] =
+                        context.confirmCancellation;
                   }
                   if (isRestoreAskUserQuestion) {
                     meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] = true;
@@ -13926,7 +13963,13 @@ export function createSessionControlPlane(
       const decision = await requestSessionStatus<{
         accepted: boolean;
         interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionContinue);
+      }>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionContinue,
+        typeof context?.confirmCancellation === 'string'
+          ? { confirmCancellation: context.confirmCancellation }
+          : undefined,
+      );
 
       if (!decision.accepted) {
         return decision;
@@ -13980,6 +14023,9 @@ export function createSessionControlPlane(
             : {}),
           ...(promptId !== undefined ? { promptId } : {}),
           continue: true,
+          ...(typeof context?.confirmCancellation === 'string'
+            ? { confirmCancellation: context.confirmCancellation }
+            : {}),
         },
       );
       promptPromise.catch((err) => {

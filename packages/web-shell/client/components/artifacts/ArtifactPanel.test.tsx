@@ -40,6 +40,10 @@ const {
     fileStat: vi.fn(),
     dirList: vi.fn(),
     uploadWorkspaceFile: vi.fn(),
+    deleteWorkspaceFile: vi.fn(),
+    writeWorkspaceFile: vi.fn(),
+    createWorkspaceDirectory: vi.fn(),
+    deleteWorkspaceDirectory: vi.fn(),
   };
   return {
     mockActions: {
@@ -461,6 +465,10 @@ afterEach(() => {
   mockSecondaryWorkspaceActions.fileStat.mockReset();
   mockSecondaryWorkspaceActions.dirList.mockReset();
   mockSecondaryWorkspaceActions.uploadWorkspaceFile.mockReset();
+  mockSecondaryWorkspaceActions.deleteWorkspaceFile.mockReset();
+  mockSecondaryWorkspaceActions.writeWorkspaceFile.mockReset();
+  mockSecondaryWorkspaceActions.createWorkspaceDirectory.mockReset();
+  mockSecondaryWorkspaceActions.deleteWorkspaceDirectory.mockReset();
   mockWorkspace.client.workspaceByCwd.mockClear();
   mockWorkspace.capabilities.features = [];
   latestArtifactWorkspaceTarget = undefined;
@@ -651,6 +659,105 @@ describe('ArtifactPanel web previews', () => {
 
 describe('artifact workspace authority', () => {
   it.each(['/primary', '/secondary'])(
+    'deletes through the qualified advertised owner for %s',
+    async (cwd) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_delete',
+        'workspace_qualified_rest_core',
+      ];
+      mockSecondaryWorkspaceActions.deleteWorkspaceFile.mockResolvedValue(
+        undefined,
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd={cwd} />,
+        ),
+      );
+      await latestArtifactWorkspaceTarget!.actions.deleteWorkspaceFile!(
+        'nested/file.txt',
+      );
+      expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(cwd);
+      expect(
+        mockSecondaryWorkspaceActions.deleteWorkspaceFile,
+      ).toHaveBeenCalledWith('nested/file.txt');
+    },
+  );
+
+  it.each(['missing-delete', 'missing-rest', 'ssh'])(
+    'does not expose unsupported deletion: %s',
+    (reason) => {
+      mockWorkspace.capabilities.features =
+        reason === 'missing-delete'
+          ? ['workspace_qualified_rest_core']
+          : reason === 'missing-rest'
+            ? ['workspace_file_delete']
+            : ['workspace_file_delete', 'workspace_qualified_rest_core'];
+      if (reason === 'ssh')
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: mockWorkspace.capabilities.workspaces.map((entry) =>
+            entry.cwd === '/secondary'
+              ? { ...entry, ssh: { host: 'remote', directory: '/remote' } }
+              : entry,
+          ),
+        };
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      expect(
+        latestArtifactWorkspaceTarget!.actions.deleteWorkspaceFile,
+      ).toBeUndefined();
+    },
+  );
+
+  it.each(['capability', 'owner'])(
+    'rejects captured and pending deletion after %s revocation',
+    async (reason) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_delete',
+        'workspace_qualified_rest_core',
+      ];
+      let finish!: () => void;
+      mockSecondaryWorkspaceActions.deleteWorkspaceFile.mockReturnValue(
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      const remove =
+        latestArtifactWorkspaceTarget!.actions.deleteWorkspaceFile!;
+      const pending = remove('file.txt');
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        ...(reason === 'capability'
+          ? { features: [] }
+          : {
+              workspaces: mockWorkspace.capabilities.workspaces.filter(
+                (entry) => entry.cwd !== '/secondary',
+              ),
+            }),
+      };
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+      finish();
+      await expect(pending).rejects.toThrow(/no longer available/);
+      await expect(remove('file.txt')).rejects.toThrow(/no longer available/);
+      expect(
+        mockSecondaryWorkspaceActions.deleteWorkspaceFile,
+      ).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['/primary', '/secondary'])(
     'uploads only through the qualified advertised owner for %s',
     async (cwd) => {
       mockWorkspace.capabilities.features = [
@@ -762,6 +869,224 @@ describe('artifact workspace authority', () => {
       await expect(upload(request)).rejects.toThrow(/no longer available/);
       expect(
         mockSecondaryWorkspaceActions.uploadWorkspaceFile,
+      ).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['/primary', '/secondary'])(
+    'deletes a folder through %s',
+    async (cwd) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_directory_delete',
+        'workspace_qualified_rest_core',
+      ];
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd={cwd} />,
+        ),
+      );
+      await latestArtifactWorkspaceTarget!.actions.deleteDirectory!('folder');
+      expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(cwd);
+      expect(
+        mockSecondaryWorkspaceActions.deleteWorkspaceDirectory,
+      ).toHaveBeenCalledWith('folder');
+    },
+  );
+
+  it.each(['missing-capability', 'missing-rest', 'ssh', 'revoked'])(
+    'gates folder deletion with %s',
+    async (reason) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_directory_delete',
+        'workspace_qualified_rest_core',
+      ];
+      if (reason === 'missing-capability')
+        mockWorkspace.capabilities.features = ['workspace_qualified_rest_core'];
+      if (reason === 'missing-rest')
+        mockWorkspace.capabilities.features = ['workspace_directory_delete'];
+      if (reason === 'ssh')
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: mockWorkspace.capabilities.workspaces.map((entry) =>
+            entry.cwd === '/secondary'
+              ? { ...entry, ssh: { host: 'remote', directory: '/remote' } }
+              : entry,
+          ),
+        };
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      if (reason !== 'revoked')
+        expect(
+          latestArtifactWorkspaceTarget!.actions.deleteDirectory,
+        ).toBeUndefined();
+      else {
+        const remove = latestArtifactWorkspaceTarget!.actions.deleteDirectory!;
+        mockWorkspace.capabilities.features = ['workspace_qualified_rest_core'];
+        act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+        await expect(remove('folder')).rejects.toThrow('no longer available');
+      }
+      expect(
+        mockSecondaryWorkspaceActions.deleteWorkspaceDirectory,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a pending folder deletion after owner revocation', async () => {
+    mockWorkspace.capabilities.features = [
+      'workspace_directory_delete',
+      'workspace_qualified_rest_core',
+    ];
+    let complete!: () => void;
+    mockSecondaryWorkspaceActions.deleteWorkspaceDirectory.mockReturnValue(
+      new Promise<void>((resolve) => {
+        complete = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const pending =
+      latestArtifactWorkspaceTarget!.actions.deleteDirectory!('folder');
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+    complete();
+    await expect(pending).rejects.toThrow('no longer available');
+  });
+
+  it.each([
+    ['/primary', 'file'],
+    ['/secondary', 'file'],
+    ['/primary', 'directory'],
+    ['/secondary', 'directory'],
+  ] as const)(
+    'creates %s %s through the qualified owner',
+    async (cwd, kind) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_write',
+        'workspace_directory_create',
+        'workspace_qualified_rest_core',
+      ];
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd={cwd} />,
+        ),
+      );
+      if (kind === 'file')
+        await latestArtifactWorkspaceTarget!.actions.createFile!('new.txt');
+      else
+        await latestArtifactWorkspaceTarget!.actions.createDirectory!('folder');
+      expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(cwd);
+      if (kind === 'file')
+        expect(
+          mockSecondaryWorkspaceActions.writeWorkspaceFile,
+        ).toHaveBeenCalledWith({
+          path: 'new.txt',
+          content: '',
+          mode: 'create',
+        });
+      else
+        expect(
+          mockSecondaryWorkspaceActions.createWorkspaceDirectory,
+        ).toHaveBeenCalledWith('folder');
+    },
+  );
+
+  it.each(['missing-file', 'missing-directory', 'missing-rest', 'ssh'])(
+    'gates creation with %s',
+    (reason) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_write',
+        'workspace_directory_create',
+        'workspace_qualified_rest_core',
+      ].filter(
+        (feature) =>
+          feature !==
+          (reason === 'missing-file'
+            ? 'workspace_file_write'
+            : reason === 'missing-directory'
+              ? 'workspace_directory_create'
+              : reason === 'missing-rest'
+                ? 'workspace_qualified_rest_core'
+                : ''),
+      );
+      if (reason === 'ssh')
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: mockWorkspace.capabilities.workspaces.map((entry) =>
+            entry.cwd === '/secondary'
+              ? { ...entry, ssh: { host: 'remote', directory: '/remote' } }
+              : entry,
+          ),
+        };
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      expect(Boolean(latestArtifactWorkspaceTarget!.actions.createFile)).toBe(
+        reason === 'missing-directory',
+      );
+      expect(
+        Boolean(latestArtifactWorkspaceTarget!.actions.createDirectory),
+      ).toBe(reason === 'missing-file');
+    },
+  );
+
+  it.each(['capability', 'owner'])(
+    'rejects stale creation after %s revocation',
+    async (reason) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_write',
+        'workspace_directory_create',
+        'workspace_qualified_rest_core',
+      ];
+      let finish!: () => void;
+      mockSecondaryWorkspaceActions.writeWorkspaceFile.mockReturnValue(
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      const create = latestArtifactWorkspaceTarget!.actions.createFile!;
+      const pending = create('new.txt');
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        ...(reason === 'capability'
+          ? { features: [] }
+          : {
+              workspaces: mockWorkspace.capabilities.workspaces.filter(
+                (entry) => entry.cwd !== '/secondary',
+              ),
+            }),
+      };
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+      finish();
+      await expect(pending).rejects.toThrow(/no longer available/);
+      await expect(create('another.txt')).rejects.toThrow(
+        /no longer available/,
+      );
+      expect(
+        mockSecondaryWorkspaceActions.writeWorkspaceFile,
       ).toHaveBeenCalledTimes(1);
     },
   );
@@ -2359,6 +2684,179 @@ describe('ArtifactPanel add menu', () => {
     ).find((button) => button.textContent === 'New');
     act(() => reopenedCreate?.click());
     expect(onCreateSideTask).toHaveBeenCalledOnce();
+  });
+
+  it('offers reversible archive actions for completed side tasks', () => {
+    const onArchiveSideTasks = vi.fn();
+    const onUnarchiveSideTasks = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            sideTasks={[
+              {
+                sessionId: 'side-complete',
+                title: 'Completed research',
+                archivable: true,
+              },
+              {
+                sessionId: 'side-running',
+                title: 'Running research',
+                archivable: false,
+              },
+            ]}
+            archivedSideTasks={[
+              {
+                sessionId: 'side-archived',
+                title: 'Archived research',
+              },
+            ]}
+            onCreateSideTask={vi.fn()}
+            onOpenSideTask={vi.fn()}
+            onArchiveSideTasks={onArchiveSideTasks}
+            onUnarchiveSideTasks={onUnarchiveSideTasks}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const openMenu = () => {
+      const sideTask = Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      ).find((button) => button.textContent?.includes('Side task'));
+      act(() => {
+        sideTask?.dispatchEvent(
+          new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+        );
+      });
+    };
+    const openTaskActions = (title: string) => {
+      const trigger = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent?.includes(title));
+      act(() => trigger?.click());
+    };
+
+    openMenu();
+    openTaskActions('Completed research');
+    const archive = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Archive');
+    act(() => archive?.click());
+    expect(onArchiveSideTasks).toHaveBeenNthCalledWith(1, [
+      expect.objectContaining({ sessionId: 'side-complete' }),
+    ]);
+
+    openMenu();
+    const archiveCompleted = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Archive completed');
+    act(() => archiveCompleted?.click());
+    expect(onArchiveSideTasks).toHaveBeenNthCalledWith(
+      2,
+      expect.arrayContaining([
+        expect.objectContaining({ sessionId: 'side-complete' }),
+        expect.objectContaining({ sessionId: 'side-running' }),
+      ]),
+    );
+
+    openMenu();
+    openTaskActions('Archived (1)');
+    const restore = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.includes('Archived research'));
+    act(() => restore?.click());
+    expect(onUnarchiveSideTasks).toHaveBeenCalledWith([
+      expect.objectContaining({ sessionId: 'side-archived' }),
+    ]);
+
+    openMenu();
+    openTaskActions('Running research');
+    const disabledArchive = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find(
+      (item) =>
+        item.textContent === 'Archive' && item.hasAttribute('data-disabled'),
+    );
+    expect(disabledArchive?.getAttribute('title')).toBe(
+      'Only completed side tasks can be archived.',
+    );
+  });
+
+  it('keeps long archived side-task lists within a scrollable submenu', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            archivedSideTasks={Array.from({ length: 40 }, (_, index) => ({
+              sessionId: `side-archived-${index}`,
+              title: `Archived research ${index}`,
+            }))}
+            onCreateSideTask={vi.fn()}
+            onOpenSideTask={vi.fn()}
+            onUnarchiveSideTasks={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const sideTask = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Side task'));
+    act(() => {
+      sideTask?.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+      );
+    });
+    const archived = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.includes('Archived (40)'));
+    act(() => archived?.click());
+
+    const archivedMenu = Array.from(
+      document.body.querySelectorAll<HTMLElement>(
+        '[data-slot="dropdown-menu-sub-content"]',
+      ),
+    ).find((menu) => menu.textContent?.includes('Archived research 39'));
+    expect(archivedMenu).toBeDefined();
+    expect(archivedMenu?.className).toContain(
+      'max-h-(--radix-dropdown-menu-content-available-height)',
+    );
+    expect(archivedMenu?.className).toContain('overflow-y-auto');
   });
 
   it('forwards model management policy and the refusal callback to the side task panel', () => {

@@ -735,12 +735,14 @@ export class DaemonSessionClient {
   /** Return continuation admission; terminal results arrive on the event stream. */
   async continueSession(
     signal?: AbortSignal,
+    options: { confirmCancellation?: string } = {},
   ): Promise<DaemonContinueSessionResult> {
     signal?.throwIfAborted();
     return await this.withClientIdSelfHeal(() =>
       this.client.continueSession(this.sessionId, {
         clientId: this.clientId,
         signal,
+        confirmCancellation: options.confirmCancellation,
       }),
     );
   }
