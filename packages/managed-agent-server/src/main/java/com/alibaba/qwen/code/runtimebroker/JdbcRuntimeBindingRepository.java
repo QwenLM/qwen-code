@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -1227,6 +1228,44 @@ public final class JdbcRuntimeBindingRepository
                 });
     }
 
+    /** A binding's request columns, aliased with the {@code b_} prefix, for a join on alias {@code b}. */
+    static final String REQUEST_COLUMNS_AS_B = String.join(", ", List.of("tenant_id", "workspace_id",
+                    "workspace_generation", "canonical_cwd", "capability_digest", "isolation_class", "isolation_key",
+                    "provisioner_kind", "storage_id").stream().map(column -> "b." + column + " AS b_" + column).toList());
+
+    /** Whether the prefixed binding columns describe a shared binding; a malformed request does not. */
+    static boolean sharesRuntimeSessions(ResultSet rows, String prefix) throws SQLException {
+        try {
+            return HarnessOwnership.sharesRuntimeSessions(new RuntimeProvisionRequest(
+                    new RuntimeScope(rows.getString(prefix + "tenant_id"), rows.getString(prefix + "workspace_id"),
+                            rows.getString(prefix + "workspace_generation"), rows.getString(prefix + "canonical_cwd"),
+                            rows.getString(prefix + "capability_digest"), rows.getString(prefix + "isolation_class")),
+                    rows.getString(prefix + "isolation_key"), rows.getString(prefix + "provisioner_kind"),
+                    rows.getString(prefix + "storage_id")));
+        } catch (IllegalArgumentException malformed) {
+            return false;
+        }
+    }
+
+    /** Whether any Runtime Session of the Harness Session was placed on a shared binding. */
+    public static boolean hasSharedRuntimeSessions(Connection connection, String tenantId, String harnessSessionId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT " + REQUEST_COLUMNS_AS_B
+                + " FROM ma_runtime_session s JOIN ma_runtime_binding b ON b.binding_id = s.binding_id"
+                + " WHERE s.harness_session_id = ? AND s.tenant_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
+            JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    if (sharesRuntimeSessions(rows, "b_")) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     @Override
     public List<RuntimeBindingRecord> verifyHarnessResources(Connection connection, String tenantId,
             String harnessSessionId) throws SQLException {
@@ -1265,6 +1304,16 @@ public final class JdbcRuntimeBindingRepository
                 while (rows.next()) {
                     String bindingId = rows.getString("binding_id");
                     RuntimeBindingRecord original = bindings.stream().filter(binding -> binding.getBindingId().equals(bindingId)).findFirst().orElse(null);
+                    if (original == null) {
+                        // A shared binding outlives this Session: its own Runtime
+                        // Sessions must be released, never the binding drained.
+                        RuntimeBindingRecord shared = selectById(connection, bindingId, true);
+                        if (shared != null && HarnessOwnership.sharesRuntimeSessions(shared.getRequest())
+                                && tenantId.equals(shared.getRequest().getScope().getTenantId())) {
+                            original = shared;
+                            bindings.add(shared);
+                        }
+                    }
                     if (original == null || rows.getLong("runtime_generation") < 1
                             || original.getGeneration() < rows.getLong("runtime_generation")) {
                         throw new RuntimeBrokerException(
@@ -1342,6 +1391,69 @@ public final class JdbcRuntimeBindingRepository
                 }
             }
         }
+        verifySharedSessionsStopped(connection, tenantId, harnessSessionId);
+    }
+
+    /**
+     * A shared binding keeps serving other Sessions, so this Session's stop
+     * proof is its own Runtime Sessions released, their executions settled
+     * and no storage holder naming one of them.
+     */
+    private void verifySharedSessionsStopped(Connection connection, String tenantId, String harnessSessionId)
+            throws SQLException {
+        List<RuntimeSessionRecord> sessions = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT " + JdbcRuntimeSessionRepository.SESSION_COLUMNS
+                + " FROM ma_runtime_session WHERE harness_session_id = ? AND tenant_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
+            JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    RuntimeSessionRecord session = JdbcRuntimeSessionRepository.mapSession(rows);
+                    if (tenantId.equals(session.getSession().getScope().getTenantId())
+                            && harnessSessionId.equals(session.getSession().getHarnessSessionId())) {
+                        sessions.add(session);
+                    }
+                }
+            }
+        }
+        Map<String, Boolean> shared = new HashMap<>();
+        for (RuntimeSessionRecord session : sessions) {
+            Boolean sharing = shared.get(session.getBindingId());
+            if (sharing == null) {
+                RuntimeBindingRecord binding = selectById(connection, session.getBindingId(), false);
+                sharing = binding != null && HarnessOwnership.sharesRuntimeSessions(binding.getRequest());
+                shared.put(session.getBindingId(), sharing);
+            }
+            if (sharing && (session.isActive()
+                    || JdbcToolExecutionRepository.hasActiveByRuntimeSession(connection, session.getBindingId(),
+                            session.getRuntimeGeneration(), session.getRuntimeSessionId())
+                    || hasStorageHolder(connection, session))) {
+                throw new RuntimeBrokerException(
+                        409,
+                        "workspace_close_execution_unsettled",
+                        "Original resources remain active",
+                        false);
+            }
+        }
+    }
+
+    private static boolean hasStorageHolder(Connection connection, RuntimeSessionRecord session) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT binding_id, runtime_session_id FROM ma_storage_owner"
+                                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
+            statement.setLong(2, session.getRuntimeGeneration());
+            JdbcRepositorySupport.setIdentity(statement, 3, session.getRuntimeSessionId());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    if (session.getBindingId().equals(rows.getString("binding_id"))
+                            && session.getRuntimeSessionId().equals(rows.getString("runtime_session_id"))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     @Override
