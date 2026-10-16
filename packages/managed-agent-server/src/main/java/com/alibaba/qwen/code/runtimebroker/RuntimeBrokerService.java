@@ -399,7 +399,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             work = work.thenCompose(ignored -> {
                 if (authority != null) {
-                    bindingRepository.requireHarnessCleanup(record.getSession().getScope(), harnessSessionId, authority);
+                    bindingRepository.requireHarnessCleanup(binding.getRequest(), record.getSession().getScope(),
+                            harnessSessionId, authority);
                 }
                 return releaseSavedSession(binding, record, null);
             });

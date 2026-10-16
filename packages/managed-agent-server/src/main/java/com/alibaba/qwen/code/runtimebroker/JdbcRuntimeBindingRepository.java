@@ -929,6 +929,20 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
+    public void requireHarnessCleanup(RuntimeProvisionRequest bindingRequest, RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (!HarnessOwnership.sharesRuntimeSessions(bindingRequest)) {
+            requireHarnessCleanup(scope, harnessSessionId, authority);
+            return;
+        }
+        JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, scope.getTenantId());
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.CLEANUP));
+            return null;
+        });
+    }
+
+    @Override
     public void requireHookAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, scope.getTenantId());
@@ -974,14 +988,17 @@ public final class JdbcRuntimeBindingRepository
         return result;
     }
 
-    /** Lifecycle authority over a shared binding stays refused. */
+    /**
+     * Lifecycle authority over a shared binding admits only cleanup, fenced by
+     * the Runtime Session's own Harness Session lifecycle claim.
+     */
     private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority, Set<HarnessFence> fence) throws SQLException {
         boolean legacyHook = fence.contains(HarnessFence.LEGACY_HOOK);
         boolean retirement = fence.contains(HarnessFence.RETIREMENT);
         boolean cleanup = fence.contains(HarnessFence.CLEANUP);
         if (fence.contains(HarnessFence.RUNTIME_SESSION_OWNER)) {
-            if (authority != null) {
+            if (authority != null && !cleanup) {
                 throw admissionClosed();
             }
             BrokerValues.requireId(harnessSessionId, "harnessSessionId");

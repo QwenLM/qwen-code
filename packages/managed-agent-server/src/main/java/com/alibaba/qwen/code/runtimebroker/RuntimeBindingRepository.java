@@ -120,6 +120,12 @@ public interface RuntimeBindingRepository {
     }
 
     /** As the scope-only check, for a Runtime Session on {@code bindingRequest}; see {@link HarnessOwnership}. */
+    default void requireHarnessCleanup(RuntimeProvisionRequest bindingRequest, RuntimeScope scope,
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        requireHarnessCleanup(scope, harnessSessionId, authority);
+    }
+
+    /** As the scope-only check, for a Runtime Session on {@code bindingRequest}; see {@link HarnessOwnership}. */
     default void requireHookAdmission(RuntimeProvisionRequest bindingRequest, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireHookAdmission(scope, harnessSessionId, authority);
