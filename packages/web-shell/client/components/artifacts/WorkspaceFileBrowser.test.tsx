@@ -66,12 +66,13 @@ const upload = vi.fn();
 async function mount(
   workspaceCwd = '/workspace',
   rootListing: {
-    entries: Array<{ name: string; kind: 'file' }>;
+    entries: Array<{ name: string; kind: 'file' | 'directory' }>;
     truncated: boolean;
   } = {
     entries: [],
     truncated: false,
   },
+  extraActions: Partial<ArtifactWorkspaceActions> = {},
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -79,6 +80,7 @@ async function mount(
   const actions = {
     listDirectory: vi.fn().mockResolvedValue(rootListing),
     uploadWorkspaceFile: upload,
+    ...extraActions,
   } as unknown as ArtifactWorkspaceActions;
   await act(async () =>
     root!.render(
@@ -175,4 +177,68 @@ it('keeps repeated spaces in the selected file shown in the header', async () =>
   const header = container.querySelector('header span')!;
   expect(header.textContent).toContain('notes  draft.md');
   expect(header.getAttribute('title')).toContain('notes  draft.md');
+});
+const menuAnchorRect = {
+  top: 0,
+  right: 0,
+  bottom: 0,
+  left: 0,
+  width: 0,
+  height: 0,
+  x: 0,
+  y: 0,
+};
+function openDirectoryMenu(path: string) {
+  act(() =>
+    treeOptions.current?.composition?.contextMenu?.onOpen?.(
+      { kind: 'directory', name: path, path },
+      {
+        anchorElement: document.createElement('div'),
+        anchorRect: menuAnchorRect,
+        close: vi.fn(),
+        restoreFocus: vi.fn(),
+      },
+    ),
+  );
+}
+function clickMenuItem(name: string) {
+  const item = [...document.body.querySelectorAll('[role="menuitem"]')].find(
+    (element) => element.textContent === name,
+  );
+  expect(item, `menu item ${name}`).toBeDefined();
+  act(() => (item as HTMLElement).click());
+}
+it('keeps repeated spaces in the delete confirmation path', async () => {
+  await mount(
+    '/workspace',
+    {
+      entries: [{ name: 'notes  draft', kind: 'directory' }],
+      truncated: false,
+    },
+    { deleteDirectory: vi.fn() },
+  );
+  openDirectoryMenu('notes  draft/');
+  clickMenuItem('Delete');
+  const path = document.body.querySelector(
+    '[role="alertdialog"] span.font-medium',
+  );
+  expect(path?.textContent).toBe('notes  draft');
+  expect(path?.className).toContain('whitespace-pre-wrap');
+});
+it('keeps repeated spaces in the create dialog destination', async () => {
+  await mount(
+    '/workspace',
+    {
+      entries: [{ name: 'notes  draft', kind: 'directory' }],
+      truncated: false,
+    },
+    { createFile: vi.fn() },
+  );
+  openDirectoryMenu('notes  draft/');
+  clickMenuItem('New file');
+  const destination = document.body.querySelector(
+    '[role="dialog"] [data-slot="dialog-description"]',
+  );
+  expect(destination?.textContent).toContain('/workspace/notes  draft');
+  expect(destination?.className).toContain('whitespace-pre-wrap');
 });

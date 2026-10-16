@@ -833,9 +833,9 @@ export function WorkspaceFileBrowser({
                   : 'files.newFile',
               )}
             </DialogTitle>
-            <DialogDescription className="break-all">
+            <DialogDescription className="whitespace-pre-wrap break-all">
               {t('files.destination')}:{' '}
-              {safeDisplayText(absolutePath(createTarget?.parent ?? ''))}
+              {formatFileName(absolutePath(createTarget?.parent ?? ''))}
             </DialogDescription>
           </DialogHeader>
           <form
@@ -900,8 +900,8 @@ export function WorkspaceFileBrowser({
             <AlertDialogTitle>{t('files.deleteFolderTitle')}</AlertDialogTitle>
             <AlertDialogDescription>
               {t('files.deleteFolderWarning')}
-              <span className="mt-2 block break-all font-medium text-foreground">
-                {safeDisplayText(deletePath)}
+              <span className="mt-2 block whitespace-pre-wrap break-all font-medium text-foreground">
+                {formatFileName(deletePath ?? '')}
               </span>
             </AlertDialogDescription>
           </AlertDialogHeader>
