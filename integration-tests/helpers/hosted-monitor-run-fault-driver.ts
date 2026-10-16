@@ -1341,10 +1341,10 @@ async function runStoreFailureCase() {
       // "no second identity ever minted" observable.
       await new Promise((resolve) => setTimeout(resolve, 10_000));
     } else {
-      // manifest/page-envelope-commit: the one-shot trigger rejects the
-      // first commit of its kind in a real transaction, then disarms; the
-      // run either heals through the publisher's identitied re-drive or
-      // stays honestly blocked — a drain ends the case the same either way.
+      // manifest/page-envelope-commit: the trigger refuses the
+      // publication's commit kind for the rest of the case, so the run
+      // stays honestly blocked without re-executing until the drain arm
+      // below ends it — there is no heal-over path to wait for.
       await waitUntil(async () => {
         checkProxy();
         checkStoreProxy();

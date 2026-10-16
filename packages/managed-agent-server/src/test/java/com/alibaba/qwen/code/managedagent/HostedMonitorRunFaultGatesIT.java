@@ -346,9 +346,6 @@ class HostedMonitorRunFaultGatesIT {
                                 : letter.equals("fg8d")
                                     ? "FG8_CANCEL_DRAIN_OK"
                                     : "FG8_STREAM_GAPS_OK");
-                if (letter.equals("fg8b")) {
-                    dropFg8bTriggers(jdbc);
-                }
                 JsonNode reports = json.readTree(
                         Files.readString(resultFile));
                 assertThat(reports).hasSize(cases.size());
@@ -357,6 +354,11 @@ class HostedMonitorRunFaultGatesIT {
                             reports.get(index));
                 }
             } finally {
+                // The triggers must go down on the failure path too: an
+                // armed BEFORE INSERT survives for the rest of the fork.
+                if (letter.equals("fg8b")) {
+                    dropFg8bTriggers(jdbc);
+                }
                 driver.descendants()
                         .forEach(process -> process.destroyForcibly());
                 if (driver.isAlive()) {
@@ -367,12 +369,19 @@ class HostedMonitorRunFaultGatesIT {
     }
 
     // FG8b's fault source: a test-only trigger per case, scoped to that
-    // case's session rows, signalling SQLSTATE '45000' with a marker whose
-    // text asserts the commit was really rejected, the same way FG7B
-    // asserted FG7B_* in the captured output. Each marker names its case.
+    // case's session rows, permanently refusing the case's commit kind
+    // inside a real transaction — a fire-once-then-disarm arm would let
+    // the next commit heal over the very blocking the issue gates. Each
+    // fire also writes fg8b_fire (MyISAM, so the row survives the
+    // signalled rollback): the broker flattens this SQLException into
+    // runtime_broker_internal_error, so unlike FG7B the marker text never
+    // reaches captured output and the fire count is the attribution.
     private void installFg8bTriggers(JdbcTemplate jdbc, String tenant,
             List<Map<String, Object>> sessions) {
         fg8bTriggers = new ArrayList<>();
+        jdbc.execute("CREATE TABLE fg8b_fire (case_name VARCHAR(64)"
+                + " NOT NULL, fired_at TIMESTAMP(6) NOT NULL DEFAULT"
+                + " CURRENT_TIMESTAMP(6)) ENGINE = MyISAM");
         for (Map<String, Object> session : sessions) {
             String name = session.get("name").toString();
             String sessionId = session.get("sessionId").toString();
@@ -415,16 +424,20 @@ class HostedMonitorRunFaultGatesIT {
             // inside each condition is the fence.
             jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON "
                     + table + " FOR EACH ROW BEGIN IF " + condition
-                    + " THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '"
-                    + marker + "'; END IF; END");
+                    + " THEN INSERT INTO fg8b_fire (case_name) VALUES ('"
+                    + name + "'); SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT"
+                    + " = '" + marker + "'; END IF; END");
         }
     }
 
     private void dropFg8bTriggers(JdbcTemplate jdbc) {
-        for (String trigger : fg8bTriggers) {
-            jdbc.execute("DROP TRIGGER IF EXISTS " + trigger);
+        if (fg8bTriggers != null) {
+            for (String trigger : fg8bTriggers) {
+                jdbc.execute("DROP TRIGGER IF EXISTS " + trigger);
+            }
+            fg8bTriggers = null;
         }
-        fg8bTriggers = null;
+        jdbc.execute("DROP TABLE IF EXISTS fg8b_fire");
     }
 
     private void assertCase(String letter, JdbcTemplate jdbc, String tenant,
@@ -539,6 +552,14 @@ class HostedMonitorRunFaultGatesIT {
             Map<String, Object> session, JsonNode report) throws Exception {
         String sessionId = session.get("sessionId").toString();
         String name = session.get("name").toString();
+        // Attribution first: the rejections this case watched must come
+        // from this case's own trigger. A trigger that silently never
+        // armed goes red here, not on an outcome (the broker's flattened
+        // runtime_broker_internal_error carries no marker text).
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM fg8b_fire WHERE case_name = ?",
+                Integer.class, name))
+                .as(name + ": the case trigger really fired").isPositive();
         switch (name) {
             case "invocation-commit" -> {
                 // The admission's INSERT was rejected inside a real
@@ -572,12 +593,24 @@ class HostedMonitorRunFaultGatesIT {
             assertProcessRows(jdbc, sessionId, name, 0);
             return;
         }
+        // The publication's commit kind is refused for the rest of the
+        // case, so the run blocks without re-executing instead of healing
+        // over the gate — and the driver's drain arm ends it, which means
+        // the record carries the drain's stop and never a fabricated exit.
         assertProcessRows(jdbc, sessionId, name, 1);
+        assertThat(report.path("recovered").asBoolean())
+                .as(name + ": the blocked run never self-settled")
+                .isFalse();
+        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+                "child_run");
+        assertThat(record.path("stopRequested").asBoolean())
+                .as(name + ": the drain carried the stop marker").isTrue();
+        assertThat(record.path("run").path("state").asText())
+                .as(name + ": settles cancelled, never exited")
+                .isEqualTo("cancelled");
+        assertThat(record.path("stopReason").asText())
+                .isEqualTo("stop_requested");
         if (name.equals("manifest-commit")) {
-            // No manifest revision ever committed under the trigger, so
-            // the run blocked instead of recovering — and the driver
-            // answered it with the drain arm; the record must settle as a
-            // proven stop, never an `exited`.
             var manifests = jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
                             + " AND session_id = ? AND kind ="
@@ -587,10 +620,23 @@ class HostedMonitorRunFaultGatesIT {
                     .as(name + ": every manifest commit was rejected")
                     .isZero();
         } else {
-            // A page envelope's rejection must never surface as a manifest
-            // naming an unpersisted envelope — the chain walk inherits the
-            // read-refusal the Artifact chain enforces at serve time.
-            verifyOutputChain(jdbc, tenant, sessionId, false);
+            // A committed manifest names only persisted envelopes — so
+            // once its page envelopes are refused, the only honest chain
+            // carries no manifest at all.
+            assertThat(jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
+                            + " AND session_id = ? AND kind ="
+                            + " 'managed-tool-result-page'",
+                    Integer.class, tenant, sessionId))
+                    .as(name + ": every page-envelope commit was rejected")
+                    .isZero();
+            assertThat(jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
+                            + " AND session_id = ? AND kind ="
+                            + " 'managed-tool-result-manifest'",
+                    Integer.class, tenant, sessionId))
+                    .as(name + ": no manifest may name refused envelopes")
+                    .isZero();
         }
     }
 

@@ -24,11 +24,11 @@ Issue #14163 跟踪 FG8 为 `monitor_run` 与 `child_run` 的 `shell` kind 剩�
 
 4. **driver 为 FG8d 的 release 臂直接对 broker 发言。** 没有任何 daemon 路由暴露 routine/drain release；`cli.close()` 会走 drain 臂但会毁掉夹具。driver 因此对 Harness 已信任的 broker 基址自行发 `:release`，用 `protocolVersion: 1` 与 broker 代理从派犯流量里捕获到的 `harnessSessionId`/`runtimeSessionId` 身份。这条 wire 与 Harness 自己会产出的一样——driver 的角色是触发 + 见证注入，被 gate 的生产代码是 broker 的两臂分叉（`RuntimeBrokerService.releaseSessionAfterSweep`）。
 
-5. **FG8b 的触发器设施沿用 FG7B，按 case 划定。** 一次性 DDL 按 case 安装并拆除，证据落在 `target/fg8b` 下，tenant 与 case 双重 scope，`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT` 为 `FG8B_<case>`，在被捕获的 Spring 输出里断言——带触发器 case 的字母加挂 `OutputCaptureExtension`。对会重复发生的写入（manifest 修订、page envelope），一次性靠 trigger 旁边的一张 MyISAM latch 表保证，因为事务内状态行会随被 SIGNAL 的写入一起回滚；这是「恰好失败一次这类提交」在 MySQL 体内唯一的立臂方式。
+5. **FG8b 的触发器设施沿用 FG7B，按 case 划定。** 每案一道触发器，tenant 与 case 双重 scope，在该案 driver 工作开始前安装、在字母的 `finally` 里拆除，`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT` 为 `FG8B_<case>`。触发器**永久**拒绝该案的提交类型：火一次就解除的臂会让 publisher 的重驱把 issue 要 gate 的阻塞（「manifest 提交失败会阻塞该 run 而不重执行」）直接自愈掉，因此不设 latch、不解除。每次点火另写一行 `fg8b_fire`——MyISAM，行在被 SIGNAL 的回滚后存活，是点火证据唯一能存活的位置——计数即本案归因：broker 把这条 SQLException 压平成 `runtime_broker_internal_error`，与 FG7B 服务器侧提交不同，marker 文本到不了被捕获输出，对它挂 `OutputCaptureExtension` 断言在架构上是死的。
 
 ## 门禁账本
 
-每个 case 的地面真相是 JDBC——`ma_tool_execution`（含 `:process` 后缀行）、`ma_session_record` 记录体、输出表（`ma_resource`、捕获的 manifest/page envelope）——外加 broker 代理操作日志、store 代理 commit 日志、被捕获的 Spring 输出与 case 目录证据（producer 标记、gate FIFO、progress 文件）。每个 case 先断言自己的故障真的点了火：代理 drop 计数、`FG8_DROPPED` 行、`FG8B_<case>` SQLException marker，或 cancel/release 应答的标志位。
+每个 case 的地面真相是 JDBC——`ma_tool_execution`（含 `:process` 后缀行）、`ma_session_record` 记录体、输出表（`ma_resource`、捕获的 manifest/page envelope）——外加 broker 代理操作日志、store 代理 commit 日志、被捕获的 Spring 输出与 case 目录证据（producer 标记、gate FIFO、progress 文件）。每个 case 先断言自己的故障真的点了火：代理 drop 计数、`FG8_DROPPED` 行、`fg8b_fire` 点火计数，或 cancel/release 应答的标志位。
 
 ### FG8a — 应答丢失（4 案）
 
@@ -43,14 +43,14 @@ driver 让每个 case 的 Session 同时穿过**两个**代理（broker 调用�
 
 ### FG8b — 存储故障（4 案）
 
-触发器 DDL 按 FG7B 形状，名字 `fg8b_<hex>`，message 文本 `FG8B_<CASE>`（`INVOCATION_COMMIT` / `PROCESS_LEDGER_COMMIT` / `MANIFEST_COMMIT` / `PAGE_ENVELOPE_COMMIT`）。触发器按 case tenant 与 case session 双重 scope（单发由构造保证），在该 case 的 driver 工作开始前安装、结束后拆除。marker 必须出现在被捕获的 Spring 输出里；一门悄悄没点火的 gate 会红在 marker 断言上，而不是红在某个结局上。
+触发器 DDL 按 FG7B 形状，名字 `fg8b_<hex>`，message 文本 `FG8B_<CASE>`（`INVOCATION_COMMIT` / `PROCESS_LEDGER_COMMIT` / `MANIFEST_COMMIT` / `PAGE_ENVELOPE_COMMIT`），每次点火另写一行 `fg8b_fire`。触发器按 case tenant 与 case session 双重 scope，对该案余下时间永久拒绝其提交类型，在该 case 的 driver 工作开始前安装、在 `finally` 里拆除。每个 case 先经 `fg8b_fire` 计数断言自己的触发器真的点过火——一门悄悄没点火的 gate 会红在点火计数上，而不是红在某个结局上。
 
-| Case                    | 注入                                                                                                       | 期望（JDBC / 证据）                                                                                                                                                                                                            |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `invocation-commit`     | `BEFORE INSERT ON ma_tool_execution`（`NEW.harness_session_id = <session>` 且 call-id 无 `:process` 后缀） | 零 OS 副作用：无调用行、无 `:process` 行、无 capture 注册（`ma_output_capture`/capture 资源缺席）、从未有物理进程（case 目录无 `bg-started.txt`）；会话轮不编造后台启动就结束——实测到的 blocked/阻塞结算形态在 gate 侧记录在案 |
-| `process-ledger-commit` | 同表，call-id 带 `:process` 后缀                                                                           | 调用行存在，`:process` 行缺席；run 阻塞且不发起二次准入（至多 1 条调用行，broker 操作日志无第二次 dispatch）；无物理进程                                                                                                       |
-| `manifest-commit`       | `BEFORE INSERT ON ma_resource`，`kind = 'managed-tool-result-manifest'`，经 latch 一次性                   | 不为恢复而重执行 run：一条 `:process` 行、一次 capture；已提交输出前缀保持逐字节一致且可读（复用 `verifyOutputChain` 走查）；marker 恰好点火一次                                                                               |
-| `page-envelope-commit`  | 同表，`kind = 'managed-tool-result-page'`，经 latch 一次性                                                 | manifest 永不命名未持久化的 page：`verifyCapture` 里的读链不变量断言不被触发；marker 恰好点火一次；最终链逐字节一致                                                                                                            |
+| Case                    | 注入                                                                                                       | 期望（JDBC / 证据）                                                                                                                                                                                                                                |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invocation-commit`     | `BEFORE INSERT ON ma_tool_execution`（`NEW.harness_session_id = <session>` 且 call-id 无 `:process` 后缀） | 零 OS 副作用：无调用行、无 `:process` 行、无 capture 注册（`ma_output_capture`/capture 资源缺席）、从未有物理进程（case 目录无 `bg-started.txt`）；会话轮不编造后台启动就结束——实测到的 blocked/阻塞结算形态在 gate 侧记录在案                     |
+| `process-ledger-commit` | 同表，call-id 带 `:process` 后缀                                                                           | 调用行存在，`:process` 行缺席；run 阻塞且不发起二次准入（至多 1 条调用行，broker 操作日志无第二次 dispatch）；无物理进程                                                                                                                           |
+| `manifest-commit`       | `BEFORE INSERT ON ma_resource`，`kind = 'managed-tool-result-manifest'`，永久                              | manifest 提交失败阻塞该 run 而不重执行：一条 `:process` 行、一次 start 尝试、零条 manifest 修订落库；driver 以 drain 收束该阻塞 run，记录结算为 `cancelled`/`stop_requested` 且 `stopRequested: true`，绝不 `exited`；点火计数 ≥ 1                 |
+| `page-envelope-commit`  | 同表，`kind = 'managed-tool-result-page'`，永久                                                            | 读链绝不解析到一个其 page envelope 未被持久化的 manifest：每次 page-envelope 提交都被拒，零条 page 行落库，唯一诚实的链不含任何 manifest（若有 manifest 命名了被拒 envelope 则红在计数上）；阻塞 run 按 `manifest-commit` 同形 drain；点火计数 ≥ 1 |
 
 ### FG8d — 取消与 drain（6 案）
 
@@ -85,11 +85,11 @@ step/diagnose/FIFO 纪律不变；每个新等待都是状态而不是 sleep；p
 
 `HostedMonitorRunFaultGatesIT` 增加三个字母，各为一个调 `runLetter` 的 `@Test @Timeout(600)` 方法，复用 `assertCase` 并点名各字母的期望：
 
-- `fg8aRetriesResolveThroughTheOriginalIdentityOnMySql`
-- `fg8bStoreFailuresLeaveNoOsEffectsOrBlockedRunsOnMySql`
+- `fg8aLostRepliesResolveThroughTheOriginalIdentityOnMySql`
+- `fg8bStoreFailuresLeaveNoOsEffectsOnMySql`
 - `fg8dCancellationAndDrainSettleHonestlyOnMySql`
 
-FG8b 的触发器按 case 经 `JdbcTemplate` 安装，在该 case 的 driver 工作开始前——字母按顺序跑 case，与 FG7B 按字母顺序播种一致——在拆解时拆掉所有已装触发器（FG7B 的 `DROP TRIGGER IF EXISTS` 形状）。两条 monitor/输出链断言调用现有 helper；零 OS 副作用断言是同一批表上的小型新 JDBC 查询，按案列在上文账本。@ExtendWith(OutputCaptureExtension.class) 覆盖对被捕获 Spring 输出的触发器 marker 断言。
+FG8b 的触发器按 case 经 `JdbcTemplate` 安装，在该 case 的 driver 工作开始前——字母按顺序跑 case，与 FG7B 按字母顺序播种一致——在 `finally` 里拆掉所有已装触发器与 `fg8b_fire` 计数表，失败的 case 不会把臂漏进 fork 余下时间。monitor 相关断言调用现有 helper；零 OS 副作用与阻塞发布断言是同一批表上的小型新 JDBC 查询，外加 `fg8b_fire` 点火计数归因，按案列在上文账本。
 
 ## 发现的环境约束：cgroup v2
 
@@ -116,7 +116,7 @@ FG8b 的触发器按 case 经 `JdbcTemplate` 安装，在该 case 的 driver 工
 
 - `npm run build && npm run typecheck && npm run bundle`；driver ESLint 干净；本文双语版本 prettier 干净。
 - 兄弟模块先装（`../qwencode`、`../runtime-broker`）后 `mvn verify` managed-agent-server（单测/H2 + Checkstyle + SpotBugs）。
-- 每个新字母对本地 MariaDB（`mysqld`、一次性 datadir，需要 trigger 权限）跑绿；每案故障见证（drop 计数、`FG8B_*` marker、标志位）正向可见；字母的 happy path（不武装）跑绿；每字母选择子可用。
+- 每个新字母对本地 MariaDB（`mysqld`、一次性 datadir，需要 trigger 权限）跑绿；每案故障见证（drop 计数、`fg8b_fire` 点火计数、标志位）正向可见；字母的 happy path（不武装）跑绿；每字母选择子可用。
 - 四条变异逐一变红；源码还原；字母复绿。
 - `hosted-process-ci.test.js` 带移动后的预算跑绿；`check-failsafe-reports.js hosted` 满足（整车道跑在 CI 侧，结构性检查本地跑）。
 - 按 AGENTS.md 做两轮连续干净的无向 + 反向审计。

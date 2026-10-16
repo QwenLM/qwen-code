@@ -91,16 +91,20 @@ inside the 1800 s fork; see the CI section.
    production code under gate is the broker's arm split
    (`RuntimeBrokerService.releaseSessionAfterSweep`).
 
-5. **FG8b's trigger facility follows FG7B, scoped per case.** One-shot DDL
-   installed and dropped per case inside `target/fg8b` evidence, tenant-
-   and case-scoped, `SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT` =
-   `FG8B_<case>`, asserted in the captured Spring output — the
-   `OutputCaptureExtension` is added to the letters that carry trigger
-   cases. One-shot-ness for repeat-occurring writes (manifest revisions,
-   page envelopes) uses a MyISAM latch table next to the trigger, because a
-   transactional state row rolls back with the signalled write; it is the
-   only way a "fail this class of commit exactly once" arm exists inside
-   MySQL itself.
+5. **FG8b's trigger facility follows FG7B, scoped per case.** One trigger
+   per case, tenant- and case-scoped, installed before that case's driver
+   work begins and dropped in the letter's `finally`, signalling
+   `SQLSTATE '45000' SET MESSAGE_TEXT` = `FG8B_<case>`. The trigger
+   refuses the case's commit kind **permanently**: a fire-once-then-disarm
+   arm would let the publisher's re-drive heal over the blocking the issue
+   gates ("a failed manifest commit blocks the run without re-executing
+   it"), so there is no latch and no disarm. Every fire also writes an
+   `fg8b_fire` row — MyISAM, so the row survives the signalled rollback,
+   which is the only place arm-fired evidence can live — and the count is
+   the case's attribution: the broker flattens this SQLException into
+   `runtime_broker_internal_error`, so unlike FG7B's server-side commits
+   the marker text never reaches captured output and an
+   `OutputCaptureExtension` assertion on it is architecturally dead.
 
 ## The gate ledger
 
@@ -110,7 +114,7 @@ suffixed rows), `ma_session_record` bodies, the output tables
 operation log, the store-proxy commit log, the captured Spring output, and
 the case directory evidence (producer markers, gate FIFOs, progress
 files). Every case first asserts its fault actually fired: the proxy drop
-count, the `FG8_DROPPED` line, the `FG8B_<case>` SQLException marker, or
+count, the `FG8_DROPPED` line, the `fg8b_fire` fire count, or
 the cancel/release answer's flags.
 
 ### FG8a — lost replies (4 cases)
@@ -131,18 +135,20 @@ arm disarms after firing so a retried request passes normally.
 
 Trigger DDL per FG7B, `fg8b_<hex>` names, `FG8B_<CASE>` message text
 (`INVOCATION_COMMIT` / `PROCESS_LEDGER_COMMIT` / `MANIFEST_COMMIT` /
-`PAGE_ENVELOPE_COMMIT`). Triggers are scoped to the case tenant and the
-case session (single-fire by construction), installed before that case's
-driver work begins and dropped after. The marker must appear in the
-captured Spring output; a gate that silently never fired its trigger goes
-red on the marker assertion, not on an outcome.
+`PAGE_ENVELOPE_COMMIT`), plus one `INSERT INTO fg8b_fire` per fire.
+Triggers are scoped to the case tenant and the case session, they refuse
+the case's commit kind for the rest of the case, are installed before
+that case's driver work begins, and are dropped in a `finally`. Every
+case first asserts its trigger really fired through the `fg8b_fire`
+count — a gate that silently never fired goes red on the fire count,
+not on an outcome.
 
-| Case                    | Injection                                                                                                        | Expect (JDBC / evidence)                                                                                                                                                                                                                                                                                                              |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `invocation-commit`     | `BEFORE INSERT ON ma_tool_execution` (`NEW.harness_session_id = <session>` AND call-id has no `:process` suffix) | Zero OS effects: no invocation row, no `:process` row, no capture registration (`ma_output_capture`/capture resources absent), no physical process ever (case directory has no `bg-started.txt`); the session turn settles without fabricating a background start — the blocked/blocked-settled form observed is documented gate-side |
-| `process-ledger-commit` | Same table, call-id suffixed `:process`                                                                          | Invocation exists, `:process` row absent; the run blocks without a second admission (exactly ≤1 invocation row, no second dispatch in the broker operation log); no physical process                                                                                                                                                  |
-| `manifest-commit`       | `BEFORE INSERT ON ma_resource`, `kind = 'managed-tool-result-manifest'`, one-shot via latch                      | The run is not re-executed to recover: one `:process` row, one capture; the committed output prefix stays byte-identical and readable (existing `verifyOutputChain` walk); the marker fired exactly once                                                                                                                              |
-| `page-envelope-commit`  | Same table, `kind = 'managed-tool-result-page'`, one-shot via latch                                              | No manifest ever names an unpersisted page: the read-chain invariant assertion inside `verifyCapture` never trips; the marker fired exactly once; the final chain is byte-identical                                                                                                                                                   |
+| Case                    | Injection                                                                                                        | Expect (JDBC / evidence)                                                                                                                                                                                                                                                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invocation-commit`     | `BEFORE INSERT ON ma_tool_execution` (`NEW.harness_session_id = <session>` AND call-id has no `:process` suffix) | Zero OS effects: no invocation row, no `:process` row, no capture registration (`ma_output_capture`/capture resources absent), no physical process ever (case directory has no `bg-started.txt`); the session turn settles without fabricating a background start — the blocked/blocked-settled form observed is documented gate-side       |
+| `process-ledger-commit` | Same table, call-id suffixed `:process`                                                                          | Invocation exists, `:process` row absent; the run blocks without a second admission (exactly ≤1 invocation row, no second dispatch in the broker operation log); no physical process                                                                                                                                                        |
+| `manifest-commit`       | `BEFORE INSERT ON ma_resource`, `kind = 'managed-tool-result-manifest'`, permanent                               | A failed manifest commit blocks the run without re-executing it: one `:process` row, one start attempt, zero manifest revisions ever commit; the driver drains the blocked run and the record settles `cancelled`/`stop_requested` with `stopRequested: true`, never `exited`; fire count ≥ 1                                               |
+| `page-envelope-commit`  | Same table, `kind = 'managed-tool-result-page'`, permanent                                                       | The read chain never resolves to a manifest whose page envelopes were not persisted: every page-envelope commit is refused, so zero page rows persist and the only honest chain carries no manifest at all (a committed manifest naming a refused envelope goes red on the count); blocked run drained as `manifest-commit`; fire count ≥ 1 |
 
 ### FG8d — cancellation and drain (6 cases)
 
@@ -212,19 +218,19 @@ FG8d's identity capture arrives via the driver-side broker proxy.
 `@Test @Timeout(600)` methods calling `runLetter`, reusing `assertCase`
 and naming each letter's expectations:
 
-- `fg8aRetriesResolveThroughTheOriginalIdentityOnMySql`
-- `fg8bStoreFailuresLeaveNoOsEffectsOrBlockedRunsOnMySql`
+- `fg8aLostRepliesResolveThroughTheOriginalIdentityOnMySql`
+- `fg8bStoreFailuresLeaveNoOsEffectsOnMySql`
 - `fg8dCancellationAndDrainSettleHonestlyOnMySql`
 
 FG8b installs its triggers case-by-case through `JdbcTemplate` before
 that case's driver portion runs — the letter runs cases sequentially, the
 way FG7B installed rows in letter order — and drops every installed
-trigger in teardown (the FG7B `DROP TRIGGER IF EXISTS` shape). The two
-monitor-bearing and output-chain assertions call the existing helpers;
-the zero-OS-effects assertions are new small JDBC queries over the same
-tables, listed per case in the ledger above. `@ExtendWith
-(OutputCaptureExtension.class)` covers the trigger-marker assertions on
-captured Spring output.
+trigger plus the `fg8b_fire` count table in a `finally`, so a failing
+case cannot leak its arm into the rest of the fork. The monitor-bearing
+assertions call the existing helpers; the zero-OS-effects and
+blocked-publication assertions are new small JDBC queries over the same
+tables, plus the `fg8b_fire` fire-count attribution per case, all listed
+per case in the ledger above.
 
 ## Environment constraint discovered: cgroup v2
 
