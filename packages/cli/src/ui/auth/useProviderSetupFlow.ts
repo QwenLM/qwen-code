@@ -392,7 +392,7 @@ export function useProviderSetupFlow(
       if (provider?.validateApiKey) {
         const err = provider.validateApiKey(trimmed, baseUrl);
         if (err) {
-          setApiKeyError(err);
+          setApiKeyError(t(err));
           return false;
         }
       }
