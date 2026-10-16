@@ -47549,6 +47549,69 @@ describe('Managed home integration', () => {
     await flush();
   }
 
+  it.each([undefined, 'run_shell_command', 'ask_user_question'])(
+    'keeps Managed Settings open while Local approval is %s',
+    async (toolName) => {
+      window.history.replaceState(null, '', '/?managed=0');
+      testState.blocks = toolName
+        ? [makePendingPermissionBlock({ toolName })]
+        : [];
+      const { container } = renderApp({
+        managedAgentProvider: managedProvider(),
+        language: 'en',
+      });
+      await flush();
+      const keyboardActive = () =>
+        toolName === 'ask_user_question'
+          ? testState.latestAskUserQuestionKeyboardActive
+          : testState.latestToolApprovalKeyboardActive;
+      if (toolName) expect(keyboardActive()).toBe(true);
+
+      await chooseBackend(container, 'Managed');
+      expect(
+        container
+          .querySelector('[data-testid="managed-home"]')
+          ?.getAttribute('aria-hidden'),
+      ).toBeNull();
+      const hiddenApprovalKeyboardActive = keyboardActive();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sidebar-settings"]',
+          )!
+          .click(),
+      );
+      await flush();
+      expect(
+        container
+          .querySelector('[data-testid="inline-panel"]')
+          ?.getAttribute('aria-label'),
+      ).toBe('Settings');
+      expect(
+        container
+          .querySelector('[data-testid="managed-conversation"]')
+          ?.getAttribute('data-interactive'),
+      ).toBe('false');
+      if (toolName) expect(hiddenApprovalKeyboardActive).toBe(false);
+
+      await chooseBackend(container, 'Local');
+      if (toolName) {
+        expect(
+          container.querySelector('[data-testid="inline-panel"]'),
+        ).toBeNull();
+        expect(keyboardActive()).toBe(true);
+      } else {
+        expect(
+          container.querySelector('[data-testid="inline-panel"]'),
+        ).not.toBeNull();
+      }
+      expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+      expect(mockSessionActions.respondToPermission).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mockSessionActions.cancel).not.toHaveBeenCalled();
+    },
+  );
+
   it('preserves the Local new-task workspace header while hiding it in Managed', async () => {
     window.history.replaceState(null, '', '/?managed=1');
     mockConnection.sessionId = undefined;

@@ -7875,11 +7875,14 @@ export function App({
   // the panel auto-close, the panel focus-restore guard, and the ChatEditor
   // dialogOpen prop.
   const approvalOverlayActive =
-    pendingToolApproval !== null || pendingAskUserApproval !== null;
+    !managedMode &&
+    (pendingToolApproval !== null || pendingAskUserApproval !== null);
   const approvalOverlayActiveRef = useRef(approvalOverlayActive);
   approvalOverlayActiveRef.current =
     approvalOverlayActive ||
-    (canActOnPendingApproval && extractPendingPermission(blocks) !== null);
+    (!managedMode &&
+      canActOnPendingApproval &&
+      extractPendingPermission(blocks) !== null);
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -10594,6 +10597,7 @@ export function App({
   // ToolApproval/AskUserQuestion (their keyboard handling is focus-scoped), so
   // the app no longer focuses the wrapper element directly.
   const toolApprovalOverlayVisible =
+    !managedMode &&
     pendingToolApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
@@ -10601,6 +10605,7 @@ export function App({
     mainView === 'chat' &&
     !artifactPanelFullscreen;
   const askUserOverlayVisible =
+    !managedMode &&
     pendingAskUserApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
