@@ -23,6 +23,15 @@ import {
   type ManagedSessionKey,
 } from './managed-session-records.js';
 
+/** A durable store refused the transaction without appending any records. */
+export class ManagedSessionCommitRejectedError extends ManagedSessionRecordError {
+  constructor(cause: Error) {
+    super(cause.message);
+    this.cause = cause;
+    this.name = 'ManagedSessionCommitRejectedError';
+  }
+}
+
 export interface ManagedSessionCommitReceipt {
   readonly transactionId: string;
   readonly commandId: string;
@@ -107,6 +116,12 @@ export interface ManagedSessionJournalHandle
     readonly detailCode: string;
   }): Promise<void>;
   seal(commit: ManagedSessionCommitProof): Promise<void>;
+  /**
+   * True once the seal committed. A `seal()` rejection before that point
+   * left the writer open and still able to append, so durability decisions
+   * must key on this outcome rather than on the call having been attempted.
+   */
+  readonly writerSealed: boolean;
   /**
    * The commit proof this handle took over from a sealed writer, when it did.
    * Durable stores keep the proof server-side and omit it here.

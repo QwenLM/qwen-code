@@ -11,6 +11,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -68,16 +69,24 @@ function events(transaction: Transaction): Event[] {
 
 function selected(transaction: Transaction, fault: string) {
   const committed = events(transaction);
-  if (fault === 'arguments' || fault === 'intent') {
+  if (fault === 'arguments') {
+    return transaction.resources.some(
+      (resource) =>
+        resource.kind === 'managed-tool-input' && resource.bytesBase64,
+    );
+  }
+  if (fault === 'intent') {
     const intent = committed.find((event) => event.kind === 'tool.intent');
     if (!intent) return false;
-    const argument = transaction.resources.find(
-      (resource) => resource.kind === 'managed-tool-input',
-    );
-    assert(argument?.bytesBase64);
-    assert.equal(
-      (intent.payload['argsRef'] as { resourceId: string }).resourceId,
-      argument.resourceId,
+    const argument = intent.payload['argsRef'] as {
+      kind: string;
+      resourceId: string;
+    };
+    assert.equal(argument.kind, 'managed-tool-input');
+    assert(
+      transaction.resources.some(
+        (resource) => resource.resourceId === argument.resourceId,
+      ),
     );
     return true;
   }
@@ -136,7 +145,10 @@ const proxy = createServer(async (req, res) => {
       ...(body.length ? { body } : {}),
       signal: AbortSignal.timeout(30_000),
     };
-    const commit = store && url.pathname.endsWith('/transactions:commit');
+    const commit =
+      store &&
+      (url.pathname.endsWith('/transactions:commit') ||
+        url.pathname.endsWith('/transactions:commit-v2'));
     const target = commit && !restoring && selected(fields, report.fault);
     if (target) {
       assert(report.faults < 3, 'Harness exceeded the commit retry budget');
@@ -176,10 +188,20 @@ const proxy = createServer(async (req, res) => {
     if (restoring && store && url.pathname.endsWith('/transactions'))
       report.restoreTransactions.push(...json.transactions);
     if (!store) {
-      assert.equal(fields.runtimeSessionId, report.promptId);
       const operation =
         req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
-      report.operations.push(operation);
+      const harnessScoped =
+        req.method === 'POST' &&
+        [
+          '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/tool-sessions:active-holds',
+        ].includes(url.pathname);
+      assert.equal(
+        fields.runtimeSessionId,
+        harnessScoped ? undefined : report.promptId,
+      );
+      if (!(harnessScoped && operation === 'active-holds'))
+        report.operations.push(operation);
       if (operation === 'prepare') {
         assert.equal(report.executionCallId, '');
         report.executionCallId = json.executionCallId;
@@ -191,11 +213,7 @@ const proxy = createServer(async (req, res) => {
         assert.equal(json.executionCallId, report.executionCallId);
       }
     }
-    for (const [name, value] of upstream.headers)
-      if (!['content-length', 'transfer-encoding', 'connection'].includes(name))
-        res.setHeader(name, value);
-    res.writeHead(upstream.status);
-    res.end(bytes);
+    relayUpstream(res, upstream, bytes);
   } catch (cause) {
     proxyFailure = cause;
     res.destroy();
@@ -332,9 +350,9 @@ try {
       current.fault.startsWith('result-') || current.fault === 'turn-reply';
     for (const [operation, count] of [
       ['acquire', 1],
-      ['prepare', 1],
+      ['prepare', current.fault === 'arguments' ? 0 : 1],
       ['start', started ? 1 : 0],
-      ['release', current.fault === 'turn-reply' ? 1 : 0],
+      ['release', 0],
     ] as const)
       assert.equal(
         current.operations.filter((item) => item === operation).length,
@@ -395,10 +413,10 @@ try {
         restored[0].recordBytesBase64,
         current.target!.recordBytesBase64,
       );
-    assert.equal(
-      current.operations.length,
-      operations,
-      'Cold load must not contact Broker',
+    assert.deepEqual(
+      current.operations.slice(operations),
+      completed ? ['release'] : [],
+      'Cold load may only release a durably settled Turn',
     );
     assert.equal(
       current.modelCalls,

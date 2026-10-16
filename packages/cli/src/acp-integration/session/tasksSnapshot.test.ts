@@ -550,6 +550,26 @@ describe('buildSessionTasksStatus monitor correlation', () => {
 });
 
 describe('buildSessionTasksStatus workflow graph', () => {
+  it('preserves the owner of project history viewed from another chat', () => {
+    const source = { ...workflowSnapshot(), parentSessionId: 'original-chat' };
+    const result = buildSessionTasksStatus(
+      'viewing-chat',
+      configWith([]),
+      2_000,
+      [source],
+      { includeWorkflows: true },
+    );
+    expect(result.tasks[0]).toMatchObject({ parentSessionId: 'original-chat' });
+    const legacy = buildSessionTasksStatus(
+      'viewing-chat',
+      configWith([]),
+      2_000,
+      [workflowSnapshot()],
+      { includeWorkflows: true },
+    );
+    expect(legacy.tasks[0]).not.toHaveProperty('parentSessionId');
+  });
+
   it('preserves independent correlation records in historical task snapshots', () => {
     const source = workflowSnapshot({
       toolUseId: 'exact-tool-call',
@@ -618,6 +638,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       kind: 'workflow',
       id: 'wf_graph',
       runId: 'wf_graph',
+      parentSessionId: 'live-chat',
       toolUseId: 'workflow-call-1',
       description: 'wf_graph',
       meta: null,
@@ -718,6 +739,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(task).toMatchObject({
       kind: 'workflow',
       id: 'wf_graph',
+      parentSessionId: 'live-chat',
       toolUseId: 'workflow-call-1',
       workflowName: 'review-and-fix',
       label: 'review-and-fix',

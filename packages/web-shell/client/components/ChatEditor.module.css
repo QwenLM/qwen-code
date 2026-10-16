@@ -256,8 +256,13 @@
 }
 
 :global([data-web-shell-toolbar-popover]) {
-  width: min(max-content, var(--radix-popover-content-available-width));
+  width: max-content;
+  max-width: min(
+    var(--radix-popover-content-available-width),
+    calc(100vw - 16px)
+  );
   max-height: var(--radix-popover-content-available-height);
+  box-sizing: border-box;
   overflow: hidden;
 }
 

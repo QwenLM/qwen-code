@@ -21,6 +21,7 @@ import { render, screen } from '@testing-library/react';
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    width: 100,
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -73,6 +74,7 @@ vi.mock('@opentui/react', async () => {
       addInputHandler: () => {},
       removeInputHandler: () => {},
     }),
+    useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
   };
 });
 
@@ -373,6 +375,26 @@ function configWith(options: {
 describe('OpenTuiHooksDialog', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
+  });
+
+  it('charges the footer hint the rows it wraps into at a narrow width', () => {
+    // At a 38-column terminal the 31-column events footer wraps to two rows:
+    // the measured chrome pays it, so a fifteen-row region leaves the events
+    // list one row, where the flat count left two — and the unshrinkable
+    // frame grew a row past the region.
+    mocks.state.width = 38;
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({})}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+        availableTerminalHeight={15}
+      />,
+    );
+
+    expect(screen.getByText(DISPLAY_HOOK_EVENTS[0]!)).toBeTruthy();
+    expect(screen.queryByText(DISPLAY_HOOK_EVENTS[1]!)).toBeNull();
   });
 
   it('drills from an event through its matcher to a hook and back out', async () => {
@@ -444,6 +466,127 @@ describe('OpenTuiHooksDialog', () => {
 
     expect(screen.queryByText('Stop - Matchers')).toBeNull();
     expect(screen.getByText('[command] ./verify.sh')).toBeTruthy();
+  });
+
+  it('windows the event list to the region, so Enter only opens a painted row', async () => {
+    // The constant twelve-row window overran a short region: the clip took
+    // the tail while the cursor kept walking it. At a fifteen-row region the
+    // chrome (frame, title, the two-row read-only note, margins, footer)
+    // leaves the list four rows, two of them spent on the scroll arrows — so
+    // exactly two events paint.
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({})}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+        availableTerminalHeight={15}
+      />,
+    );
+
+    expect(screen.getByText(DISPLAY_HOOK_EVENTS[0]!)).toBeTruthy();
+    expect(screen.getByText(DISPLAY_HOOK_EVENTS[1]!)).toBeTruthy();
+    expect(screen.queryByText(DISPLAY_HOOK_EVENTS[2]!)).toBeNull();
+
+    // The window follows the cursor: two downs bring the third event into
+    // the window, and Enter opens exactly that event's step.
+    await press('down');
+    await press('down');
+    expect(screen.getByText(DISPLAY_HOOK_EVENTS[2]!)).toBeTruthy();
+    await press('return');
+    // The read-only note only renders on the events step; its absence is the
+    // navigation tell.
+    expect(screen.queryByText(/This menu is read-only/)).toBeNull();
+    // And the opened step is the painted row's: the matchers header carries
+    // the third event's name, so an Enter that committed the wrong row (say
+    // items[0] instead of the cursor's) shows up here.
+    expect(
+      screen.getByText(new RegExp(`${DISPLAY_HOOK_EVENTS[2]!} - `)),
+    ).toBeTruthy();
+  });
+
+  it('clips a wrapping handler label to the one row the window charges for it', async () => {
+    // Each list row is charged one physical row in the window budget; an
+    // unclipped handler label wraps to two or three rows at this width and
+    // the frame paints past the window it paid for. The label column here is
+    // 92 - 2 (indicator) - 3 (number column) = 87 columns.
+    const longCommand = 'x'.repeat(200);
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({
+          entries: [
+            {
+              eventName: HookEventName.Stop,
+              config: { type: HookType.Command, command: longCommand },
+            },
+          ],
+        })}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    // Stop has no matchers, so Enter on the event opens its handler list.
+    const stopIndex = DISPLAY_HOOK_EVENTS.indexOf(HookEventName.Stop);
+    for (let i = 0; i < stopIndex; i++) await press('down');
+    await press('return');
+
+    expect(screen.queryByText(`[command] ${'x'.repeat(200)}`)).toBeNull();
+    expect(screen.getByText(`[command] ${'x'.repeat(77)}`)).toBeTruthy();
+  });
+
+  it('charges the handlers header the rows it wraps into', async () => {
+    // The header interpolates the user-supplied matcher: at this width the
+    // 200-column matcher wraps the header to four rows and the description
+    // adds one, so the chrome is 8 + 1 + 5 = 14 and the region-16 window pays
+    // two rows — not the four a flat two-row header charge would paint.
+    const entries: Array<{
+      eventName: HookEventName;
+      matcher: string;
+      config: HookConfig;
+    }> = ['./a.sh', './b.sh', './c.sh'].map((command) => ({
+      eventName: HookEventName.PreToolUse,
+      matcher: 'm'.repeat(200),
+      config: { type: HookType.Command, command },
+    }));
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({ entries })}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+        availableTerminalHeight={16}
+      />,
+    );
+
+    await press('return'); // PreToolUse (first event) → matchers step
+    await press('return'); // the single matcher → handlers step
+
+    expect(screen.getByText('[command] ./a.sh')).toBeTruthy();
+    expect(screen.getByText('[command] ./b.sh')).toBeTruthy();
+    expect(screen.queryByText('[command] ./c.sh')).toBeNull();
+  });
+
+  it('clips a wrapping matcher name to the one row the window charges for it', async () => {
+    const longMatcher = 'm'.repeat(200);
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({
+          entries: [
+            {
+              eventName: HookEventName.PreToolUse,
+              matcher: longMatcher,
+              config: { type: HookType.Command, command: './lint.sh' },
+            },
+          ],
+        })}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await press('return'); // PreToolUse is the first event → matchers step
+
+    expect(screen.queryByText('m'.repeat(200))).toBeNull();
+    expect(screen.getByText('m'.repeat(87))).toBeTruthy();
   });
 
   it('says so when an event has no hooks', async () => {

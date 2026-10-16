@@ -6,6 +6,10 @@
 
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
+  findSessionAgentBinding,
+  type SessionAgentNativeBinding,
+} from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
+import {
   buildHooksListing,
   type ContentGeneratorConfig,
   APPROVAL_MODE_INFO,
@@ -171,7 +175,7 @@ import {
   qualifySkillName,
   sessionIdContext,
   resolveAgentPersona,
-  findAgentSessionBinding,
+  buildRemoteSessionAgentSystemPrompt,
   resolveModelId,
   buildModelIdContext,
   registerSession,
@@ -273,6 +277,7 @@ import {
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
+import { isUnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 import {
   getConversationDirectoryName,
   hasVerifiableInode,
@@ -367,6 +372,7 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
+import { parseSessionExternalRecordParams } from './session-external-record-params.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
@@ -482,7 +488,10 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   PROMPT_CANCEL_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
+  getPromptCancelAbortReason,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
@@ -881,21 +890,6 @@ function managedQuarantineSummary(reason: Error): string {
     entries.push('a ledger it could not read held the unproven stop');
   }
   return entries.join('; ');
-}
-
-/**
- * The structural half of the serve side's LedgerSweepUnprovenError, which the
- * acp-integration boundary forbids importing here.
- */
-function isUnprovenSweepReport(
-  failure: unknown,
-): failure is { workFile: string; remaining: unknown[] } {
-  return (
-    typeof failure === 'object' &&
-    failure !== null &&
-    typeof (failure as { workFile?: unknown }).workFile === 'string' &&
-    Array.isArray((failure as { remaining?: unknown }).remaining)
-  );
 }
 
 function getSessionWriterError(error: unknown):
@@ -4903,6 +4897,7 @@ class QwenAgent implements Agent {
        * unset and keep their force semantics.
        */
       onlyIfUnheld?: boolean;
+      cancelReason?: 'user';
     },
   ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
     const session = this.sessions.get(sessionId);
@@ -4918,7 +4913,9 @@ class QwenAgent implements Agent {
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
-      : session.beginClose();
+      : opts?.cancelReason === 'user'
+        ? session.beginClose('user')
+        : session.beginClose();
     const conditionalDrainDeadline = opts?.onlyIfUnheld
       ? Date.now() + drainTimeoutMs
       : undefined;
@@ -4950,9 +4947,15 @@ class QwenAgent implements Agent {
         }
       }
 
+      const abortReason = getPromptCancelAbortReason({
+        [PROMPT_CANCEL_REASON_META_KEY]: opts?.cancelReason ?? 'interrupted',
+      });
+      for (const call of this.activePromptCalls.get(sessionId) ?? []) {
+        session.cancelPromptAdmission(call.controller, abortReason);
+      }
       for (const [requestId, generation] of this.generationControllers) {
         if (generation.sessionId !== sessionId) continue;
-        generation.controller.abort();
+        generation.controller.abort(abortReason);
         this.generationControllers.delete(requestId);
       }
       await waitForSessionDrain(
@@ -5008,6 +5011,9 @@ class QwenAgent implements Agent {
               error,
             );
           }
+          // Session multi-agent records deferred behind the turn that just
+          // settled land now, while the recorder still accepts writes.
+          await session.flushDeferredExternalRecords?.();
           recorder?.finalize();
           let flushError: unknown;
           try {
@@ -7179,8 +7185,9 @@ class QwenAgent implements Agent {
       throw new Error(`Session not found: ${sessionId}`);
     }
     await this.runInSessionContext(session, async () => {
+      const abortReason = getPromptCancelAbortReason(params._meta);
       try {
-        await session.cancelPendingPrompt();
+        await session.cancelPendingPrompt(abortReason);
       } catch (error) {
         if (!isNotCurrentlyGeneratingCancelError(error)) {
           throw error;
@@ -7191,7 +7198,7 @@ class QwenAgent implements Agent {
       // cancelPendingPrompt cannot see them. Abort their controllers too, or a
       // cancelled prompt would run in full once admission frees.
       for (const call of this.activePromptCalls.get(sessionId) ?? []) {
-        call.controller.abort();
+        session.cancelPromptAdmission(call.controller, abortReason);
       }
     });
   }
@@ -9010,16 +9017,16 @@ class QwenAgent implements Agent {
     );
   }
 
-  private buildSessionContextStatus(
+  private async buildSessionContextStatus(
     sessionId: string,
-  ): ServeSessionContextStatus {
+  ): Promise<ServeSessionContextStatus> {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
-      recovery: session.getRecoveryStatus(),
+      recovery: await session.getRecoveryStatusForClient(),
       state: {
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
@@ -9624,6 +9631,7 @@ class QwenAgent implements Agent {
   private isSessionScopedExtMethod(method: string): boolean {
     return (
       method === PROMPT_CANCEL_METHOD ||
+      method === MID_TURN_SEND_NOW_METHOD ||
       method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD ||
       method.startsWith('qwen/control/session/') ||
       method.startsWith('qwen/status/session/') ||
@@ -9649,7 +9657,8 @@ class QwenAgent implements Agent {
             }
           : params;
       if (
-        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
+        (method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification ||
+          method === SERVE_CONTROL_EXT_METHODS.sessionExternalRecord) &&
         this.privateParentState !== 'trusted'
       ) {
         throw RequestError.invalidParams(
@@ -9769,9 +9778,23 @@ class QwenAgent implements Agent {
         if (targetedCalls.size === 0) {
           return { cancelled: false };
         }
-        targetedCalls.forEach((call) => call.controller.abort());
+        const abortReason = getPromptCancelAbortReason(params['_meta']);
+        targetedCalls.forEach((call) =>
+          session.cancelPromptAdmission(call.controller, abortReason),
+        );
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
+      }
+      case MID_TURN_SEND_NOW_METHOD: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        this.sessions.get(sessionId)?.sendMidTurnInputNow();
+        return {};
       }
       case TODO_STOP_GUARD_QUEUE_RELEASE_METHOD: {
         const sessionId = params['sessionId'];
@@ -10041,10 +10064,9 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        return this.buildSessionContextStatus(sessionId) as unknown as Record<
-          string,
-          unknown
-        >;
+        return (await this.buildSessionContextStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionContextUsage: {
         const sessionId = params['sessionId'];
@@ -12036,6 +12058,44 @@ class QwenAgent implements Agent {
         });
         return { sessionId, accepted: result.accepted };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionExternalRecord: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const request = parseSessionExternalRecordParams(params);
+        if (typeof request === 'string') {
+          throw RequestError.invalidParams(undefined, request);
+        }
+        const session = this.sessionOrThrow(sessionId);
+        try {
+          const result = await session.appendExternalRecord(request);
+          return {
+            sessionId,
+            recordId: result.recordId,
+            created: result.created,
+            ...(result.deferred ? { deferred: true } : {}),
+          };
+        } catch (error) {
+          // A Managed session's log has no mapping for these records
+          // (`ManagedSessionRecordSink.canCarry`); say so in a form the
+          // daemon can branch on instead of an opaque internal error.
+          if (
+            error instanceof Error &&
+            (error as { code?: unknown }).code ===
+              'managed_session_record_refused'
+          ) {
+            throw RequestError.invalidParams(
+              { errorKind: 'managed_session_unsupported' },
+              'Session agents are not supported in managed sessions.',
+            );
+          }
+          throw error;
+        }
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -12057,7 +12117,15 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
+        const cancelReason = params['cancelReason'];
+        if (cancelReason !== undefined && cancelReason !== 'user') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid session close cancellation reason',
+          );
+        }
         const outcome = await this.closeStoredSession(sessionId, {
+          ...(cancelReason === 'user' ? { cancelReason } : {}),
           requireFlush: params['requireFlush'] === true,
           onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
           ...(typeof rawDrainTimeoutMs === 'number'
@@ -13674,7 +13742,11 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const result = await session.continueLastTurn();
+        const result = await session.continueLastTurn(
+          typeof params['confirmCancellation'] === 'string'
+            ? params['confirmCancellation']
+            : undefined,
+        );
         debugLogger.info(
           `sessionContinue sessionId=${sessionId} accepted=${result.accepted} interruption=${result.interruption}`,
         );
@@ -14961,9 +15033,13 @@ class QwenAgent implements Agent {
             // them on DEFAULT too — pushing the file value (or the AUTO fold
             // of a missing key) into a safe-mode session would silently
             // strip its approval restriction.
-            const reloadedSessionMode = isRestrictedApprovalModeConfig(config)
-              ? ApprovalMode.DEFAULT
-              : reloadedApprovalMode;
+            // Session-agent sessions are pinned to DEFAULT too: every write
+            // they make asks in the chat session (Config refuses other modes).
+            const reloadedSessionMode =
+              isRestrictedApprovalModeConfig(config) ||
+              config.isSessionAgentSession?.() === true
+                ? ApprovalMode.DEFAULT
+                : reloadedApprovalMode;
             const previousMode = config.getApprovalMode();
             const convergedMode = this.sessionApprovalModeConverged.get(id);
             if (
@@ -15611,7 +15687,28 @@ class QwenAgent implements Agent {
     if (!provisionalWorkspace && chatRecording !== false) {
       this.bindSessionSourceService(config);
     }
+    // A hidden agent session the session-agents orchestrator planned. Looked
+    // up before `initialize()` so the session is marked before its tools are
+    // built (see Config.markSessionAgentSession). A plain read of
+    // daemon-written state; the claim itself is still only `sourceType`.
+    let sessionAgentBinding: SessionAgentNativeBinding | undefined;
     try {
+      if (
+        sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+        sessionSource.sourceId
+      ) {
+        sessionAgentBinding = await findSessionAgentBinding(
+          cwd,
+          wiredSessionId,
+          sessionSource.sourceId,
+        );
+        if (
+          sessionAgentBinding &&
+          typeof config.markSessionAgentSession === 'function'
+        ) {
+          config.markSessionAgentSession();
+        }
+      }
       await config.initialize({
         ...effectiveInitializeOptions,
         // Reverse tool channel (issue #5626, Phase 2): bind the session
@@ -15640,9 +15737,14 @@ class QwenAgent implements Agent {
         // means not enabled, which refuses — the safe direction here, since the
         // alternative is granting an agent persona on a Config that cannot say
         // whether the operator opted in.
+        // A remote Host runs a coordinator's turn under a binding its daemon
+        // wrote for that turn (`remotePersona`); being a runtime does not
+        // require this workspace to run collaboration itself (session-multi-agent design §8-5).
+        const remotePersona = sessionAgentBinding?.remotePersona;
         const collaborationEnabled =
-          typeof config.isAgentCollaborationEnabled === 'function' &&
-          config.isAgentCollaborationEnabled();
+          remotePersona !== undefined ||
+          (typeof config.isAgentCollaborationEnabled === 'function' &&
+            config.isAgentCollaborationEnabled());
         if (!collaborationEnabled) {
           throw RequestError.invalidParams(
             undefined,
@@ -15652,35 +15754,46 @@ class QwenAgent implements Agent {
         // Server binding. `sourceType` and `sourceId` both arrive from the
         // client, so on their own they are a claim, not a credential — without
         // this check any caller with daemon access could ask for an agent's
-        // persona and its thread tools. What makes the claim true is that this
-        // workspace's store holds a live run for that agent naming this very
-        // session. Deliberately not gated on the opt-in: with collaboration on
-        // is exactly when the check has to hold.
-        const binding = await findAgentSessionBinding(
-          cwd,
-          wiredSessionId,
-          sessionSource.sourceId,
-        );
-        if (!binding) {
+        // persona. What makes the claim true is a session-agents binding,
+        // persisted by the orchestrator, that planned this very session id
+        // for a live run of that agent (looked up above). Deliberately not
+        // gated on the opt-in: with collaboration on is exactly when the
+        // check has to hold.
+        if (!sessionAgentBinding) {
           throw RequestError.invalidParams(
             undefined,
             'No dispatched run claims this session for that agent',
           );
         }
-        const persona = await resolveAgentPersona(
-          config,
-          sessionSource.sourceId,
-        );
-        if (persona.status !== 'resolved') {
-          throw RequestError.invalidParams(undefined, persona.error);
+        let personaModel: string | undefined;
+        if (remotePersona) {
+          // Not in this Host's roster: the coordinator sent the persona. No
+          // tool allowlist — every tool stays behind approval, which round-
+          // trips to the coordinator's session.
+          config.applyWorkspaceAgentPersona(
+            buildRemoteSessionAgentSystemPrompt(remotePersona),
+            remotePersona.name,
+            undefined,
+          );
+          personaModel = remotePersona.model;
+        } else {
+          const persona = await resolveAgentPersona(
+            config,
+            sessionSource.sourceId,
+          );
+          if (persona.status !== 'resolved') {
+            throw RequestError.invalidParams(undefined, persona.error);
+          }
+          config.applyWorkspaceAgentPersona(
+            persona.systemPrompt,
+            persona.agent.name,
+            persona.toolConfig.executionAllowedTools,
+            persona.toolConfig.disallowedTools,
+          );
+          personaModel = persona.model;
         }
-        config.applyWorkspaceAgentPersona(
-          persona.systemPrompt,
-          persona.agent.name,
-          persona.toolConfig.executionAllowedTools,
-        );
         const currentAuthType = config.getModelsConfig().getCurrentAuthType();
-        const model = resolveModelId(persona.model, {
+        const model = resolveModelId(personaModel, {
           ...buildModelIdContext(config),
           currentModel: undefined,
           currentAuthType,

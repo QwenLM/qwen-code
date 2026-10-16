@@ -81,6 +81,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // older daemon without it leaves them on the legacy client-fallback
   // behavior. Client-generated message ids make retries idempotent.
   session_mid_turn_message_query: { since: 'v1' },
+  // `POST /session/:id/mid-turn-messages/send-now` asks the agent to deliver
+  // the queued mid-turn messages now, cutting a streaming model response
+  // short instead of waiting for its next tool boundary, unless that response
+  // has started a tool call.
+  session_mid_turn_send_now: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -135,7 +140,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
   workspace_agent_generate: { since: 'v1' },
-  // Persistent workspace Agents collaborating on shared task threads
+  // Persistent workspace Agents answering @-mentions in chat sessions
   // (`/workspaces/:workspace/agent/*`). Conditional on the
   // `experimental.agentCollaboration` opt-in. Whether the routes exist at all
   // is settled at daemon startup, but the tag is recomputed per response, so a
@@ -218,6 +223,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `workspace_file_read`). The advertised upload byte cap is surfaced via
   // `limits.maxWorkspaceFileUploadBytes`.
   workspace_file_upload: { since: 'v1' },
+  // Qualified-only deletion of regular files in trusted local workspaces.
+  workspace_file_delete: { since: 'v1' },
+  workspace_directory_create: { since: 'v1' },
+  workspace_directory_delete: { since: 'v1' },
   // Daemon hosts the session-level approval-mode
   // control route `POST /session/:id/approval-mode` (gated by the
   // mutation gate, strict). The route accepts `{mode, persist?}` —
@@ -485,7 +494,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // surfacing a guaranteed launch failure.
   workspace_local_terminal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
-  // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
+  // Covers core file read/write/upload/delete, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings

@@ -57,9 +57,11 @@ public final class HostedHarnessClient implements AutoCloseable {
     private static final Set<String> RUNTIME_RECOVERY_OUTCOMES =
             Set.of("known", "unknown");
     private static final Set<String> RUNTIME_RECOVERY_PHASES =
-            Set.of("await_runtime", "results_ready");
+            Set.of("await_runtime", "await_agent", "await_command",
+                    "results_ready");
     private static final Set<String> RUNTIME_EXECUTION_STATES =
-            Set.of("prepared", "executing", "cancel_requested", "settled");
+            Set.of("prepared", "executing", "cancel_requested", "settled",
+                    "abandoned");
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
 
     private final String baseUrl;
@@ -232,16 +234,44 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         ensureOpen();
         HarnessSessionRef session = requireSessionRef(request.getSession());
+        if (request.getModelSelection() != null
+                && !capabilities().getFeatures().contains("model-selection/1")) {
+            throw new DaemonException("Hosted model selection is unavailable");
+        }
+        if (request.getApprovalSelection() != null
+                && !capabilities().getFeatures().contains("approval-selection/1")) {
+            throw new DaemonException("Hosted approval selection is unavailable");
+        }
         ActivePrompt candidate = new ActivePrompt(request.getPromptId(),
-                request.getPayloadDigest());
+                request.getPayloadDigest(), request.getModelSelection(), request.getApprovalSelection());
         ActivePrompt existing = activePrompts.putIfAbsent(
                 session.getHarnessSessionId(), candidate);
-        if (existing != null
-                && (!existing.promptId.equals(candidate.promptId)
-                        || !existing.payloadDigest.equals(
-                                candidate.payloadDigest))) {
-            throw new DaemonException(
-                    "Hosted Harness session already has a running turn");
+        if (existing != null && !existing.matches(candidate)) {
+            // A prompt whose admission outcome was never learned (an
+            // ambiguous answer, then a terminal coordinator failure) must
+            // not pin the Session for every later Turn: ask the Harness,
+            // which drops the entry when nothing is running there. The
+            // probe is fail-closed — only a successful idle read clears the
+            // entry — and its own failure must not leak the probe's
+            // exception types: the dispatcher maps DaemonHttpException and
+            // DaemonProtocolException to a terminal Turn failure, while the
+            // plain busy-turn refusal below retries. A generation change
+            // still propagates, so the dispatcher adopts the new
+            // generation instead of flattening it into a busy retry.
+            try {
+                getStatus(session);
+            } catch (HostedHarnessGenerationException generationChange) {
+                throw generationChange;
+            } catch (DaemonException probeFailure) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
+            existing = activePrompts.putIfAbsent(
+                    session.getHarnessSessionId(), candidate);
+            if (existing != null && !existing.matches(candidate)) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
         }
         boolean ownsActivePrompt = existing == null;
         HttpResponse<HttpSupport.Body> raw;
@@ -320,6 +350,154 @@ public final class HostedHarnessClient implements AutoCloseable {
                 ref.getHarnessClientId(), operation);
         return parseManagedRuntimeAdmission(response, stablePromptId,
                 operation, "continuation");
+    }
+
+    /**
+     * H6b/H6c: one automation operation onto the Session's journal (the
+     * control plane's verbs). The Hosted side commits through its funnel and
+     * answers 202 with the settled result; a non-2xx answer surfaces as a
+     * {@link DaemonHttpException} the caller translates, and anything
+     * ambiguous is an unknown outcome to retry, never to guess at.
+     */
+    public Map<String, Object> runAutomationOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/automations/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/automations/operations",
+                body, ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 202, operation);
+        try {
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "automation operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "automation operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the automation operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "automation operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different automation operation");
+            }
+            return json;
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
+    }
+
+    /**
+     * H4b: one child operation onto the Session's journal (the control
+     * plane's verbs). The Hosted side commits through its funnel and
+     * answers 202 once settled; anything ambiguous is an unknown outcome
+     * for the caller to retry, never to guess at.
+     */
+    public void runChildOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/children/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/children/operations",
+                body, ref.getHarnessClientId(), operation);
+        try {
+            DaemonClient.requireStatus(response, 202, operation);
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "child operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "child operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the child operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "child operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different child operation");
+            }
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
+    }
+
+    /**
+     * H4d-b: one session message operation onto the Session's journal (the
+     * message relay's verbs). The Hosted side commits through its funnel
+     * and answers 202 once settled, carrying the settled body — H4e-b3's
+     * command verbs answer it with the lead's reply document, which the
+     * relay copies back to the member. A non-2xx answer surfaces as a
+     * {@link DaemonHttpException}, and anything ambiguous is an unknown
+     * outcome for the caller to retry, never to guess at.
+     */
+    public Map<String, Object> runMessageOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/messages/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/messages/operations",
+                body, ref.getHarnessClientId(), operation);
+        try {
+            DaemonClient.requireStatus(response, 202, operation);
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "message operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "message operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the message operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "message operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different message operation");
+            }
+            return json;
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
+    }
+
+    /**
+     * H5b/H5c: one channel operation onto the Session's journal (the control
+     * plane's verbs). The Hosted side commits through its funnel and answers
+     * 202 with the settled result; a non-2xx answer surfaces as a
+     * {@link DaemonHttpException} the caller translates, and anything
+     * ambiguous is an unknown outcome to retry, never to guess at.
+     */
+    public Map<String, Object> runChannelOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/channels/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/channels/operations",
+                body, ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 202, operation);
+        try {
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "channel operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "channel operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the channel operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "channel operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different channel operation");
+            }
+            return json;
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
     }
 
     public PromptReceipt cancelManagedRuntime(CancelManagedRuntime request) {
@@ -529,6 +707,82 @@ public final class HostedHarnessClient implements AutoCloseable {
                 json);
     }
 
+    public Map<String, Object> settleLifecycle(HarnessSessionRef session, Map<String, Object> request) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        int version = request.containsKey("protocolVersion") ? JsonSupport.requiredInt(request, "protocolVersion", "lifecycle") : 1;
+        if (version != 1 && version != 2) {
+            throw new DaemonProtocolException("Unknown Hosted lifecycle protocol");
+        }
+        boolean v2 = version == 2;
+        if (v2 && !("hosted-workspace-shell/1".equals(request.get("toolProfile"))
+                || "hosted-workspace-mcp/1".equals(request.get("toolProfile")))) {
+            throw new DaemonProtocolException("Unsupported Hosted lifecycle profile");
+        }
+        if (v2 ? !capabilities.getLifecycleV2Profiles().contains(request.get("toolProfile"))
+                : capabilities.getLifecycleProtocolVersion() != 1) {
+            throw new DaemonProtocolException("Hosted lifecycle capability is required");
+        }
+        String operation = "POST /session/:id/lifecycle";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/lifecycle",
+                request, ref.getHarnessClientId(), operation);
+        requireMutationStatus(response, 200, operation);
+        // Past this point the Harness has answered 200: a failure to decode
+        // or match the receipt is a post-answer failure, which the
+        // coordinator must not read as "the settle never happened".
+        Map<String, Object> receipt;
+        try {
+            receipt = JsonSupport.parseObject(response.getBody(), operation);
+        } catch (DaemonProtocolException error) {
+            throw new HostedHarnessSettleAnsweredException(error.getMessage(), error);
+        }
+        if (!java.util.Objects.equals(request.get("sessionKey"), receipt.get("sessionKey"))
+                || !java.util.Objects.equals(request.get("kind"), receipt.get("kind"))
+                || v2 && (!java.util.Objects.equals(request.get("phase"), receipt.get("phase"))
+                        || JsonSupport.requiredInt(receipt, "protocolVersion", operation) != 2
+                        || !java.util.Objects.equals(request.get("toolProfile"), receipt.get("toolProfile"))
+                        || !java.util.Objects.equals(JsonSupport.requiredObject(request, "authority", operation).get("operationId"),
+                                receipt.get("operationId")))) {
+            throw new HostedHarnessSettleAnsweredException(
+                    "Hosted lifecycle receipt identity differs", null);
+        }
+        return receipt;
+    }
+
+    public void detachLifecycle(HarnessSessionRef session, Map<String, Object> authority) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        AttachmentState state = attachments.get(ref.getHarnessSessionId());
+        ActivePrompt prompt = activePrompts.get(ref.getHarnessSessionId());
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/detach",
+                Map.of("authority", authority), ref.getHarnessClientId(), "POST /session/:id/detach");
+        if (response.getStatusCode() != 404) {
+            requireMutationStatus(response, 204, "POST /session/:id/detach");
+        }
+        if (state != null && state.matches(ref) && attachments.remove(ref.getHarnessSessionId(), state)) {
+            state.cancel();
+            if (prompt != null) {
+                activePrompts.remove(ref.getHarnessSessionId(), prompt);
+            }
+        }
+    }
+
+    public void detachLifecycle(String harnessSessionId, Map<String, Object> authority) {
+        ensureOpen();
+        String sessionId = requireUuid(harnessSessionId, "harnessSessionId");
+        AttachmentState state = attachments.get(sessionId);
+        ActivePrompt prompt = activePrompts.get(sessionId);
+        HttpSupport.Response response = sendMutation(sessionPath(sessionId) + "/detach",
+                Map.of("authority", authority), null, "POST /session/:id/detach");
+        if (response.getStatusCode() != 404) {
+            requireMutationStatus(response, 204, "POST /session/:id/detach");
+        }
+        if (state != null && attachments.remove(sessionId, state)) {
+            state.cancel();
+            if (prompt != null) {
+                activePrompts.remove(sessionId, prompt);
+            }
+        }
+    }
+
     public void detachSession(HarnessSessionRef session) {
         HarnessSessionRef ref = requireSessionRef(session);
         HttpSupport.Response response = sendMutation(
@@ -541,6 +795,20 @@ public final class HostedHarnessClient implements AutoCloseable {
     }
 
     public void updateSessionTitle(HarnessSessionRef session, String title) {
+        updateSessionTitle(session, title, null);
+    }
+
+    public void updateSessionTitle(HarnessSessionRef session, String title, long revision) {
+        if (revision < 1) {
+            throw new IllegalArgumentException("title revision must be positive");
+        }
+        if (capabilities().getTitleProtocolVersion() != 1) {
+            throw new DaemonProtocolException("Hosted Harness title protocol version 1 is required");
+        }
+        updateSessionTitle(session, title, Long.valueOf(revision));
+    }
+
+    private void updateSessionTitle(HarnessSessionRef session, String title, Long revision) {
         HarnessSessionRef ref = requireSessionRef(session);
         String value = requireNonBlank(title, "title");
         if (value.length() > 256) {
@@ -550,7 +818,9 @@ public final class HostedHarnessClient implements AutoCloseable {
         String operation = "POST /session/:id/title";
         HttpSupport.Response response = sendMutation(
                 sessionPath(ref.getHarnessSessionId()) + "/title",
-                Map.of("title", value), ref.getHarnessClientId(), operation);
+                revision == null ? Map.of("title", value)
+                        : Map.of("title", value, "managedRenameRevision", revision.toString()),
+                ref.getHarnessClientId(), operation);
         DaemonClient.requireStatus(response, 200, operation);
         Map<String, Object> json = JsonSupport.parseObject(
                 response.getBody(), "Hosted Harness title response");
@@ -560,6 +830,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (!ref.getHarnessSessionId().equals(responseSessionId)) {
             throw new DaemonProtocolException(
                     "Hosted Harness title response sessionId does not match");
+        }
+        if (revision != null && !revision.toString().equals(
+                JsonSupport.requiredString(json, "managedRenameRevision", "title"))) {
+            throw new DaemonProtocolException("Hosted Harness title revision does not match");
         }
         if (!JsonSupport.requiredBoolean(json, "persisted", "title")) {
             throw new DaemonProtocolException(
@@ -765,8 +1039,35 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new HostedHarnessCapabilityMismatchException(
                     expectedDigest, digest);
         }
+        List<String> hostedFeatures = new ArrayList<>();
+        if (hosted.containsKey("features")) {
+            if (!(hosted.get("features") instanceof List<?>)) {
+                throw new DaemonProtocolException("Hosted Harness features must be an array");
+            }
+            for (Object value : (List<?>) hosted.get("features")) {
+                if (!(value instanceof String) || ((String) value).isBlank() || hostedFeatures.contains(value)) {
+                    throw new DaemonProtocolException("Invalid Hosted Harness feature");
+                }
+                hostedFeatures.add((String) value);
+            }
+        }
         return new HostedHarnessCapabilities(current, supported, bootId,
-                digest);
+                digest, hosted.containsKey("lifecycleProtocolVersion")
+                        ? JsonSupport.requiredInt(hosted, "lifecycleProtocolVersion", "capabilities.hostedHarness") : 0,
+                hosted.containsKey("titleProtocolVersion")
+                        ? JsonSupport.requiredInt(hosted, "titleProtocolVersion", "capabilities.hostedHarness") : 0,
+                hostedFeatures, parseLifecycleV2Profiles(hosted));
+    }
+
+    private static List<String> parseLifecycleV2Profiles(Map<String, Object> hosted) {
+        if (!hosted.containsKey("lifecycleV2Profiles")) {
+            return List.of();
+        }
+        List<Object> values = JsonSupport.optionalList(hosted, "lifecycleV2Profiles");
+        if (values == null || values.stream().anyMatch(value -> !(value instanceof String))) {
+            throw new DaemonProtocolException("lifecycleV2Profiles must be a string array");
+        }
+        return values.stream().map(String.class::cast).distinct().collect(java.util.stream.Collectors.toList());
     }
 
     private HarnessSessionRef parseSession(String body,
@@ -1278,10 +1579,22 @@ public final class HostedHarnessClient implements AutoCloseable {
     private static final class ActivePrompt {
         private final String promptId;
         private final String payloadDigest;
+        private final Map<String, Object> modelSelection;
+        private final Map<String, Object> approvalSelection;
 
-        ActivePrompt(String promptId, String payloadDigest) {
+        ActivePrompt(String promptId, String payloadDigest, Map<String, Object> modelSelection,
+                Map<String, Object> approvalSelection) {
             this.promptId = promptId;
             this.payloadDigest = payloadDigest;
+            this.modelSelection = modelSelection;
+            this.approvalSelection = approvalSelection;
+        }
+
+        boolean matches(ActivePrompt other) {
+            return promptId.equals(other.promptId)
+                    && payloadDigest.equals(other.payloadDigest)
+                    && java.util.Objects.equals(modelSelection, other.modelSelection)
+                    && java.util.Objects.equals(approvalSelection, other.approvalSelection);
         }
     }
 

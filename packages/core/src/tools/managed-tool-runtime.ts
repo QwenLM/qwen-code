@@ -61,6 +61,46 @@ function invocationParams(params: unknown): Record<string, unknown> {
   return projected;
 }
 
+/**
+ * A prepared reference stays bound to its original arguments, so a hook
+ * replacement is refused rather than ignored. A deny or stop keeps its reason.
+ */
+function refuseUpdatedInput(
+  result: PreToolUseHookResult,
+): PreToolUseHookResult {
+  const { updatedInput, ...rest } = result;
+  if (
+    updatedInput === undefined ||
+    (!rest.shouldProceed && rest.blockType !== 'ask')
+  ) {
+    return rest;
+  }
+  return {
+    ...rest,
+    shouldProceed: false,
+    blockType: 'denied',
+    blockReason:
+      'PreToolUse updatedInput is not supported for managed tool invocations; the tool was not run.',
+  };
+}
+
+/**
+ * Hook payloads arrive untyped over the message bus, so the non-cloneable
+ * fallback carries a hook's text fields only when they really are strings:
+ * any other value could be the one that made the clone throw.
+ */
+function hookStringFields<K extends string>(
+  hook: Partial<Record<K, unknown>>,
+  keys: readonly K[],
+): Partial<Record<K, string>> {
+  const fields: Partial<Record<K, string>> = {};
+  for (const key of keys) {
+    const value = hook[key];
+    if (typeof value === 'string') fields[key] = value;
+  }
+  return fields;
+}
+
 export class ManagedToolPreparationError extends Error {}
 
 export type ManagedToolConfirmationPhase = 'permission' | 'preflight';
@@ -611,8 +651,9 @@ export class ManagedToolRuntime {
         entry.hookOwner,
       );
       this.assertExecutable(entry);
-      entry.preflightResult = structuredClone(result);
-      return result;
+      const settled = refuseUpdatedInput(result);
+      entry.preflightResult = structuredClone(settled);
+      return settled;
     });
     return structuredClone(await entry.preflight);
   }
@@ -773,7 +814,37 @@ export class ManagedToolRuntime {
         result.postHook = { shouldStop: false, hookError };
       else result.failureHook = { hookError };
     }
-    entry.result = structuredClone(result);
+    try {
+      entry.result = structuredClone(result);
+    } catch (error) {
+      // A hook payload with non-cloneable values must not wedge the
+      // invocation: replace only the hook that ran, and preserve the stop
+      // directive and the text fields the hook actually issued.
+      const hookError = `Cannot serialize managed tool hooks: ${String(error)}`;
+      entry.result = structuredClone({
+        ...result,
+        ...(result.postHook
+          ? {
+              postHook: {
+                shouldStop: result.postHook.shouldStop === true,
+                ...hookStringFields(result.postHook, [
+                  'stopReason',
+                  'additionalContext',
+                ]),
+                hookError,
+              },
+            }
+          : {}),
+        ...(result.failureHook
+          ? {
+              failureHook: {
+                ...hookStringFields(result.failureHook, ['additionalContext']),
+                hookError,
+              },
+            }
+          : {}),
+      });
+    }
     return entry.result;
   }
 
@@ -906,6 +977,7 @@ function runtimeLocalOutcome(
     case ToolConfirmationOutcome.ProceedAlwaysTool:
     case ToolConfirmationOutcome.ProceedAlwaysProject:
     case ToolConfirmationOutcome.ProceedAlwaysUser:
+    case ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault:
       return ToolConfirmationOutcome.ProceedOnce;
     default:
       return outcome;

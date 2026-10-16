@@ -192,6 +192,19 @@ async function transcriptSubtypes(
 }
 
 describe('managed session record sink', () => {
+  it('round-trips resumed attempt identities through the managed projection', async () => {
+    const harness = await createHarness();
+    const attempt = record({
+      type: 'system',
+      subtype: 'turn_attempt',
+      promptId: 'client-1',
+      daemonPromptId: 'daemon-2',
+    });
+    await harness.sink.write(attempt);
+    expect(await harness.sink.project()).toEqual([attempt]);
+    await harness.close();
+  });
+
   it('carries the record shapes the projection can reproduce', async () => {
     const harness = await createHarness();
     expect(harness.sink.canCarry(record({ type: 'user' }))).toBe(true);
@@ -592,6 +605,35 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it('refuses to settle a turn whose result record is not reader-facing', async () => {
+    const harness = await createHarness();
+    const before = harness.authority.committedSequence;
+    // The session is still initial, so this settle takes the direct
+    // appendExecutionEvent path rather than commitTurnComplete.
+    await expect(
+      harness.sink.write(
+        record({
+          uuid: 'rec-turn-foreign',
+          sessionId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+          type: 'system',
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId: 'turn-foreign',
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        } as Partial<ChatRecord>),
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(harness.authority.committedSequence).toBe(before);
+    expect(
+      harness.authority
+        .readEvents()
+        .some((event) => event.kind === 'turn.settled'),
+    ).toBe(false);
+    await harness.close();
+  });
+
   it('refuses a turn result with no prompt id or state', async () => {
     const harness = await createHarness();
     await expect(
@@ -832,7 +874,7 @@ describe('managed session record sink', () => {
         type: 'system',
         subtype,
         systemPayload,
-      } as Partial<ChatRecord>);
+      } as unknown as Partial<ChatRecord>);
       await harness.sink.write(carried);
       // The name names the channel: a carried subtype lands as one
       // message.committed event and no domain record, or the live

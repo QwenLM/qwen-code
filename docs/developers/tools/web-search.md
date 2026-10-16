@@ -373,3 +373,94 @@ Replace `${FIRECRAWL_API_KEY}` with your actual API key, or set it as an environ
 ```
 
 ---
+
+### SerpApi
+
+The official hosted MCP server by SerpApi, providing real-time structured search results from Google, Baidu, Bing and other search engines through a single tool. Search queries and their parameters are sent to SerpApi.
+
+- **Documentation:** https://serpapi.com/integrations/mcp
+- **Cost:** Paid (free plan available)
+- **Get API Key:** https://serpapi.com/manage-api-key
+- **Best for:** Structured results from a broad choice of search engines
+
+#### Available Tools
+
+- `search` — Web search, optionally returning results as Markdown
+
+#### Setup
+
+**Method 1: CLI command**
+
+```bash
+qwen mcp add serpapi \
+  -t http \
+  "https://mcp.serpapi.com/mcp" \
+  -H "Authorization: Bearer ${SERPAPI_API_KEY}"
+```
+
+**Method 2: `settings.json`**
+
+```json
+{
+  "mcpServers": {
+    "serpapi": {
+      "httpUrl": "https://mcp.serpapi.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SERPAPI_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${SERPAPI_API_KEY}` with your actual API key, or set it as an environment variable. The key is only needed for searches. Without a valid API key, the server still connects and lists its tools, but `search` returns an error.
+
+---
+
+### looot
+
+A hosted MCP server from looot with web search, Google SERP results, news search and web page reading. Search queries and the URLs you ask it to read are sent to looot.
+
+- **Documentation:** https://docs.looot.ai
+- **Cost:** Paid (prepaid balance, no free tier)
+- **Get API Key:** https://looot.ai
+- **Best for:** Web search, Google SERP and news results, and reading a page as text
+
+#### Available Tools
+
+- `web_search` — Web search
+- `google_search_results` — Google SERP results
+- `news_search` — News search
+- `read_web_page` — Read a single page as text
+
+The server also exposes company and email lookups.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add looot \
+  -t http \
+  "https://api.looot.ai/mcp" \
+  -H "Authorization: Bearer ${LOOOT_API_KEY}"
+```
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "looot": {
+      "httpUrl": "https://api.looot.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LOOOT_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${LOOOT_API_KEY}` with your actual API key, or set it as an environment variable.
+
+---
