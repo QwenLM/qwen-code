@@ -1,6 +1,6 @@
 # Linux representative desktop validation
 
-Hosted CI owns the canonical Xvfb/Openbox and headless Sway environments. Some
+Hosted CI owns the canonical Xvfb/Openbox environment. Some
 contracts require a real user desktop and therefore run only when a maintainer
 explicitly provisions the corresponding environment.
 
@@ -8,10 +8,7 @@ explicitly provisions the corresponding environment.
 
 | Environment | Required evidence | Current status | Preflight |
 | --- | --- | --- | --- |
-| GNOME/Mutter | WinRects geometry and activation, portal/libei input, portal recording, and shared renderer apps | Native GTK behavior, capture, and desktop scope are accepted; shared renderers and portal video remain open | Wayland user session, enabled WinRects helper, and portal grant |
-| KDE/KWin | KWin-specific activation and portal behavior | Plasma 6 session startup, GTK AT-SPI discovery, and portal interfaces were observed; no behavioral matrix is accepted | Plasma/KWin 6 Wayland session; Plasma 5.27 is rejected |
-| Real Xorg | MPX/uinput behavior that Xvfb cannot provide | Not yet validated | Non-Wayland Xorg session with `/dev/uinput` access |
-| DRM/EGL renderer | Representative WebKitGTK/Tauri accessibility tree | Not available on the hosted Sway or representative desktop hosts used so far | A real `/dev/dri/renderD128`; software-only headless rendering is rejected |
+| Real Xorg | MPX/uinput behavior that Xvfb cannot provide | Not yet validated | Xorg session with `/dev/uinput` access |
 
 ## Source ownership
 
@@ -32,8 +29,6 @@ equivalent terminal inside that user's session. The wrapper rejects the wrong
 desktop generation before building fixtures.
 
 ```bash
-scripts/ci/linux/run-rust-e2e-desktop.sh gnome
-scripts/ci/linux/run-rust-e2e-desktop.sh kde
 scripts/ci/linux/run-rust-e2e-desktop.sh xorg
 ```
 

@@ -83,9 +83,6 @@ pub enum ActionTransport {
     LinuxPty,
     LinuxXSendEvent,
     LinuxXTest,
-    LinuxLibei,
-    LinuxWaylandVirtualPointer,
-    LinuxCuaCompositorInject,
     LinuxX11ConfigureWindow,
     BrowserCdpInputMouse,
     BrowserCdpInputKey,
@@ -119,9 +116,6 @@ impl ActionTransport {
         Self::LinuxPty,
         Self::LinuxXSendEvent,
         Self::LinuxXTest,
-        Self::LinuxLibei,
-        Self::LinuxWaylandVirtualPointer,
-        Self::LinuxCuaCompositorInject,
         Self::LinuxX11ConfigureWindow,
         Self::BrowserCdpInputMouse,
         Self::BrowserCdpInputKey,
@@ -153,10 +147,7 @@ impl ActionTransport {
             | Self::WindowsSendInput
             | Self::WindowsSetCursorPos
             | Self::WindowsShellExecute
-            | Self::LinuxXTest
-            | Self::LinuxLibei
-            | Self::LinuxWaylandVirtualPointer
-            | Self::LinuxCuaCompositorInject => ActionRoute::GlobalInput,
+            | Self::LinuxXTest => ActionRoute::GlobalInput,
             Self::WindowsSetWindowPos | Self::LinuxX11ConfigureWindow => ActionRoute::SystemApi,
             Self::BrowserCdpRuntimeFunction => ActionRoute::Dom,
             Self::BrowserCdpInputMouse | Self::BrowserCdpInputKey => ActionRoute::TrustedInput,
@@ -763,9 +754,6 @@ fn parse_transport_name(value: &str) -> Result<ActionTransport, String> {
         "linux_pty" => ActionTransport::LinuxPty,
         "linux_x_send_event" => ActionTransport::LinuxXSendEvent,
         "linux_x_test" => ActionTransport::LinuxXTest,
-        "linux_libei" => ActionTransport::LinuxLibei,
-        "linux_wayland_virtual_pointer" => ActionTransport::LinuxWaylandVirtualPointer,
-        "linux_cua_compositor_inject" => ActionTransport::LinuxCuaCompositorInject,
         "linux_x11_configure_window" => ActionTransport::LinuxX11ConfigureWindow,
         "browser_cdp_input_mouse" => ActionTransport::BrowserCdpInputMouse,
         "browser_cdp_input_key" => ActionTransport::BrowserCdpInputKey,
@@ -941,15 +929,10 @@ fn transport_from_legacy(
         "post_message" | "PostMessage" => ActionTransport::WindowsPostMessage,
         "SendInput" => ActionTransport::WindowsSendInput,
         "SetCursorPos" => ActionTransport::WindowsSetCursorPos,
-        "atspi" | "wayland_atspi" | "x11_atspi" => ActionTransport::LinuxAtSpiAction,
+        "atspi" | "x11_atspi" => ActionTransport::LinuxAtSpiAction,
         "pty" => ActionTransport::LinuxPty,
         "x11_pixel" | "x11_pixel_fg" | "x11_xtest_fg" | "xtest" | "xtest_desktop" => {
             ActionTransport::LinuxXTest
-        }
-        "wayland_activate" | "wayland_focused" => ActionTransport::LinuxLibei,
-        "wayland_desktop" => ActionTransport::LinuxWaylandVirtualPointer,
-        "cua_compositor_inject" | "wayland_cua_compositor" => {
-            ActionTransport::LinuxCuaCompositorInject
         }
         "hid" | "cgevent_hid" | "cgevent_fg" => ActionTransport::MacosCgEventHid,
         "cgevent" => {
@@ -1138,9 +1121,7 @@ fn actual_delivery_from_legacy(
     }
     match raw_path {
         Some(path) if path.ends_with("_fg") => Some(ActualDelivery::Foreground),
-        Some("hid" | "cgevent_hid" | "SendInput" | "wayland_activate" | "wayland_focused") => {
-            Some(ActualDelivery::Foreground)
-        }
+        Some("hid" | "cgevent_hid" | "SendInput") => Some(ActualDelivery::Foreground),
         Some(_) => Some(ActualDelivery::Background),
         None => Some(ActualDelivery::Unknown),
     }
@@ -1286,9 +1267,6 @@ fn transport_name(transport: ActionTransport) -> &'static str {
         ActionTransport::LinuxPty => "linux_pty",
         ActionTransport::LinuxXSendEvent => "linux_x_send_event",
         ActionTransport::LinuxXTest => "linux_x_test",
-        ActionTransport::LinuxLibei => "linux_libei",
-        ActionTransport::LinuxWaylandVirtualPointer => "linux_wayland_virtual_pointer",
-        ActionTransport::LinuxCuaCompositorInject => "linux_cua_compositor_inject",
         ActionTransport::LinuxX11ConfigureWindow => "linux_x11_configure_window",
         ActionTransport::BrowserCdpInputMouse => "browser_cdp_input_mouse",
         ActionTransport::BrowserCdpInputKey => "browser_cdp_input_key",
@@ -1565,7 +1543,7 @@ mod tests {
     fn projection_contains_only_outcome_information() {
         let projection = ActionExecutionRecord::builder(
             ActionEffect::Confirmed,
-            ActionTransport::LinuxLibei,
+            ActionTransport::LinuxXTest,
             RequestedDelivery::Foreground,
         )
         .actual_delivery(ActualDelivery::Foreground)
@@ -2079,7 +2057,6 @@ mod tests {
             "SendInput",
             "SetCursorPos",
             "atspi",
-            "wayland_atspi",
             "x11_atspi",
             "pty",
             "x11_pixel",
@@ -2087,11 +2064,6 @@ mod tests {
             "x11_xtest_fg",
             "xtest",
             "xtest_desktop",
-            "wayland_activate",
-            "wayland_focused",
-            "wayland_desktop",
-            "cua_compositor_inject",
-            "wayland_cua_compositor",
             "hid",
             "cgevent_hid",
             "cgevent",

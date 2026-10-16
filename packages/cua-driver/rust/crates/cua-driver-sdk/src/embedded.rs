@@ -846,7 +846,6 @@ pub(crate) fn allowed_environment_name(name: &str) -> bool {
                 | "LOCALAPPDATA"
                 | "PROGRAMDATA"
                 | "DISPLAY"
-                | "WAYLAND_DISPLAY"
                 | "XDG_RUNTIME_DIR"
                 | "XDG_SESSION_TYPE"
                 | "DBUS_SESSION_BUS_ADDRESS"
@@ -1194,7 +1193,7 @@ mod tests {
     #[test]
     fn environment_is_allowlisted_and_driver_controls_are_reserved() {
         assert!(allowed_environment_name("PATH"));
-        assert!(allowed_environment_name("WAYLAND_DISPLAY"));
+        assert!(!allowed_environment_name("WAYLAND_DISPLAY"));
         assert!(!allowed_environment_name("CUA_DRIVER_PERMISSION_MODE"));
         assert!(!allowed_environment_name("LD_PRELOAD"));
         assert!(!allowed_environment_name("NODE_OPTIONS"));
@@ -1239,6 +1238,8 @@ mod tests {
     fn interactive_linux_session_environment_is_inherited() {
         let values = merge_safe_environment(
             [
+                ("DISPLAY".into(), ":7".into()),
+                ("XAUTHORITY".into(), "/tmp/cua-test-cookie".into()),
                 ("WAYLAND_DISPLAY".into(), "wayland-7".into()),
                 ("XDG_RUNTIME_DIR".into(), "/run/user/1000".into()),
                 ("XDG_SESSION_TYPE".into(), "wayland".into()),
@@ -1252,7 +1253,8 @@ mod tests {
         );
 
         for (name, value) in [
-            ("WAYLAND_DISPLAY", "wayland-7"),
+            ("DISPLAY", ":7"),
+            ("XAUTHORITY", "/tmp/cua-test-cookie"),
             ("XDG_RUNTIME_DIR", "/run/user/1000"),
             ("XDG_SESSION_TYPE", "wayland"),
             ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
@@ -1263,7 +1265,8 @@ mod tests {
         }
         assert!(!values
             .iter()
-            .any(|variable| variable.name == "AT_SPI_BUS_ADDRESS"));
+            .any(|variable| variable.name == "AT_SPI_BUS_ADDRESS"
+                || variable.name == "WAYLAND_DISPLAY"));
     }
 
     #[test]

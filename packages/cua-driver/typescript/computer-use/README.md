@@ -39,8 +39,7 @@ the caller. Public `listApps()` returns only `id`, `displayName` and
 Native selection uses focused/main AX windows and sheets on macOS, native
 active/stacking order and transient ownership on X11, and foreground/Z-order
 plus owned popup relationships on Windows. Ambiguous or unavailable targets
-fail without dispatching input. Wayland requires compositor support for window
-discovery and activation; an unsupported desktop reports the limitation.
+fail without dispatching input. Only X11 is supported on Linux, including X11 apps under XWayland.
 
 App methods accept short observed IDs or screenshot coordinates, and do not
 accept process IDs, window IDs, opaque tokens or delivery options.

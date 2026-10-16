@@ -181,5 +181,4 @@ cargo test -p cua-driver-core
 ```
 
 Generated contract and language bindings must be checked with the package-local
-scripts before release. Signed/notarized macOS, Windows UIAccess, Linux X11 and
-Wayland, and real MCP/model verification remain platform release gates.
+scripts before release. Signed/notarized macOS, Windows UIAccess, Linux X11, and real MCP/model verification remain platform release gates.

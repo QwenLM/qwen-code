@@ -5,8 +5,7 @@
 //! 2. Persistent plain `XGetImage` via x11rb — still in-process
 //! 3. `import -window <xid> png:-` (ImageMagick compatibility fallback)
 //!
-//! Main-display capture keeps its own dispatch (Wayland cascade → ImageMagick →
-//! root `XGetImage`). Wayland-native per-window paths are not routed into XShm.
+//! Main-display capture uses ImageMagick then root `XGetImage`.
 //!
 //! x11rb MIT-SHM API (pinned 0.13.2):
 //! - https://docs.rs/x11rb/0.13.2/x11rb/protocol/shm/trait.ConnectionExt.html
@@ -890,39 +889,12 @@ pub fn png_dimensions_pub(data: &[u8]) -> Result<(u32, u32)> {
 // `CUA_DRIVER_RS_DEDUP_AUDIT.md`. RGBA-encoding callers below now go
 // through `cua_driver_core::image_utils::encode_rgba_to_png`.
 
-/// Capture the primary display (root window) as raw PNG bytes.
-///
-/// Dispatch:
-/// - Native Wayland (`CUA_DRIVER_RS_ENABLE_WAYLAND=1` + Wayland session):
-///   routes through [`crate::wayland::screenshot_display_dispatch`] which
-///   owns the complete GNOME helper → wlroots screencopy →
-///   ext-image-copy-capture-v1 → portal Screenshot → X11 cascade. An
-///   available GNOME helper's capture failure is terminal.
-/// - X11 / Wayland-disabled: ImageMagick `import` → x11rb `XGetImage`.
+/// Capture the X11 primary display as raw PNG bytes.
 pub fn screenshot_display_bytes() -> Result<Vec<u8>> {
-    screenshot_display_bytes_with_dispatch(
-        crate::wayland::is_wayland(),
-        crate::wayland::screenshot_display_dispatch,
-        screenshot_display_bytes_x11,
-    )
+    crate::require_x11()?;
+    screenshot_display_bytes_x11()
 }
 
-fn screenshot_display_bytes_with_dispatch(
-    wayland_enabled: bool,
-    wayland_capture: impl FnOnce() -> Result<Vec<u8>>,
-    x11_capture: impl FnOnce() -> Result<Vec<u8>>,
-) -> Result<Vec<u8>> {
-    if wayland_enabled {
-        wayland_capture()
-    } else {
-        x11_capture()
-    }
-}
-
-/// X11-only display capture path — extracted so the wayland cascade in
-/// [`crate::wayland::screenshot_display_dispatch`] can call it as a final
-/// fallback without re-entering [`screenshot_display_bytes`] (which would
-/// loop forever once we're on Wayland).
 pub(crate) fn screenshot_display_bytes_x11() -> Result<Vec<u8>> {
     // Try `import -window root png:-` (ImageMagick).
     if let Ok(bytes) = capture_import_target("root") {
@@ -1213,43 +1185,6 @@ mod tests {
             XShmState::after_capture_retry_failure(),
             XShmState::Unsupported { .. }
         ));
-    }
-
-    #[test]
-    fn available_gnome_helper_failure_is_terminal_at_public_boundary() {
-        let x11_called = Cell::new(false);
-
-        let result = screenshot_display_bytes_with_dispatch(
-            true,
-            || Err(anyhow::anyhow!("GNOME compositor helper capture failed")),
-            || {
-                x11_called.set(true);
-                Ok(vec![1, 2, 3])
-            },
-        );
-
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "GNOME compositor helper capture failed"
-        );
-        assert!(!x11_called.get(), "public boundary retried X11 capture");
-    }
-
-    #[test]
-    fn wayland_disabled_uses_x11_capture() {
-        let wayland_called = Cell::new(false);
-
-        let result = screenshot_display_bytes_with_dispatch(
-            false,
-            || {
-                wayland_called.set(true);
-                Err(anyhow::anyhow!("Wayland capture should not run"))
-            },
-            || Ok(vec![1, 2, 3]),
-        );
-
-        assert_eq!(result.unwrap(), vec![1, 2, 3]);
-        assert!(!wayland_called.get());
     }
 
     #[test]

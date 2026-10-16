@@ -115,6 +115,7 @@ fn try_list_windows_inner(
     filter_pid: Option<u32>,
     include_untitled: bool,
 ) -> Result<Vec<WindowInfo>> {
+    crate::require_x11()?;
     let (conn, screen_num) = RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;

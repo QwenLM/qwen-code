@@ -57,12 +57,6 @@ platform-linux = { path = "../platform-linux" }
 
 [features]
 default = []
-# GNOME/KDE portal input ships in ordinary Linux releases; PipeWire capture
-# remains a separate modern-desktop feature. The combined name stays as a
-# compatibility alias for Nix and downstream builds.
-portal-input = ["platform-linux/portal-input"]
-portal-capture = ["platform-linux/portal-capture"]
-portal-libei = ["platform-linux/portal-libei"]
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 # Embed the Windows manifest for DPI awareness (fixes coordinate mismatches

@@ -186,7 +186,7 @@ jobs:
   # ── Linux (x86_64 + arm64) ───────────────────────────────────────────────
   # Built inside debian:11 (glibc 2.31) so binaries run on Debian 11+,
   # Ubuntu 20.04+, RHEL/Rocky 8+. arm64 builds natively on a hosted ARM
-  # runner to avoid hand-wiring a cross linker for the X11/Wayland C deps.
+  # runner to avoid hand-wiring a cross linker for the X11 C deps.
   build-linux:
     name: 'linux-${{ matrix.arch }}'
     needs: ['validate-version']
@@ -219,8 +219,7 @@ jobs:
           apt-get -o Acquire::Retries=3 update
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             git ca-certificates curl build-essential pkg-config \
-            libx11-dev libxi-dev libxtst-dev libxext-dev libwayland-dev \
-            libxkbcommon-dev
+            libx11-dev libxi-dev libxtst-dev libxext-dev
       - uses: 'actions/checkout@v4'
       - uses: 'actions/setup-node@v4'
         with:
@@ -253,7 +252,7 @@ jobs:
             cua-driver-linux-${{ matrix.arch }}-
       - name: 'Build (release)'
         working-directory: 'packages/cua-driver/rust'
-        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-sdk --release --locked --features cua-driver/portal-input --target ${{ matrix.target }}'
+        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-sdk --release --locked --target ${{ matrix.target }}'
       - name: 'Build Electron-compatible Node runtime'
         working-directory: 'packages/cua-driver'
         run: |
@@ -273,12 +272,11 @@ jobs:
           cp "target/${TARGET}/release/libcua_driver_sdk.so" "release/${STAGE}/"
           cp "target/${TARGET}/release/cua_driver_node_runtime.node" "release/${STAGE}/"
           cp include/cua_driver_abi.h "release/${STAGE}/"
-          cp -R ../wayland-helper "release/${STAGE}/wayland-helper"
           cp ../../../LICENSE "release/${STAGE}/LICENSE"
           (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
           tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" \
             qwen-cua-driver cua-cursor-theme libcua_driver_sdk.so \
-            cua_driver_node_runtime.node cua_driver_abi.h wayland-helper
+            cua_driver_node_runtime.node cua_driver_abi.h
           ls -lh "release/${STAGE}.tar.gz" "release/${STAGE}-binary.tar.gz"
       - uses: 'actions/upload-artifact@v4'
         with:

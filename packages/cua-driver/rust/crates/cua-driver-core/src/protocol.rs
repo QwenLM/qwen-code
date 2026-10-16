@@ -391,7 +391,7 @@ fn agent_instructions() -> String {
     } else {
         (
             "AT-SPI",
-            "LINUX.md (X11/Wayland status, AT-SPI bus, BETA-level support)",
+            "LINUX.md (X11 support, AT-SPI bus, BETA-level support)",
         )
     };
 

@@ -1803,16 +1803,9 @@ fn button_state_mask(button: u8) -> KeyButMask {
     }
 }
 
-/// Open an X11 connection for background input injection, failing *loudly* and
-/// actionably when input cannot be delivered — rather than letting a pure
-/// Wayland session fall through to an X11 path that silently no-ops yet reports
-/// success (#1921). On a pure Wayland session with the native backend off, this
-/// returns a clear error naming the fix; otherwise it connects and, on any
-/// connect failure, surfaces DISPLAY so the cause is diagnosable.
+/// Open an authenticated X11 connection for input injection.
 fn connect_x11_for_input() -> Result<(RustConnection, usize)> {
-    if let Some(reason) = crate::wayland::wayland_input_unavailable_reason() {
-        bail!("{reason}");
-    }
+    crate::require_x11()?;
     RustConnection::connect(None).map_err(|e| {
         anyhow!(
             "cannot inject input: X11 connection failed (DISPLAY={:?}): {e}",

@@ -645,11 +645,7 @@ fn configure_linux_runtime(prepare_desktop_environment: bool) {
     cua_driver_core::recording::set_element_bounds_fn(|window_id, pid, index| {
         platform_linux::recording_hooks::element_window_local_xy(window_id, pid, index)
     });
-    if platform_linux::wayland::is_wayland() {
-        cua_driver_core::video::set_video_backend_factory(Box::new(
-            platform_linux::video_wayland::WfRecorderVideoBackendFactory,
-        ));
-    } else {
+    {
         cua_driver_core::video::set_video_backend_factory(Box::new(
             cua_driver_core::video_ffmpeg::FfmpegVideoBackendFactory,
         ));

@@ -7,8 +7,7 @@
 //! - AT-SPI D-Bus protocol for accessibility tree (via subprocess bridge)
 //! - xwd/scrot/import for window screenshots
 //!
-//! Wayland: falls back to xdg-output and virtual-keyboard protocols when
-//! running under a Wayland compositor with XWayland support.
+//! Only X11 is supported, including X11 applications running under XWayland.
 
 use cua_driver_core::tool::ToolRegistry;
 
@@ -55,12 +54,6 @@ pub mod a11y;
 #[cfg(target_os = "linux")]
 pub mod recording_hooks;
 
-#[cfg(target_os = "linux")]
-pub mod video_wayland;
-
-#[cfg(target_os = "linux")]
-pub mod wayland;
-
 // `terminal` is OS-independent (pure string matching + a thin x11 hook).
 // Keeping it un-gated lets the unit tests run on any host.
 pub mod terminal;
@@ -102,31 +95,29 @@ pub fn is_wsl() -> bool {
     })
 }
 
-/// Actionable hint appended to "no usable display" errors. Tailored for WSL,
-/// where the common failure is "no real X/Wayland display, or WSLg geometry
-/// isn't resolvable". Kept as a trailing fragment so callers can splice it
-/// onto a more specific message. See issue #2005.
+/// Actionable display diagnostic shared by capture and input failures.
 pub fn no_display_hint() -> String {
-    let neither_display_set =
-        std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none();
-    if is_wsl() {
-        " — no usable display detected (WSL). WSLg provides $DISPLAY/$WAYLAND_DISPLAY \
-         under a recent Windows 11 + 'wsl --update'; on older setups install an X server \
-         (e.g. VcXsrv) and export DISPLAY. cua-driver needs a real display to capture and \
-         report screen size."
-            .to_owned()
-    } else if neither_display_set {
-        " — no usable display detected: neither $DISPLAY (X11) nor $WAYLAND_DISPLAY is set. \
-         Start an X server / Wayland compositor (or Xvfb for headless) before running cua-driver."
+    if std::env::var_os("DISPLAY").is_none() {
+        " — only X11 is supported. Set DISPLAY and XAUTHORITY for an X server or run the target application under XWayland.".to_owned()
+    } else if is_wsl() {
+        " — connect to the WSLg X11 display or an external X server and verify XAUTHORITY."
             .to_owned()
     } else {
         String::new()
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn require_x11() -> anyhow::Result<()> {
+    if std::env::var_os("DISPLAY").is_none_or(|display| display.is_empty()) {
+        anyhow::bail!(
+            "only X11 is supported. Set DISPLAY and XAUTHORITY, including when using XWayland."
+        );
+    }
+    Ok(())
+}
+
 pub fn register_tools() -> ToolRegistry {
-    #[cfg(target_os = "linux")]
-    wayland::ensure_nested_session();
     tools::build_registry(false)
 }
 
@@ -143,10 +134,6 @@ pub fn register_tools_with_cursor_and_provider(
     cfg: cursor_overlay::CursorConfig,
     compat: bool,
 ) -> ToolRegistry {
-    #[cfg(target_os = "linux")]
-    wayland::ensure_nested_session();
-    #[cfg(target_os = "linux")]
-    wayland::overlay::set_config_enabled(cfg.enabled);
     if cfg.enabled {
         overlay::init(cfg.clone());
         overlay::run_on_thread();

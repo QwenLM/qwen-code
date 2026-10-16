@@ -419,7 +419,6 @@ capabilities, or existing-profile consent.
 | Chrome / Edge on Windows | Exact binding, refs, navigation, typing, trusted or explicit DOM click | Must run in an interactive user session, not Session 0 |
 | Chrome / Edge on macOS | Exact binding, refs, navigation, typing, explicit DOM click | Trusted standalone click refuses to preserve background posture |
 | Chrome / Chromium on Linux X11 | Exact binding, refs, navigation, typing, explicit DOM click | Trusted standalone click refuses to preserve background posture |
-| Chromium on validated Wayland setups | Exact binding only when compositor identity is provable | Generic/ambiguous compositor identity refuses mutation |
 | Electron | Exact single-page routes where endpoint and host relationship are proven | Do not infer support for arbitrary embedded webviews |
 | Safari / Firefox | Native window state only | Typed page mutation is not supported yet |
 | WebView2 / Tauri / other embedded webviews | Native AX/PX fallback unless an exact route is reported | Host/renderer correlation may refuse |

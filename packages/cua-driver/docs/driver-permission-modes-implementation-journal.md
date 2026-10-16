@@ -1,5 +1,10 @@
 # Driver Permission Modes Implementation Journal
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 > Contract update: the shipped canonical middle-mode name is `bounded`, with
 > `autonomous` retained as a compatibility alias. The interactive CLI danger
 > flag now selects `unrestricted` as well as acknowledging its risk; embedded

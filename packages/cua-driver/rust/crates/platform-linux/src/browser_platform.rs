@@ -450,91 +450,6 @@ impl BrowserPlatform for LinuxBrowserPlatform {
                 format!("pid {pid} is outside the Linux process-id range"),
             )
         })?;
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            if let Some(window) = crate::wayland::sway_ipc::window_for_id(window_id) {
-                if window.pid != pid_u32 {
-                    return Err(refusal(
-                        BrowserRefusalCode::BrowserWrongTargetRefused,
-                        format!("Sway window {window_id} is not owned by pid {pid}"),
-                    ));
-                }
-                return Ok(NativeWindowInfo {
-                    pid,
-                    window_id,
-                    title: window.title,
-                    bounds: Rect::new(
-                        f64::from(window.x),
-                        f64::from(window.y),
-                        f64::from(window.width),
-                        f64::from(window.height),
-                    ),
-                    geometry_exact: true,
-                    ownership: NativeOwnershipProof {
-                        method: NativeOwnershipMethod::WindowServerOwner,
-                        owner_pid: pid,
-                        detail: Some("Sway IPC pid and rect".to_owned()),
-                    },
-                });
-            }
-            if let Some(window) =
-                crate::wayland::shell_helper::trusted_window_for_id(pid_u32, window_id)
-            {
-                return Ok(NativeWindowInfo {
-                    pid,
-                    window_id,
-                    title: window.title,
-                    bounds: Rect::new(
-                        f64::from(window.x),
-                        f64::from(window.y),
-                        f64::from(window.width),
-                        f64::from(window.height),
-                    ),
-                    geometry_exact: true,
-                    ownership: NativeOwnershipProof {
-                        method: NativeOwnershipMethod::PlatformAttested,
-                        owner_pid: pid,
-                        detail: Some(
-                            "verified GNOME Shell helper owner, stable window id, pid, and frame rect"
-                                .to_owned(),
-                        ),
-                    },
-                });
-            }
-            let window = tokio::task::spawn_blocking(move || {
-                crate::wayland::list_windows_dispatch(Some(pid_u32))
-                    .into_iter()
-                    .find(|window| window.xid == window_id)
-            })
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| {
-                refusal(
-                    BrowserRefusalCode::BrowserRouteUnavailable,
-                    "the active Wayland compositor cannot prove this window's pid and geometry",
-                )
-            })?;
-            return Ok(NativeWindowInfo {
-                pid,
-                window_id,
-                title: window.title,
-                bounds: Rect::new(
-                    f64::from(window.x),
-                    f64::from(window.y),
-                    f64::from(window.width),
-                    f64::from(window.height),
-                ),
-                geometry_exact: false,
-                ownership: NativeOwnershipProof {
-                    method: NativeOwnershipMethod::PlatformAttested,
-                    owner_pid: pid,
-                    detail: Some(
-                        "Wayland shell/AT-SPI metadata; geometry may be unavailable, so core permits read-only heuristic binding only"
-                            .to_owned(),
-                    ),
-                },
-            });
-        }
 
         let window = tokio::task::spawn_blocking(move || {
             crate::x11::list_windows(Some(pid_u32))
@@ -583,44 +498,7 @@ impl BrowserPlatform for LinuxBrowserPlatform {
                 format!("pid {pid} is outside the Linux process-id range"),
             )
         })?;
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            let Some(windows) = crate::wayland::sway_ipc::list_windows() else {
-                if let Some(owned) =
-                    crate::wayland::shell_helper::trusted_window_ids_for_pid(pid_u32)
-                {
-                    return Ok(Some(owned.len() == 1 && owned[0] == window_id));
-                }
-                if crate::wayland::is_inject_mode() {
-                    // The private cua-compositor route owns both the native
-                    // toplevel enumeration and its PID correlation. Unlike a
-                    // generic AT-SPI-only Wayland session, that is sufficient
-                    // to attest singleton native-window cardinality for an
-                    // embedded Chromium endpoint.
-                    let owned = tokio::task::spawn_blocking(move || {
-                        crate::wayland::list_windows_dispatch(Some(pid_u32))
-                            .into_iter()
-                            .filter(|window| window.pid == Some(pid_u32))
-                            .map(|window| window.xid)
-                            .collect::<Vec<_>>()
-                    })
-                    .await
-                    .map_err(|error| {
-                        refusal(
-                            BrowserRefusalCode::BrowserRouteUnavailable,
-                            format!("could not enumerate cua-compositor browser windows: {error}"),
-                        )
-                    })?;
-                    return Ok(Some(owned.len() == 1 && owned[0] == window_id));
-                }
-                return Ok(None);
-            };
-            let owned = windows
-                .into_iter()
-                .filter(|window| window.pid == pid_u32)
-                .map(|window| window.id)
-                .collect::<Vec<_>>();
-            return Ok(Some(owned.len() == 1 && owned[0] == window_id));
-        }
+
         let owned = tokio::task::spawn_blocking(move || {
             crate::x11::list_windows(Some(pid_u32))
                 .into_iter()

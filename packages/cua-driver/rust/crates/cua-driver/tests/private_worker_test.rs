@@ -116,11 +116,7 @@ async fn private_worker_inherits_the_interactive_linux_display_scope() {
         return;
     }
     let has_x11 = std::env::var("DISPLAY").is_ok_and(|display| !display.is_empty());
-    let has_wayland = std::env::var("WAYLAND_DISPLAY").is_ok_and(|display| !display.is_empty());
-    assert!(
-        has_x11 || has_wayland,
-        "canonical GUI E2E requires DISPLAY or WAYLAND_DISPLAY"
-    );
+    assert!(has_x11, "canonical GUI E2E requires an X11 DISPLAY");
 
     let driver = cua_driver_sdk::CuaDriver::create_private_worker(worker_options()).unwrap();
     let standard = driver
@@ -179,27 +175,15 @@ async fn private_worker_inherits_the_interactive_linux_display_scope() {
     .unwrap();
     assert_eq!(started_structured["capture_scope"], "desktop");
     assert_eq!(started_structured["effective_scope"], "desktop");
-    if has_x11 {
-        let desktop = session
-            .call_tool("get_desktop_state".into(), "{}".into())
-            .await
-            .unwrap();
-        assert!(
-            !desktop.images.is_empty(),
-            "worker inherited no usable X11 capture scope: {}",
-            desktop.text
-        );
-    } else {
-        let windows = session
-            .call_tool("list_windows".into(), "{}".into())
-            .await
-            .unwrap();
-        assert!(
-            windows.error_code.is_none(),
-            "worker inherited no usable native Wayland session scope: {}",
-            windows.text
-        );
-    }
+    let desktop = session
+        .call_tool("get_desktop_state".into(), "{}".into())
+        .await
+        .unwrap();
+    assert!(
+        !desktop.images.is_empty(),
+        "worker inherited no usable X11 capture scope: {}",
+        desktop.text
+    );
     let ended = session
         .call_tool(
             "end_session".into(),

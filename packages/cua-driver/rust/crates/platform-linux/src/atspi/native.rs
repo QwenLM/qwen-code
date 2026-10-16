@@ -275,10 +275,6 @@ struct Visited<'a> {
     /// True when an ancestor is a web document (e.g. role "document web"),
     /// i.e. this node is page content rather than browser chrome.
     in_web_doc: bool,
-    /// True when this node is exported by a separate WebKit WebProcess bus.
-    /// Chromium keeps its document on the application's ordinary AT-SPI bus,
-    /// where descendant Window extents already include the document origin.
-    on_web_process_bus: bool,
     /// Position of the application top-level (frame/window) this node descends
     /// from, in `app.get_children()` order. AT-SPI exposes one application per
     /// process, so a multi-window app publishes every window's controls in one
@@ -706,9 +702,8 @@ async fn resolve_window_frame(
     }
     let windows = crate::x11::list_windows(Some(pid));
     let window = windows.iter().find(|candidate| candidate.xid == xid)?;
-    let gtk4_x11 = !crate::wayland::is_wayland()
-        && std::fs::read_to_string(format!("/proc/{pid}/maps"))
-            .is_ok_and(|maps| maps.contains("libgtk-4.so"));
+    let gtk4_x11 = std::fs::read_to_string(format!("/proc/{pid}/maps"))
+        .is_ok_and(|maps| maps.contains("libgtk-4.so"));
     let mut candidates: Vec<(usize, (i32, i32, i32, i32))> = Vec::new();
     let mut titles = Vec::new();
     let mut titles_complete = true;
@@ -1245,7 +1240,6 @@ async fn collect_visited_into<'a>(
             has_component,
             focused,
             in_web_doc,
-            on_web_process_bus: is_web_process_bus(&oref.name),
             frame_ordinal,
             identity,
             acc,
@@ -1560,172 +1554,6 @@ pub(super) fn walk_tree_bounded_with_timeout(
             truncated: status.truncated,
             incomplete_notes: status.incomplete_notes,
         }))
-    })
-}
-
-/// Enumerate top-level windows from the AT-SPI registry — the window-listing
-/// fallback for Wayland compositors that DON'T implement
-/// `zwlr_foreign_toplevel_management` (GNOME Mutter, KDE KWin). Native Wayland
-/// apps have no X11 XID and Mutter/KWin expose no foreign-toplevel list, so
-/// `wayland::list_windows` comes back empty there and the whole element flow
-/// (get_window_state -> click by element_index) is unreachable — even though the
-/// AT-SPI tree itself is keyed by PID and works fine (see `walk_tree_bounded`,
-/// whose walk ignores the xid). This bridges that gap: it returns one
-/// [`WindowInfo`] per application top-level frame, with a SYNTHETIC but stable
-/// `xid`. Downstream `get_window_state` / `click` walk the tree by PID and never
-/// dereference the xid against X11, so the synthetic value only needs to be
-/// non-zero and to round-trip back from the caller.
-pub fn list_windows(filter_pid: Option<u32>) -> Vec<crate::x11::WindowInfo> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return std::thread::spawn(move || list_windows_blocking(filter_pid))
-            .join()
-            .unwrap_or_default();
-    }
-    list_windows_blocking(filter_pid)
-}
-
-fn list_windows_blocking(filter_pid: Option<u32>) -> Vec<crate::x11::WindowInfo> {
-    use crate::x11::WindowInfo;
-    runtime().block_on(async {
-        let work = async {
-            let conn = shared_connection().await?;
-            let zconn = conn.connection();
-            let root = match call(conn.root_accessible_on_registry()).await {
-                Some(Ok(r)) => r,
-                _ => return Ok(Vec::new()),
-            };
-            let dbus = atspi::zbus::fdo::DBusProxy::new(zconn)
-                .await
-                .map_err(|e| anyhow!("DBus proxy unavailable: {e}"))?;
-            let apps = match call(root.get_children()).await {
-                Some(Ok(a)) => a,
-                _ => return Ok(Vec::new()),
-            };
-            let mut out: Vec<WindowInfo> = Vec::new();
-            for app_ref in apps {
-                // Skip apps that can't answer the pid query (modal-grabbed) and
-                // apps that don't match the filter.
-                let cpid = match call(pid_of(&dbus, &app_ref)).await {
-                    Some(Some(p)) => p,
-                    _ => continue,
-                };
-                if let Some(want) = filter_pid {
-                    if cpid != want {
-                        continue;
-                    }
-                }
-                let app_ref = match RawObjectRef::from_atspi(&app_ref) {
-                    Some(app_ref) => app_ref,
-                    None => continue,
-                };
-                let app = match call(accessible_for(conn, &app_ref)).await {
-                    Some(Ok(a)) => a,
-                    _ => continue,
-                };
-                let app_name = call(app.name())
-                    .await
-                    .and_then(|r| r.ok())
-                    .unwrap_or_default();
-                let frames = match call(app.get_children()).await {
-                    Some(Ok(c)) => c,
-                    _ => Vec::new(),
-                };
-                let mut emitted = 0usize;
-                for (i, frame_ref) in frames.iter().enumerate() {
-                    let frame_ref = match RawObjectRef::from_atspi(frame_ref) {
-                        Some(frame_ref) => frame_ref,
-                        None => continue,
-                    };
-                    let frame = match call(accessible_for(conn, &frame_ref)).await {
-                        Some(Ok(f)) => f,
-                        _ => continue,
-                    };
-                    let role = call(frame.get_role_name())
-                        .await
-                        .and_then(|r| r.ok())
-                        .unwrap_or_default();
-                    if !matches!(
-                        role.as_str(),
-                        "frame" | "window" | "dialog" | "alert" | "file chooser"
-                    ) {
-                        continue;
-                    }
-                    let title = call(frame.name())
-                        .await
-                        .and_then(|r| r.ok())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| app_name.clone());
-                    let geometry = match call(frame.proxies()).await {
-                        Some(Ok(proxies)) => match call(proxies.component()).await {
-                            Some(Ok(component)) => call(component.get_extents(CoordType::Screen))
-                                .await
-                                .and_then(|result| result.ok()),
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-                    let (observed_x, observed_y, width, height) = geometry
-                        .filter(|(_, _, width, height)| *width > 0 && *height > 0)
-                        .map(|(x, y, width, height)| {
-                            (x, y, width.max(0) as u32, height.max(0) as u32)
-                        })
-                        .unwrap_or((0, 0, 0, 0));
-                    // On native Wayland, AT-SPI frame extents can be a stale
-                    // toolkit default even when the compositor has already
-                    // placed the window elsewhere. Prefer compositor metadata
-                    // by pid/title so list_windows and later element geometry
-                    // share the same screen origin.
-                    let (x, y) = prefer_authoritative_wayland_origin(
-                        authoritative_wayland_origin(cpid, 0, Some(&title)),
-                        Some((observed_x, observed_y)),
-                    )
-                    .unwrap_or((observed_x, observed_y));
-                    // Stable, non-zero, unique per (pid, frame ordinal).
-                    let xid = (((cpid as u64) << 16) | (i as u64)).max(1);
-                    out.push(WindowInfo {
-                        xid,
-                        pid: Some(cpid),
-                        app_name: app_name.clone(),
-                        title,
-                        is_on_screen: width > 0 && height > 0,
-                        z_index: None,
-                        x,
-                        y,
-                        width,
-                        height,
-                    });
-                    emitted += 1;
-                }
-                // App with no enumerable top-level frame still gets one handle so
-                // the by-pid AT-SPI element flow stays reachable.
-                if emitted == 0 {
-                    out.push(WindowInfo {
-                        xid: (cpid as u64).max(1),
-                        pid: Some(cpid),
-                        app_name: app_name.clone(),
-                        title: app_name,
-                        is_on_screen: true,
-                        z_index: None,
-                        x: 0,
-                        y: 0,
-                        width: 0,
-                        height: 0,
-                    });
-                }
-            }
-            Ok::<_, anyhow::Error>(out)
-        };
-        match tokio::time::timeout(OP_TIMEOUT, work).await {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                dlog!("atspi list_windows failed: {e}");
-                Vec::new()
-            }
-            Err(_) => {
-                dlog!("atspi list_windows timed out");
-                Vec::new()
-            }
-        }
     })
 }
 
@@ -2476,9 +2304,6 @@ pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Optio
                 Some(v) => v,
                 None => return Ok(None),
             };
-            let web_document_origin = web_document_origin_for_visited(&visited, pid)
-                .await
-                .unwrap_or((0, 0));
 
             // Collect actionable nodes whose window-local bounds contain the point,
             // then let `select_click_target` pick the innermost *real actuator* —
@@ -2503,19 +2328,7 @@ pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Optio
                 if w <= 0 || h <= 0 {
                     continue;
                 }
-                let (document_x, document_y) = if v.in_web_doc {
-                    web_document_origin
-                } else {
-                    (0, 0)
-                };
-                frames.push((
-                    i,
-                    x + document_x,
-                    y + document_y,
-                    w as u32,
-                    h as u32,
-                    is_passive_role(&v.role),
-                ));
+                frames.push((i, x, y, w as u32, h as u32, is_passive_role(&v.role)));
             }
 
             let Some(idx) = select_click_target(&frames, win_x, win_y) else {
@@ -2548,28 +2361,11 @@ pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Optio
     attempt.finish(result)
 }
 
-/// Vision/pixel click that actually lands — the Wayland answer (and a robust
-/// GTK4 path generally). Maps a *screen* pixel to the smallest `element_index`
-/// whose reconstructed screen frame covers it, then fires that element's
-/// primary action via [`perform_action`].
-///
-/// Why not [`perform_action_at_point`]: that one hit-tests raw
-/// `CoordType::Window` extents over an ad-hoc node set and `do_action`s the node
-/// it resolves directly. On GTK4 that can land on an inner, non-actuating node
-/// (a label inside the button) → a silent no-op that still returns `Some`
-/// ("false success"). And on native Wayland there is no virtual-pointer click to
-/// fall back to (Mutter drops synthetic pointer events). This routine instead
-/// uses the SAME screen-frame reconstruction that `get_window_state` exposes to
-/// the agent, via the GNOME Shell helper on Wayland and `_GTK_FRAME_EXTENTS` on
-/// X11, and actuates by `element_index`, the click path already verified
-/// working. So "click at pixel (x,y)" becomes "click the element the agent sees
-/// there", with no pointer injection and no reliance on `CoordType::Screen`
-/// (which GTK4 reports as (0,0)).
-///
-/// `screen_x`/`screen_y` are full-display screen pixels (what the vision
-/// screenshot and `get_window_state` frames are in). Returns `Ok(Some(action))`
-/// on a hit, `Ok(None)` when no element covers the point so the caller can fall
-/// back to its native injection path.
+/// Map a screen pixel to the smallest indexable element using the same
+/// reconstructed X11 frame as observation, then perform its primary action.
+/// GTK4's raw Screen extents can be (0,0); the window-relative reconstruction
+/// avoids actuating a passive inner label instead of its containing control.
+/// Returns None when no accessible element covers the point.
 pub fn perform_action_at_screen_point(
     pid: u32,
     xid: u64,
@@ -2584,14 +2380,11 @@ pub fn perform_action_at_screen_point(
                 Some(v) => v,
                 None => return Ok(None),
             };
-            let web_document_origin = web_document_origin_for_visited(&visited, pid)
-                .await
-                .unwrap_or((0, 0));
 
             // Reconstruct each indexable element's SCREEN frame the same way
             // get_window_state does: WINDOW-relative extents (GTK4 reports these
             // correctly; Screen is (0,0)) plus the window's screen origin (the
-            // GNOME Shell helper on Wayland, _GTK_FRAME_EXTENTS on X11). When no
+            // X11 _GTK_FRAME_EXTENTS). When no
             // offset resolves, fall back to CoordType::Screen (correct on Qt/GTK3).
             let offset = window_to_screen_offset(pid, xid, None);
             let coord = if offset.is_some() {
@@ -2622,15 +2415,10 @@ pub fn perform_action_at_screen_point(
                 if x == i32::MIN || y == i32::MIN || w <= 1 || h <= 1 {
                     continue;
                 }
-                let (document_x, document_y) = if node.in_web_doc {
-                    web_document_origin
-                } else {
-                    (0, 0)
-                };
                 frames.push((
                     idx,
-                    x + ox + document_x,
-                    y + oy + document_y,
+                    x + ox,
+                    y + oy,
                     w as u32,
                     h as u32,
                     is_passive_role(&node.role),
@@ -2790,9 +2578,6 @@ pub(crate) fn get_element_bounds_in_window(
             let (visited, only_frame, _) = collect_visited_bounded(conn, pid, xid, None, None)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let web_document_origin = web_document_origin_for_visited(&visited, pid)
-                .await
-                .unwrap_or((0, 0));
             if xid != 0 && only_frame.is_none() {
                 return Err(anyhow!(
                     "window {xid} could not be correlated to an AT-SPI frame"
@@ -2818,24 +2603,14 @@ pub(crate) fn get_element_bounds_in_window(
                 .map_err(|e| anyhow!("Component unavailable: {e}"))?;
             // Prefer WINDOW coords + a deterministic screen offset — fixes GTK4,
             // whose CoordType::Screen collapses every element to (0,0). Fall back to
-            // Screen on Wayland / when no X11 window resolves (offset is None).
+            // Screen when no X11 window resolves (offset is None).
             match window_to_screen_offset(pid, xid, None) {
                 Some((ox, oy)) => {
                     let (x, y, w, h) = comp
                         .get_extents(CoordType::Window)
                         .await
                         .map_err(|e| anyhow!("getExtents failed: {e}"))?;
-                    let (document_x, document_y) = if target.in_web_doc {
-                        web_document_origin
-                    } else {
-                        (0, 0)
-                    };
-                    Ok((
-                        x + ox + document_x,
-                        y + oy + document_y,
-                        w.max(0) as u32,
-                        h.max(0) as u32,
-                    ))
+                    Ok((x + ox, y + oy, w.max(0) as u32, h.max(0) as u32))
                 }
                 None => {
                     let (x, y, w, h) = comp
@@ -2935,28 +2710,8 @@ fn parse_gtk_frame_extents(vals: &[u32]) -> Option<(i32, i32)> {
 /// toolkits (Qt, etc.) have no such property *and* report correct Screen
 /// extents, so we return `None` for them — callers keep the unchanged Screen
 /// path and the WINDOW reconstruction can never regress a toolkit that was
-/// already correct. Also returns `None` on native Wayland (clients may not
-/// query screen origins, by design) or when no X11 window resolves.
-fn window_to_screen_offset(pid: u32, xid: u64, title: Option<&str>) -> Option<(i32, i32)> {
-    if crate::wayland::is_wayland() {
-        // Native Wayland: clients can't query a window's screen origin, and
-        // AT-SPI CoordType::Screen collapses to (0,0) on Mutter. The bundled
-        // `org.cua.WinRects` GNOME Shell extension supplies the window's screen
-        // origin (`meta_window.get_frame_rect()`); combined with the per-widget
-        // CoordType::Window coords (which GTK4 reports correctly on Wayland too)
-        // this reconstructs real screen coords — the GNOME analogue of the X11
-        // `_GTK_FRAME_EXTENTS` path below. `None` (no extension) keeps the
-        // legacy Screen path (still (0,0), but no worse than before).
-        let authoritative = authoritative_wayland_origin(pid, xid, title);
-        // AT-SPI discovery can only guess a native Wayland origin when the
-        // compositor exposes no geometry. Keep that observation as the final
-        // fallback so stale default placement cannot override Sway IPC or a
-        // shell helper's authoritative frame.
-        return prefer_authoritative_wayland_origin(
-            authoritative,
-            crate::wayland::observed_window_origin(pid),
-        );
-    }
+/// already correct. Also returns `None` when no X11 window resolves.
+fn window_to_screen_offset(pid: u32, xid: u64, _title: Option<&str>) -> Option<(i32, i32)> {
     // GTK3 Screen coordinates already include the CSD inset. GTK4's broken
     // Screen provider still needs the Window reconstruction below.
     if std::fs::read_to_string(format!("/proc/{pid}/maps"))
@@ -2978,114 +2733,6 @@ fn window_to_screen_offset(pid: u32, xid: u64, title: Option<&str>) -> Option<(i
     let (fl, ft) = gtk_frame_extents(win_xid)?;
     let (ox, oy) = x11_window_origin(win_xid)?;
     Some((ox + fl, oy + ft))
-}
-
-/// Resolve a native Wayland window origin from compositor-owned metadata.
-/// These sources are authoritative over AT-SPI's observed frame location,
-/// which can remain at a toolkit default after Sway places the real window.
-fn authoritative_wayland_origin(pid: u32, xid: u64, title: Option<&str>) -> Option<(i32, i32)> {
-    if !crate::wayland::is_wayland() {
-        return None;
-    }
-    crate::wayland::inject_accessibility_offset(pid)
-        .or_else(|| crate::wayland::sway_ipc::window_origin_for_pid(pid))
-        .or_else(|| {
-            (xid != 0)
-                .then(|| crate::wayland::sway_ipc::window_for_id(xid))
-                .flatten()
-                .map(|window| (window.x, window.y))
-        })
-        .or_else(|| {
-            (xid != 0)
-                .then(|| {
-                    crate::wayland::sway_ipc::list_windows().and_then(|_| {
-                        crate::wayland::window_geometry(xid)
-                            .map(|(window_x, window_y, _, _)| (window_x, window_y))
-                    })
-                })
-                .flatten()
-        })
-        .or_else(|| crate::wayland::shell_helper::window_origin_for_pid(pid))
-        .or_else(|| title.and_then(crate::wayland::sway_ipc::window_origin_for_title))
-}
-
-fn prefer_authoritative_wayland_origin(
-    authoritative: Option<(i32, i32)>,
-    observed: Option<(i32, i32)>,
-) -> Option<(i32, i32)> {
-    authoritative.or(observed)
-}
-
-fn combine_wayland_content_offsets(
-    compositor: Option<(i32, i32)>,
-    document: Option<(i32, i32)>,
-    document_is_separate: bool,
-) -> Option<(i32, i32)> {
-    if !document_is_separate {
-        // Chromium descendants' CoordType::Window extents are already rooted
-        // below the document accessible. Adding that document's own (x,y)
-        // double-counts its renderer inset. WebKitGTK exports page content on
-        // a distinct WebProcess bus, so only that bridge needs the extra hop.
-        return compositor;
-    }
-    match (compositor, document) {
-        (Some((cx, cy)), Some((dx, dy))) => Some((cx + dx, cy + dy)),
-        (Some(offset), None) | (None, Some(offset)) => Some(offset),
-        (None, None) => None,
-    }
-}
-
-/// Offset of embedded web content inside a captured Wayland toplevel.
-/// Compositor decorations and toolkit document offsets are independent and
-/// therefore additive: choosing one or the other leaves WebKit controls one
-/// title bar away from the pixels shown to the caller.
-async fn web_document_origin_for_visited(visited: &[Visited<'_>], pid: u32) -> Option<(i32, i32)> {
-    if !crate::wayland::is_wayland() {
-        return None;
-    }
-    let sway_window = crate::wayland::sway_ipc::window_for_pid(pid);
-    let compositor = sway_window
-        .as_ref()
-        .map(|window| (window.content_x, window.content_y));
-    let document = visited
-        .iter()
-        .filter(|node| node.has_component)
-        .filter(|node| is_document_role(&node.role) || node.in_web_doc)
-        .min_by_key(|node| node.depth);
-    let document = if let Some(document) = document {
-        match call(document.acc.proxies()).await {
-            Some(Ok(proxies)) => match call(proxies.component()).await {
-                Some(Ok(component)) => match call(component.get_extents(CoordType::Window)).await {
-                    Some(Ok((x, y, width, height))) if x >= 0 && y >= 0 => {
-                        let inferred_top = match (compositor, sway_window.as_ref()) {
-                            (Some((_, 0)), Some(window))
-                                if width > 0
-                                    && height > 0
-                                    && (i64::from(window.width) - i64::from(width)).abs() <= 4
-                                    && i64::from(window.height) > i64::from(height) =>
-                            {
-                                (i64::from(window.height) - i64::from(height))
-                                    .min(i64::from(i32::MAX)) as i32
-                            }
-                            _ => 0,
-                        };
-                        Some((x, y.max(inferred_top)))
-                    }
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let document_is_separate = visited.iter().any(|node| node.on_web_process_bus);
-    let combined = combine_wayland_content_offsets(compositor, document, document_is_separate);
-    dlog!(
-        "Wayland web content offset: compositor={compositor:?} document={document:?} separate_process={document_is_separate} combined={combined:?}"
-    );
-    combined
 }
 
 fn screen_extent_rebase(
@@ -3114,7 +2761,7 @@ fn rebase_renderer_window_offset(
         // Chromium may expose a negative renderer-local frame origin. Rebase
         // that shape, but keep positive content insets: its descendants are
         // already relative to the content origin and subtracting the inset
-        // moves first-row controls above the captured Wayland window.
+        // moves first-row controls above the captured window.
         if frame_x < 0 {
             offset.0 = offset.0.saturating_sub(frame_x);
         }
@@ -3152,7 +2799,7 @@ async fn element_bounds_for_visited(
     // Query WINDOW-relative extents and add a deterministic screen offset
     // (X11 window origin + GTK4 CSD inset). This fixes GTK4 — whose
     // CoordType::Screen reports every element at (0,0) — by using the
-    // distinct per-widget WINDOW coords instead. On Wayland / when no X11
+    // distinct per-widget WINDOW coords instead. When no X11
     // window resolves, `offset` is None and we keep the legacy Screen path
     // so non-X11 behaviour is unchanged.
     let window_title = visited.iter().find_map(|node| {
@@ -3175,7 +2822,7 @@ async fn element_bounds_for_visited(
     // produce a zero delta; Chromium's local (0,0) frame produces the
     // required window-origin delta. GTK's explicit Window-coordinate
     // path above remains authoritative when available.
-    let screen_rebase = if offset.is_none() && !crate::wayland::is_wayland() && xid != 0 {
+    let screen_rebase = if offset.is_none() && xid != 0 {
         let x11_origin = x11_window_origin(xid);
         let frame = visited.iter().find(|node| {
             node.has_component
@@ -3236,14 +2883,6 @@ async fn element_bounds_for_visited(
     } else {
         None
     };
-    // Add compositor decorations and the embedded document origin for web
-    // descendants only. Electron commonly contributes zero for both; WebKitGTK
-    // under Sway needs the sum.
-    let web_document_origin = if offset.is_some() {
-        web_document_origin_for_visited(visited, pid).await
-    } else {
-        None
-    };
     let (offset_x, offset_y) = rebase_renderer_window_offset(
         offset.or(screen_rebase).unwrap_or((0, 0)),
         window_frame_origin,
@@ -3285,18 +2924,7 @@ async fn element_bounds_for_visited(
             if x == i32::MIN || y == i32::MIN || x < -16384 || y < -16384 || w <= 1 || h <= 1 {
                 continue;
             }
-            let (document_x, document_y) = if node.in_web_doc {
-                web_document_origin.unwrap_or((0, 0))
-            } else {
-                (0, 0)
-            };
-            out.push((
-                idx,
-                x + offset_x + document_x,
-                y + offset_y + document_y,
-                w as u32,
-                h as u32,
-            ));
+            out.push((idx, x + offset_x, y + offset_y, w as u32, h as u32));
         }
     }
     true
@@ -3450,9 +3078,8 @@ mod frame_correlation_tests {
 mod coord_tests {
     use super::parse_gtk_frame_extents;
     use super::{
-        activation_index, before_snapshot_deadline, combine_wayland_content_offsets,
-        hidden_native_menu, is_activation_action, is_enabled_state, is_indexable_capabilities,
-        is_passive_role, is_web_process_bus, prefer_authoritative_wayland_origin,
+        activation_index, before_snapshot_deadline, hidden_native_menu, is_activation_action,
+        is_enabled_state, is_indexable_capabilities, is_passive_role, is_web_process_bus,
         rebase_renderer_window_offset, screen_extent_rebase, select_click_target,
         ApplicationSelection,
     };
@@ -3780,47 +3407,6 @@ mod coord_tests {
     }
 
     #[test]
-    fn compositor_origin_wins_over_stale_accessibility_observation() {
-        assert_eq!(
-            prefer_authoritative_wayland_origin(Some((0, 0)), Some((120, 120))),
-            Some((0, 0))
-        );
-        assert_eq!(
-            prefer_authoritative_wayland_origin(None, Some((120, 120))),
-            Some((120, 120))
-        );
-    }
-
-    #[test]
-    fn wayland_compositor_and_document_offsets_are_additive() {
-        assert_eq!(
-            combine_wayland_content_offsets(Some((0, 47)), Some((0, 0)), true),
-            Some((0, 47))
-        );
-        assert_eq!(
-            combine_wayland_content_offsets(Some((2, 20)), Some((0, 47)), true),
-            Some((2, 67))
-        );
-        assert_eq!(
-            combine_wayland_content_offsets(None, Some((0, 47)), true),
-            Some((0, 47))
-        );
-        assert_eq!(combine_wayland_content_offsets(None, None, true), None);
-    }
-
-    #[test]
-    fn chromium_window_extents_do_not_double_count_document_origin() {
-        assert_eq!(
-            combine_wayland_content_offsets(Some((2, 20)), Some((22, 55)), false),
-            Some((2, 20))
-        );
-        assert_eq!(
-            combine_wayland_content_offsets(None, Some((22, 55)), false),
-            None
-        );
-    }
-
-    #[test]
     fn webkit_web_process_bus_marks_roleless_document_subtrees() {
         assert!(is_web_process_bus("org.webkitgtk.WebProcess.1234"));
         assert!(is_web_process_bus("org.example.WebProcess"));
@@ -3959,7 +3545,7 @@ mod coord_tests {
 
     #[test]
     fn chromium_action_names_stay_activatable() {
-        // Live capture from Chromium on GNOME Wayland. These elements were
+        // Chromium accessibility capture. These elements were
         // actuable before this change and must remain so; only
         // `showContextMenu` is not an activation.
         assert!(is_activation_action("activate")); // entry
