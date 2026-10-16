@@ -21,12 +21,14 @@ public final class ManagedSchema {
             "/db/managed-schema/V3__session_list_created_at.sql";
     public static final String WORKSPACE_CREATION = "/db/managed-schema/V4__workspace_creation.sql";
     public static final String MODEL_SELECTION = "/db/managed-schema/V5__session_model_selection.sql";
+    public static final String APPROVAL_SELECTION = "/db/managed-schema/V6__session_approval_selection.sql";
     // Additive migrations over the published V1 baseline, in version order.
     public static final String SSH_WORKSPACE =
-            "/db/managed-schema/V6__ssh_workspace_registration.sql";
+            "/db/managed-schema/V7__ssh_workspace_registration.sql";
     private static final List<Migration> EXTENSIONS = List.of(new Migration(2, PRIVATE_AUTHORITY),
             new Migration(3, SESSION_LIST), new Migration(4, WORKSPACE_CREATION),
-            new Migration(5, MODEL_SELECTION), new Migration(6, SSH_WORKSPACE));
+            new Migration(5, MODEL_SELECTION), new Migration(6, APPROVAL_SELECTION),
+            new Migration(7, SSH_WORKSPACE));
     private static final int CURRENT = EXTENSIONS.getLast().version();
 
     private record Migration(int version, String resource) {

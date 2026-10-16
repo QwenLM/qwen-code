@@ -253,6 +253,11 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellModelContext")),
                     entry(ApiModels.WebShellModelOption.class, List.of("WebShellModelOption")),
                     entry(ApiModels.WebShellModelSelection.class, List.of("WebShellModelSelection")),
+                    entry(ApiModels.WebShellSessionApprovalRequest.class, List.of("WebShellSessionApprovalRequest")),
+                    entry(ApiModels.WebShellSessionApproval.class, List.of("WebShellSessionApproval")),
+                    entry(ApiModels.WebShellChangeApprovalRequest.class, List.of("WebShellChangeApprovalRequest")),
+                    entry(ApiModels.WebShellApprovalChangeResult.class, List.of("WebShellApprovalChangeResult")),
+                    entry(ApiModels.WebShellApprovalSelection.class, List.of("WebShellApprovalSelection")),
                     entry(ApiModels.WebShellSessionModelsRequest.class, List.of("WebShellSessionModelsRequest")),
                     entry(ApiModels.WebShellSessionModels.class, List.of("WebShellSessionModels")),
                     entry(ApiModels.WebShellChangeModelRequest.class, List.of("WebShellChangeModelRequest")),
@@ -1223,6 +1228,18 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(1);
         assertThat(webBound.at("/workspace/state").asText())
                 .isEqualTo("ready");
+        exchange(drift, "queryWebShellSessionApproval", 200,
+                post(WEB_SHELL + "/session-approval/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionApproval", 401,
+                post(WEB_SHELL + "/session-approval/query").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "changeWebShellSessionApproval", 409,
+                post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
+        exchange(drift, "changeWebShellSessionApproval", 401,
+                post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
         exchange(drift, "queryWebShellSessionModels", 200,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant).principal(actor),
                 "{\"sessionId\":\"" + webBoundId + "\"}");
@@ -2525,7 +2542,7 @@ class ManagedAgentApiContractTest {
                 assertThat(other.get("capabilities"))
                         .isEqualTo(json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false}
                                 """));
             }
         }

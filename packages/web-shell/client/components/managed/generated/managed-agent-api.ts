@@ -116,74 +116,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/agent/web-shell/v1/runtime-nodes/query": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** @description Lists only administrator-configured SSH nodes authorized for the current tenant and actor. Requires a trusted actor. Registration is disabled by default and answers 200 with supported=false and an empty data array; an enabled deployment may answer supported=true with no authorized nodes. Node credentials, SSH aliases and server paths are not exposed. This read starts no worker. */
-        post: operations["webShellQueryRuntimeNodes"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/agent/web-shell/v1/workspaces/check-directory": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** @description Checks the configured Node.js and pinned qwen-code versions, allowed directory range, existing canonical directory and access permissions over SSH. Requires an enabled deployment and an exact tenant/actor node grant; disabled registration answers 404 ssh_runtime_disabled and an unknown or unauthorized node answers 403 runtime_node_forbidden. This is a preview: registration revalidates the directory and never creates a directory, clones a repository or starts a worker. */
-        post: operations["webShellCheckWorkspaceDirectory"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/agent/web-shell/v1/workspaces/create": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** @description Create an independent empty Workspace under the operator-controlled creation root and grant its authenticated creator OWNER access. Disabled deployments reject creation. The actor-scoped idempotency key freezes the normalized name and storage registration; retry the same request after an uncertain response. Completed replay checks current access and does not restore removed Workspaces or revoked grants. No host path is accepted or returned. */
-        post: operations["webShellCreateWorkspace"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/agent/web-shell/v1/workspaces/operations/get": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** @description Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. recovery_blocked is terminal and preserves the original physical owner; querying never unlocks it or starts a Runtime worker. */
-        post: operations["webShellGetWorkspaceOperation"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/agent/web-shell/v1/workspaces/query": {
         parameters: {
             query?: never;
@@ -482,6 +414,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspaces/create": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Create an independent empty Workspace under the operator-controlled creation root and grant its authenticated creator OWNER access. Disabled deployments reject creation. The actor-scoped idempotency key freezes the normalized name and storage registration; retry the same request after an uncertain response. Completed replay checks current access and does not restore removed Workspaces or revoked grants. No host path is accepted or returned. */
+        post: operations["webShellCreateWorkspace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/session-options/query": {
         parameters: {
             query?: never;
@@ -527,6 +476,91 @@ export interface paths {
         put?: never;
         /** @description Change the model of an idle Workspace Session for later Turns. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection. */
         post: operations["changeWebShellSessionModel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-approval/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read the current policy and owner-authorized change support of a readable Workspace Session. */
+        post: operations["queryWebShellSessionApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-approval/change": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Change the next-Turn policy of an idle built-in Workspace Session. Requires its recorded owner and current OPERATOR access. Changes are revision-checked and actor/session-scoped idempotent. */
+        post: operations["changeWebShellSessionApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/runtime-nodes/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Lists only administrator-configured SSH nodes authorized for the current tenant and actor. Requires a trusted actor. Registration is disabled by default and answers 200 with supported=false and an empty data array; an enabled deployment may answer supported=true with no authorized nodes. Node credentials, SSH aliases and server paths are not exposed. This read starts no worker. */
+        post: operations["webShellQueryRuntimeNodes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/check-directory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Checks the configured Node.js and pinned qwen-code versions, allowed directory range, existing canonical directory and access permissions over SSH. Requires an enabled deployment and an exact tenant/actor node grant; disabled registration answers 404 ssh_runtime_disabled and an unknown or unauthorized node answers 403 runtime_node_forbidden. This is a preview: registration revalidates the directory and never creates a directory, clones a repository or starts a worker. */
+        post: operations["webShellCheckWorkspaceDirectory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/operations/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. recovery_blocked is terminal and preserves the original physical owner; querying never unlocks it or starts a Runtime worker. */
+        post: operations["webShellGetWorkspaceOperation"];
         delete?: never;
         options?: never;
         head?: never;
@@ -684,12 +718,19 @@ export interface components {
             workspace?: components["schemas"]["WebShellWorkspaceContext"];
             capabilities: components["schemas"]["WebShellSessionCapabilities"];
             /**
-             * @description Persisted Session approval policy; older servers may omit it. Existing Sessions cannot change policy through this API.
+             * @description Current effective approval policy; initialApprovalMode retains the immutable creation policy.
              * @enum {string}
              */
             approvalMode?: "default" | "auto-edit" | "yolo";
             modelContext?: components["schemas"]["WebShellModelContext"];
             modelSelection?: components["schemas"]["WebShellModelSelection"];
+            /** Format: int64 */
+            approvalRevision?: number;
+            /**
+             * @description Immutable creation-time policy, used to confirm creation replay.
+             * @enum {string}
+             */
+            initialApprovalMode?: "default" | "auto-edit" | "yolo";
         };
         WebShellSessionCapabilities: {
             /**
@@ -726,10 +767,12 @@ export interface components {
              * @default false
              */
             sessionDelete?: boolean;
-            /** @description Present only for persisted Shell Sessions, with no schema default; files and unbound Sessions omit it. True when Workspace files, Shell deployment admission and persisted default/auto-edit approval are valid. False prevents fresh sending. Disabling only the Shell flag preserves accepted cancellation and approval while Workspace files remain enabled and persisted approval remains valid; files-off or invalid approval can refuse attachment. This capability does not override authorization or recovery refusals. */
+            /** @description Present only for persisted Shell Sessions, with no schema default; files and unbound Sessions omit it. True when Workspace files, Shell deployment admission and a valid persisted approval mode are valid. False prevents fresh sending. Disabling only the Shell flag preserves accepted cancellation and approval while Workspace files remain enabled and persisted approval remains valid; files-off or invalid approval can refuse attachment. This capability does not override authorization or recovery refusals. */
             foregroundShell?: boolean;
             /** @description The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply. */
             modelChange?: boolean;
+            /** @description The caller owns this built-in Workspace Session with OPERATOR access and the Harness supports approval-selection/1. Idle-state admission is checked separately. Missing means false. */
+            approvalModeChange?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -1253,46 +1296,10 @@ export interface components {
              */
             byteLength: number;
         };
-        WebShellRuntimeNode: {
-            nodeId: string;
-            displayName: string;
-        };
-        /** @description Disabled registration returns supported=false and no nodes. This capability controls fresh registration only; existing operation queries remain available. */
-        WebShellRuntimeNodePage: {
-            /** @default false */
-            supported: boolean;
-            data: components["schemas"]["WebShellRuntimeNode"][];
-        } & unknown;
-        WebShellWorkspaceDirectoryRequest: {
-            nodeId: string;
-            /** @description Existing absolute directory on the selected node; no directory or repository is created. */
-            path: string;
-        };
-        WebShellWorkspaceDirectory: {
-            nodeId: string;
-            /** @description Canonical absolute path after remote directory validation. */
-            canonicalPath: string;
-            /** @enum {string} */
-            platform: "linux" | "darwin";
-        };
         WebShellWorkspaceCreateRequest: {
             /** @description Trimmed display name, without control characters. The server validates the normalized name. */
             displayName: string;
             idempotencyKey: string;
-        };
-        WebShellWorkspaceOperationRequest: {
-            operationId: string;
-        };
-        /** @description workspaceId is returned only after completed registration. recovery_blocked preserves the original ownership and requires administrator review; a new browser draft does not release it. replayed=true identifies an existing operation returned by a repeated key or a query. */
-        WebShellWorkspaceCreateOperation: {
-            operationId: string;
-            /** @constant */
-            type: "workspace_create";
-            /** @enum {string} */
-            status: "pending" | "running" | "completed" | "failed" | "cancelled" | "recovery_blocked";
-            workspaceId?: string | null;
-            failureCode?: string | null;
-            replayed: boolean;
         };
         WebShellSessionOptionsRequest: {
             agentId: string;
@@ -1342,6 +1349,70 @@ export interface components {
         WebShellModelChangeResult: {
             sessionId: string;
             modelSelection: components["schemas"]["WebShellModelSelection"];
+            replayed: boolean;
+        };
+        WebShellSessionApprovalRequest: {
+            sessionId: string;
+        };
+        WebShellSessionApproval: {
+            /** @enum {string} */
+            approvalMode: "default" | "auto-edit" | "yolo";
+            /** Format: int64 */
+            approvalRevision: number;
+            availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
+            supported: boolean;
+        };
+        WebShellChangeApprovalRequest: {
+            sessionId: string;
+            /** Format: int64 */
+            expectedRevision: number;
+            idempotencyKey: string;
+            requestId?: string;
+            /** @enum {string} */
+            approvalMode: "default" | "auto-edit" | "yolo";
+        };
+        WebShellApprovalChangeResult: {
+            sessionId: string;
+            /** @enum {string} */
+            approvalMode: "default" | "auto-edit" | "yolo";
+            /** Format: int64 */
+            approvalRevision: number;
+            replayed: boolean;
+        };
+        WebShellRuntimeNode: {
+            nodeId: string;
+            displayName: string;
+        };
+        /** @description Disabled registration returns supported=false and no nodes. This capability controls fresh registration only; existing operation queries remain available. */
+        WebShellRuntimeNodePage: {
+            /** @default false */
+            supported: boolean;
+            data: components["schemas"]["WebShellRuntimeNode"][];
+        } & unknown;
+        WebShellWorkspaceDirectoryRequest: {
+            nodeId: string;
+            /** @description Existing absolute directory on the selected node; no directory or repository is created. */
+            path: string;
+        };
+        WebShellWorkspaceDirectory: {
+            nodeId: string;
+            /** @description Canonical absolute path after remote directory validation. */
+            canonicalPath: string;
+            /** @enum {string} */
+            platform: "linux" | "darwin";
+        };
+        WebShellWorkspaceOperationRequest: {
+            operationId: string;
+        };
+        /** @description workspaceId is returned only after completed registration. recovery_blocked preserves the original ownership and requires administrator review; a new browser draft does not release it. replayed=true identifies an existing operation returned by a repeated key or a query. */
+        WebShellWorkspaceCreateOperation: {
+            operationId: string;
+            /** @constant */
+            type: "workspace_create";
+            /** @enum {string} */
+            status: "pending" | "running" | "completed" | "failed" | "cancelled" | "recovery_blocked";
+            workspaceId?: string | null;
+            failureCode?: string | null;
             replayed: boolean;
         };
         WebShellWorkspaceRegisterRequest: {
@@ -1646,135 +1717,6 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
-            413: components["responses"]["PayloadTooLarge"];
-        };
-    };
-    webShellQueryRuntimeNodes: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description SSH registration capability and authorized machine display names. */
-            200: {
-                headers: {
-                    "X-Request-Id": components["headers"]["RequestId"];
-                    "Cache-Control"?: "no-store";
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebShellRuntimeNodePage"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            413: components["responses"]["PayloadTooLarge"];
-        };
-    };
-    webShellCheckWorkspaceDirectory: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["WebShellWorkspaceDirectoryRequest"];
-            };
-        };
-        responses: {
-            /** @description Validated canonical directory on the selected Linux or macOS node. */
-            200: {
-                headers: {
-                    "X-Request-Id": components["headers"]["RequestId"];
-                    "Cache-Control"?: "no-store";
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebShellWorkspaceDirectory"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            413: components["responses"]["PayloadTooLarge"];
-            /** @description The SSH bootstrap response is invalid. */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            503: components["responses"]["Unavailable"];
-        };
-    };
-    webShellCreateWorkspace: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["WebShellWorkspaceCreateRequest"];
-            };
-        };
-        responses: {
-            /** @description Created Workspace or authorized same-key replay. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebShellWorkspace"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            413: components["responses"]["PayloadTooLarge"];
-        };
-    };
-    webShellGetWorkspaceOperation: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["WebShellWorkspaceOperationRequest"];
-            };
-        };
-        responses: {
-            /** @description Latest durable state of the original actor-owned registration. */
-            200: {
-                headers: {
-                    "X-Request-Id": components["headers"]["RequestId"];
-                    "Cache-Control"?: "no-store";
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebShellWorkspaceCreateOperation"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
             413: components["responses"]["PayloadTooLarge"];
         };
     };
@@ -2420,6 +2362,36 @@ export interface operations {
             413: components["responses"]["PayloadTooLarge"];
         };
     };
+    webShellCreateWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Created Workspace or authorized same-key replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspace"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
     queryWebShellSessionOptions: {
         parameters: {
             query?: never;
@@ -2506,6 +2478,165 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellSessionApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description The current policy options. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionApproval"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    changeWebShellSessionApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellChangeApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description The committed approval selection, or its original receipt on replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellApprovalChangeResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellQueryRuntimeNodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SSH registration capability and authorized machine display names. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["RequestId"];
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellRuntimeNodePage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellCheckWorkspaceDirectory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceDirectoryRequest"];
+            };
+        };
+        responses: {
+            /** @description Validated canonical directory on the selected Linux or macOS node. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["RequestId"];
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceDirectory"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description The SSH bootstrap response is invalid. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellGetWorkspaceOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceOperationRequest"];
+            };
+        };
+        responses: {
+            /** @description Latest durable state of the original actor-owned registration. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["RequestId"];
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceCreateOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             413: components["responses"]["PayloadTooLarge"];
         };
     };

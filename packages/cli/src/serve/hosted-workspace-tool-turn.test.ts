@@ -682,6 +682,7 @@ async function shellReceiptScenario(
     | 'lost-admission'
     | 'lost-reserve',
   foregroundOnly = false,
+  approval?: { mode: HostedApprovalMode },
 ) {
   const shellCall = {
     ...calls[0],
@@ -852,7 +853,9 @@ async function shellReceiptScenario(
       Buffer.byteLength(JSON.stringify(messageParts)) <= 64 * 1024,
     { owner, captureBytes: 1024 * 1024 },
     undefined,
-    undefined,
+    approval
+      ? { settings: { mode: approval.mode, timeoutMs: 1000 }, waiters }
+      : undefined,
     { foregroundOnly },
   );
   const execution = shellTurn.execute(
@@ -953,6 +956,14 @@ async function shellReceiptScenario(
       .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(1);
 }
+
+it.each([false, true])(
+  'runs Full Access Shell without ordinary Actions through durable result and replay acceptance (foreground-only: %s)',
+  async (foregroundOnly) => {
+    await shellReceiptScenario('normal', foregroundOnly, { mode: 'yolo' });
+    expect(actionIds()).toEqual([]);
+  },
+);
 
 it.each([
   'normal',

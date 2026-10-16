@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -10,7 +11,9 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 
+import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
@@ -18,6 +21,50 @@ import java.sql.SQLException;
 
 /** Uses its own disposable empty application catalog. */
 class WorkspaceCreationSchemaMySqlIT {
+    @Test
+    void addsSshRegistrationAfterPublishedApprovalSelectionWithoutChangingHistory() {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            var source = database.source();
+            Flyway.configure()
+                    .dataSource(source)
+                    .locations(ManagedSchema.FLYWAY_LOCATION)
+                    .target("6")
+                    .load()
+                    .migrate();
+            var jdbc = new JdbcTemplate(source);
+            jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,"
+                    + "selected_approval_mode,approval_revision,gmt_create,gmt_modified)"
+                    + " VALUES ('tenant','session','qwen-code','yolo',3,1,1)");
+            jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,"
+                    + "payload_digest,status,approval_mode,approval_revision,gmt_create,gmt_modified)"
+                    + " VALUES ('tenant','session','turn','prompt','[]','digest',"
+                    + "'COMPLETED','auto-edit',2,1,1)");
+            var session = jdbc.queryForMap("SELECT * FROM ma_session");
+            var turn = jdbc.queryForMap("SELECT * FROM ma_turn");
+            var history = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
+            var lastInstalledRank = jdbc.queryForObject(
+                    "SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
+            assertEquals(6, ManagedSchema.schemaVersion(source));
+
+            Flyway.configure()
+                    .dataSource(source)
+                    .locations(ManagedSchema.FLYWAY_LOCATION)
+                    .load()
+                    .migrate();
+
+            ManagedSchema.validate(source);
+            assertEquals(7, ManagedSchema.schemaVersion(source));
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_session"))
+                    .usingRecursiveComparison().isEqualTo(session);
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_turn"))
+                    .usingRecursiveComparison().isEqualTo(turn);
+            assertEquals(history, jdbc.queryForList("SELECT * FROM flyway_schema_history"
+                    + " WHERE installed_rank <= ? ORDER BY installed_rank", lastInstalledRank));
+            assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM flyway_schema_history"
+                    + " WHERE version='7' AND success=TRUE", Integer.class));
+        }
+    }
+
     @Test
     void upgradesPublishedCatalogsWithoutChangingExistingRows() throws Exception {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
@@ -42,7 +89,7 @@ class WorkspaceCreationSchemaMySqlIT {
             }
             assertEquals(1, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
-            assertEquals(6, ManagedSchema.schemaVersion(source));
+            assertEquals(7, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement();
                     var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
@@ -55,6 +102,12 @@ class WorkspaceCreationSchemaMySqlIT {
                 statement.execute("ALTER TABLE ma_operation ADD "
                         + baselineCheck(baseline, "ck_ma_operation_kind"));
                 statement.execute("DROP INDEX ix_ma_storage_owner_host ON ma_storage_owner");
+                statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_approval_selection");
+                statement.execute("ALTER TABLE ma_turn DROP CONSTRAINT ck_ma_turn_approval_selection");
+                statement.execute("ALTER TABLE ma_session DROP COLUMN selected_approval_mode");
+                statement.execute("ALTER TABLE ma_session DROP COLUMN approval_revision");
+                statement.execute("ALTER TABLE ma_turn DROP COLUMN approval_mode");
+                statement.execute("ALTER TABLE ma_turn DROP COLUMN approval_revision");
                 statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_model_selection");
                 statement.execute("ALTER TABLE ma_turn DROP CONSTRAINT ck_ma_turn_model_selection");
                 statement.execute("ALTER TABLE ma_session DROP COLUMN model_id");
@@ -77,7 +130,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(6, ManagedSchema.schemaVersion(source));
+            assertEquals(7, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(

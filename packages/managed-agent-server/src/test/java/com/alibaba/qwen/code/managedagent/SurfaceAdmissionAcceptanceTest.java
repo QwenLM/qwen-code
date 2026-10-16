@@ -464,8 +464,8 @@ class SurfaceAdmissionAcceptanceTest {
                 // An anonymous mutation needs an actor: the automation
                 // mutations name it up front (401), while the lifecycle
                 // family stays invisible (404).
-                expect(entry, null, automationEntry(entry) ? 401 : 404,
-                        automationEntry(entry) ? "actor_required"
+                expect(entry, null, (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? 401 : 404,
+                        (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? "actor_required"
                                 : "session_not_found");
             }
             case WORKSPACE_ALLOCATION -> {
@@ -1575,7 +1575,9 @@ class SurfaceAdmissionAcceptanceTest {
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
-            case SESSION_MODELS -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_APPROVAL, SESSION_MODELS -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
+                    + "\",\"idempotencyKey\":\"approval-change\",\"approvalMode\":\"yolo\",\"expectedRevision\":0}";
             case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"model-change\",\"modelId\":\"model-a\",\"expectedRevision\":0}";
             case WORKSPACE_LIST -> "{}";
