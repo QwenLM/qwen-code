@@ -11,8 +11,7 @@ on:
       - 'scripts/flyway-migration-utils.js'
       - 'scripts/tests/package-managed-agent-reference.test.mjs'
       - 'packages/sdk-java/qwencode/**'
-      - 'packages/sdk-java/runtime-broker/**'
-      - 'packages/sdk-java/managed-agent-server/**'
+      - 'packages/managed-agent-server/**'
       - 'packages/core/src/managed-runtime/contracts/**'
       - 'packages/cli/src/serve/capabilities.ts'
       - 'packages/cli/src/serve/broker-managed-runtime-provider.ts'
@@ -120,8 +119,7 @@ jobs:
           cache: 'maven'
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
-            packages/sdk-java/runtime-broker/pom.xml
-            packages/sdk-java/managed-agent-server/pom.xml
+            packages/managed-agent-server/pom.xml
 
       - name: 'Set up Node.js 22'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -144,8 +142,7 @@ jobs:
         run: |-
           set -euo pipefail
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true clean install
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests clean install
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml -DskipTests clean package
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml -DskipTests clean package
 
       - name: 'Assemble reference distribution'
         env:

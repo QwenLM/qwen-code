@@ -209,12 +209,7 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 }
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
-const springModule = path.join(
-  root,
-  'packages',
-  'sdk-java',
-  'managed-agent-server',
-);
+const springModule = path.join(root, 'packages', 'managed-agent-server');
 const springTarget = path.join(springModule, 'target');
 // The pom attaches classified repackage executions alongside the
 // unclassified server jar, so a wildcard over target/ matches several

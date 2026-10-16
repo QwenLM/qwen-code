@@ -21,14 +21,11 @@ const step = (name) => {
   return found;
 };
 const verify = () => step('Verify the EventTransport multi-node gates');
-const pom = readFileSync(
-  'packages/sdk-java/managed-agent-server/pom.xml',
-  'utf8',
-);
+const pom = readFileSync('packages/managed-agent-server/pom.xml', 'utf8');
 const profile = pom
   .split('<id>event-transport-multi-node-gates</id>')[1]
   .split('</profile>')[0];
-const server = 'packages/sdk-java/managed-agent-server/src';
+const server = 'packages/managed-agent-server/src';
 const properties = readFileSync(
   `${server}/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java`,
   'utf8',
@@ -65,7 +62,7 @@ describe('EventTransport multi-node gates CI', () => {
       expect(run).toContain(`-D${property}=`);
     }
     expect(run).toContain(
-      'node scripts/check-failsafe-reports.js event-transport-multi-node packages/sdk-java/managed-agent-server',
+      'node scripts/check-failsafe-reports.js event-transport-multi-node packages/managed-agent-server',
     );
   });
 
@@ -126,7 +123,7 @@ describe('EventTransport multi-node gates CI', () => {
       '-Dqwen.gate.rocketmq.work-dir="${RUNNER_TEMP}/rocketmq"',
     );
     expect(step('Upload multi-node gate reports').with.path).toContain(
-      'packages/sdk-java/managed-agent-server/target/mq3-multi-node/',
+      'packages/managed-agent-server/target/mq3-multi-node/',
     );
   });
 
