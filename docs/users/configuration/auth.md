@@ -201,7 +201,7 @@ Token Plan is available in two regions, each with its own dedicated endpoint:
 
 ### Interactive setup
 
-Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. Token Plan API keys have no prefix requirement (unlike Coding Plan keys, which start with `sk-sp-`).
+Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. ModelStudio Token Plan API keys have no prefix requirement, unlike Coding Plan keys, which start with `sk-sp-`, and unlike the separate QwenCloud Token Plan keys in Option 1, which also start with `sk-sp-`.
 
 After authentication, use the `/model` command to browse and switch between the models configured for your Token Plan. The model lineup evolves over time, so it is intentionally not listed here; model discovery from the endpoint happens during the `/auth` setup step above (the endpoint's own list is offered there and must be selected explicitly), and `/model` then shows the models configured for your plan.
 

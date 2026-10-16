@@ -162,8 +162,10 @@ describe('qwencloudStandardProvider', () => {
 
   it('never claims the QwenCloud Token Plan sibling, nor a foreign key on its own endpoint', () => {
     // Both QwenCloud presets share uiGroup, catalog and protocol bucket, so
-    // this envKey gate is the only thing keeping applyModelProvidersPatch from
-    // dropping a Token Plan install when the Standard wizard re-runs.
+    // the ownsModel gate is what keeps applyModelProvidersPatch from dropping
+    // a Token Plan install when the Standard wizard re-runs. Its envKey and
+    // baseUrl conjuncts each exclude the sibling independently; the baseUrl
+    // leg is exercised on its own in the foreign-baseUrl case below.
     const owns = qwencloudStandardProvider.ownsModel!;
     expect(
       owns({
