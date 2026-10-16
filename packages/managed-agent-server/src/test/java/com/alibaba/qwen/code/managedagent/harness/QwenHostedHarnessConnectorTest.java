@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
+import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -28,6 +29,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.SshRuntimeStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -481,15 +483,17 @@ class QwenHostedHarnessConnectorTest {
     // load the connector sends (attach, recovery, lifecycle settle), so the
     // Hosted Agent tool admits a worktree child only on a host that serves it.
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-team-lead/1"})
-    void childWorkspaceCapabilityRidesEveryCreateAndLoad(String profile) {
+    @CsvSource({"hosted-workspace-files/1,false", "hosted-workspace-team-lead/1,false",
+            "hosted-workspace-files/1,true", "hosted-workspace-shell/1,true"})
+    void placementCapabilitiesRideEveryCreateAndLoad(String profile, boolean remote) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
         when(client.capabilities()).thenReturn(capabilities);
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
-        when(attached.getApprovalMode()).thenReturn("yolo");
+        String approval = remote ? "default" : "yolo";
+        when(attached.getApprovalMode()).thenReturn(approval);
         when(client.createSession(any())).thenReturn(attached);
         when(client.loadSession(any())).thenReturn(attached);
         when(client.settleLifecycle(any(), any())).thenReturn(Map.of());
@@ -497,13 +501,21 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", profile);
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), approval, profile);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         ManagedAgentProperties properties = properties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
         ManagedActionStore actions = mock(ManagedActionStore.class);
-        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("yolo");
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn(approval);
+        properties.getToolPublication().setEnabled(remote);
+        properties.getToolPublication().setExecutionBytes(1048576L);
+        SshWorkspaceStore ssh = mock(SshWorkspaceStore.class);
+        if (remote) {
+            when(ssh.runtimeStorage("tenant-a", "storage")).thenReturn(new SshRuntimeStorage(
+                    "node-a", "storage", "/remote", Map.of("identity", Map.of("root", "/remote"),
+                            "marker", Map.of("root", "/remote", "storageId", "storage"), "qwenVersion", "0.25.1")));
+        }
         OperationRecord operation = mock(OperationRecord.class);
         when(operation.tenantId()).thenReturn("tenant-a");
         when(operation.sessionId()).thenReturn(SESSION_ID);
@@ -513,7 +525,7 @@ class QwenHostedHarnessConnectorTest {
 
         java.util.function.Supplier<QwenHostedHarnessConnector> fresh = () -> {
             QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(
-                    properties, sessions, mock(WorkspaceExecutionStore.class), actions);
+                    properties, sessions, mock(WorkspaceExecutionStore.class), actions, null, null, ssh);
             ReflectionTestUtils.setField(connector, "client", client);
             return connector;
         };
@@ -522,23 +534,43 @@ class QwenHostedHarnessConnectorTest {
         fresh.get().recoverManagedRuntime("tenant-a", SESSION_ID, false);
         fresh.get().settleLifecycle(operation);
         fresh.get().rename("tenant-a", SESSION_ID, "internal lead");
+        ReflectionTestUtils.invokeMethod(fresh.get(), "messageStopAttachment", "tenant-a", SESSION_ID);
 
         ArgumentCaptor<CreateHarnessSession> create = ArgumentCaptor.forClass(CreateHarnessSession.class);
         ArgumentCaptor<LoadHarnessSession> load = ArgumentCaptor.forClass(LoadHarnessSession.class);
         verify(client).createSession(create.capture());
-        verify(client, times(4)).loadSession(load.capture());
-        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(create.getValue(), "toJson"))
-                .containsEntry("childWorkspaces", true)
+        verify(client, times(5)).loadSession(load.capture());
+        Map<String, Object> created = ReflectionTestUtils.invokeMethod(create.getValue(), "toJson");
+        assertThat(created)
                 .containsEntry("toolProfile", profile)
-                .containsEntry("approvalMode", "yolo")
-                .doesNotContainKey("suppressChildAgents")
+                .containsEntry("approvalMode", approval)
                 .doesNotContainKey("childSnapshots");
+        if (remote) {
+            assertThat(created).containsEntry("foregroundOnly", true).doesNotContainKey("childWorkspaces");
+            if (profile.contains("shell")) {
+                assertThat(created).containsKey("captureBytes");
+            }
+        } else {
+            assertThat(created).containsEntry("childWorkspaces", true).doesNotContainKey("foregroundOnly");
+        }
+        if (profile.contains("shell")) {
+            assertThat(created).containsEntry("suppressChildAgents", true);
+        } else {
+            assertThat(created).doesNotContainKey("suppressChildAgents");
+        }
         for (LoadHarnessSession request : load.getAllValues()) {
-            assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(request, "toJson"))
-                    .containsEntry("childWorkspaces", true)
-                    .containsEntry("toolProfile", profile)
-                    .doesNotContainKey("suppressChildAgents")
-                    .doesNotContainKey("childSnapshots");
+            Map<String, Object> wire = ReflectionTestUtils.invokeMethod(request, "toJson");
+            assertThat(wire).containsEntry("toolProfile", profile).doesNotContainKey("childSnapshots");
+            if (remote) {
+                assertThat(wire).containsEntry("foregroundOnly", true).doesNotContainKey("childWorkspaces");
+            } else {
+                assertThat(wire).containsEntry("childWorkspaces", true).doesNotContainKey("foregroundOnly");
+            }
+            if (profile.contains("shell")) {
+                assertThat(wire).containsEntry("suppressChildAgents", true);
+            } else {
+                assertThat(wire).doesNotContainKey("suppressChildAgents");
+            }
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getAllValues().get(2), "toJson"))
                 .containsEntry("lifecycleAuthority", Map.of("operationId", "close-1", "claimGeneration", 2L));
@@ -551,17 +583,25 @@ class QwenHostedHarnessConnectorTest {
         fresh.get().recoverManagedRuntime("tenant-a", SESSION_ID, false);
         fresh.get().settleLifecycle(operation);
         fresh.get().rename("tenant-a", SESSION_ID, "internal lead");
+        ReflectionTestUtils.invokeMethod(fresh.get(), "messageStopAttachment", "tenant-a", SESSION_ID);
         ArgumentCaptor<CreateHarnessSession> snapshotCreate = ArgumentCaptor.forClass(CreateHarnessSession.class);
         ArgumentCaptor<LoadHarnessSession> snapshotLoad = ArgumentCaptor.forClass(LoadHarnessSession.class);
         verify(client).createSession(snapshotCreate.capture());
-        verify(client, times(4)).loadSession(snapshotLoad.capture());
-        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(snapshotCreate.getValue(), "toJson"))
-                .containsEntry("childWorkspaces", true)
-                .containsEntry("childSnapshots", true);
+        verify(client, times(5)).loadSession(snapshotLoad.capture());
+        Map<String, Object> snapshotCreated = ReflectionTestUtils.invokeMethod(snapshotCreate.getValue(), "toJson");
+        if (remote) {
+            assertThat(snapshotCreated).containsEntry("foregroundOnly", true)
+                    .doesNotContainKeys("childWorkspaces", "childSnapshots");
+        } else {
+            assertThat(snapshotCreated).containsEntry("childWorkspaces", true).containsEntry("childSnapshots", true);
+        }
         for (LoadHarnessSession request : snapshotLoad.getAllValues()) {
-            assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(request, "toJson"))
-                    .containsEntry("childWorkspaces", true)
-                    .containsEntry("childSnapshots", true);
+            Map<String, Object> wire = ReflectionTestUtils.invokeMethod(request, "toJson");
+            if (remote) {
+                assertThat(wire).containsEntry("foregroundOnly", true).doesNotContainKeys("childWorkspaces", "childSnapshots");
+            } else {
+                assertThat(wire).containsEntry("childWorkspaces", true).containsEntry("childSnapshots", true);
+            }
         }
     }
 
