@@ -303,7 +303,7 @@ class WorkspaceSessionRetentionMySqlIT {
         // Restore the sealed writer with a lapsed lease: retirement then
         // proceeds, and a renewal that misses it fails on the lease instead.
         jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE',"
-                + " writer_lease_until = TIMESTAMPADD(SECOND, -60, CURRENT_TIMESTAMP(6))");
+                + " writer_lease_until = (" + ManagedSchemaTime.SQL_NOW + " + -60000)");
         var deletion = deleteClaim(store, tenant, session);
         var publicLocked = new CountDownLatch(1);
         var completingPublicLock = new CountDownLatch(1);

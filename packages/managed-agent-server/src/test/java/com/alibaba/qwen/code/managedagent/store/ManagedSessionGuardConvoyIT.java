@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewW
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
@@ -499,8 +500,9 @@ class ManagedSessionGuardConvoyIT {
                 // transaction window: a drain-first writer order would have the
                 // writer holding this gap and deadlock the pair.
                 jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
-                                + " harness_session_id, session_id, head_kind, phase, created_at, updated_at)"
-                                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))"
+                                + " harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified)"
+                                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", "
+                                + ManagedSchemaTime.SQL_NOW + ")"
                                 + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL",
                         JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
                         JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim", "victim");
@@ -522,8 +524,9 @@ class ManagedSessionGuardConvoyIT {
         // back; replay that final state explicitly.
         transactions.executeWithoutResult(ignored ->
                 jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
-                                + " harness_session_id, session_id, head_kind, phase, created_at, updated_at)"
-                                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))"
+                                + " harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified)"
+                                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", "
+                                + ManagedSchemaTime.SQL_NOW + ")"
                                 + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL",
                         JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
                         JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim", "victim"));
