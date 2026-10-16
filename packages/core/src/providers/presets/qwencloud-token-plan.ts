@@ -29,6 +29,19 @@ export const QWENCLOUD_TOKEN_PLAN_GLOBAL_DOC_URL =
 // Provider config
 // ---------------------------------------------------------------------------
 
+/**
+ * Token Plan seed catalog: the shared QwenCloud chat catalog minus the two
+ * models a live `GET /models` on the Token Plan endpoint does not serve — the
+ * China route (probed 2026-10-16 with a real subscription key) offers
+ * kimi-k2.x and deepseek-v4-pro in place of kimi-k3 and deepseek-v4-pro-0813,
+ * matching the platform doc's personal-edition table. Seeds are the offline
+ * fallback and the wizard defaults, so every entry must be callable on this
+ * endpoint; the excluded models keep their stamps in the Standard catalog.
+ */
+const QWENCLOUD_TOKEN_PLAN_MODELS = QWENCLOUD_MODELS.filter(
+  (model) => model.id !== 'kimi-k3' && model.id !== 'deepseek-v4-pro-0813',
+);
+
 export const qwencloudTokenPlanProvider: ProviderConfig = {
   id: 'qwencloud-token-plan',
   label: 'Token Plan',
@@ -54,7 +67,7 @@ export const qwencloudTokenPlanProvider: ProviderConfig = {
   envKey: QWENCLOUD_TOKEN_PLAN_ENV_KEY,
   // The plan docs do not enumerate which chat models a tier unlocks, so the
   // seeded catalog is only the offline fallback; discovery reads `/models`.
-  models: QWENCLOUD_MODELS,
+  models: QWENCLOUD_TOKEN_PLAN_MODELS,
   modelsEditable: true,
   supportsModelDiscovery: true,
   modelNamePrefix: (baseUrl) =>
