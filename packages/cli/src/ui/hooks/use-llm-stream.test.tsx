@@ -58,6 +58,7 @@ import {
 } from '../utils/inline-image-parts.js';
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 
 // --- MOCKS ---
 const mockSendMessageStream = vi
@@ -497,6 +498,76 @@ describe('useLlmStream', () => {
         rerender({ ...baseProps, toolCalls }),
     };
   };
+
+  describe('Mod startup admission', () => {
+    it.each([
+      ['@image.png describe', SendMessageType.UserQuery],
+      ['/tmp/image.png', SendMessageType.UserQuery],
+      ['/help', SendMessageType.Notification],
+      ['/help', SendMessageType.Teammate],
+      ['/help', SendMessageType.Retry],
+      ['/help', SendMessageType.Goal],
+      ['/help', SendMessageType.ToolResult],
+    ])(
+      'rejects %s (%s) before model or media preprocessing',
+      async (query, submitType) => {
+        const ready = Promise.reject(new Error('Mod startup failed'));
+        void ready.catch(() => {});
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+        try {
+          const { result } = renderTestHook();
+          await act(async () => {
+            await result.current.submitQuery(query, submitType);
+          });
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+          expect(handleAtCommandSpy).not.toHaveBeenCalled();
+          expect(mockRunVisionBridge).not.toHaveBeenCalled();
+          expect(mockStartNewPrompt).not.toHaveBeenCalled();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(mockAddItem).toHaveBeenCalledWith(
+            expect.objectContaining({
+              type: MessageType.ERROR,
+              text: expect.stringContaining('Mods failed to initialize'),
+            }),
+            expect.any(Number),
+          );
+        } finally {
+          owner.mockRestore();
+        }
+      },
+    );
+
+    it.each([SendMessageType.UserQuery, SendMessageType.Cron])(
+      'lets the slash dispatcher admit recovery commands for %s',
+      async (submitType) => {
+        const ready = Promise.reject(new Error('Mod startup failed'));
+        void ready.catch(() => {});
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+        mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+        try {
+          const { result } = renderTestHook();
+          await act(async () => {
+            await result.current.submitQuery('/help', submitType);
+          });
+          expect(mockHandleSlashCommand).toHaveBeenCalledOnce();
+          expect(mockHandleSlashCommand.mock.calls[0][0]).toBe('/help');
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(
+            mockAddItem.mock.calls.some(
+              ([item]) => item.type === MessageType.ERROR,
+            ),
+          ).toBe(false);
+        } finally {
+          owner.mockRestore();
+        }
+      },
+    );
+  });
 
   it('sends a hidden Goal turn without user admission side effects', async () => {
     vi.mocked(mockConfig.getToolRegistry).mockReturnValue({

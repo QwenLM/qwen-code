@@ -456,6 +456,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_read_cursor',
       'workspace_file_write',
       'workspace_file_upload',
+      'workspace_file_delete',
       'workspace_directory_create',
       'workspace_directory_delete',
       'session_approval_mode_control',

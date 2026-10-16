@@ -122,6 +122,6 @@ public class ManagedSchemaPublicationStoreTest {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             return new ByteArrayInputStream(objects.get(key));
         }
-        @Override public void requireUnversioned() { }
+        @Override public void validateConfiguration() { }
     }
 }
