@@ -79,7 +79,7 @@ export const useShellCommandProcessor = (
   setPendingHistoryItem: React.Dispatch<
     React.SetStateAction<HistoryItemWithoutId | null>
   >,
-  onExec: (command: Promise<void>) => void,
+  onExec: (command: Promise<void>, signal: AbortSignal) => void,
   onDebugMessage: (message: string) => void,
   config: Config,
   llmClient: LlmClient,
@@ -165,8 +165,12 @@ export const useShellCommandProcessor = (
 
         const cleanupShellCommand = () => {
           abortSignal.removeEventListener('abort', abortHandler);
-          if (pwdFilePath && fs.existsSync(pwdFilePath)) {
-            fs.unlinkSync(pwdFilePath);
+          try {
+            if (pwdFilePath && fs.existsSync(pwdFilePath)) {
+              fs.unlinkSync(pwdFilePath);
+            }
+          } catch (error) {
+            debugLogger.debug('Failed to remove shell pwd file', error);
           }
           setActiveShellPtyId(null);
           setShellInputFocused(false);
@@ -381,7 +385,7 @@ export const useShellCommandProcessor = (
         executeCommand(resolve);
       });
 
-      onExec(execPromise);
+      onExec(execPromise, abortSignal);
       return true;
     },
     [
