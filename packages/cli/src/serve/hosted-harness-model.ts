@@ -31,6 +31,7 @@ import {
 } from './hosted-agent-definition.js';
 
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import type { HostedSkillCatalog } from './hosted-skill-catalog.js';
 import {
   HostedHookRecoveryRequiredError,
   type HostedHookSession,
@@ -152,6 +153,7 @@ export async function runHostedHarnessTextTurn(input: {
   agentDefinition?: HostedAgentDefinition;
   modelSelection?: HostedModelSelection;
   agentInstructions?: string;
+  skills?: HostedSkillCatalog;
   textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
@@ -182,6 +184,7 @@ export async function runHostedHarnessTextTurn(input: {
       input.agentInstructions
         ? `# Agent instructions\n\n${input.agentInstructions}`
         : undefined,
+      input.skills?.instructions(),
       context,
     ]
       .filter(Boolean)
@@ -295,7 +298,7 @@ export async function runHostedHarnessTextTurn(input: {
     await input.hooks?.ensureReady(input.signal);
     // Seed instructions when memory reload is skipped; restore them after
     // initialize() when its hierarchical memory refresh replaces user memory.
-    if (input.agentInstructions)
+    if (input.agentInstructions || input.skills)
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -311,7 +314,7 @@ export async function runHostedHarnessTextTurn(input: {
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
       throw new Error('Hosted Harness model authentication is unavailable.');
-    if (input.agentInstructions) {
+    if (input.agentInstructions || input.skills) {
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -322,7 +325,7 @@ export async function runHostedHarnessTextTurn(input: {
       if (model) throw new HostedModelUnavailableError(cause);
       throw cause;
     }
-    if (input.agentInstructions)
+    if (input.agentInstructions || input.skills)
       await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
