@@ -54,6 +54,65 @@ describe('useManagedSession', () => {
     return null;
   }
 
+  it('does not resurrect an older model selection or its cleared occupancy from a delayed summary', async () => {
+    const getSession = vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessionId: 'session-1',
+        modelSelection: { modelId: 'A', revision: 1 },
+        modelContext: {
+          modelId: 'A',
+          inputTokens: 200,
+          contextWindowSize: 1000,
+          observedAt: 1,
+        },
+      })
+      .mockResolvedValueOnce({
+        sessionId: 'session-1',
+        modelSelection: { modelId: 'A', revision: 3 },
+      })
+      .mockResolvedValue({
+        sessionId: 'session-1',
+        modelSelection: { modelId: 'A', revision: 1 },
+        modelContext: {
+          modelId: 'A',
+          inputTokens: 200,
+          contextWindowSize: 1000,
+          observedAt: 1,
+        },
+      });
+    const provider = {
+      getSession,
+      getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+      async *subscribeEvents(_id: string, opts: { signal: AbortSignal }) {
+        await new Promise((resolve) =>
+          opts.signal.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    root = createRoot(document.createElement('div'));
+    await act(async () => {
+      root!.render(<Probe provider={provider} />);
+    });
+    await act(async () => {
+      await latest!.refreshSummary();
+    });
+    expect(latest!.summary?.modelSelection).toEqual({
+      modelId: 'A',
+      revision: 3,
+    });
+    expect(latest!.summary?.modelContext).toBeUndefined();
+    await act(async () => {
+      await latest!.refreshSummary();
+    });
+    expect(latest!.summary?.modelSelection).toEqual({
+      modelId: 'A',
+      revision: 3,
+    });
+    expect(latest!.summary?.modelContext).toBeUndefined();
+  });
+
   function deterministicBackoff(): () => void {
     const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
     return () => random.mockRestore();

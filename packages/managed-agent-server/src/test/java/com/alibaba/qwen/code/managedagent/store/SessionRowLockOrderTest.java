@@ -235,6 +235,10 @@ class SessionRowLockOrderTest {
                                     "Original.csi/0",
                                     "Row.withState/2",
                                     "ToolPublicationStore.usesDataSource/1")),
+                    Map.entry("WorkspaceCreationStore.java",
+                            Set.of("WorkspaceCreationStore.enabled/0")),
+                    Map.entry("WorkspaceExecutionStore.java",
+                            Set.of("WorkspaceExecutionStore.createdStorageRoot/2")),
                     Map.entry("WorkspaceCsiCheckpointSnapshotStore.java",
                             Set.of("WorkspaceCsiCheckpointSnapshotStore.hash/1",
                                     "WorkspaceCsiCheckpointSnapshotStore.scope/1")),
@@ -321,7 +325,7 @@ class SessionRowLockOrderTest {
         // lockers no helper name would find, and the create entries, whose
         // session-row INSERT is the lock.
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
-                "insertTurnCommand", "insertCancelCommand",
+                "insertTurnCommand", "insertCancelCommand", "changeSessionModel",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
                 "insertChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
@@ -372,11 +376,11 @@ class SessionRowLockOrderTest {
                         "beginLifecycle", "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",
-                        "cancelBeforeAdmission", "claimTurn",
+                        "cancelBeforeAdmission", "changeSessionModel", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
                         "deferTurnRetry", "failTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
-                        "findReplayFloorTargets", "findTurn",
+                        "findReplayFloorTargets", "findTurn", "findTurnModelSelection",
                         "findTurnSummary", "hasActiveTurn",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertCsiSessionCommand",

@@ -19,8 +19,10 @@ public final class ManagedSchema {
             "/db/managed-schema/V2__private_csi_authority.sql";
     public static final String SESSION_LIST =
             "/db/managed-schema/V3__session_list_created_at.sql";
+    public static final String WORKSPACE_CREATION = "/db/managed-schema/V4__workspace_creation.sql";
+    public static final String MODEL_SELECTION = "/db/managed-schema/V5__session_model_selection.sql";
     // Additive migrations over the published V1 baseline, in version order.
-    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST);
+    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION);
     private static final int CURRENT = EXTENSIONS.size() + 1;
 
     private ManagedSchema() {}
@@ -85,8 +87,19 @@ public final class ManagedSchema {
     }
 
     private static String extend(String ddl, String extension) {
+        var namespace = Pattern.compile("ALTER TABLE ma_request_receipt ADD (CONSTRAINT"
+                + " ck_ma_request_namespace CHECK[^;]+);").matcher(extension);
+        if (namespace.find()) {
+            var previous = Pattern.compile("CONSTRAINT ck_ma_request_namespace CHECK[^\\n]+")
+                    .matcher(ddl);
+            if (!previous.find()) {
+                throw new IllegalStateException("Receipt namespace constraint is absent from the baseline");
+            }
+            ddl = previous.replaceFirst(java.util.regex.Matcher.quoteReplacement(namespace.group(1) + ","));
+            extension = extension.replace(namespace.group(), "");
+        }
         var columns =
-                Pattern.compile("ALTER TABLE (ma_[a-z_]+) ADD COLUMN ([^;]+);").matcher(extension);
+                Pattern.compile("ALTER TABLE (ma_[a-z_]+) ADD (?:COLUMN )?([^;]+);").matcher(extension);
         while (columns.find()) {
             var table =
                     Pattern.compile(
