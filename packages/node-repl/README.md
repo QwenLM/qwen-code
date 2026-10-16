@@ -20,7 +20,7 @@ documentation. Start with `var app = await cua.getApp("Application")`; it displa
 AX state automatically. Use `app.getAXState()`, `app.getScreenshot()`, or
 `app.getAXStateAndScreenshot()` for observations, with `emit:false` to suppress
 automatic display. Actions return void; observe to confirm the result.
-Call `cua.rewriteDocumentation()` after context compaction.
+Call `cua.rewriteDocumentation()` after context compaction. `cua.desktop` provides explicit foreground desktop input; `cua.getBrowser/getTab/createBrowserTab` wrap the existing browser SDK. The SDK and browser SDK are installed as matching dependencies. Graceful reset/disposal closes the native session and releases held desktop keys before terminating the kernel.
 
 ### Cell semantics
 
@@ -124,11 +124,11 @@ have happened when an error is thrown; use those diagnostics before retrying.
 ## Desktop relay
 
 `node-repl-mcp desktop-relay` lends this server to a Qwen Code session running
-somewhere else, typically a headless dev box, so the computer-use skill can
+somewhere else, typically a headless dev box, so the Computer Use runtime can
 drive the desktop you are sitting at. On macOS:
 
 ```bash
-npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install
+npx -y @qwen-code/node-repl-mcp@0.26.0 desktop-relay install
 ```
 
 This installs the server and `@qwen-code/cua-sdk` under `~/.qwen/desktop-relay`

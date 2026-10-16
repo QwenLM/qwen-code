@@ -118,7 +118,7 @@ $ThemeBinaryName = "cua-cursor-theme.exe"
 # where the baked line hasn't been updated yet.
 #
 # ~~~ BAKED_VERSION: must match the release version in this change ~~~
-$Script:CuaDriverRsBakedVersion = "0.20.11"
+$Script:CuaDriverRsBakedVersion = "0.26.0"
 # ~~~ END_BAKED_VERSION ~~~
 $CursorThemeRequiredFrom = [version]"0.12.7"
 $LegacyUiaRequiredFrom = [version]"0.2.8"
@@ -1387,8 +1387,8 @@ Write-Step "  target      : $target"
 $Script:CuaDriverRsSelectedChannel = Resolve-SelectedChannel
 $version = Resolve-Version
 $versionedDir = Join-Path $ReleasesDir "$version-$target"
-$requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom
-$requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and -not $requiresSignedUia
+$requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom -and ([version]$version -lt [version]"0.26.0" -or $env:CUA_DRIVER_USE_UIACCESS -eq "1")
+$requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and [version]$version -lt $SignedUiaRequiredFrom
 
 # If the per-version dir is already populated, skip the download — the
 # binary is immutable per version, so a repeat install is a no-op apart
@@ -1422,8 +1422,8 @@ if (-not $skipDownload) {
         if ($asset.Version -ne $version) {
             $version = $asset.Version
             $versionedDir = Join-Path $ReleasesDir "$version-$target"
-            $requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom
-            $requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and -not $requiresSignedUia
+            $requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom -and ([version]$version -lt [version]"0.26.0" -or $env:CUA_DRIVER_USE_UIACCESS -eq "1")
+            $requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and [version]$version -lt $SignedUiaRequiredFrom
             $uiaSecureDir = Join-Path $env:ProgramFiles "Qwen\CuaDriver\$version"
             $uiaSecurePath = Join-Path $uiaSecureDir 'qwen-cua-driver-uia.exe'
         }
@@ -1448,7 +1448,7 @@ if (-not $skipDownload) {
             }
             Write-Step "installed $versionedDir\$BinaryName (version $version, target $target)"
         }
-        if (-not $requiresSignedUia) {
+        if ($requiresLegacyUia) {
             foreach ($legacyUiaName in @('qwen-cua-driver-uia.exe', 'cua-driver-uia.exe')) {
                 $legacyUiaStage = Join-Path $stageDir $legacyUiaName
                 if (Test-Path -LiteralPath $legacyUiaStage) {
@@ -1459,9 +1459,9 @@ if (-not $skipDownload) {
             }
         }
         if ($requiresSignedUia) {
-            # The UIAccess worker is required for foreground acquisition and
-            # input delivery. Windows only grants uiAccess to a signed binary
-            # installed under a secure system path.
+            # Historical releases require UIAccess. Current releases use it
+            # only after explicit opt-in; Windows still requires a trusted
+            # signature and the secure Program Files path.
             $uiaStage = Join-Path $stageDir 'qwen-cua-driver-uia.exe'
             if (-not (Test-Path -LiteralPath $uiaStage)) {
                 throw "release archive is missing required qwen-cua-driver-uia.exe"

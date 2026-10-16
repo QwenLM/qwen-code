@@ -22,8 +22,8 @@ export const DESKTOP_RELAY_LABEL = 'com.qwencode.desktop-relay';
  */
 export const DESKTOP_RELAY_SERVER_NAME = 'desktop-node-repl';
 
-/** Kept equal to the SDK version the bundled computer-use skill pins. */
-export const DESKTOP_RELAY_CUA_SDK_VERSION = '0.20.11';
+/** Same version as the standalone runtime and its SDK dependency. */
+export const DESKTOP_RELAY_CUA_SDK_VERSION = '0.26.0';
 
 /**
  * The daemon drops `/acp` frames above 10 MB; leave room for the

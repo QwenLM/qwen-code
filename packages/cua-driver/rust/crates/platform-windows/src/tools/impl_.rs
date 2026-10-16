@@ -4206,7 +4206,7 @@ impl Tool for ClickTool {
                     crate::uia::windows_enum::PointInvokeOutcome::Miss
                         | crate::uia::windows_enum::PointInvokeOutcome::Unavailable
                 ) {
-                    return ToolResult::error("UIA point action timed out or is busy; no second click was sent; observe before retrying")
+                    return ToolResult::error("UIA point action is busy or its effect is unconfirmed; no second click was sent; observe before retrying")
                         .with_structured(json!({"code":"uia_input_unconfirmed","sent":true}));
                 }
             }

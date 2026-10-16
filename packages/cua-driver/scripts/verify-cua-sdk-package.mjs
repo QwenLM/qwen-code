@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url"
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const driverRoot = resolve(scriptDirectory, "..")
 const packageRoot = join(driverRoot, "typescript")
-const skillResources = ["SKILL.md"]
+
 
 function valueAfter(flag) {
   const index = process.argv.indexOf(flag)
@@ -34,6 +34,8 @@ function optionalValueAfter(flag) {
 
 const nativeDirectory = resolve(valueAfter("--native-dir"))
 const outputDirectory = resolve(valueAfter("--output-dir"))
+const browserTarballArgument = optionalValueAfter("--browser-tarball")
+const browserTarball = browserTarballArgument ? resolve(browserTarballArgument) : undefined
 const releaseDirectoryArgument = optionalValueAfter("--release-dir")
 const releaseDirectory = releaseDirectoryArgument
   ? resolve(releaseDirectoryArgument)
@@ -168,13 +170,18 @@ for (const required of [
   "computer-use/index.js",
   "computer-use/app.js",
   "computer-use/index.d.ts",
-  ...skillResources.map((resource) => `computer-use/${resource}`),
+  "computer-use/runtime.js",
+  "computer-use/runtime.d.ts",
+  "computer-use/documentation.js",
+  "computer-use/browser.js",
+  "computer-use/interface.json",
   "scripts/install-native.mjs",
 ]) {
   if (!packedPaths.includes(required)) {
     throw new Error(`packed SDK is missing ${required}`)
   }
 }
+if (packedPaths.some((path) => path.endsWith("SKILL.md"))) throw new Error("SDK must use runtime documentation, not a bundled skill");
 const bundledNative = packedPaths.find((path) =>
   /\.(?:dll|dylib|node|so)$/u.test(path),
 )
@@ -224,6 +231,7 @@ try {
     [
       "install",
       tarball,
+      ...(browserTarball ? [browserTarball] : []),
       "--no-audit",
       "--no-fund",
       "--ignore-scripts=false",
@@ -231,13 +239,6 @@ try {
     ],
     { cwd: consumer, env: environment },
   )
-  for (const resource of skillResources) {
-    const canonical = readFileSync(join(driverRoot, "..", "core", "src", "skills", "bundled", "computer-use", resource))
-    const installed = readFileSync(join(consumer, "node_modules", "@qwen-code", "cua-sdk", "computer-use", resource))
-    if (!canonical.equals(installed)) {
-      throw new Error(`installed Computer Use skill differs from canonical resource: ${resource}`)
-    }
-  }
   const dependencyTree = run("npm", ["ls", "--all", "--json"], {
     cwd: consumer,
     env: environment,
@@ -265,14 +266,18 @@ try {
       if (!Array.isArray(listing.tools) || listing.tools.length === 0) {
         throw new Error("native SDK returned no tools");
       }
-      const revisionSupported = await computer.supportsObservationRevision();
-      if (typeof revisionSupported !== "boolean") {
-        throw new Error("ComputerUse capability probe returned an invalid result");
+      let safeRefusal = false;
+      try {
+        await computer.appCall("click", { scope: "desktop", x: 1, y: 1 });
+      } catch (error) {
+        if (error.code !== "screenshot_required" || error.sent !== false) throw error;
+        safeRefusal = true;
       }
+      if (!safeRefusal || listing.tools.length !== 19) throw new Error("Computer Use session/manifest contract mismatch");
       process.stdout.write(JSON.stringify({
         package: "@qwen-code/cua-sdk",
         toolCount: listing.tools.length,
-        revisionSupported,
+        safeRefusal,
       }) + "\\n");
     } finally {
       await computer.close();

@@ -5,7 +5,9 @@ export function createBrowserFacade(runtime, load = () => import('@qwen-code/bro
   const browsers = new Map();
   async function connected() {
     if (closed) throw new Error('Computer Use browser session is closed.');
-    module ??= await load();
+    const loaded = module ?? await load();
+    if (closed) throw new Error('Computer Use browser session is closed.');
+    module = loaded;
     return (agent ??= await module.setupBrowserRuntime());
   }
   async function getBrowser(selector) {

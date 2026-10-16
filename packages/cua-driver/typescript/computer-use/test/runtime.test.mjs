@@ -40,6 +40,8 @@ test('documentation is platform-specific and includes generated tool description
   assert.match(documentation('linux'), /only X11/);
   assert.match(documentation('darwin'), /macOS/);
   assert.match(documentation('darwin'), /getAXStateAndScreenshot/);
+  assert.match(documentation('darwin'), /cua\.desktop\.keyDown/);
+  assert.doesNotMatch(documentation('darwin'), /app\.desktop\./);
 });
 
 test('desktop calls use explicit scope, serialize, return void and dispose the owning session', async () => {
@@ -76,4 +78,15 @@ test('browser facade returns repository handles unchanged, requires unique URLs,
   assert.deepEqual(navigated, ['https://example.org']);
   await cua[Symbol.asyncDispose](); assert.equal(closed, 1);
   await assert.rejects(cua.getBrowser('Chrome'), /closed/);
+});
+
+test('disposing during a lazy browser import prevents a late browser connection', async () => {
+  let resolveModule; let connected = 0;
+  const pending = new Promise((resolve) => { resolveModule = resolve; });
+  const cua = createCua({ write() {} }, { browserModule: pending });
+  const selection = cua.getBrowser('Chrome');
+  await cua[Symbol.asyncDispose]();
+  resolveModule({ setupBrowserRuntime() { connected++; throw new Error('must not connect'); } });
+  await assert.rejects(selection, /closed/);
+  assert.equal(connected, 0);
 });

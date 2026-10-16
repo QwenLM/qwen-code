@@ -883,6 +883,11 @@ impl ToolRegistry {
             .filter_map(|name| self.tools.get(name))
             .map(|tool| tool.def().to_list_entry())
             .collect();
+        if self.normalized_coordinates {
+            let mut native = serde_json::json!({"tools":list});
+            crate::coord_norm::rewrite_coord_desc(&mut native);
+            list = native["tools"].as_array().unwrap().clone();
+        }
         if self.computer_use.is_some() {
             let extra = std::env::var("CUA_DRIVER_EXTRA_TOOLS").as_deref() == Ok("1");
             let mut entries = Vec::new();
@@ -892,8 +897,8 @@ impl ToolRegistry {
                 }
                 let mut schema = spec.input_schema.clone();
                 if extra {
-                    if let Some(native) = self.tools.get(spec.name) {
-                        schema = serde_json::json!({"oneOf":[schema,native.def().input_schema]});
+                    if let Some(native) = list.iter().find(|tool| tool["name"] == spec.name) {
+                        schema = serde_json::json!({"oneOf":[schema,native["inputSchema"]]});
                     }
                 }
                 let risk_tool = match spec.name {
@@ -931,16 +936,13 @@ impl ToolRegistry {
         //
         // Both fields are additive: existing consumers that read only
         // `tools` keep working unchanged.
-        let mut result = serde_json::json!({
+        let result = serde_json::json!({
             "tools": list,
             "platform": std::env::consts::OS,
             "capability_version": CAPABILITY_VERSION,
             "schema_version": TOOLS_LIST_SCHEMA_VERSION,
             "enforcement_adapters": crate::authorization::enforcement_adapter_inventory_json(),
         });
-        if self.normalized_coordinates {
-            crate::coord_norm::rewrite_coord_desc(&mut result);
-        }
         result
     }
 
@@ -1230,7 +1232,7 @@ impl ToolRegistry {
         // Convert only the private dispatch copy. Authorization, consent,
         // manifests, recordings, and replay continue to use the caller's
         // normalized arguments, while platform workers receive pixels.
-        if self.normalized_coordinates {
+        if self.normalized_coordinates && !computer_use_native_dispatch() {
             let pid = args.opt_i64("pid").unwrap_or(0);
             let window_id = args.opt_u64("window_id").unwrap_or(0);
             let (width, height) = crate::coord_norm::get_size(pid, window_id).unwrap_or((0, 0));
@@ -1645,7 +1647,9 @@ impl ToolRegistry {
             crate::coord_norm::ingest_window_size(resolved_name, &args, &result);
             crate::coord_norm::ingest_screen_size(resolved_name, &result);
             crate::coord_norm::ingest_zoom_size(resolved_name, &args, &result);
-            crate::coord_norm::normalize_result(resolved_name, &mut result);
+            if !computer_use_native_dispatch() {
+                crate::coord_norm::normalize_result(resolved_name, &mut result);
+            }
         }
         // The platform worker has exited, so another text operation for this
         // pid may now start even while result projection and evidence capture

@@ -11,18 +11,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TestContext } from 'vitest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-// The bundled skill has the model import the staged runtime/index.js from
-// inside the node_repl kernel's untrusted vm context, which has no `process`
-// global. build.mjs's own load check imports dist/index.js in Node's main
-// realm and therefore cannot see that difference, so this test runs the
-// skill's first cell, verbatim from SKILL.md, through the real kernel built in
-// packages/node-repl/dist against a runtime it stages itself, the way the
-// bundle step and `npm run dev` do, into a temporary skill directory.
+// Import the packaged browser runtime inside the real Node REPL kernel,
+// including its pinned Playwright dependency and its VM process binding.
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
-const skillFile = path.join(
-  repoRoot,
-  'packages/core/src/skills/bundled/browser-use/SKILL.md',
-);
 const browserUseDist = path.join(repoRoot, 'packages/browser-use/dist');
 const nodeReplDist = path.join(repoRoot, 'packages/node-repl/dist');
 const requiredArtifacts = [
@@ -40,7 +31,7 @@ interface KernelOutcome {
 
 interface Kernel {
   exec(request: { code: string; timeoutMs: number }): Promise<KernelOutcome>;
-  dispose(): void;
+  dispose(): Promise<void>;
 }
 
 interface KernelManagerModule {
@@ -61,23 +52,15 @@ interface CopyAssetsModule {
   copyBrowserUseAssets(root: string, skillDir: string): void;
 }
 
-function firstSkillCell(skillBase: string): string {
-  const skill = fs.readFileSync(skillFile, 'utf8');
-  const cell = /```js\n([\s\S]*?)```/.exec(skill)?.[1];
-  if (cell === undefined) throw new Error('SKILL.md has no ```js cell');
-  expect(cell).toContain("import('/absolute/skill/base/runtime/index.js')");
-  return cell.replaceAll('/absolute/skill/base', skillBase);
-}
-
 describe(
-  'bundled skill runtime inside the node_repl kernel',
+  'browser runtime inside the node_repl kernel',
   { timeout: 90_000 },
   () => {
     afterEach(() => {
       vi.unstubAllEnvs();
     });
 
-    async function runFirstSkillCell(
+    async function runBrowserRuntime(
       context: TestContext,
       prepareRuntime: (runtimeDir: string) => void = () => {},
     ): Promise<{ outcome: KernelOutcome; runtimeDir: string }> {
@@ -129,12 +112,12 @@ describe(
       });
       try {
         const outcome = await manager.exec({
-          code: firstSkillCell(skillBase),
+          code: `var browserRuntime = await import(${JSON.stringify(pathToFileURL(path.join(runtimeDir, 'index.js')).href)}); var browserRuntimeAgent = await browserRuntime.setupBrowserRuntime(); await browserRuntimeAgent.browsers.list();`,
           timeoutMs: 60_000,
         });
         return { outcome, runtimeDir };
       } finally {
-        manager.dispose();
+        await manager.dispose();
         fs.rmSync(tmpRootDir, { recursive: true, force: true });
       }
     }
@@ -152,8 +135,8 @@ describe(
       });
     }
 
-    it("runs SKILL.md's first cell up to the Chrome bridge without a ReferenceError", async (context) => {
-      const { outcome } = await runFirstSkillCell(context);
+    it('loads the SDK up to the Chrome bridge without a ReferenceError', async (context) => {
+      const { outcome } = await runBrowserRuntime(context);
 
       // A `ReferenceError: process is not defined` here means the staged
       // runtime lost the kernel-realm `process` binding that build.mjs adds
@@ -167,7 +150,7 @@ describe(
     });
 
     it('reports an incomplete runtime when its bundled playwright-core is missing', async (context) => {
-      const { outcome, runtimeDir } = await runFirstSkillCell(
+      const { outcome, runtimeDir } = await runBrowserRuntime(
         context,
         (runtime) => {
           fs.rmSync(path.join(runtime, 'node_modules/playwright-core'), {
@@ -187,7 +170,7 @@ describe(
     it('refuses a playwright-core other than the pinned version', async (context) => {
       // Stands in for a missing bundled copy that Node's lookup replaced with
       // an unrelated install further up the directory tree.
-      const { outcome, runtimeDir } = await runFirstSkillCell(
+      const { outcome, runtimeDir } = await runBrowserRuntime(
         context,
         (runtime) => {
           const manifestPath = path.join(

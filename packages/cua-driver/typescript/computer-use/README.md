@@ -18,3 +18,12 @@ The direct `qwen-cua-driver mcp` entry point exposes the same app operations and
 For an existing daemon, the transport layer supports `ComputerUse.connect({socketPath})`; otherwise `ComputerUse.create()` owns an embedded native runtime. Close the owning transport when finished. Node REPL supplies cancellation barriers and waits for native cleanup after dispatch.
 
 Linux supports X11 applications, including X11 apps under XWayland. Inherit DISPLAY, XAUTHORITY and the desktop accessibility session bus. Native Wayland targets are unsupported.
+
+
+## Explicit desktop and browser interfaces
+
+`cua.desktop.getScreenshot()` displays the primary display. Desktop point actions use pixels from that session's latest image; changed display geometry invalidates it. `click({x,y},{key:'shift'})` holds modifiers around one click. `keyDown/keyUp` are session-owned desktop operations; use try/finally and release keys before app input or ordinary text/chords. Normal reset, session end and runtime shutdown release held keys; abrupt process termination cannot promise release.
+
+`cua.getBrowser('Chrome')` displays that browser's documentation and tabs. `getTab(id,{browser:'Chrome'})` or an unambiguous `{url}` displays its DOM snapshot; `createBrowserTab('Chrome',url)` opens and displays a tab. These return the existing browser-use SDK objects without changing their methods or behavior. Browser extension setup remains required. The browser SDK is a same-version npm dependency, separate from the native driver.
+
+Direct MCP uses the same operation names with `scope:'desktop'` instead of `app`. The default manifest contains 19 operations. Internal start/end lifecycle calls remain callable without enlarging the default inventory.

@@ -48,6 +48,12 @@ function run(command, args, options = {}) {
 }
 
 const outputDirectory = path.resolve(valueAfter('--output-dir'));
+const localDependencies = ['--sdk-tarball', '--browser-tarball'].flatMap(
+  (flag) => {
+    const index = process.argv.indexOf(flag);
+    return index < 0 ? [] : [path.resolve(valueAfter(flag))];
+  },
+);
 const manifest = JSON.parse(
   readFileSync(path.join(packageRoot, 'package.json'), 'utf8'),
 );
@@ -156,6 +162,7 @@ try {
     [
       'install',
       tarball,
+      ...localDependencies,
       '--no-audit',
       '--no-fund',
       `--registry=${npmRegistry}`,
@@ -210,10 +217,14 @@ try {
       throw new Error(`unexpected MCP tools: ${names.join(',')}`);
     }
 
-    await client.callTool({
+    const initial = await client.callTool({
       name: 'js',
       arguments: { code: 'const releaseValue = 40;' },
     });
+    if (initial.isError || !textOf(initial).includes('cua.desktop'))
+      throw new Error(
+        'clean package did not preload matching runtime documentation',
+      );
     const persisted = await client.callTool({
       name: 'js',
       arguments: { code: 'nodeRepl.write(String(releaseValue + 2));' },

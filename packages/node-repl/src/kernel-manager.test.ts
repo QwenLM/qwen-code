@@ -88,14 +88,18 @@ afterEach(async () => {
 describe('NodeReplKernelManager', () => {
   it('awaits Computer Use session cleanup on reset and disposal', async () => {
     const marker = path.join(workDir, 'cua-cleanup.txt');
-    createEsmPackage(path.join(workDir, 'node_modules'), 'cua-cleanup-fixture', `
+    createEsmPackage(
+      path.join(workDir, 'node_modules'),
+      'cua-cleanup-fixture',
+      `
       import fs from 'node:fs';
       import { setTimeout } from 'node:timers/promises';
       export const cua = { async [Symbol.asyncDispose]() {
         await setTimeout(30);
         fs.appendFileSync(${JSON.stringify(marker)}, ${JSON.stringify('released\n')});
       } };
-    `);
+    `,
+    );
     const install = `globalThis.cua = (await import('cua-cleanup-fixture')).cua;`;
     expect((await run(install)).status).toBe('ok');
     await manager.reset();

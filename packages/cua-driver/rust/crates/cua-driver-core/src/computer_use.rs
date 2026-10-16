@@ -503,7 +503,7 @@ impl ComputerUseRuntime {
             if let Some(session) = &session {
                 input["session"] = session.clone();
             }
-            Box::pin(registry.invoke(name, input))
+            Box::pin(registry.invoke_computer_use_native(name, input))
         };
         let apps = checked(call("list_apps", json!({})).await, false)?;
         let apps = apps
@@ -816,7 +816,7 @@ impl ComputerUseRuntime {
                 input["modifier"] = if key.is_string() { json!([key]) } else { key };
             }
         }
-        let mut result = Box::pin(registry.invoke(name, input.clone())).await;
+        let mut result = Box::pin(registry.invoke_computer_use_native(name, input.clone())).await;
         let refusal = result.structured_content.as_ref();
         if cfg!(any(target_os = "windows", target_os = "linux"))
             && result.is_error == Some(true)
@@ -825,7 +825,7 @@ impl ComputerUseRuntime {
             })
         {
             input["delivery_mode"] = json!("foreground");
-            result = Box::pin(registry.invoke(name, input)).await;
+            result = Box::pin(registry.invoke_computer_use_native(name, input)).await;
         }
         Self::acknowledge(result)
     }
@@ -1073,7 +1073,8 @@ mod tests {
     }
     #[tokio::test]
     async fn desktop_maps_the_observed_frame_once_and_invalidates_changed_geometry() {
-        let (registry, fixture, context) = setup();
+        let (mut registry, fixture, context) = setup();
+        registry.set_coordinate_space_normalized(true);
         let result = call(
             &registry,
             context.clone(),

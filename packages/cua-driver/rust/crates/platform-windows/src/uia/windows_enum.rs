@@ -458,6 +458,7 @@ pub(crate) enum PointInvokeOutcome {
     Busy,
     Timeout,
     Unavailable,
+    Unconfirmed,
 }
 
 impl PointInvokeOutcome {
@@ -466,7 +467,7 @@ impl PointInvokeOutcome {
             Ok(outcome) => outcome,
             Err(UiaDeadlineError::Busy) => Self::Busy,
             Err(UiaDeadlineError::Timeout) => Self::Timeout,
-            Err(UiaDeadlineError::Unavailable) => Self::Unavailable,
+            Err(UiaDeadlineError::Unavailable) => Self::Unconfirmed,
         }
     }
 }
@@ -486,7 +487,7 @@ fn try_invoke_in_window_at_point_unbounded(
     sy: i32,
     cancelled: &AtomicBool,
 ) -> PointInvokeOutcome {
-    use PointInvokeOutcome::{Invoked, Miss, Timeout, Unavailable};
+    use PointInvokeOutcome::{Invoked, Miss, Timeout, Unavailable, Unconfirmed};
     // Keep this first so COM interfaces drop before CoUninitialize.
     let _com = ComInit::new();
     if hwnd == 0 {
@@ -628,7 +629,7 @@ fn try_invoke_in_window_at_point_unbounded(
                         if cancelled.load(Ordering::Acquire) {
                             return Timeout;
                         }
-                        return if ec.Expand().is_ok() { Invoked } else { Unavailable };
+                        return if ec.Expand().is_ok() { Invoked } else { Unconfirmed };
                     }
                 }
                 return Unavailable;
@@ -648,7 +649,7 @@ fn try_invoke_in_window_at_point_unbounded(
                 Ok(()) => Invoked,
                 Err(e) => {
                     tracing::debug!(target: "click", "UIA Invoke (windowed) at ({sx},{sy}) failed: {e}");
-                    Unavailable
+                    Unconfirmed
                 }
             }
         })
@@ -1147,6 +1148,14 @@ mod tests {
         let mut win32 = dwm;
         win32.left -= 8;
         assert_eq!(select_window_rect(false, Some(dwm), Some(win32)), Some(dwm));
+    }
+
+    #[test]
+    fn a_worker_without_a_result_cannot_prove_input_was_not_sent() {
+        assert_eq!(
+            PointInvokeOutcome::from_worker(Err(UiaDeadlineError::Unavailable)),
+            PointInvokeOutcome::Unconfirmed,
+        );
     }
 
     #[test]
