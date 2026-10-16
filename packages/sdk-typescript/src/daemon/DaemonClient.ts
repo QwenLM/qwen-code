@@ -8806,6 +8806,18 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  async deleteWorkspaceFile(
+    filePath: string,
+    clientId?: string,
+  ): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/file/delete',
+      'POST /workspaces/:workspace/file/delete',
+      { method: 'POST', body: { path: filePath }, clientId, mode: 'rest' },
+    );
+  }
+
   private get<T>(path: string, label: string, clientId?: string): Promise<T> {
     return this.client.workspaceJsonRequest<T>(
       this.workspaceSelector,
