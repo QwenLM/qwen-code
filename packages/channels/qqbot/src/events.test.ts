@@ -2185,7 +2185,7 @@ describe('resolveRoute chatTypes fallback', () => {
     expect(result!.path).toBe('/v2/groups/dual-chat-id/messages');
   });
 
-  it('returns null when neither chatTypeMap nor chatTypes has entry', async () => {
+  it('reports a permanent block when neither chatTypeMap nor chatTypes has entry', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     chp['accessToken'] = 'test-token';
@@ -2195,10 +2195,52 @@ describe('resolveRoute chatTypes fallback', () => {
     const result = await (
       pvt['resolveRoute'] as (
         chatId: string,
-      ) => Promise<{ base: string; path: string } | null>
+      ) => Promise<{ base: string; path: string } | { block: string }>
     )('unknown-chat');
 
-    expect(result).toBeNull();
+    // resolveRoute names the retry class beside the guard that produced it.
+    expect(result).toEqual({ block: 'permanent' });
+  });
+
+  it('reports a permanent block for a chatId the API cannot address', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const pvt = ch as unknown as QQChannelRaw;
+    // A slash fails isValidChatId, so the retry can never resolve the route:
+    // the invalid-chatId guard must name the permanent class, not transient.
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | { block: string }>
+    )('bad/chat');
+
+    expect(result).toEqual({ block: 'permanent' });
+  });
+
+  it('reports a transient block when the refreshed token is empty', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = '';
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: '',
+      expiresIn: 7200,
+    });
+
+    const pvt = ch as unknown as QQChannelRaw;
+    // An empty token is a recoverable token state: the guard must name the
+    // transient class so a cancelled turn's stashed head is re-attempted
+    // rather than dropped.
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | { block: string }>
+    )('group-1');
+
+    expect(result).toEqual({ block: 'transient' });
   });
 });
 
