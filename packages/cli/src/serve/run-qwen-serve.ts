@@ -482,6 +482,10 @@ const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 // an unauthenticated peer could hold one connection slot per upgrade for the
 // whole boot window.
 const PRE_TRANSPORT_UPGRADE_HOLD_MAX = 32;
+// Cap the bytes accumulated from a parked upgrade socket into its replay
+// head. A pipelined first frame must survive the park, but a peer flooding
+// the held socket is dropped instead of buffered without bound.
+const PRE_TRANSPORT_UPGRADE_HEAD_MAX = 64 * 1024;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 32;
@@ -10176,6 +10180,7 @@ async function runQwenServeImpl(
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
+            drainPreTransportUpgrades?.();
             // NOTE: the shutdown signal handlers stay attached during the
             // drain so a second signal can take the explicit force-exit path
             // above. Detaching them up front would leave Node's default signal
@@ -10739,6 +10744,10 @@ async function runQwenServeImpl(
         );
       }
     };
+    // Late-assigned where the pre-transport upgrade park is set up below
+    // (close() is defined on the handle first): close() drains the park so an
+    // upgrade-detached socket cannot hold the listener open.
+    let drainPreTransportUpgrades: (() => void) | undefined = undefined;
     let server: Server;
     if (tlsOptions) {
       try {
@@ -10809,6 +10818,13 @@ async function runQwenServeImpl(
       // Retry-After only while the daemon may still finish booting (queue
       // overflow); the settle/failure flushes are terminal — this process
       // never retries the runtime startup.
+      // Gate-closed and overflow answers reach sockets that never entered
+      // the park, so they carry no error sink; attach one before writing so
+      // a peer that resets instead of reading the answer cannot surface an
+      // uncaught ECONNRESET (a TLS socket's write flushes asynchronously, so
+      // the window is real there even though a plain-HTTP same-tick
+      // write+destroy does not reproduce it).
+      socket.once('error', () => {});
       socket.write(
         retryable
           ? 'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n'
@@ -10873,15 +10889,34 @@ async function runQwenServeImpl(
         socket.destroy();
       };
       const drop = (): void => dropPreTransportUpgrade(socket);
+      const entry = { req, socket, head, detach: (): void => {} };
+      // The upgrade path leaves the socket neither flowing nor paused, so an
+      // unread byte would stall FIN/RST delivery and the eviction above would
+      // never fire. Keep reading while parked: bytes accumulate into the
+      // entry's head (they are a pipelined first frame, replayed in order),
+      // and a peer that floods past the cap is dropped.
+      const accumulate = (chunk: Buffer): void => {
+        if (
+          entry.head.byteLength + chunk.byteLength <=
+          PRE_TRANSPORT_UPGRADE_HEAD_MAX
+        ) {
+          entry.head = Buffer.concat([entry.head, chunk]);
+        } else {
+          dropAndDestroy();
+        }
+      };
       const detach = (): void => {
+        socket.removeListener('data', accumulate);
         socket.removeListener('error', dropAndDestroy);
         socket.removeListener('end', dropAndDestroy);
         socket.removeListener('close', drop);
       };
+      entry.detach = detach;
+      socket.on('data', accumulate);
       socket.once('error', dropAndDestroy);
       socket.once('end', dropAndDestroy);
       socket.once('close', drop);
-      preTransportUpgrades.push({ req, socket, head, detach });
+      preTransportUpgrades.push(entry);
       daemonLog.info(
         `deferred runtime: parked pre-transport upgrade ${
           req.url?.split('?', 1)[0] ?? '/'
@@ -10894,6 +10929,15 @@ async function runQwenServeImpl(
       if (!runtimeStartupSettled) startRuntimeForRequest?.();
     };
     server.on('upgrade', preTransportUpgradeGuard);
+    drainPreTransportUpgrades = () => {
+      preTransportUpgradeGateClosed = true;
+      const queued = preTransportUpgrades.splice(0);
+      for (const { socket, detach } of queued) {
+        detach();
+        if (socket.destroyed) continue;
+        answerPreTransportUpgrade503(socket, false);
+      }
+    };
     void runtimeReady.then(
       () => {
         // A runtime that settles without a transport (handle-less app:
@@ -10915,6 +10959,16 @@ async function runQwenServeImpl(
         releasePreTransportUpgrades();
       },
       () => {
+        // failRuntimeStartup has already disposed the runtime app, which
+        // removes the transport listener the latch vouches for. Re-derive
+        // the latch from the actual listener count — this server also hosts
+        // the guard, so an attached transport means more than one 'upgrade'
+        // listener — so the release below answers parked upgrades instead of
+        // emitting them into a void, and the guard's attached-check stops
+        // swallowing later upgrades.
+        if (acpWsTransportAttached && server.listenerCount('upgrade') < 2) {
+          acpWsTransportAttached = false;
+        }
         // A failed startup never retries (runtimeStarting is never reset),
         // so a handle-less configuration must not keep the raw gate: it
         // would answer every upgrade pre-auth for the rest of the process
