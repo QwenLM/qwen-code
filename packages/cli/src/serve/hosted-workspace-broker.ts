@@ -19,6 +19,7 @@ import type {
   ToolResultCapture,
   ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { parseToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
@@ -679,6 +680,41 @@ export class HostedWorkspaceBroker {
     )
       throw new Error('Runtime execution outcome is unknown.');
     return { state: state as HostedBrokerExecutionState };
+  }
+
+  async readSettledShellResult(id: string): Promise<{
+    bindingGeneration: string;
+    result: ToolResultEnvelope;
+  }> {
+    const response = await this.request(
+      `/executions/${encodeURIComponent(id)}`,
+    );
+    const generation = response['bindingGeneration'];
+    const bindingId = response['runtimeBindingId'];
+    const status = object(response['status']);
+    if (
+      response['protocolVersion'] !== 1 ||
+      response['harnessSessionId'] !== this.identity.harnessSessionId ||
+      response['runtimeSessionId'] !== this.identity.runtimeSessionId ||
+      response['executionCallId'] !== id ||
+      typeof bindingId !== 'string' ||
+      !bindingId ||
+      typeof generation !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(generation) ||
+      BigInt(generation) > 2n ** 63n - 1n ||
+      (this.runtime !== undefined &&
+        (this.runtime.bindingId !== bindingId ||
+          this.runtime.generation !== generation)) ||
+      status['state'] !== 'settled'
+    ) {
+      throw new Error(
+        'Original Shell result is not settled under its binding.',
+      );
+    }
+    return {
+      bindingGeneration: generation,
+      result: parseToolResultEnvelope(status['result']),
+    };
   }
 
   /**

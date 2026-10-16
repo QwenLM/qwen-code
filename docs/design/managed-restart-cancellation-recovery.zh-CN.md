@@ -15,6 +15,7 @@
 3. 在写公共恢复失败终态前，走取消接管并使用原 checkpoint/activation/prompt。Workspace 失败清理使用独立内部授权：必须匹配已接纳的具体 RUNNING Turn、有效 dispatch owner 和已记录的接纳 epoch，再核验原 Session 结构；不依赖公共取消命令，也不授予新的执行权限。普通取消仍要求已持久化的 CANCELLING 意图。清理失败保持可重试；恢复失败的终态写入是原子的，不能覆盖并发到达的用户取消。
 4. `await_runtime` 中结果未知的快照可以尝试取消原 execution 身份。该能力不允许继续运行或重试执行。Runtime 取消仍须观察到终态结果，或保留既有 abandoned/unobserved 区分，才能写入结算。结果未知的 agent/command 等待仍不具备取消条件。
 5. Harness 本地 Shell 发布器可能先于原 Worker 消失。此后发布失败时，只有明确取消的前台 capture，同时具有自身真实的 aborted 进程结果、有效原始启动 PID，以及 POSIX 原进程组已消失的正向证据，才可保留 cancelled 结果。child-process API 在原 handle 上提供 PID，完成结果不含 PID；其他执行方式和显式结果 PID 必须匹配。已转后台、结果缺失、进程组仍活跃或权限拒绝，以及 Windows 均保持未知。finalize 丢失时，保留结果明确标记 capture unavailable、producer lost、无 manifest、delivery blocked；finalize 已完成而 accept 丢失时，保留原有效 manifest，仅将 delivery 标为 blocked。仅同一 sink 的原结果对象及同样的物理停止证据可获得本地四字段 ACK，克隆或伪造的 envelope 不能绕过原发布器；该 ACK 不声称持久化 native outcome，也不伪造 outcomeRef。成功执行或任意发布失败都不能变成已见证的取消。
+6. 在解除恢复中的前台 Shell 等待前，由当前持有写权限的 writer 记录原生回执。只读原 Broker 的已结算结果，不启动工作；验证原 checkpoint、intent、参数及 Runtime 调用映射，复用 Shell admission 的 manifest、流封存和摘要检查。旧 intent 属于 checkpoint 的 activation，不要求属于替换后的 writer；恢复检查持久化 seal，而非已消失 producer 的内存 prefix。已有回执和 manifest 保留原 outcome 引用。丢失 capture 时记录 blocked 回执，resultRef 为空且不关联产物资源；完整 capture 必须通过完整校验才可接纳。真实日志事务生成结果投影及其 sequence/revision。保持关闭校验不变：物理停止和普通历史结果不能替代该回执。
 
 ## 约束与风险
 
@@ -27,5 +28,6 @@
 - 覆盖有效/过期/sealed writer、已接纳原生输入、压缩/缺失 head、丢失调度 claim。
 - 覆盖 parked 取消接管、瞬态清理拒绝、未知 Runtime 取得停止证据与仍未知两种结果、不重放 execute 及公共终态唯一。
 - 使用真实前台父子进程复现原发布器丢失；只有原进程组停止后才允许 cancelled 执行和 unavailable capture。验证精确 dispatch claim 授权、外来/过期/未接纳 claim 拒绝，以及用户取消赢得终态竞争。
+- 验证恢复取消提交唯一原生回执，并在写入/解除等待之间崩溃后复用；保留完整 manifest，验证空流 seal，拒绝外来身份、损坏资源或已被 fencing 的 writer。确认真实日志投影使现有物理关闭检查正常完成。
 - 构建、类型检查并测试受影响 TypeScript 消费者；运行 SDK/server 校验、独立 MySQL 和对应 Hosted 恢复 profile。
 - 独立重复真实 Linux/MySQL Java/Harness 替换，核对原 Worker 身份、文件/marker 精确字节、取消/关闭及物理释放。保持原演示不动并恢复测试资源。
