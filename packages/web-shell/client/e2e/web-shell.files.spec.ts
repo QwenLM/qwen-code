@@ -19,6 +19,7 @@ async function openFiles(
   creationEnabled = false,
   deletionEnabled = false,
   uploadEnabled = false,
+  fileDeletionEnabled = false,
 ) {
   const scenario = createWebShellDaemonScenario({
     workspaceCwd,
@@ -39,12 +40,18 @@ async function openFiles(
       turnCompleteEvent('files-ready', { id: 3 }),
     ],
   });
-  if (creationEnabled || deletionEnabled || uploadEnabled)
+  if (
+    creationEnabled ||
+    deletionEnabled ||
+    uploadEnabled ||
+    fileDeletionEnabled
+  )
     scenario.capabilities.features.push(
       ...(creationEnabled
         ? ['workspace_file_write', 'workspace_directory_create']
         : []),
       ...(deletionEnabled ? ['workspace_directory_delete'] : []),
+      ...(fileDeletionEnabled ? ['workspace_file_delete'] : []),
       ...(uploadEnabled ? ['workspace_file_upload'] : []),
       'workspace_qualified_rest_core',
     );
@@ -2406,4 +2413,251 @@ test('@smoke coordinates new-folder uploads with folder deletion', async ({
     'Workspace guide',
   );
   await expect(browser.getByRole('progressbar')).toBeHidden();
+});
+
+async function openDeleteMenu(
+  page: Page,
+  browser: import('@playwright/test').Locator,
+  name = 'README.md',
+) {
+  await browser
+    .getByRole('treeitem', { name, exact: true })
+    .click({ button: 'right' });
+  await expect(
+    page.getByRole('menuitem', { name: 'Delete', exact: true }),
+  ).toBeVisible();
+}
+
+test('@smoke confirms irreversible file deletion and preserves other tree state', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    false,
+    true,
+    true,
+    true,
+    true,
+  );
+  await browser
+    .getByRole('treeitem', { name: 'README.md', exact: true })
+    .click();
+  await expect(browser.getByTestId('workspace-file-content')).toContainText(
+    'Workspace guide',
+  );
+  await browser.getByRole('treeitem', { name: 'deep', exact: true }).click();
+  await expect(
+    browser.getByRole('treeitem', { name: 'level-0', exact: true }),
+  ).toBeVisible();
+  const calls: { url: string; path: string }[] = [];
+  let finish!: () => void;
+  await page.route('**/file/delete', async (route) => {
+    calls.push({
+      url: new URL(route.request().url()).pathname,
+      path: route.request().postDataJSON().path,
+    });
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    await route.fulfill({ json: { kind: 'file_delete', path: 'README.md' } });
+  });
+  await browser.screenshot({
+    path: test.info().outputPath('delete-before.png'),
+  });
+  await openDeleteMenu(page, browser);
+  await page
+    .getByRole('menu')
+    .screenshot({ path: test.info().outputPath('delete-menu.png') });
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  const dialog = page.getByRole('alertdialog', { name: 'Delete file?' });
+  await expect(dialog).toContainText('/tmp/qwen-web-shell-e2e/README.md');
+  await expect(dialog).toContainText('This cannot be undone.');
+  await expect(dialog.getByRole('button', { name: /^cancel$/i })).toBeFocused();
+  expect(calls).toHaveLength(0);
+  await dialog.screenshot({
+    path: test.info().outputPath('delete-confirmation.png'),
+  });
+  await dialog.getByRole('button', { name: /^cancel$/i }).click();
+  await expect(dialog).toBeHidden();
+  await expect(
+    browser.locator('[role="treeitem"][tabindex="0"]'),
+  ).toBeFocused();
+  expect(calls).toHaveLength(0);
+  await expect(
+    browser.getByRole('treeitem', { name: 'README.md', exact: true }),
+  ).toBeVisible();
+  await openDeleteMenu(page, browser);
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(
+    browser.locator('[role="treeitem"][tabindex="0"]'),
+  ).toBeFocused();
+  expect(calls).toHaveLength(0);
+  await openDeleteMenu(page, browser);
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await dialog
+    .getByRole('button', { name: 'Delete file', exact: true })
+    .click();
+  await expect.poll(() => calls.length).toBe(1);
+  expect(calls[0]).toEqual({
+    url: '/workspaces/%2Ftmp%2Fqwen-web-shell-e2e/file/delete',
+    path: 'README.md',
+  });
+  await expect(
+    dialog.getByRole('button', { name: /^cancel$/i }),
+  ).toBeDisabled();
+  await expect(
+    dialog.getByRole('button', { name: 'Deleting…', exact: true }),
+  ).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeVisible();
+  finish();
+  await expect(dialog).toBeHidden();
+  await expect(
+    browser.locator('[role="treeitem"][tabindex="0"]'),
+  ).toBeFocused();
+  await expect(
+    browser.getByRole('treeitem', { name: 'README.md', exact: true }),
+  ).toBeHidden();
+  await expect(browser.getByTestId('workspace-file-content')).toBeHidden();
+  await expect(
+    browser.getByRole('treeitem', { name: 'level-0', exact: true }),
+  ).toBeVisible();
+  await browser.screenshot({
+    path: test.info().outputPath('delete-completed.png'),
+  });
+
+  await page.route('**/file/upload?*', (route) =>
+    route.fulfill({
+      json: {
+        kind: 'file_upload',
+        path: 'README.md',
+        sizeBytes: 4,
+        hash: 'sha256:test',
+      },
+    }),
+  );
+  await dropLocalFiles(page, browser.getByTestId('workspace-file-sidebar'), [
+    'README.md',
+  ]);
+  await expect(
+    browser.getByRole('treeitem', { name: 'README.md', exact: true }),
+  ).toBeVisible();
+  await expect(browser.getByRole('progressbar')).toBeHidden();
+  await page.route('**/file/delete', (route) =>
+    route.fulfill({ json: { kind: 'file_delete', path: 'README.md' } }),
+  );
+  await openDeleteMenu(page, browser);
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await dialog
+    .getByRole('button', { name: 'Delete file', exact: true })
+    .click();
+  await expect(dialog).toBeHidden();
+  await expect(
+    browser.getByRole('treeitem', { name: 'README.md', exact: true }),
+  ).toBeHidden();
+  await expect(
+    browser.getByRole('treeitem', { name: 'level-0', exact: true }),
+  ).toBeVisible();
+});
+
+test('@smoke keeps failed deletions visible for retry', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    false,
+    false,
+    true,
+    true,
+  );
+  let calls = 0;
+  await page.route('**/file/delete', async (route) => {
+    calls++;
+    await route.fulfill(
+      calls === 1
+        ? { status: 403, json: { error: 'Deletion denied' } }
+        : { json: { kind: 'file_delete', path: 'README.md' } },
+    );
+  });
+  await openDeleteMenu(page, browser);
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  const dialog = page.getByRole('alertdialog');
+  await dialog
+    .getByRole('button', { name: 'Delete file', exact: true })
+    .click();
+  await expect(dialog.getByRole('alert')).toContainText('Deletion denied');
+  await expect(
+    browser.locator('[role="treeitem"][data-item-path="README.md"]'),
+  ).toBeVisible();
+  await dialog
+    .getByRole('button', { name: 'Delete file', exact: true })
+    .click();
+  await expect(dialog).toBeHidden();
+  expect(calls).toBe(2);
+  await expect(
+    browser.getByRole('treeitem', { name: 'README.md', exact: true }),
+  ).toBeHidden();
+});
+
+test('@smoke hides file deletion without capability and for symlinks', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(page, baseURL!);
+  await browser
+    .getByRole('treeitem', { name: 'README.md', exact: true })
+    .click({ button: 'right' });
+  await expect(
+    page.getByRole('menuitem', { name: 'Download', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('menuitem', { name: 'Delete', exact: true }),
+  ).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await browser
+    .getByRole('treeitem', { name: 'linked', exact: true })
+    .click({ button: 'right' });
+  await expect(
+    page.getByRole('menuitem', { name: 'Download', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('menuitem', { name: 'Delete', exact: true }),
+  ).toHaveCount(0);
+});
+
+test('@smoke never offers deletion for a symlink even with capability', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    false,
+    false,
+    true,
+    true,
+  );
+  await browser
+    .getByRole('treeitem', { name: 'linked', exact: true })
+    .click({ button: 'right' });
+  await expect(
+    page.getByRole('menuitem', { name: 'Download', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('menuitem', { name: 'Delete', exact: true }),
+  ).toHaveCount(0);
 });

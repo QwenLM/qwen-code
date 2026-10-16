@@ -534,6 +534,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       'writeWorkspaceFile',
       'createWorkspaceDirectory',
       'deleteWorkspaceDirectory',
+      'deleteWorkspaceFile',
       'uploadWorkspaceFile',
     ]) {
       expect(packaged).toContain(method);
@@ -559,6 +560,10 @@ describe('build artifact — transcript entry (#11031)', () => {
       'files.sourceTooLarge',
     ] as const)
       expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
+    for (const key of Object.keys(FILES_MESSAGES_EN)) {
+      expect(bundle).not.toContain(`"${key}"`);
+      expect(bundle).not.toContain(`'${key}'`);
+    }
   });
 
   it('carries no Live Voice strings and looks none up', () => {
