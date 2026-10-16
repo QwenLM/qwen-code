@@ -3274,7 +3274,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
-    // When `result.error` is set, `coreToolScheduler` builds the
+    // For non-aborted errors, `coreToolScheduler` builds the
     // model-facing functionResponse from `error.message`, NOT from
     // `llmContent` (see `convertToFunctionResponse` and the error
     // branch in scheduler's success/error split). So if a long
@@ -3283,15 +3283,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // hint to error.message too so the advisory survives whichever
     // branch the scheduler takes.
     //
-    // Note on reach: `ShellExecutionResult.error` is reserved for
-    // SPAWN / setup failures (per the field's doc comment in
-    // shellExecutionService.ts); non-zero exits leave it null. Real
-    // spawn failures (ENOENT, permission denied) typically resolve in
-    // <1s, so the elapsed >= threshold + spawn-error combination is
-    // rare. The preservation is here for the slow-spawn edge cases
-    // (PTY init dragging, remote-fs exec syscalls, security scanners
-    // interposing) where the rare path could still trigger and the
-    // hint would otherwise vanish.
+    // `ShellExecutionResult.error` covers spawn/setup failures and
+    // unconfirmed cancellation cleanup; ordinary non-zero exits leave
+    // it null. Preserve the hint for non-aborted errors; cancellation
+    // and timeout suppress it above.
     //
     // Use a `---` divider line so downstream consumers of
     // `error.message` (firePostToolUseFailureHook, telemetry grouping,

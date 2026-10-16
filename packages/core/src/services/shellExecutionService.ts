@@ -33,12 +33,15 @@ import { getShellContextEnvVars } from './shellContextEnv.js';
 import { noteConPtyHostReleased, releaseConPtyHost } from './conpty-host.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
+import {
+  OwnedPosixProcessGroup,
+  SHELL_CANCEL_GRACE_MS as SIGKILL_TIMEOUT_MS,
+} from './posix-process-group.js';
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
 
 const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_BUFFERED_OUTPUT_BYTES_CEILING = 256 * 1024 * 1024;
-const SIGKILL_TIMEOUT_MS = 200;
 /**
  * streamStdout settle fence: after the child exits, trailing stdio keeps
  * flowing until 'close' — but 'close' also waits on *inherited* fds, so a
@@ -222,7 +225,7 @@ export interface ShellExecutionResult {
    * clean-exit signal of 0 is normalized to null at the service boundary.
    */
   signal: number | null;
-  /** An error object if the process failed to spawn. */
+  /** An error if execution failed or cancellation cleanup could not be confirmed. */
   error: Error | null;
   /** A boolean indicating if the command was aborted by the user. */
   aborted: boolean;
@@ -737,8 +740,22 @@ const getCleanupStrategy = () =>
 export class ShellExecutionService {
   private static activePtys = new Map<number, ActivePty>();
   private static activeChildProcesses = new Set<number>();
+  private static posixGroups = new Map<number, OwnedPosixProcessGroup>();
 
   static cleanup() {
+    if (os.platform() === 'linux') {
+      for (const group of this.posixGroups.values()) group.force();
+      for (const pty of this.activePtys.values()) {
+        try {
+          pty.headlessTerminal.dispose();
+        } catch {
+          // already disposed
+        }
+      }
+      this.activePtys.clear();
+      this.activeChildProcesses.clear();
+      return;
+    }
     const strategy = getCleanupStrategy();
     // Cleanup PTYs
     for (const [pid, pty] of this.activePtys) {
@@ -999,6 +1016,20 @@ export class ShellExecutionService {
             },
       });
 
+      const posixGroup =
+        os.platform() === 'linux' && child.pid
+          ? new OwnedPosixProcessGroup(child.pid)
+          : undefined;
+      if (posixGroup && child.pid) this.posixGroups.set(child.pid, posixGroup);
+      const releaseGroup = () => {
+        if (!posixGroup || !child.pid) return;
+        posixGroup.release();
+        if (this.posixGroups.get(child.pid) === posixGroup) {
+          this.posixGroups.delete(child.pid);
+        }
+        this.activeChildProcesses.delete(child.pid);
+      };
+
       const result = new Promise<ShellExecutionResult>((resolve) => {
         let stdoutDecoder: TextDecoder | null = null;
         let stderrDecoder: TextDecoder | null = null;
@@ -1034,6 +1065,7 @@ export class ShellExecutionService {
         let remainingDrainMs = POST_EXIT_STREAM_DRAIN_MS;
         let drainStartedAt = 0;
         let pendingCaptureWrites = 0;
+        let cleanupConfirmed = false;
         let stdoutEnded = false;
         let stderrEnded = false;
         let stdoutWrite: Promise<void> = Promise.resolve();
@@ -1046,18 +1078,30 @@ export class ShellExecutionService {
           remainingDrainMs -= performance.now() - drainStartedAt;
         };
         const resumeDrain = () => {
-          if (!recordedExit || drainTimer || settled || pendingCaptureWrites) {
+          if (
+            (!recordedExit && !cleanupConfirmed) ||
+            drainTimer ||
+            settled ||
+            pendingCaptureWrites
+          ) {
             return;
           }
           if (remainingDrainMs <= 0) {
-            void handleExit(recordedExit.code, recordedExit.signal);
+            const recorded = recordedExit ?? {
+              code: child.exitCode,
+              signal: child.signalCode,
+            };
+            void handleExit(recorded.code, recorded.signal);
             return;
           }
           drainStartedAt = performance.now();
           drainTimer = setTimeout(() => {
             drainTimer = null;
-            const recorded = recordedExit;
-            if (recorded) void handleExit(recorded.code, recorded.signal);
+            const recorded = recordedExit ?? {
+              code: child.exitCode,
+              signal: child.signalCode,
+            };
+            void handleExit(recorded.code, recorded.signal);
           }, remainingDrainMs);
           drainTimer.unref?.();
         };
@@ -1275,6 +1319,17 @@ export class ShellExecutionService {
         ) => {
           if (settled) return;
           settled = true;
+          if (posixGroup?.completion) {
+            const cleanupError = await posixGroup.completion;
+            error ??= cleanupError;
+          }
+          releaseGroup();
+          if (posixGroup) {
+            child.stdout?.off('data', stdoutHandler);
+            child.stderr?.off('data', stderrHandler);
+            child.stdout?.resume();
+            child.stderr?.resume();
+          }
           if (drainTimer) {
             clearTimeout(drainTimer);
             drainTimer = null;
@@ -1393,8 +1448,10 @@ export class ShellExecutionService {
           code: number | null,
           signal: NodeJS.Signals | null,
         ) => {
-          if (child.pid) {
+          exited = true;
+          if (child.pid && !posixGroup?.cancelling) {
             this.activeChildProcesses.delete(child.pid);
+            releaseGroup();
           }
           if (!streamStdout && !rawCapture) {
             void handleExit(code, signal);
@@ -1492,6 +1549,7 @@ export class ShellExecutionService {
             );
           }
           this.activeChildProcesses.delete(child.pid);
+          releaseGroup();
           detachServiceListeners();
           const {
             stdout: snapStdout,
@@ -1758,6 +1816,19 @@ export class ShellExecutionService {
 
         const performCancelKill = async (): Promise<void> => {
           if (!child.pid || exited) return;
+          if (posixGroup) {
+            const cleanupError = await posixGroup.cancel();
+            error ??= cleanupError;
+            // A permission or identity failure need not emit a leader exit.
+            // Settle with the cleanup error rather than waiting indefinitely.
+            if (cleanupError) {
+              await handleExit(child.exitCode, child.signalCode);
+            } else {
+              cleanupConfirmed = true;
+              resumeDrain();
+            }
+            return;
+          }
           if (isWindows) {
             const killer = cpSpawn(
               WINDOWS_TASKKILL,
@@ -1995,6 +2066,19 @@ export class ShellExecutionService {
       });
       ptySpawned = true;
 
+      const posixGroup =
+        os.platform() === 'linux'
+          ? new OwnedPosixProcessGroup(ptyProcess.pid)
+          : undefined;
+      if (posixGroup) this.posixGroups.set(ptyProcess.pid, posixGroup);
+      const releaseGroup = () => {
+        if (!posixGroup) return;
+        posixGroup.release();
+        if (this.posixGroups.get(ptyProcess.pid) === posixGroup) {
+          this.posixGroups.delete(ptyProcess.pid);
+        }
+      };
+
       const result = new Promise<ShellExecutionResult>((resolve) => {
         const headlessTerminal = new Terminal({
           allowProposedApi: true,
@@ -2033,7 +2117,7 @@ export class ShellExecutionService {
         let outputComparison: AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const sniffChunks: Buffer[] = [];
-        const error: Error | null = null;
+        let error: Error | null = null;
         let exited = false;
         // Set the moment performCancelKill actually proceeds (a cancel reached
         // us before the shell exited). The finalizer reads THIS, not a late
@@ -2370,91 +2454,120 @@ export class ShellExecutionService {
           // releaseConPtyHost disposes that worker without signalling the pid.
           releaseConPtyHost(ptyProcess);
           this.activePtys.delete(ptyProcess.pid);
+          releaseGroup();
         };
 
-        const exitDisposable = ptyProcess.onExit(
-          ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
-            exited = true;
-            abortSignal.removeEventListener('abort', abortHandler);
-
-            const finalize = async () => {
-              const finalBuffer = Buffer.concat(outputChunks);
-              let fullOutput = '';
-
-              try {
-                try {
-                  render(true);
-                } catch (e) {
-                  debugLogger.warn(
-                    `Final PTY render threw during cleanup: ${e instanceof Error ? e.message : String(e)}`,
-                  );
-                }
-
-                try {
-                  if (isStreamingRawContent) {
-                    // Re-decode the captured buffer with proper encoding detection.
-                    // The streaming decoder used the first-chunk heuristic which
-                    // can misdetect when early output is ASCII-only but later
-                    // output is in a different encoding (e.g. GBK).
-                    const finalEncoding =
-                      getCachedEncodingForBuffer(finalBuffer);
-                    const decodedOutput = new TextDecoder(finalEncoding).decode(
-                      finalBuffer,
-                    );
-                    fullOutput = await replayTerminalOutput(
-                      decodedOutput,
-                      cols,
-                      rows,
-                      Terminal,
-                    );
-                  } else {
-                    fullOutput = serializeTerminalToText(headlessTerminal);
-                  }
-                } catch {
-                  try {
-                    fullOutput = decodeBufferedOutput(finalBuffer);
-                  } catch {
-                    // Ignore fallback rendering errors and resolve with empty text.
-                  }
-                }
-                fullOutput = appendOutputCaptureLimitNotice(
-                  fullOutput,
-                  outputCaptureLimitExceeded,
-                  totalBytesReceived,
-                  maxBufferedOutputBytes,
-                );
-
-                resolve({
-                  rawOutput: finalBuffer,
-                  output: fullOutput,
-                  exitCode,
-                  signal: signal === 0 ? null : (signal ?? null),
-                  error,
-                  aborted: abortSignal.aborted,
-                  pid: ptyProcess.pid,
-                  executionMethod:
-                    (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??
-                    'node-pty',
-                });
-              } finally {
-                disposeForegroundPtyResources();
-              }
-            };
-
-            // Give any last onData callbacks a chance to run before finalizing.
-            // onExit can arrive slightly before late PTY data is processed.
+        let ptySettled = false;
+        let recordedPtyExit: { exitCode: number; signal?: number } | undefined;
+        let resolvePtyExit!: () => void;
+        const nativePtyExit = new Promise<void>((resolve) => {
+          resolvePtyExit = resolve;
+        });
+        let ptyDrain: Promise<void> | undefined;
+        const drainPtyOutput = () => {
+          if (ptyDrain) return ptyDrain;
+          ptyDrain = (async () => {
+            if (posixGroup?.completion) await posixGroup.completion;
             const flushChain = () => processingChain.then(() => {});
             const deadline = new Promise<void>((res) =>
               setTimeout(res, SIGKILL_TIMEOUT_MS),
             );
             const drain = () =>
               new Promise<void>((res) => setImmediate(res)).then(flushChain);
+            const flush = async () => {
+              // node-pty can defer onExit until its socket closes after group cleanup.
+              // Preserve that status within the existing output-drain deadline.
+              if (posixGroup?.cancelling && !recordedPtyExit)
+                await nativePtyExit;
+              await flushChain().then(drain).then(drain);
+            };
+            await Promise.race([flush(), deadline]);
+          })();
+          return ptyDrain;
+        };
+        const finalizePty = async (
+          exitCode: number | null,
+          signal: number | null | undefined,
+        ) => {
+          if (ptySettled) return;
+          ptySettled = true;
+          if (posixGroup?.completion) {
+            const cleanupError = await posixGroup.completion;
+            error ??= cleanupError;
+          }
+          const finalBuffer = Buffer.concat(outputChunks);
+          let fullOutput = '';
 
-            void Promise.race([
-              flushChain().then(drain).then(drain),
-              deadline,
-            ]).then(() => {
-              void finalize();
+          try {
+            try {
+              render(true);
+            } catch (e) {
+              debugLogger.warn(
+                `Final PTY render threw during cleanup: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+
+            try {
+              if (isStreamingRawContent) {
+                // Re-decode the captured buffer with proper encoding detection.
+                // The streaming decoder used the first-chunk heuristic which
+                // can misdetect when early output is ASCII-only but later
+                // output is in a different encoding (e.g. GBK).
+                const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
+                const decodedOutput = new TextDecoder(finalEncoding).decode(
+                  finalBuffer,
+                );
+                fullOutput = await replayTerminalOutput(
+                  decodedOutput,
+                  cols,
+                  rows,
+                  Terminal,
+                );
+              } else {
+                fullOutput = serializeTerminalToText(headlessTerminal);
+              }
+            } catch {
+              try {
+                fullOutput = decodeBufferedOutput(finalBuffer);
+              } catch {
+                // Ignore fallback rendering errors and resolve with empty text.
+              }
+            }
+            fullOutput = appendOutputCaptureLimitNotice(
+              fullOutput,
+              outputCaptureLimitExceeded,
+              totalBytesReceived,
+              maxBufferedOutputBytes,
+            );
+
+            resolve({
+              rawOutput: finalBuffer,
+              output: fullOutput,
+              exitCode,
+              signal: signal === 0 ? null : (signal ?? null),
+              error,
+              aborted: abortSignal.aborted,
+              pid: ptyProcess.pid,
+              executionMethod:
+                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+            });
+          } finally {
+            disposeForegroundPtyResources();
+          }
+        };
+
+        const exitDisposable = ptyProcess.onExit(
+          ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+            exited = true;
+            recordedPtyExit = { exitCode, signal };
+            resolvePtyExit();
+            abortSignal.removeEventListener('abort', abortHandler);
+            if (!posixGroup?.cancelling) releaseGroup();
+
+            // Give any last onData callbacks a chance to run before finalizing.
+            // onExit can arrive slightly before late PTY data is processed.
+            void drainPtyOutput().then(() => {
+              void finalizePty(exitCode, signal);
             });
           },
         );
@@ -2479,6 +2592,7 @@ export class ShellExecutionService {
             );
             return;
           }
+          releaseGroup();
           // Skip kill, dispose all our foreground listeners on the live
           // PTY (so post-promote data/exit/error don't leak into our
           // foreground onOutputEvent or crash via the error handler's
@@ -2865,6 +2979,16 @@ export class ShellExecutionService {
           // the finalizer reap tree-kills. Guarded by `exited` above, so a late
           // abort after a normal exit returns early and never sets this.
           cancelKillDispatched = true;
+          if (posixGroup) {
+            const cleanupError = await posixGroup.cancel();
+            error ??= cleanupError;
+            await drainPtyOutput();
+            await finalizePty(
+              recordedPtyExit?.exitCode ?? null,
+              recordedPtyExit?.signal,
+            );
+            return;
+          }
           if (os.platform() === 'win32') {
             // Tree-kill SYNCHRONOUSLY (spawnSync, like windowsStrategy.killPty):
             // taskkill must enumerate and kill the process tree BEFORE
@@ -2981,7 +3105,15 @@ export class ShellExecutionService {
 
       return {
         pid: ptyProcess.pid,
-        result: result.catch((error: unknown) => {
+        result: result.catch(async (error: unknown) => {
+          if (posixGroup) {
+            posixGroup.force();
+            await posixGroup.completion;
+            releaseGroup();
+            this.activePtys.get(ptyProcess.pid)?.headlessTerminal.dispose();
+            this.activePtys.delete(ptyProcess.pid);
+            throw error;
+          }
           // An initialization exception can occur after spawn. Kill that process;
           // the caller must never retry it through another transport.
           try {
