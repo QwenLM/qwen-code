@@ -619,21 +619,25 @@ for (const count of [1, 105]) {
       await expect(replyCheck).toBeChecked();
       await expect(selected).toHaveCount(2);
       await expect(answerRow.getByRole('checkbox')).toHaveCount(0);
-      const labelBox = await header
-        .locator('[class*="processedLabel"]')
-        .boundingBox();
-      const checkBox = await replyCheck.boundingBox();
-      expect(labelBox).not.toBeNull();
-      expect(checkBox).not.toBeNull();
-      expect(checkBox!.x + checkBox!.width).toBeLessThan(labelBox!.x);
-      expect(
-        Math.abs(
-          checkBox!.y +
-            checkBox!.height / 2 -
-            labelBox!.y -
-            labelBox!.height / 2,
-        ),
-      ).toBeLessThanOrEqual(3);
+      // Read both positions in one frame while the virtual list may scroll.
+      const { horizontalGap, verticalOffset } = await headerRow.evaluate(
+        (row) => {
+          const label = row
+            .querySelector('[class*="processedLabel"]')!
+            .getBoundingClientRect();
+          const checkbox = row
+            .querySelector('[role="checkbox"]')!
+            .getBoundingClientRect();
+          return {
+            horizontalGap: label.left - checkbox.right,
+            verticalOffset: Math.abs(
+              (checkbox.top + checkbox.bottom - label.top - label.bottom) / 2,
+            ),
+          };
+        },
+      );
+      expect(horizontalGap).toBeGreaterThan(0);
+      expect(verticalOffset).toBeLessThanOrEqual(3);
       await replyCheck.click();
       await expect(userRow.getByRole('checkbox')).not.toBeChecked();
       await expect(header).toHaveAttribute('aria-expanded', String(expanded));

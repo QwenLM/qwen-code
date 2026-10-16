@@ -1907,6 +1907,7 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-definition',
       'managed-checkpoint',
       'managed-file_history',
       'managed-action-options',

@@ -514,12 +514,31 @@ describe('build artifact — transcript entry (#11031)', () => {
     // Grouped deletion adds shared action rendering and bilingual copy;
     // at 6c367751 the remainder measures 1,341,055. The 1,343,000 ceiling
     // leaves 1,945 units of margin; the deletion hook stays interactive-only.
+    // File-tree mutation actions are excluded from the transcript build.
+    // At 31e02ace main measures 1,330,293; the read-only artifact hook with
+    // those actions excluded measures 1,330,497, below the same ceiling.
+    // Merging 17d5f774 measures 1,340,638, leaving 2,362 units of margin.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
     expect(js.length).toBeLessThan(1_343_000);
+  });
+
+  it('keeps workspace mutations out of the read-only transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const method of [
+      'writeWorkspaceFile',
+      'createWorkspaceDirectory',
+      'deleteWorkspaceDirectory',
+      'uploadWorkspaceFile',
+    ]) {
+      expect(packaged).toContain(method);
+      expect(transcript).not.toContain(method);
+    }
+    expect(transcript).toContain('dirList');
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {
