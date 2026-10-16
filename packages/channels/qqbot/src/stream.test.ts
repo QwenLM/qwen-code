@@ -1466,6 +1466,11 @@ describe('flush marker ownership', () => {
 });
 
 describe('seal state through the hook teardown', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+  });
+
   it("drops a dead session's stashed head with an observable log", () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
@@ -1493,11 +1498,17 @@ describe('seal state through the hook teardown', () => {
     const stash = chp['streamOrphanBuffer'] as Map<string, unknown>;
     (chp['pendingStreamDelete'] as Set<string>).add('sess-1');
     stash.set('sess-1', { turn: 0, text: 'stashed-head' });
+    (
+      chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >
+    ).set('sess-1', { msgId: 'msg-1', timestamp: Date.now() });
 
     (
       ch as unknown as { onPromptEnd: (c: string, s: string) => void }
     ).onPromptEnd('test-chat', 'sess-1');
-    await drain();
+    for (let i = 0; i < 8; i++) await drain();
 
     const contents = mockSendQQMessage.mock.calls.map(
       (c) =>
@@ -1506,6 +1517,36 @@ describe('seal state through the hook teardown', () => {
     );
     expect(contents).toContain('stashed-head');
     expect(stash.has('sess-1')).toBe(false);
+    // The argument assertion alone would pass even if the send threw: a
+    // delivered stash releases its own anchor, so the session's anchor entry
+    // must be gone. A failed delivery leaves it in place for the retry.
+    expect(
+      (chp['sessionReplyMsgId'] as Map<string, unknown>).has('sess-1'),
+    ).toBe(false);
+  });
+
+  it('drains a live stash into the first fresh entry of the same turn', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['streamOrphanBuffer'] as Map<string, unknown>).set('sess-1', {
+      turn: 0,
+      text: 'HEAD-CHUNK',
+      pre: 'PRE-',
+    });
+
+    // No streamState entry: the parked predecessor has freed the slot, so this
+    // chunk starts a fresh entry — and it must carry the stashed head and its
+    // sealed pre, or the reply head is lost with no other copy.
+    onResponseChunk(ch, 'test-chat', 'TAIL', 'sess-1');
+
+    const state = (
+      chp['streamState'] as Map<string, { buffer: string; sealedPre?: string }>
+    ).get('sess-1');
+    expect(state?.buffer).toBe('HEAD-CHUNKTAIL');
+    expect(state?.sealedPre).toBe('PRE-');
+    expect(
+      (chp['streamOrphanBuffer'] as Map<string, unknown>).has('sess-1'),
+    ).toBe(false);
   });
 
   it("prepends a live turn's stashed head on completion", async () => {
