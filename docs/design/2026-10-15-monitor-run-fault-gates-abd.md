@@ -193,8 +193,10 @@ The driver keeps its three existing arming primitives and adds:
   `resources` array carries a page envelope), the operation-name filter
   for `commitMonitorRun`, and `dropNextStopRevision` (the
   `commitChildRunRecord` whose shell record first sets `stopRequested`,
-  read from the commit's record bytes). The commit log the arms and the
-  cases read is reset per case, like every arm.
+  read from the commit's record bytes). An arm fires only on a commit the
+  store accepted: a refused commit never landed, so it relays and the arm
+  stays armed. The commit log the arms and the cases read is reset per
+  case, like every arm.
 - **Broker identity capture.** The broker proxy records the
   `harnessSessionId` / `runtimeSessionId` pair from each POST body, so
   the FG8d release driver reuses the production identity instead of

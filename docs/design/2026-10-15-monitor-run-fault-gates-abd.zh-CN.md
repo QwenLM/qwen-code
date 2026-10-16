@@ -70,7 +70,7 @@ driver 让每个 case 的 Session 同时穿过**两个**代理（broker 调用�
 driver 保留现有三个 arming 原语并新增：
 
 - **Broker lose-once 臂。** `dropNextStart` / `dropNextCancel` / `dropNextMonitorStop` 按 case 武装；broker 代理消费上游应答后 `req.socket.destroy()`（照 store 代理 lose-once commit 臂的形状）。专门的 `holdStart` 臂把请求**转发前**泊住（`cancel-before-start` 的编排），有一个与 `heldReplies` 同形的有界释放；被泊 socket 在 cancel 结算后毁掉，永不转发。
-- **Store 臂。** `dropNextPagePublish`（`resources` 数组携带 page envelope 的那条 journal commit）、`commitMonitorRun` 的操作名过滤，以及 `dropNextStopRevision`（其 shell 记录首次置 `stopRequested` 的那条 `commitChildRunRecord`，从提交的 record bytes 里读出）。各臂与各 case 读取的 commit 日志与所有臂一样按 case 重置。
+- **Store 臂。** `dropNextPagePublish`（`resources` 数组携带 page envelope 的那条 journal commit）、`commitMonitorRun` 的操作名过滤，以及 `dropNextStopRevision`（其 shell 记录首次置 `stopRequested` 的那条 `commitChildRunRecord`，从提交的 record bytes 里读出）。臂只对 store 已接受的提交生效：被拒的提交从未落库，照常转发，臂保持待命。各臂与各 case 读取的 commit 日志与所有臂一样按 case 重置。
 - **Broker 身份捕获。** broker 代理从每个 POST body 记下 `harnessSessionId` / `runtimeSessionId` 对，FG8d 的 release driver 复用生产身份而不是猜测（FG6 的 reply-loss driver 断言同一对）。
 - **Broker control 通道观测。** control 调用连同 body 的 `operation.kind` 一起记录，让 FG8d 能把「routine 臂什么都没停」断言为维护 wire 上的**缺席**，而不是时序赛跑。
 - **`brokerRequest` helper**，用于 `:release`（routine 与 drain），用捕获的身份与 `protocolVersion: 1`；应答以 `{status, code}` 回给 case 做标志位断言。
