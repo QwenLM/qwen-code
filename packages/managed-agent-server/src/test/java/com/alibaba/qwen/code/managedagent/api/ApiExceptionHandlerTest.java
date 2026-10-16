@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationStorageException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.aliyun.oss.OSSException;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpHeaders;
@@ -18,18 +18,28 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class ApiExceptionHandlerTest {
     @Test
-    void reportsOssAccessDeniedAsDefiniteRejection() {
-        OSSException denied = mock(OSSException.class);
-        when(denied.getErrorCode()).thenReturn("AccessDenied");
+    void reportsStorageAccessDeniedAsDefiniteRejectionWithoutProviderDetails() {
+        var denied = new ToolPublicationStorageException(ToolPublicationStorageException.Reason.ACCESS_DENIED,
+                new IllegalStateException("private backend diagnostics"));
         var response = new ApiExceptionHandler().objectStore(denied,
                 new MockHttpServletRequest(), new MockHttpServletResponse());
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
-        assertThat(response.getBody()).containsKey("error");
+        assertThat(errorCode(response.getBody())).isEqualTo("managed_tool_publication_storage_denied");
+        assertThat(response.getBody().toString()).doesNotContain("private backend diagnostics");
+    }
+
+    @Test
+    void storageFailuresKeepTheGenericPublicResponse() {
+        var failure = new ToolPublicationStorageException(ToolPublicationStorageException.Reason.FAILURE,
+                new IllegalStateException("private backend diagnostics"));
+        var response = new ApiExceptionHandler().objectStore(failure,
+                new MockHttpServletRequest(), new MockHttpServletResponse());
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(errorCode(response.getBody())).isEqualTo("internal_error");
+        assertThat(response.getBody().toString()).doesNotContain("private backend diagnostics");
     }
 
     @Test
