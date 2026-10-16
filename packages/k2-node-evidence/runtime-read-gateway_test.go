@@ -56,6 +56,8 @@ type gatewayMetadataFixture struct {
 var gatewayTask = registeredTask{ArmID: "owned-arm", Namespace: "owned-evidence", PodName: "worker", PodUID: "original-uid", ImageDigest: strings.Repeat("c", 64)}
 var gatewayCID, gatewaySID = strings.Repeat("a", 64), strings.Repeat("b", 64)
 
+const gatewayOCISpec = `{"ociVersion":"1.2.0","process":{"apparmorProfile":"qwen-k2-worker-v1","noNewPrivileges":true,"user":{"uid":1000,"gid":1000,"additionalGids":[1000]},"args":["/usr/local/bin/node","/opt/qwen-k2/worker.mjs"]},"root":{"path":"rootfs","readonly":true},"linux":{}}`
+
 func (w *gatewayMetadataFixture) Get(ctx context.Context, request *containers.GetContainerRequest, _ ...grpc.CallOption) (*containers.GetContainerResponse, error) {
 	f := w.fixture
 	f.request(ctx)
@@ -200,7 +202,7 @@ func newGatewayFixture(t *testing.T) (*runtimeReadGateway, *gatewayFixture, cont
 	f := &gatewayFixture{t: t, state: tasktypes.Status_CREATED, criState: cri.ContainerState_CONTAINER_CREATED, pid: 12345, image: "sha256:" + gatewayTask.ImageDigest, stamp: stamp, finishedAt: stamp.AsTime().UnixNano(), exited: make(chan struct{}), started: make(chan struct{}), waitDone: make(chan struct{})}
 	f.metadata = &containers.Container{ID: gatewayCID, Image: "opaque-original-image", Snapshotter: "overlayfs", SnapshotKey: gatewayCID,
 		Runtime: &containers.Container_Runtime{Name: "io.containerd.runc.v2", Options: &anypb.Any{TypeUrl: "synthetic-runtime-options", Value: []byte{1}}},
-		Spec:    &anypb.Any{TypeUrl: "types.containerd.io/opencontainers/runtime-spec/1/Spec", Value: []byte(`{"synthetic":"current-metadata-only"}`)}, CreatedAt: stamp,
+		Spec:    &anypb.Any{TypeUrl: "types.containerd.io/opencontainers/runtime-spec/1/Spec", Value: []byte(gatewayOCISpec)}, CreatedAt: stamp,
 		Labels: map[string]string{"io.kubernetes.pod.uid": gatewayTask.PodUID, "io.kubernetes.pod.namespace": gatewayTask.Namespace,
 			"io.kubernetes.pod.name": gatewayTask.PodName, "io.kubernetes.container.name": "runtime", "io.cri-containerd.kind": "container"}}
 	g := &runtimeReadGateway{tasks: &gatewayTaskFixture{fixture: f}, containers: &gatewayMetadataFixture{fixture: f}, cri: &gatewayCriFixture{fixture: f}, lifetime: ctx}
@@ -284,7 +286,9 @@ func TestGatewayRefusesInvalidContainerMetadataBeforeEstablishingWait(t *testing
 
 func TestGatewayPinsAllCurrentContainerInputsAndRefusesRepair(t *testing.T) {
 	for name, mutate := range map[string]func(*containers.Container){
-		"spec":            func(c *containers.Container) { c.Spec.Value = []byte(`{"changed":true}`) },
+		"spec": func(c *containers.Container) {
+			c.Spec.Value = []byte(strings.Replace(gatewayOCISpec, `"rootfs"`, `"changed-rootfs"`, 1))
+		},
 		"runtime-options": func(c *containers.Container) { c.Runtime.Options.Value = []byte{2} },
 		"image":           func(c *containers.Container) { c.Image = "other-image" },
 		"snapshotter":     func(c *containers.Container) { c.Snapshotter = "other" },
@@ -311,6 +315,71 @@ func TestGatewayPinsAllCurrentContainerInputsAndRefusesRepair(t *testing.T) {
 			f.mu.Unlock()
 			if _, err := g.observe(context.Background(), gatewayTask.ArmID); err == nil || g.originals[gatewayTask.ArmID].metadataSHA256 != pin {
 				t.Fatal("repaired a blocked original or replaced its input pin")
+			}
+		})
+	}
+}
+
+func TestGatewayRefusesInvalidOCIIntentBeforePinOrWaitAndCannotRepair(t *testing.T) {
+	faults := map[string]string{
+		"null":              "null",
+		"array":             "[]",
+		"opaque":            `{"synthetic":"current-metadata-only"}`,
+		"null-process":      `{"process":null}`,
+		"array-process":     `{"process":[]}`,
+		"duplicate-process": gatewayOCISpec[:len(gatewayOCISpec)-1] + `,"process":{}}`,
+		"duplicate-profile": strings.Replace(gatewayOCISpec, `"apparmorProfile":`, `"apparmorProfile":"unconfined","apparmorProfile":`, 1),
+		"duplicate-user":    strings.Replace(gatewayOCISpec, `"user":`, `"user":{},"user":`, 1),
+		"duplicate-uid":     strings.Replace(gatewayOCISpec, `"uid":1000`, `"uid":0,"u\u0069d":1000`, 1),
+		"alias-process":     strings.Replace(gatewayOCISpec, `"process":`, `"PROCESS":{},"process":`, 1),
+		"alias-profile":     strings.Replace(gatewayOCISpec, `"apparmorProfile":`, `"ApparmorProfile":"unconfined","apparmorProfile":`, 1),
+		"alias-privileges":  strings.Replace(gatewayOCISpec, `"noNewPrivileges":`, `"NoNewPrivileges":false,"noNewPrivileges":`, 1),
+		"alias-user":        strings.Replace(gatewayOCISpec, `"user":`, `"User":{},"user":`, 1),
+		"alias-uid":         strings.Replace(gatewayOCISpec, `"uid":1000`, `"UID":0,"uid":1000`, 1),
+		"alias-gid":         strings.Replace(gatewayOCISpec, `"gid":1000`, `"Gid":0,"gid":1000`, 1),
+		"trailing-document": gatewayOCISpec + `{}`,
+		"invalid-utf8":      strings.Replace(gatewayOCISpec, `"rootfs"`, "\"root\xfffs\"", 1),
+		"oversized":         strings.Repeat(" ", 1<<20) + gatewayOCISpec,
+	}
+	for _, pair := range []struct{ from, to string }{
+		{`"apparmorProfile":"qwen-k2-worker-v1"`, `"apparmorProfile":null`},
+		{`"apparmorProfile":"qwen-k2-worker-v1"`, `"apparmorProfile":"unconfined"`},
+		{`"apparmorProfile":"qwen-k2-worker-v1"`, `"ApparmorProfile":"qwen-k2-worker-v1"`},
+		{`"apparmorProfile":"qwen-k2-worker-v1"`, `"apparmorProfile":true`},
+		{`"noNewPrivileges":true`, `"noNewPrivileges":false`},
+		{`"noNewPrivileges":true`, `"noNewPrivileges":"true"`},
+		{`"noNewPrivileges":true`, `"noNewPrivileges":null`},
+		{`"noNewPrivileges":true`, `"NoNewPrivileges":true`},
+		{`"user":{"uid":1000,"gid":1000,"additionalGids":[1000]}`, `"user":null`},
+		{`"user":{"uid":1000,"gid":1000,"additionalGids":[1000]}`, `"user":[]`},
+		{`"uid":1000`, `"uid":0`},
+		{`"uid":1000`, `"uid":null`},
+		{`"uid":1000`, `"uid":"1000"`},
+		{`"uid":1000`, `"uid":1000.0`},
+		{`"uid":1000`, `"uid":1e3`},
+		{`"uid":1000`, `"uid":4294967296`},
+		{`"gid":1000`, `"gid":0`},
+		{`"gid":1000`, `"gid":-1`},
+		{`"gid":1000`, `"gid":null`},
+		{`"gid":1000`, `"gid":"1000"`},
+		{`"gid":1000`, `"gid":1000.0`},
+	} {
+		faults[pair.to] = strings.Replace(gatewayOCISpec, pair.from, pair.to, 1)
+	}
+	for name, raw := range faults {
+		t.Run(name, func(t *testing.T) {
+			g, f, _ := newGatewayFixture(t)
+			f.metadata.Spec.Value = []byte(raw)
+			if _, err := g.observe(context.Background(), gatewayTask.ArmID); err == nil {
+				t.Fatal("accepted invalid original OCI process intent")
+			}
+			original := g.originals[gatewayTask.ArmID]
+			if !original.blocked || original.metadataSHA256 != "" || original.wait != nil || f.waitCalls != 0 {
+				t.Fatal("invalid OCI intent established an original pin or wait")
+			}
+			f.metadata.Spec.Value = []byte(gatewayOCISpec)
+			if _, err := g.observe(context.Background(), gatewayTask.ArmID); err == nil {
+				t.Fatal("repaired an original blocked by invalid OCI intent")
 			}
 		})
 	}

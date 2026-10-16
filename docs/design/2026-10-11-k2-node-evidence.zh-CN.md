@@ -103,6 +103,10 @@ Parent 包含原 sandbox 和全部 descendant，只有 worker 退出不足以使
 
 ## 当前进程 credentials 检查
 
+当前 metadata consumer 还在固定 metadata 或启动 Wait 前检查四项 OCI process 安全意图：`apparmorProfile` 必须精确等于 `qwen-k2-worker-v1`，`noNewPrivileges` 必须为 JSON boolean true，`user.uid`/`user.gid` 必须为 JSON 整数 1000。有界 Spec 必须为有效 UTF-8、单一完整 JSON object，process/user 必须为 object，任何位置的重复字段均拒绝。缺失、null、大小写别名、错误类型或冲突值均拒绝。其它 OCI 字段仍作为不透明输入进入完整 metadata digest，不引入通用 OCI policy 解释器。首次拒绝在建立 metadata pin 和 lifetime Wait 前永久阻断原对象；后续拒绝保留原固定值并沿用 gateway/source blocked 路径。不输出或记录 raw Spec。
+
+这项窄 intent gate 当前只有源码和编译检查；新增行为夹具与原生 source 验收尚未执行。它不增加 journal 字段、资格、release 权限或公开入口。下述真实 running-process 检查仍须保留。当前 OCI 声明不能证明原 runtime 在首次执行前实际消费了哪些输入，也不授予出生 confinement 或 ACK 安装资格。
+
 Gateway 现在还在同一已固定 runtime connection、固定 `k8s.io` 中调用真实 typed `Containers.Get`，仅查询为已登记 original 发现的 CID。在建立 lifetime Wait 前，核匹配的 Pod/container/kind labels、runtime name、OCI Spec type、image/snapshot 身份及有界完整 metadata object。只保存 deterministic protobuf bytes 的 SHA-256，排除可变 bookkeeping `UpdatedAt`；Spec、runtime options、extensions、labels、creation timestamp 及其余所有字段保持固定。后续每次 original observation 复核该 digest。缺失、变化或畸形身份、超限 metadata 及任何 RPC error 永久 block 原对象。只有已建立的 native Wait 得到同一完整 terminal tuple，且此前存在 metadata pin 时，才接受 metadata NotFound。不返回或记录 raw metadata、Env、Args。
 
 这仍是当前 metadata observation，包括首次看到原 CREATED task 时，不能识别原 runc input object，也不能证明此前未发生 mutation。Birth 资格仍需要完整 consumed-input producer，以及 retained running namespace/root 检查。Common protocol tests 与 Linux cross build 覆盖新增读取；实际 generated-client 和原目标兼容性是单独验收边界。Gateway 仍不暴露通用 containerd relay 或 task mutation method。

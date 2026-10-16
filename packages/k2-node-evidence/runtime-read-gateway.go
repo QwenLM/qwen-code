@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	containers "github.com/containerd/containerd/api/services/containers/v1"
 	tasks "github.com/containerd/containerd/api/services/tasks/v1"
@@ -172,6 +174,9 @@ func (g *runtimeReadGateway) verifyMetadata(ctx context.Context, original *gatew
 		c.Labels["io.cri-containerd.kind"] != "container" || proto.Size(c) > 1<<20 {
 		return errors.New("original container metadata identity differs")
 	}
+	if err := validateWorkerOCIIntent(c.Spec.Value); err != nil {
+		return err
+	}
 	current := proto.Clone(c).(*containers.Container)
 	// UpdatedAt is mutable bookkeeping; every input and identity byte stays pinned.
 	current.UpdatedAt = nil
@@ -181,6 +186,35 @@ func (g *runtimeReadGateway) verifyMetadata(ctx context.Context, original *gatew
 	}
 	if original.metadataSHA256 == "" {
 		original.metadataSHA256 = digest(raw)
+	}
+	return nil
+}
+
+func validateWorkerOCIIntent(raw []byte) error {
+	var spec, process, user map[string]json.RawMessage
+	if !utf8.Valid(raw) || decodeClosed(bytes.NewReader(raw), &spec) != nil || spec == nil ||
+		decodeClosed(bytes.NewReader(spec["process"]), &process) != nil || process == nil ||
+		decodeClosed(bytes.NewReader(process["user"]), &user) != nil || user == nil {
+		return errors.New("original OCI process intent is unavailable")
+	}
+	fields := [][]string{{"process"}, {"apparmorProfile", "noNewPrivileges", "user"}, {"uid", "gid"}}
+	for index, object := range []map[string]json.RawMessage{spec, process, user} {
+		for name := range object {
+			for _, canonical := range fields[index] {
+				if name != canonical && strings.EqualFold(name, canonical) {
+					return errors.New("original OCI process intent field differs")
+				}
+			}
+		}
+	}
+	var profile string
+	var noNewPrivileges bool
+	var uid, gid uint32
+	if json.Unmarshal(process["apparmorProfile"], &profile) != nil || profile != workerProfile ||
+		json.Unmarshal(process["noNewPrivileges"], &noNewPrivileges) != nil || !noNewPrivileges ||
+		json.Unmarshal(user["uid"], &uid) != nil || uid != 1000 ||
+		json.Unmarshal(user["gid"], &gid) != nil || gid != 1000 {
+		return errors.New("original OCI process intent differs")
 	}
 	return nil
 }
