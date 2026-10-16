@@ -1206,6 +1206,23 @@ mvn -Pmysql-integration \
 Use a disposable database: the integration test creates and deletes fixture
 rows within the selected schema.
 
+## Linux extension process acceptance
+
+`HostedExtensionsIT` is collected by the existing `hosted-harness-mysql` profile. It uses the public AgentDefinition and Session APIs, real MySQL, the packaged Harness and durable native worker, a stdio MCP process, and command Hooks in a delegated cgroup v2 subtree. It verifies static Skill bytes, extension revision pinning across Harness replacement, Hook allow/deny, cancellation of a Hook and its descendant, safe continuation, and physical close. A separate MCP fault case writes and fsyncs an effect before disconnecting, then verifies that a replacement Harness refuses recovery without replaying the effect or reporting successful close.
+
+After building the root packages and bundle and installing the current Java SDK, run this focused slice from `packages/managed-agent-server` on Linux with JDK 21, Node 22+, disposable MySQL 8.4, and Maven already inside the delegated cgroup ancestor:
+
+```bash
+QWEN_MANAGED_HOOK_CGROUP_ROOT=/sys/fs/cgroup/your-delegated-root \
+  mvn -Phosted-harness-mysql -Dit.test=HostedExtensionsIT \
+  -Dnode.executable=/absolute/path/to/node \
+  -Dqwen.cli.entry="$PWD/../../dist/cli.js" \
+  -Dmysql.url='jdbc:mysql://127.0.0.1:3306/managed_agent_test' \
+  -Dmysql.user=root -Dmysql.password= verify
+```
+
+Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING`, its ordinary execution `UNKNOWN`, and rejects new input and close with `409 turn_active`; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
+
 ## Real-model end-to-end check
 
 The full-chain script starts Spring with its embedded Runtime Broker and runs
