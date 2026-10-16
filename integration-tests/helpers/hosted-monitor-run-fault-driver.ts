@@ -675,46 +675,58 @@ const storeProxy = createServer(async (req, res) => {
       signal: AbortSignal.timeout(120_000),
     });
     const bytes = Buffer.from(await upstream.arrayBuffer());
-    const isPublish =
-      req.method === 'POST' && url.pathname.endsWith('/tool-results:publish');
     const isCommit =
       req.method === 'POST' &&
       (/:commit(?:-v2)?$/.test(url.pathname) ||
         url.pathname.endsWith('/receipts/commit'));
-    // FG8a's capture-commit arm: the page envelope committed; its reply is
-    // what gets destroyed — the same lose-after-commit shape as dropNextCommit.
-    if (
-      isPublish &&
-      dropNextPagePublish &&
-      parsed?.['kind'] === 'managed-tool-result-page'
-    ) {
-      dropNextPagePublish = false;
-      droppedPagePublishes++;
-      commitLog.push({
-        op: String(parsed?.['operation'] ?? parsed?.['kind']),
-        kind: String(parsed?.['kind']),
-        status: 'dropped',
-      });
-      console.log('FG8_DROPPED page publish');
-      req.socket.destroy();
-      return;
-    }
+    // Content segments are the only resource kind with its own POST
+    // (`/tool-results:publish`); pages and manifests are staged locally
+    // and ride fused inside journal commits in their `resources` array
+    // (http-managed-session-store.ts commitResources → commitBody).
     const commitOp = String(parsed?.['operation']);
+    const resources = parsed?.['resources'];
+    const carriesPageEnvelope =
+      Array.isArray(resources) &&
+      resources.some(
+        (resource) =>
+          typeof resource === 'object' &&
+          resource !== null &&
+          (resource as Record<string, unknown>)['kind'] ===
+            'managed-tool-result-page',
+      );
     // dropNextCommit drops the next journal commit of any op (FG8f). The
     // op-filtered Set arms FG8a (a monitor observation's advance) and FG8d
     // (a cancel's commit), each keyed to fire on the named operation only.
-    if (isCommit && (dropNextCommit || dropCommitOps.has(commitOp))) {
+    // FG8a's capture-commit arm drops the first journal commit carrying a
+    // page envelope — the capture-page commit whose reply is the loss.
+    if (
+      isCommit &&
+      (dropNextCommit ||
+        dropCommitOps.has(commitOp) ||
+        (dropNextPagePublish && carriesPageEnvelope))
+    ) {
+      const pageEnvelopeFell = dropNextPagePublish && carriesPageEnvelope;
       dropNextCommit = false;
       dropCommitOps.delete(commitOp);
-      droppedCommits++;
-      droppedOps++;
+      if (pageEnvelopeFell) {
+        dropNextPagePublish = false;
+        droppedPagePublishes++;
+      } else {
+        droppedCommits++;
+        droppedOps++;
+      }
       // The commit landed; the reply never does. A socket destroy is the
       // loss — no HTTP status the harness could mistake for a refusal.
       commitLog.push({
         op: commitOp,
+        ...(pageEnvelopeFell ? { kind: 'managed-tool-result-page' } : {}),
         status: 'dropped',
       });
-      console.log(`FG8_DROPPED commit ${commitOp}`);
+      console.log(
+        pageEnvelopeFell
+          ? `FG8_DROPPED page-envelope commit ${commitOp}`
+          : `FG8_DROPPED commit ${commitOp}`,
+      );
       req.socket.destroy();
       return;
     }
@@ -1078,17 +1090,40 @@ async function inFlightCap() {
   step(
     `stalled at ${stallBlocks} blocks with ${heldSegments} segment commits held`,
   );
-  releaseHeldSegments();
-  // The resume watermark re-arms: the producer advances again while the
-  // drain is still short of the full output.
+  // A free-running drain outraces the resume probe on a fast lane — two
+  // runs measured committedAtResume at 16 and 18 against a 16-block
+  // stall, where one probe window covers the whole drain. Release the
+  // held commits one at a time at driver pace instead: the resume beat
+  // then leaves several segments uncommitted while the 4 MiB watermark
+  // is honest, and strictly none when production regressed to
+  // resume-at-empty.
+  const drainCadence = (async () => {
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      const release = heldReplies.shift();
+      if (release === undefined) {
+        if (!holdSegments) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        continue;
+      }
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  })();
   let committedAtResume = -1;
-  await waitUntil(async () => {
-    checkStoreProxy();
-    if (progressLines() <= stallBlocks) return false;
-    const state = await probe<ProbeState>(current.sessionId, 'state');
-    committedAtResume = fullSegments(state).length;
-    return true;
-  }, 30_000);
+  try {
+    await waitUntil(async () => {
+      checkStoreProxy();
+      if (progressLines() <= stallBlocks) return false;
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      committedAtResume = fullSegments(state).length;
+      return true;
+    }, 60_000);
+  } finally {
+    holdSegments = false;
+    releaseHeldSegments();
+    await drainCadence;
+  }
   await releaseFifo(current.directory, 'run-gate');
   await waitUntil(async () => {
     checkProxy();
@@ -1267,9 +1302,10 @@ async function runReplyLossCase() {
       await waitUntil(() => droppedOps >= 1, 120_000);
       step('observation advance reply dropped once');
     } else if (name === 'capture-commit-reply') {
-      // Pages flush at SEGMENTS_PER_PAGE (512) — the fixture's 24
-      // blocks only reach the store at finish, after the gate opens.
-      // Withhold the witness until the finish-time first page publish
+      // The page envelope has no POST of its own: staged locally, it
+      // joins the settle cascade's first journal commit (`resources`
+      // array), which exists only once the fixture's 24 blocks have
+      // flushed at finish. Withhold the witness until that commit exists
       // instead of deadlocking on it before the release.
       await waitUntil(() => {
         checkStoreProxy();
@@ -1278,7 +1314,7 @@ async function runReplyLossCase() {
       await releaseFifo(current.directory, 'run-gate');
       step('gate released');
       await waitUntil(() => droppedPagePublishes >= 1, 180_000);
-      step('page publish reply dropped once');
+      step('page-envelope commit reply dropped once');
     }
     await waitUntil(async () => {
       checkProxy();
@@ -1357,11 +1393,9 @@ async function runStoreFailureCase() {
       await new Promise((resolve) => setTimeout(resolve, 10_000));
     } else {
       // manifest/page-envelope-commit: the trigger keeps refusing the
-      // target commit kind for the rest of the case, but refusal only
-      // poisons the capture — it never stops the run. Released from the
-      // gate the producer exits 0 and the record settles exited with the
-      // envelope degraded (capture unavailable), so the settle below is
-      // the natural one, not a drain.
+      // target commit kind for the rest of the case. What the refusal
+      // does to the run differs by kind — the two branches below own
+      // each issue cell.
       await waitUntil(async () => {
         checkProxy();
         checkStoreProxy();
@@ -1380,6 +1414,41 @@ async function runStoreFailureCase() {
       }, 180_000);
       await releaseFifo(current.directory, 'run-gate');
       step('gate released');
+      if (name === 'manifest-commit') {
+        // The refused manifest commit is the settle transaction's own
+        // head: the fused settle commit rolls back whole, so the run
+        // never settles — the issue's "blocks the run" cell made
+        // literal. The witness is the refused settle commit itself; the
+        // stable window after it is what makes "never settles"
+        // observable without hanging the fork (run 38868090681: three
+        // commitChildRunRecord 500s, then silence, then a drain release
+        // that changed nothing).
+        await waitUntil(() => {
+          checkStoreProxy();
+          return commitLog.some(
+            (entry) =>
+              entry.op === 'commitChildRunRecord' && entry.status === 500,
+          );
+        }, 180_000);
+        step('the settle commit was refused');
+        await new Promise((resolve) => setTimeout(resolve, 10_000));
+        step('still blocked after the stable window');
+        const state = await probe<ProbeState>(current.sessionId, 'state');
+        return {
+          case: name,
+          recovered: false,
+          bgStarted: bgStartedFile(),
+          brokerStartAttempts,
+          brokerStartFailures,
+          operations: [...operations],
+          committedSegments: fullSegments(state).length,
+          record: childRunOf(state),
+        };
+      }
+      // page-envelope-commit: the refusal poisons the capture, never the
+      // run — the producer exits 0 and the record settles exited with
+      // the envelope degraded (capture unavailable), so the settle below
+      // is the natural one, not a drain.
       let settled = true;
       try {
         await waitUntil(async () => {
@@ -1525,7 +1594,22 @@ async function runCancelDrainCase() {
         step('maintenance route held');
         // Positive hold witness: at least one maintenance/status request
         // must actually be parked in the proxy, otherwise the held arm
-        // was never armed and the outage is fiction.
+        // was never armed and the outage is fiction. A quiet Harness
+        // issues no status calls of its own on this lane — the witness
+        // the driver must produce itself, as one genuine tool-session
+        // status read through the same proxy: it parks only if the arm
+        // truly swallows the call.
+        const captiveStatus = fetch(
+          new URL(
+            '/internal/runtime-broker/v1/tool-sessions/' +
+              `${encodeURIComponent(brokerIdentity.runtimeSessionId!)}:status`,
+            proxyUrl,
+          ),
+          {
+            headers: { Authorization: 'Bearer hosted-tools-broker-token' },
+            signal: AbortSignal.timeout(120_000),
+          },
+        ).catch(() => undefined);
         await waitUntil(() => heldControlReplies.length >= 1, 60_000);
         step('a status request is really held');
         const unFabricated = childRunOf(
@@ -1539,6 +1623,8 @@ async function runCancelDrainCase() {
         assert.equal(outletDrain.status, 200, JSON.stringify(outletDrain.body));
         releaseBrokerControls();
         step('maintenance route restored');
+        await captiveStatus;
+        step('the captive status returned after the restore');
       } else if (name === 'cancel-reply-lost') {
         await waitUntil(async () => {
           checkStoreProxy();

@@ -600,38 +600,58 @@ class HostedMonitorRunFaultGatesIT {
             assertProcessRows(jdbc, sessionId, name, 0);
             return;
         }
-        // A publication commit that the store refused stops nothing: the
-        // process exits with zero, the envelope degrades to
-        // captureStatus unavailable, and the record settles from real
-        // exit evidence — never cancelled, never re-executed.
+        // What a refused publication commit does to the run depends on
+        // which commit the arm targets. A refused OUTPUT MANIFEST commit
+        // is the settle transaction's own head — the fused settle commit
+        // rolls back whole, so the run stays blocked open with the
+        // process long gone and its exit evidence unjournaled (the
+        // issue's "blocks the run" cell, measured on lane run
+        // 38868090681: three refused settle commits, then silence —
+        // including through a drain release). A refused page-envelope
+        // commit poisons the capture alone: the record settles from real
+        // exit evidence with the envelope degraded — never cancelled,
+        // never re-executed.
         assertProcessRows(jdbc, sessionId, name, 1);
-        assertThat(report.path("recovered").asBoolean())
-                .as(name + ": the producer exited naturally").isTrue();
         JsonNode record = extensionRecord(jdbc, tenant, sessionId,
                 "child_run");
-        assertThat(record.path("run").path("state").asText())
-                .as(name + ": settles from real exit evidence")
-                .isEqualTo("settled");
-        assertThat(record.path("stopReason").asText())
-                .isEqualTo("exited");
-        assertThat(record.path("exitCode").asInt()).isZero();
-        assertThat(record.path("stopRequested").asBoolean(false))
-                .as(name + ": nothing ever asked it to stop").isFalse();
         if (name.equals("manifest-commit")) {
+            assertThat(report.path("recovered").asBoolean())
+                    .as(name + ": a refused settle commit never recovers")
+                    .isFalse();
+            assertThat(record.path("run").path("state").asText())
+                    .as(name + ": the blocked commit keeps the run open")
+                    .isEqualTo("running");
+            assertThat(record.path("stopReason").isNull())
+                    .as(name + ": no stop proof was ever journaled")
+                    .isTrue();
+            assertThat(record.path("stopRequested").asBoolean(false))
+                    .as(name + ": nothing ever asked it to stop")
+                    .isFalse();
             // The finalize manifest (executionStatus 'success') is the
             // arm's target and never persisted; the initial empty
             // manifest is what keeps the read chain honest.
-            var settled = jdbc.queryForObject(
+            var settleManifests = jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
                             + " AND session_id = ? AND kind ="
                             + " 'managed-tool-result-manifest' AND"
                             + " CONVERT(inline_bytes USING utf8mb4) LIKE"
                             + " '%\"executionStatus\":\"success\"%'",
                     Integer.class, tenant, sessionId);
-            assertThat(settled).as(name
+            assertThat(settleManifests).as(name
                     + ": the settle-manifest commit was rejected")
                     .isZero();
         } else {
+            assertThat(report.path("recovered").asBoolean())
+                    .as(name + ": the producer exited naturally").isTrue();
+            assertThat(record.path("run").path("state").asText())
+                    .as(name + ": settles from real exit evidence")
+                    .isEqualTo("settled");
+            assertThat(record.path("stopReason").asText())
+                    .isEqualTo("exited");
+            assertThat(record.path("exitCode").asInt()).isZero();
+            assertThat(record.path("stopRequested").asBoolean(false))
+                    .as(name + ": nothing ever asked it to stop")
+                    .isFalse();
             assertThat(jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
                             + " AND session_id = ? AND kind ="
