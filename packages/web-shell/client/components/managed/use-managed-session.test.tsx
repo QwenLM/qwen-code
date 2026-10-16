@@ -54,12 +54,15 @@ describe('useManagedSession', () => {
     return null;
   }
 
-  it('does not resurrect an older model selection or its cleared occupancy from a delayed summary', async () => {
+  it('does not resurrect older model or approval selections from a delayed summary', async () => {
     const getSession = vi
       .fn()
       .mockResolvedValueOnce({
         sessionId: 'session-1',
         modelSelection: { modelId: 'A', revision: 1 },
+        approvalMode: 'default',
+        initialApprovalMode: 'default',
+        approvalRevision: 0,
         modelContext: {
           modelId: 'A',
           inputTokens: 200,
@@ -70,10 +73,15 @@ describe('useManagedSession', () => {
       .mockResolvedValueOnce({
         sessionId: 'session-1',
         modelSelection: { modelId: 'A', revision: 3 },
+        approvalMode: 'yolo',
+        initialApprovalMode: 'default',
+        approvalRevision: 2,
       })
       .mockResolvedValue({
         sessionId: 'session-1',
         modelSelection: { modelId: 'A', revision: 1 },
+        approvalMode: 'default',
+        approvalRevision: 0,
         modelContext: {
           modelId: 'A',
           inputTokens: 200,
@@ -103,6 +111,11 @@ describe('useManagedSession', () => {
       revision: 3,
     });
     expect(latest!.summary?.modelContext).toBeUndefined();
+    expect(latest!.summary).toMatchObject({
+      approvalMode: 'yolo',
+      initialApprovalMode: 'default',
+      approvalRevision: 2,
+    });
     await act(async () => {
       await latest!.refreshSummary();
     });
@@ -111,6 +124,11 @@ describe('useManagedSession', () => {
       revision: 3,
     });
     expect(latest!.summary?.modelContext).toBeUndefined();
+    expect(latest!.summary).toMatchObject({
+      approvalMode: 'yolo',
+      initialApprovalMode: 'default',
+      approvalRevision: 2,
+    });
   });
 
   function deterministicBackoff(): () => void {
