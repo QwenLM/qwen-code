@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
@@ -45,6 +46,48 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class ToolPublicationLockOrderMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    @ParameterizedTest
+    @CsvSource({"reserve,false", "reserve,true", "renew,false", "renew,true"})
+    void publicationSeesJournalCommittedAfterPlacementDiscovery(String operation, boolean headAuthorization) throws Exception {
+        String url = System.getProperty("mysql.url");
+        if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
+            throw new IllegalArgumentException("A MySQL test database URL is required");
+        }
+        String user = System.getProperty("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        var admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        String schema = "publication_snapshot_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + schema);
+        try {
+            var source = new OwnerPauseDataSource(new DriverManagerDataSource(
+                    url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
+            Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+            var journal = PublicationJournalFixture.create(source, headAuthorization);
+            if ("renew".equals(operation)) {
+                journal.reserve();
+            }
+            try (var writer = Executors.newSingleThreadExecutor()) {
+                source.afterSnapshot = () -> {
+                    try {
+                        writer.submit(() -> journal.append("renewActivation", journal.event(journal.sequence + 1,
+                                "activation.changed", PublicationJournalFixture.activation("active")) + COMMIT_MARKER,
+                                1, List.of(), null)).get(30, TimeUnit.SECONDS);
+                    } catch (Exception failure) {
+                        throw new AssertionError("Concurrent activation renewal failed", failure);
+                    }
+                };
+                JsonNode granted = journal.store.apply(journal.request(operation), WRITER_TOKEN, PUBLICATION_TOKEN);
+                assertThat(source.snapshotRead).isTrue();
+                assertThat(granted.path("state").asText()).isEqualTo("OPEN");
+                assertThat(journal.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head"
+                        + " WHERE tenant_id = 'tenant-1' AND harness_session_id = 'session-1'", Long.class))
+                        .isEqualTo(journal.revision);
+            }
+        } finally {
+            admin.execute("DROP DATABASE " + schema);
+        }
+    }
 
     /**
      * A placement owner pauses after the tenant placement guard. Each publication path must wait for
@@ -206,8 +249,10 @@ class ToolPublicationLockOrderMySqlIT {
         private final CountDownLatch ownerPlacement = new CountDownLatch(1);
         private final CountDownLatch releaseOwner = new CountDownLatch(1);
         private final AtomicBoolean paused = new AtomicBoolean();
+        private final AtomicBoolean snapshotRead = new AtomicBoolean();
         private final AtomicReference<List<String>> subjectPlacementLocks = new AtomicReference<>();
         private volatile boolean enabled;
+        private volatile Runnable afterSnapshot;
 
         private OwnerPauseDataSource(DataSource source) {
             super(source);
@@ -247,6 +292,11 @@ class ToolPublicationLockOrderMySqlIT {
                                                 }
                                             }
                                             Object value = call.invoke(statement, values);
+                                            if (afterSnapshot != null && call.getName().startsWith("execute")
+                                                    && sql.contains(" FROM ma_output_capture WHERE scope_key = ?")
+                                                    && !sql.contains("FOR UPDATE") && snapshotRead.compareAndSet(false, true)) {
+                                                afterSnapshot.run();
+                                            }
                                             if (enabled && call.getName().startsWith("execute")
                                                     && "owner".equals(Thread.currentThread().getName())
                                                     && sql.startsWith("SELECT tenant_id FROM ma_tenant_guard") && sql.contains("'runtime_placement'")
