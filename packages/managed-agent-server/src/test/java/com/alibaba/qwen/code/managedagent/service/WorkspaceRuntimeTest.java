@@ -367,6 +367,7 @@ class WorkspaceRuntimeTest {
                 fenced.withRecoveryEvidence(originalLoss, stop, Instant.now()))).isNotNull();
         RuntimeProvisioner local = mock(RuntimeProvisioner.class);
         when(local.kind()).thenReturn("local-process");
+        when(local.supportsKind("local-process")).thenReturn(true);
         when(local.supportsStartupRecovery(any())).thenReturn(true);
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?",
                 session.tenantId());
