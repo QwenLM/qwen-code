@@ -22,8 +22,11 @@ public final class ManagedSchema {
     public static final String WORKSPACE_CREATION = "/db/managed-schema/V4__workspace_creation.sql";
     public static final String MODEL_SELECTION = "/db/managed-schema/V5__session_model_selection.sql";
     public static final String APPROVAL_SELECTION = "/db/managed-schema/V6__session_approval_selection.sql";
+    public static final String TURN_COMMAND_OPERATIONS =
+            "/db/managed-schema/V7__turn_command_operations.sql";
     // Additive migrations over the published V1 baseline, in version order.
-    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION, APPROVAL_SELECTION);
+    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION, APPROVAL_SELECTION,
+            TURN_COMMAND_OPERATIONS);
     private static final int CURRENT = EXTENSIONS.size() + 1;
 
     private ManagedSchema() {}
@@ -88,16 +91,21 @@ public final class ManagedSchema {
     }
 
     private static String extend(String ddl, String extension) {
-        var namespace = Pattern.compile("ALTER TABLE ma_request_receipt ADD (CONSTRAINT"
-                + " ck_ma_request_namespace CHECK[^;]+);").matcher(extension);
-        if (namespace.find()) {
-            var previous = Pattern.compile("CONSTRAINT ck_ma_request_namespace CHECK[^\\n]+")
+        // A dropped and re-added CHECK replaces the baseline's declaration in place.
+        var replaced = Pattern.compile("ALTER TABLE (ma_[a-z_]+) DROP CONSTRAINT ([a-z_]+);")
+                .matcher(extension);
+        while (replaced.find()) {
+            var added = Pattern.compile("ALTER TABLE " + replaced.group(1) + " ADD (CONSTRAINT "
+                    + replaced.group(2) + " CHECK[^;]+);").matcher(extension);
+            var previous = Pattern.compile("CONSTRAINT " + replaced.group(2) + " CHECK[^\\n]+")
                     .matcher(ddl);
-            if (!previous.find()) {
-                throw new IllegalStateException("Receipt namespace constraint is absent from the baseline");
+            if (!added.find() || !previous.find()) {
+                throw new IllegalStateException(
+                        "Replaced constraint is absent from the baseline or the migration");
             }
-            ddl = previous.replaceFirst(java.util.regex.Matcher.quoteReplacement(namespace.group(1) + ","));
-            extension = extension.replace(namespace.group(), "");
+            ddl = ddl.substring(0, previous.start()) + added.group(1)
+                    + (previous.group().endsWith(",") ? "," : "") + ddl.substring(previous.end());
+            extension = extension.replace(added.group(), "");
         }
         var columns =
                 Pattern.compile("ALTER TABLE (ma_[a-z_]+) ADD (?:COLUMN )?([^;]+);").matcher(extension);

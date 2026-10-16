@@ -91,6 +91,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -820,6 +821,19 @@ class ManagedAgentApiContractTest {
         assertThat(cancelling.get("input_item_id").asText())
                 .isEqualTo("item_" + turnId + "_input");
         settleCancelledTurn(tenant, cancelledId, cancels);
+        // D7-1: the input and its cancel each read back as their own
+        // command operation, settled from the Turn the Harness cancelled.
+        for (String kind : List.of("SUBMIT_INPUT", "CANCEL")) {
+            JsonNode command = json(exchange(drift, "getSessionCwdOperation",
+                    200, get("/v1/agents/sessions/{id}/operations/{op}",
+                            cancelledId, turnCommandOperation(cancelledId,
+                                    kind)).header(TENANT, tenant), null));
+            assertThat(command.get("type").asText())
+                    .isEqualTo(kind.toLowerCase(Locale.ROOT));
+            assertThat(command.get("status").asText()).isEqualTo("completed");
+            assertThat(command.get("admission_stage").asText())
+                    .isEqualTo("harness_confirmed");
+        }
 
         String webSessionId = json(exchange(drift, "webShellCreateSession",
                 202, post(WEB_SHELL + "/sessions/create")
@@ -924,6 +938,19 @@ class ManagedAgentApiContractTest {
                  "sessionId":"%s","turnId":"%s"}
                 """.formatted(webSessionId, webTurnId));
         settleCancelledTurn(tenant, webSessionId, cancels);
+        for (String kind : List.of("SUBMIT_INPUT", "CANCEL")) {
+            JsonNode command = json(exchange(drift,
+                    "webShellQueryCwdOperation", 200,
+                    post(WEB_SHELL + "/operations/query").header(TENANT, tenant),
+                    """
+                    {"sessionId":"%s","operationId":"%s"}
+                    """.formatted(webSessionId,
+                            turnCommandOperation(webSessionId, kind))));
+            assertThat(command.get("type").asText())
+                    .isEqualTo(kind.toLowerCase(Locale.ROOT));
+            assertThat(command.get("deliveryState").asText())
+                    .isEqualTo("confirmed");
+        }
         awaitMaterialized(tenant, webSessionId);
         exchange(drift, "webShellGetSession", 200,
                 post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
@@ -2883,6 +2910,12 @@ class ManagedAgentApiContractTest {
                         .andReturn().getResponse()
                         .getContentAsString(StandardCharsets.UTF_8))
                         .get("status").asText()).isEqualTo("completed"));
+    }
+
+    private String turnCommandOperation(String sessionId, String kind) {
+        return jdbc.queryForObject("SELECT operation_id FROM ma_operation"
+                + " WHERE session_id = ? AND operation_kind = ?", String.class,
+                sessionId, kind);
     }
 
     private int awaitHeldTurn() {

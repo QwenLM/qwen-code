@@ -227,6 +227,16 @@ owns lifecycle state and tenant/idempotency checks, while the Hosted Harness
 remains the private title authority and the Runtime Broker owns execution
 bindings.
 
+Turn input and cancellation are recorded in the same table as `submit_input`
+and `cancel` operations. Each is saved with its command, the same route reads
+it back, and a retry under the key resolves to it. The Turn dispatcher stays
+their only deliverer, and the Turn decides their outcome. An input completes
+once a Harness admits its Turn. A cancel completes once its Turn is cancelled,
+and fails with `turn_already_settled` if the Turn ended another way. Neither
+blocks a lifecycle operation; an active Turn still does. Admission responses do
+not carry the operation id yet. See the
+[Turn command operation design](../../docs/design/2026-10-16-managed-turn-command-operations.md).
+
 ```bash
 curl -sS -X PATCH \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID \

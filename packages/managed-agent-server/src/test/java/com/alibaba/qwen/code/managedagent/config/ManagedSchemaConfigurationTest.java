@@ -27,7 +27,7 @@ import static org.mockito.Mockito.when;
 class ManagedSchemaConfigurationTest {
     @Test
     void upgradesPublishedCatalogsWithoutChangingHistoryOrOrdinaryRows() throws Exception {
-        for (int version : new int[] {1, 2, 3, 4, 5}) {
+        for (int version : new int[] {1, 2, 3, 4, 5, 6}) {
             var source = source();
             Flyway.configure()
                     .dataSource(source)
@@ -66,7 +66,7 @@ class ManagedSchemaConfigurationTest {
                             .locations(ManagedSchema.FLYWAY_LOCATION)
                             .load();
             new ManagedSchemaConfiguration().freshManagedSchema(source).migrate(current);
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(7);
             assertThat(sessionListColumns(source)).containsExactly("tenant_id", "gmt_create", "session_id");
             assertThat(
                             jdbc.queryForList(
@@ -95,9 +95,9 @@ class ManagedSchemaConfigurationTest {
 
     @Test
     void baselinesTheActualUnversionedCanonicalCatalog() throws Exception {
-        for (int version : new int[] {1, 2, 3, 4, 5, 6}) {
+        for (int version : new int[] {1, 2, 3, 4, 5, 6, 7}) {
             var source = source();
-            if (version < 6) {
+            if (version < 7) {
                 executeResource(source, ManagedSchema.RESOURCE);
                 if (version >= 2) {
                     executeResource(source, ManagedSchema.PRIVATE_AUTHORITY);
@@ -110,6 +110,9 @@ class ManagedSchemaConfigurationTest {
                 }
                 if (version >= 5) {
                     executeResource(source, ManagedSchema.MODEL_SELECTION);
+                }
+                if (version >= 6) {
+                    executeResource(source, ManagedSchema.APPROVAL_SELECTION);
                 }
             } else {
                 ManagedSchema.initialize(source);
@@ -129,7 +132,7 @@ class ManagedSchemaConfigurationTest {
                                             + " \"type\" = 'BASELINE'",
                                     String.class))
                     .isEqualTo(Integer.toString(version));
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(7);
             assertThat(sessionListColumns(source)).containsExactly("tenant_id", "gmt_create", "session_id");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class))
                     .isEqualTo(1);
@@ -192,7 +195,7 @@ class ManagedSchemaConfigurationTest {
                                 .locations(ManagedSchema.FLYWAY_LOCATION)
                                 .load());
 
-        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(7);
         assertThat(sessionListColumns(source))
                 .containsExactly("tenant_id", "gmt_create", "session_id");
         assertThat(
@@ -238,7 +241,7 @@ class ManagedSchemaConfigurationTest {
 
             ManagedSchema.initialize(source);
 
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(6);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(7);
             assertThat(sessionListColumns(source))
                     .containsExactly("tenant_id", "gmt_create", "session_id");
         }

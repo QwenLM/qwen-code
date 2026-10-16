@@ -54,6 +54,15 @@ class WorkspaceCreationSchemaMySqlIT {
         }
     }
 
+    private static String baselineCheck(String baseline, String name) {
+        return baseline.lines()
+                .filter(line -> line.contains("CONSTRAINT " + name + " CHECK"))
+                .findFirst()
+                .orElseThrow()
+                .trim()
+                .replaceFirst(",$", "");
+    }
+
     private static void upgradesPublishedCatalogs(DataSource source) throws Exception {
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
@@ -75,24 +84,18 @@ class WorkspaceCreationSchemaMySqlIT {
         }
         assertEquals(1, ManagedSchema.schemaVersion(source));
         ManagedSchema.initialize(source);
-        assertEquals(6, ManagedSchema.schemaVersion(source));
+        assertEquals(7, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection();
                 var statement = connection.createStatement();
                 var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
-            String oldCheck =
-                    new String(input.readAllBytes(), StandardCharsets.UTF_8)
-                            .lines()
-                            .filter(
-                                    line ->
-                                            line.contains(
-                                                    "CONSTRAINT ck_ma_request_namespace CHECK"))
-                            .findFirst()
-                            .orElseThrow()
-                            .trim()
-                            .replaceFirst(",$", "");
+            String baseline = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+            String oldCheck = baselineCheck(baseline, "ck_ma_request_namespace");
             statement.execute(
                     "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
             statement.execute("ALTER TABLE ma_request_receipt ADD " + oldCheck);
+            statement.execute("ALTER TABLE ma_operation DROP CONSTRAINT ck_ma_operation_kind");
+            statement.execute("ALTER TABLE ma_operation ADD "
+                    + baselineCheck(baseline, "ck_ma_operation_kind"));
             statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_approval_selection");
             statement.execute("ALTER TABLE ma_turn DROP CONSTRAINT ck_ma_turn_approval_selection");
             statement.execute("ALTER TABLE ma_session DROP COLUMN selected_approval_mode");
@@ -121,7 +124,7 @@ class WorkspaceCreationSchemaMySqlIT {
         assertEquals(4, ManagedSchema.schemaVersion(source));
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
-        assertEquals(6, ManagedSchema.schemaVersion(source));
+        assertEquals(7, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
             receipt(
