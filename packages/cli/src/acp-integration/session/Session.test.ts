@@ -1308,7 +1308,7 @@ describe('Session', () => {
       });
       expect(
         (peer!._meta?.['backgroundTask'] as { taskId: string }).taskId,
-      ).toMatch(/^teammate-message-\d+$/);
+      ).toMatch(/^teammate-message-[0-9a-f-]{36}-\d+$/);
       // The team column's identity travels structurally, minted from the inbox
       // entry's sender — not parsed out of the formatted envelope text.
       expect(peer!._meta?.['agent']).toEqual({

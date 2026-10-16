@@ -2432,6 +2432,12 @@ export class Session implements SessionContext {
   private detachTeamSink?: () => void;
   /** Session lifetime for an in-flight teammate approval request. */
   private readonly teamSinkAbort = new AbortController();
+  /**
+   * Task ids are persisted in the transcript and correlated by clients, so a
+   * resumed Session must not re-mint ordinals that transcript already holds.
+   * The per-instance token keeps them collision-free across restarts.
+   */
+  private readonly teammateIdPrefix = randomUUID();
   private teammateMessageSeq = 0;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
@@ -4796,6 +4802,46 @@ export class Session implements SessionContext {
     return this.createdAt;
   }
 
+  /**
+   * Lands the model-visible copy of every queued teammate report that is not
+   * durable yet. A report is consumed from the on-disk mailbox (marked read)
+   * before it is durable anywhere else and `notificationQueue` is its only
+   * carrier, so this has to run while the recorder still accepts writes: on
+   * the stored-session close path `recorder.close()` precedes `dispose()`, and
+   * `appendRecord` is already a no-op by then.
+   */
+  #landUndrainedPeerNotifications(): void {
+    const recording = this.config.getChatRecordingService();
+    if (!recording) return;
+    for (const item of this.notificationQueue) {
+      if (item.kind !== 'peer' || item.persisted) continue;
+      recording.recordNotification(
+        [{ text: item.modelText }],
+        item.displayText,
+        {
+          taskId: item.taskId,
+          sourceTurnId: item.sourceTurnId,
+          status: item.status,
+          kind: item.kind,
+          ...(item.agent
+            ? { agent: persistedNotificationAgent(item.agent) }
+            : {}),
+          ...item.structured,
+        },
+      );
+      item.persisted = true;
+    }
+  }
+
+  /**
+   * Pre-close hook for {@link #landUndrainedPeerNotifications}. The
+   * stored-session close sequence calls this before the recorder is finalized,
+   * which is the last point where the write is both accepted and then flushed.
+   */
+  flushPendingPeerNotifications(): void {
+    this.#landUndrainedPeerNotifications();
+  }
+
   dispose(): void {
     this.disposed = true;
     this.closing = true;
@@ -4822,29 +4868,7 @@ export class Session implements SessionContext {
     this.resolveCloseGate = null;
     this.closeGateCompletion = null;
     this.hardSuspendTodoStopGuard();
-    // A teammate report is consumed from the on-disk mailbox (marked read)
-    // before it is durable anywhere else, and this queue is its only carrier:
-    // land the model-visible copy so a resumed session still receives it.
-    const teardownRecording = this.config.getChatRecordingService();
-    if (teardownRecording) {
-      for (const item of this.notificationQueue) {
-        if (item.kind !== 'peer' || item.persisted) continue;
-        teardownRecording.recordNotification(
-          [{ text: item.modelText }],
-          item.displayText,
-          {
-            taskId: item.taskId,
-            sourceTurnId: item.sourceTurnId,
-            status: item.status,
-            kind: item.kind,
-            ...(item.agent
-              ? { agent: persistedNotificationAgent(item.agent) }
-              : {}),
-            ...item.structured,
-          },
-        );
-      }
-    }
+    this.#landUndrainedPeerNotifications();
     this.notificationQueue = [];
     this.droppedNotifications.clear();
     this.cronQueue = [];
@@ -11516,7 +11540,7 @@ export class Session implements SessionContext {
       kind: 'peer',
       // Unique per message: the public `enqueueBackgroundNotification` dedupes
       // on `taskId`, and teammate reports must never collapse into one another.
-      taskId: `teammate-message-${++this.teammateMessageSeq}`,
+      taskId: `teammate-message-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
       status: 'message',
       modelText,
       displayText,
@@ -11557,7 +11581,7 @@ export class Session implements SessionContext {
       : `left the team${change.status ? ` (${change.status})` : ''}`;
     this.#enqueueBackgroundNotification({
       kind: 'peer',
-      taskId: `teammate-roster-${++this.teammateMessageSeq}`,
+      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
       status: change.type,
       modelText: `Teammate ${change.name} ${tail}.`,
       displayText: `teammate ${change.name} ${tail}`,
@@ -11610,7 +11634,7 @@ export class Session implements SessionContext {
       {
         displayText: text,
         modelText: text,
-        taskId: `teammate-activity-${++this.teammateMessageSeq}`,
+        taskId: `teammate-activity-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
         status:
           activity.kind === 'tool' ? (activity.phase ?? 'call') : 'message',
         kind: 'peer',

@@ -5014,6 +5014,7 @@ class QwenAgent implements Agent {
           // Session multi-agent records deferred behind the turn that just
           // settled land now, while the recorder still accepts writes.
           await session.flushDeferredExternalRecords?.();
+          session.flushPendingPeerNotifications?.();
           recorder?.finalize();
           let flushError: unknown;
           try {

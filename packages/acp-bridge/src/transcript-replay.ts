@@ -321,6 +321,9 @@ const AGENT_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
   'offline',
 ] satisfies SessionAgentTerminalStatus[]);
 
+/** `SubagentValidator`'s name constraint, re-checked on the replay side. */
+const SUBAGENT_NAME_PATTERN = /^[\p{L}\p{N}_-]+$/u;
+
 function parseAgentAuthor(value: unknown): SessionAgentAuthor | undefined {
   if (
     !isObjectRecord(value) ||
@@ -2706,11 +2709,22 @@ function agentIdentityFromTaskExecution(
   if (typeof subagentName !== 'string' || subagentName.length === 0) {
     return undefined;
   }
+  // A blocked spawn persists the *raw* model-supplied `subagent_type`
+  // (`AgentTool.buildSpawnBlockedResult`, `status: 'failed'`), which never
+  // reached `SubagentValidator` — so the name is only constrained when the
+  // display says a subagent actually ran.
+  const status = display['status'];
+  if (
+    typeof status === 'string' &&
+    status !== 'completed' &&
+    status !== 'running'
+  ) {
+    return undefined;
+  }
+  if (!SUBAGENT_NAME_PATTERN.test(subagentName)) return undefined;
   // A persisted `task_execution` carries no lineage beyond its own type name,
   // so replay can only ever rebuild the root-parented form; nested identity
-  // still requires the live wire. `SubagentValidator` constrains the name to
-  // `^[\p{L}\p{N}_-]+$`, so it cannot contain `/` and the path stays
-  // unambiguous.
+  // still requires the live wire.
   return { agentName: `/root/${subagentName}`, depth: 1, kind: 'subagent' };
 }
 
