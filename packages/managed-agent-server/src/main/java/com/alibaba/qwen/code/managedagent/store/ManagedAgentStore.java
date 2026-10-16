@@ -44,6 +44,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
@@ -73,6 +75,8 @@ import java.util.regex.Pattern;
 
 @Repository
 public class ManagedAgentStore implements AgentStateStore {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            ManagedAgentStore.class);
     private static final TypeReference<List<Map<String, Object>>> INPUT_TYPE =
             new TypeReference<>() {
             };
@@ -193,6 +197,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getString("dispatch_owner"),
                     nullableLong(result, "dispatch_lease_until"),
                     result.getInt("retry_count"),
+                    additiveInt(result, "consecutive_failures"),
+                    additiveInt(result, "budget_exempt_failures"),
                     nullableLong(result, "retry_after"),
                     result.getString("error_code"),
                     result.getString("error_message"),
@@ -255,6 +261,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     additiveLong(result, "expected_context_revision"),
                     additiveLong(result, "result_context_revision"),
                     result.getString("failure_code"),
+                    additiveInt(result, "budget_exempt_attempt"),
                     hasColumn(result, "lifecycle_protocol_version")
                             ? result.getInt("lifecycle_protocol_version") : 0,
                     // NULL on a pre-V56 operation: those operations settle
@@ -1858,7 +1865,15 @@ public class ManagedAgentStore implements AgentStateStore {
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
             boolean publicLifecycle, boolean trustedChildClose) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
+        // A resumed admission pins the new operation to the failed one's
+        // protocol (below), so the tenant lock keys on the prospect of
+        // that pin too — otherwise the resumed lifecycle admission's
+        // journal-idleness read would race the retention sweep.
+        if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)
+                || latestFailedLifecycleOperation(tenantId, sessionId, kind)
+                        .filter(failed -> WorkspaceToolProfiles.lifecycleProtocol(
+                                failed.lifecycleProtocolVersion()))
+                        .isPresent()) {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         }
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
@@ -1878,6 +1893,30 @@ public class ManagedAgentStore implements AgentStateStore {
         if ("DELETED".equals(session.status())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
                     "The Session was not found.");
+        }
+        // A terminally FAILED operation leaves the Session in the pending
+        // status, which the workspace status gate and validateOperationStart
+        // refuse forever: the Session would be un-closable and un-deletable
+        // without database surgery (review round 9, R9-3; the workspace
+        // DELETE case surfaced in review round 13, R13-2). The permitted
+        // resume is recognized before those gates, and the failed
+        // operation's protocol is pinned up front — the service computes
+        // the caller's protocol from the Session's CURRENT status, and a
+        // Session parked in the pending status by the terminal fail no
+        // longer passes the lifecycle gate, so an unpinned resume would run
+        // as protocol 0 while the parked fence row is never rebound (review
+        // round 9 re-review, R9-3). The no-open-operation guard below still
+        // runs before the insert: a Session with a live operation cannot
+        // double-close.
+        var failedBefore =
+                kind != OperationKind.ACTION_RESPONSE
+                        && kind != OperationKind.CWD_CHANGE
+                        && pendingStatus(kind).equals(session.status())
+                ? latestFailedLifecycleOperation(tenantId, sessionId, kind)
+                : Optional.<FailedLifecycleOperation>empty();
+        boolean resumed = failedBefore.isPresent();
+        if (resumed) {
+            protocolVersion = failedBefore.get().lifecycleProtocolVersion();
         }
         if (protocolVersion < 0 || protocolVersion > 2
                 || protocolVersion != 0 && protocolVersion != WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile())) {
@@ -1899,7 +1938,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (kind == OperationKind.DELETE && List.of("CLOSED", "ARCHIVED").contains(session.status())) {
             protocolVersion = 0;
         }
-        if (session.workspace() != null) {
+        if (session.workspace() != null && !resumed) {
             if (kind == OperationKind.CLOSE || kind == OperationKind.DELETE && "ACTIVE".equals(session.status()) && WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
                 if (!supported || protocolVersion == 1 && !workspaceFilesEnabled) {
                     throw workspaceExecutionUnavailable();
@@ -1920,7 +1959,17 @@ public class ManagedAgentStore implements AgentStateStore {
             }
         }
         requireNoOpenOperation(tenantId, sessionId);
-        validateOperationStart(session, kind);
+        String sessionStatusBefore = session.status();
+        if (resumed) {
+            // The new operation carries the failed one's original
+            // pre-operation status, so its settle runs the steps the failed
+            // attempt was owed: an ACTIVE-before close asks the Harness to
+            // stop again, and a CLOSED-before delete still makes no Runtime
+            // calls.
+            sessionStatusBefore = failedBefore.get().sessionStatusBefore();
+        } else {
+            validateOperationStart(session, kind);
+        }
         if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
             WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId, true, protocolVersion == 2);
         }
@@ -1954,7 +2003,7 @@ public class ManagedAgentStore implements AgentStateStore {
                                 "sessionId",
                                 sessionId,
                                 "sessionStatusBefore",
-                                session.status(),
+                                sessionStatusBefore,
                                 "protocolVersion",
                                 protocolVersion)),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
@@ -1968,14 +2017,54 @@ public class ManagedAgentStore implements AgentStateStore {
                 requestDigest,
                 archive ? "COMPLETED" : "PENDING",
                 archive ? "CONFIRMED" : "PENDING",
-                session.status(),
+                sessionStatusBefore,
                 archive ? publicId("rcpt") : null,
                 now,
                 now,
                 now,
                 archive ? now : null,
                 protocolVersion);
-        if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
+        if (resumed && WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
+            // failOperation kept the fence row and released the dead
+            // operation's claim on it, so the re-admitted operation rebinds
+            // the row rather than inserting a duplicate. The release only
+            // reaches a fence still LIFECYCLE_ONLY: once effects were saved
+            // the fence moved to DRAINING with the dead operation still
+            // named, and a rebind limited to the LIFECYCLE_ONLY shape
+            // matches nothing — every later claim check reads the fence as
+            // another operation's and refuses with
+            // workspace_lifecycle_claim_fenced (review round 13, R13-1).
+            // Both parked shapes rebind here: the claim-released
+            // LIFECYCLE_ONLY row, and the DRAINING row that still names the
+            // failed operation whose validated effects the resume inherits.
+            jdbc.update("UPDATE ma_session_head SET"
+                            + " operation_id = ? WHERE tenant_key = ? AND"
+                            + " harness_key = ? AND tenant_id = ? AND"
+                            + " harness_session_id = ? AND (phase ="
+                            + " 'LIFECYCLE_ONLY' AND operation_id IS NULL OR"
+                            + " phase = 'DRAINING' AND operation_id = ?)",
+                    operationId,
+                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    tenantId, sessionId, failedBefore.get().operationId());
+            // The effects the failed operation validated stay valid for its
+            // resume: the receipt moves to the new operation with them, and
+            // verification reads the hook-execution namespace from the
+            // receipt's own operation id.
+            String carriedEffects = jdbc.queryForObject(
+                    "SELECT lifecycle_effects_receipt_json FROM"
+                            + " ma_operation WHERE tenant_id = ?"
+                            + " AND session_id = ? AND operation_id = ?",
+                    String.class, tenantId, sessionId,
+                    failedBefore.get().operationId());
+            if (carriedEffects != null) {
+                jdbc.update("UPDATE ma_operation SET"
+                                + " lifecycle_effects_receipt_json = ? WHERE"
+                                + " tenant_id = ? AND session_id = ? AND"
+                                + " operation_id = ?",
+                        carriedEffects, tenantId, sessionId, operationId);
+            }
+        } else if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
                 return null;
@@ -2665,14 +2754,15 @@ public class ManagedAgentStore implements AgentStateStore {
         List<OperationTarget> targets =
                 new ArrayList<>(
                         jdbc.query(
+                                // Every blocked lifecycle shape is
+                                // re-driven: only CLOSE and DELETE are ever
+                                // delivered (an archive completes at
+                                // admission), and both publish their waits.
                                 "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE"
                                     + " operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE',"
                                     + " 'CWD_CHANGE') AND state IN ('PENDING', 'RUNNING',"
-                                    + " 'RECOVERY_BLOCKED') AND (delivery_state = 'PENDING' OR"
-                                    + " (delivery_state = 'BLOCKED' AND (operation_kind = 'CLOSE'"
-                                    + " OR (operation_kind = 'DELETE' AND (session_status_before IN"
-                                    + " ('CLOSED', 'ARCHIVED') OR lifecycle_protocol_version IN (1,"
-                                    + " 2)))))) AND available_at <= ? AND EXISTS (SELECT 1 FROM"
+                                    + " 'RECOVERY_BLOCKED') AND delivery_state IN ('PENDING',"
+                                    + " 'BLOCKED') AND available_at <= ? AND EXISTS (SELECT 1 FROM"
                                     + " ma_session private_scope WHERE private_scope.tenant_id ="
                                     + " ma_operation.tenant_id AND private_scope.session_id ="
                                     + " ma_operation.session_id AND private_scope.csi_guard ="
@@ -2702,7 +2792,11 @@ public class ManagedAgentStore implements AgentStateStore {
                 jdbc.update(
                         "UPDATE ma_operation SET phase = 'RUNNING', state = 'RUNNING', delivery_state = 'LEASED', claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?), claim_generation = claim_generation + 1, gmt_modified = ? WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED') AND (((delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND (operation_kind = 'CLOSE' OR (operation_kind = 'DELETE' AND (session_status_before IN ('CLOSED', 'ARCHIVED') OR lifecycle_protocol_version IN (1, 2)))))) AND available_at <= ?) OR (delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + "))",
+                                + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
+                                + " operation_id = ? AND state IN ('PENDING', 'RUNNING',"
+                                + " 'RECOVERY_BLOCKED') AND ((delivery_state IN ('PENDING', 'BLOCKED')"
+                                + " AND available_at <= ?) OR (delivery_state = 'LEASED' AND"
+                                + " claim_until < " + ManagedSchemaTime.SQL_NOW + "))",
                         owner,
                         leaseDuration.toMillis(),
                         now,
@@ -2818,6 +2912,63 @@ public class ManagedAgentStore implements AgentStateStore {
         return true;
     }
 
+    @Override
+    @Transactional
+    public boolean failOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            String failureCode) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        long now = lifecycleDatabaseTime();
+        // The same fencing as completeOperation, and deliberately no
+        // Session effect beyond the claim-mirror release below: the Session
+        // row keeps its pending status and no completion event is appended,
+        // because the settle never succeeded. The receipt
+        // the contract requires of every confirmed row certifies nothing —
+        // status failed and the failure code carry the outcome.
+        // delivery_state CONFIRMED keeps every recovery scan from re-driving
+        // the row.
+        int updated = jdbc.update("UPDATE ma_operation SET"
+                        + " state = 'FAILED', phase = 'FAILED',"
+                        + " delivery_state = 'CONFIRMED', failure_code = ?,"
+                        + " receipt_id = ?, claim_owner = NULL,"
+                        + " claim_until = NULL, gmt_modified = ?,"
+                        + " completed_at = ? WHERE scope_key = ? AND"
+                        + " operation_kind IN "
+                        + SESSION_OPERATION_KINDS
+                        + " AND target_key = ? AND tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = ? AND"
+                        + " state = 'RUNNING' AND delivery_state = 'LEASED'"
+                        + " AND claim_owner = ? AND claim_generation = ?"
+                        + " AND claim_until > " + ManagedSchemaTime.SQL_NOW,
+                failureCode, publicId("rcpt"), now, now,
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                sessionOperationTarget(sessionId), tenantId, sessionId,
+                operationId, owner, claimGeneration);
+        if (updated == 1) {
+            // The terminal write also releases the lifecycle claim mirror a
+            // v1 admission raised: nothing will drive this operation again,
+            // so the fence row must not stay bound to a dead operation's id.
+            // The phase stays LIFECYCLE_ONLY, though — only the completion
+            // path flips it to DRAINING, gated on its effects verification,
+            // and isHarnessDraining (drainHarnessSession's sole precondition)
+            // reads the phase alone: writing DRAINING here would authorize
+            // draining a Session whose worker stop was never verified (review
+            // round 6, R5-5). retryOperation and blockLifecycleOperation
+            // deliberately only NULL the lease — a rescheduled operation is
+            // still in flight and must stay admission-closed to everyone
+            // else.
+            jdbc.update("UPDATE ma_session_head SET"
+                            + " operation_id = NULL, claim_lease_until = NULL"
+                            + " WHERE tenant_key = ? AND harness_key = ? AND"
+                            + " tenant_id = ? AND harness_session_id = ? AND"
+                            + " operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
+                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    tenantId, sessionId, operationId);
+        }
+        return updated == 1;
+    }
+
     private long lifecycleDatabaseTime() {
         return jdbc.queryForObject(
                 "SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
@@ -2885,15 +3036,32 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt) {
+        blockLifecycleOperation(tenantId, sessionId, operationId, owner,
+                generation, failureCode, availableAt, false);
+    }
+
+    @Override
+    @Transactional
+    public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt,
+            boolean budgetExempt) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         requireLegacyMutation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
+        // The exempt count increments from itself, never from
+        // attempt_count: a wait refunds no already-charged attempt, so
+        // attempt_count - budget_exempt_attempt stays the count of attempts
+        // that could have made progress regardless of interleaving order.
         int updated =
                 jdbc.update(
                         "UPDATE ma_operation SET phase = 'RECOVERY_BLOCKED', state ="
                             + " 'RECOVERY_BLOCKED', delivery_state = 'BLOCKED', failure_code = ?,"
                             + " available_at = ?, claim_owner = NULL, claim_until = NULL,"
-                            + " gmt_modified = ?, attempt_count = attempt_count + 1 WHERE scope_key ="
+                            + " gmt_modified = ?,"
+                            + (budgetExempt
+                                    ? " budget_exempt_attempt = budget_exempt_attempt + 1,"
+                                    : "")
+                            + " attempt_count = attempt_count + 1 WHERE scope_key ="
                             + " ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
@@ -2924,15 +3092,32 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt) {
+        retryOperation(tenantId, sessionId, operationId, owner,
+                claimGeneration, availableAt, false);
+    }
+
+    @Override
+    @Transactional
+    public void retryOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            long availableAt, boolean budgetExempt) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         requireLegacyMutation(tenantId, sessionId);
         long delay = Math.max(0, availableAt - clock.millis());
         long now = lifecycleDatabaseTime();
         availableAt = Math.addExact(now, delay);
+        // The exempt count increments from itself, never from
+        // attempt_count: a wait refunds no already-charged attempt, so
+        // attempt_count - budget_exempt_attempt stays the count of attempts
+        // that could have made progress regardless of interleaving order.
         int updated =
                 jdbc.update(
                         "UPDATE ma_operation SET delivery_state = 'PENDING', claim_owner = NULL,"
-                            + " claim_until = NULL, attempt_count = attempt_count + 1, available_at"
+                            + " claim_until = NULL,"
+                            + (budgetExempt
+                                    ? " budget_exempt_attempt = budget_exempt_attempt + 1,"
+                                    : "")
+                            + " attempt_count = attempt_count + 1, available_at"
                             + " = ?, gmt_modified = ? WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
@@ -2955,6 +3140,37 @@ public class ManagedAgentStore implements AgentStateStore {
                     operationId,
                     claimGeneration);
         }
+    }
+
+    @Override
+    @Transactional
+    public void markOperationAnswered(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
+        long now = lifecycleDatabaseTime();
+        // Watermark only: the row stays leased and no reschedule runs here —
+        // the catch block's own retryOperation (or a throw losing it) decides
+        // what happens next. The point is that the answered fact is durable
+        // before any recovery read can throw it away (review round 14,
+        // R14-3).
+        jdbc.update(
+                "UPDATE ma_operation SET budget_exempt_attempt ="
+                    + " budget_exempt_attempt + 1, gmt_modified = ? WHERE scope_key = ? AND"
+                    + " operation_kind IN "
+                        + SESSION_OPERATION_KINDS
+                        + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
+                        + " operation_id = ? AND state = 'RUNNING' AND delivery_state ="
+                        + " 'LEASED' AND claim_owner = ? AND claim_generation = ? AND"
+                        + " claim_until > " + ManagedSchemaTime.SQL_NOW,
+                now,
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                sessionOperationTarget(sessionId),
+                tenantId,
+                sessionId,
+                operationId,
+                owner,
+                claimGeneration);
     }
 
     public Admission replayCommand(String tenantId, String operation,
@@ -3434,11 +3650,65 @@ public class ManagedAgentStore implements AgentStateStore {
         Map<String, List<ItemPartRecord>> projectedParts = new LinkedHashMap<>();
         for (EventRecord event : events) {
             if (event.sequence() != expected) {
-                throw new IllegalStateException(
-                        "Message projection event sequence has a gap");
+                // A gap is permanent: appendEvent allocates a sequence under
+                // the session row lock this method already holds, so no
+                // missing sequence can still appear. Skipping ahead once
+                // beats throwing on every scan and wedging the projection.
+                LOG.error("Message projection skips a permanent event gap"
+                                + " tenant={} session={} missingSequences={}-{}"
+                                + " nextEvent={}",
+                        tenantId, sessionId, expected, event.sequence() - 1,
+                        event.sequence());
+                // The skipped range may have carried a turn's terminal
+                // event, whose settle is the only write that moves its
+                // items off in_progress. Settle those turns' items here, or
+                // they would be pinned forever — but only for a turn that is
+                // provably over: its terminal event is in the journal (its
+                // own materialization settled it already, making this a
+                // no-op guard) or its row is not live. A turn whose row is
+                // still live (recordHarnessEvents flips it in the same
+                // transaction that appends the terminal event, so a live row
+                // means the terminal event can still arrive) is settled by
+                // its own event or by turn recovery's turn.failed — never
+                // here. The remaining guards mirror settleTurnItems (never
+                // re-settle a completed item, never push last_sequence
+                // backwards).
+                jdbc.update("UPDATE ma_message SET item_status ="
+                                + " 'failed', last_sequence = CASE WHEN"
+                                + " last_sequence < ? THEN ? ELSE"
+                                + " last_sequence END, gmt_modified = ?,"
+                                + " revision = revision + 1 WHERE tenant_id"
+                                + " = ? AND session_id = ? AND item_status"
+                                + " = 'in_progress' AND last_sequence < ?"
+                                + " AND NOT EXISTS (SELECT 1 FROM"
+                                + " ma_public_event terminal WHERE"
+                                + " terminal.stream_kind = 'SESSION' AND"
+                                + " terminal.stream_id = X'' AND"
+                                + " terminal.tenant_id ="
+                                + " ma_message.tenant_id AND"
+                                + " terminal.session_id ="
+                                + " ma_message.session_id AND"
+                                + " terminal.turn_id ="
+                                + " ma_message.turn_id AND"
+                                + " terminal.event_type IN"
+                                + " ('turn.completed', 'turn.failed',"
+                                + " 'turn.cancelled'))"
+                                + " AND NOT EXISTS (SELECT 1 FROM"
+                                + " ma_turn live WHERE"
+                                + " live.tenant_id ="
+                                + " ma_message.tenant_id AND"
+                                + " live.session_id ="
+                                + " ma_message.session_id AND"
+                                + " live.turn_id ="
+                                + " ma_message.turn_id AND"
+                                + " live.status IN ('ACCEPTED', 'RUNNING',"
+                                + " 'CANCELLING'))",
+                        event.sequence() - 1, event.sequence() - 1,
+                        clock.millis(), tenantId, sessionId,
+                        event.sequence());
             }
             materializeEvent(event, projectedParts);
-            expected++;
+            expected = event.sequence() + 1;
         }
         flushParts(tenantId, sessionId, projectedParts);
         long nextCovered = events.get(events.size() - 1).sequence();
@@ -3523,22 +3793,26 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void deferTurnRetry(String tenantId, String sessionId,
             String turnId, String owner, long retryAfter) {
-        scheduleTurnRetry(tenantId, sessionId, turnId, owner, retryAfter);
+        scheduleTurnRetry(tenantId, sessionId, turnId, owner, retryAfter,
+                false);
     }
 
     @Transactional
     public void scheduleTurnRetry(String tenantId, String sessionId,
-            String turnId, String owner, long retryAfter) {
+            String turnId, String owner, long retryAfter,
+            boolean budgetExempt) {
         requireLegacyMutation(tenantId, sessionId);
         jdbc.update("UPDATE ma_turn SET retry_count = retry_count"
-                        + " + 1, retry_after = ?, dispatch_owner = NULL,"
-                        + " dispatch_lease_until = NULL, gmt_modified = ?,"
-                        + " version = version + 1 WHERE tenant_id = ? AND"
-                        + " session_id = ? AND turn_id = ? AND dispatch_owner"
-                        + " = ? AND status IN ('ACCEPTED', 'RUNNING',"
-                        + " 'CANCELLING')",
-                retryAfter, clock.millis(), tenantId, sessionId, turnId,
-                owner);
+                        + " + 1, consecutive_failures = consecutive_failures"
+                        + " + 1, budget_exempt_failures ="
+                        + " budget_exempt_failures + ?, retry_after = ?,"
+                        + " dispatch_owner = NULL, dispatch_lease_until ="
+                        + " NULL, gmt_modified = ?, version = version + 1 WHERE"
+                        + " tenant_id = ? AND session_id = ? AND turn_id = ?"
+                        + " AND dispatch_owner = ? AND status IN ('ACCEPTED',"
+                        + " 'RUNNING', 'CANCELLING')",
+                budgetExempt ? 1 : 0, retryAfter, clock.millis(), tenantId,
+                sessionId, turnId, owner);
     }
 
     @Transactional
@@ -3650,10 +3924,17 @@ public class ManagedAgentStore implements AgentStateStore {
         // session-first paths (e.g. insertCancelCommand).
         requireLegacySessionForUpdate(tenantId, sessionId);
         long now = clock.millis();
+        // The admission proves coordination made progress, so the retry
+        // budget restarts: it counts consecutive failures without progress.
+        // retry_count is not reset — it paces the backoff, which must keep
+        // growing across a crash loop that keeps making progress (review
+        // round 8, R8-3).
         int updated = jdbc.update("UPDATE ma_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, gmt_modified = ?,"
+                        + " harness_last_event_id = ?, consecutive_failures = 0,"
+                        + " budget_exempt_failures = 0,"
+                        + " gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -3704,10 +3985,16 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException(
                     "Hosted Harness recovery epoch changed");
         }
+        // The recovery admission proves coordination made progress, so the
+        // retry budget restarts: it counts consecutive failures without
+        // progress. retry_count is not reset — it paces the backoff (review
+        // round 8, R8-3).
         int updated = jdbc.update("UPDATE ma_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, gmt_modified = ?,"
+                        + " harness_last_event_id = ?, consecutive_failures = 0,"
+                        + " budget_exempt_failures = 0,"
+                        + " gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -4093,9 +4380,15 @@ public class ManagedAgentStore implements AgentStateStore {
     private int updateHarnessCursor(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long lastSourceId, long now) {
+        // Journaling new events proves coordination made progress, so the
+        // retry budget restarts: it counts consecutive failures without
+        // progress. retry_count is not reset — it paces the backoff (review
+        // round 8, R8-3).
         return jdbc.update("UPDATE ma_turn SET"
                         + " harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, gmt_modified = ?,"
+                        + " harness_last_event_id = ?, consecutive_failures = 0,"
+                        + " budget_exempt_failures = 0,"
+                        + " gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -4892,6 +5185,29 @@ public class ManagedAgentStore implements AgentStateStore {
 
     // One lifecycle change at a time: a pending rename or unarchive command
     // blocks an operation, and an open operation blocks both commands.
+    /** The latest terminally failed lifecycle operation of the kind: the
+     * status the Session carried when it began and the protocol it ran
+     * under — both re-pinned by a resumed admission. */
+    private Optional<FailedLifecycleOperation> latestFailedLifecycleOperation(
+            String tenantId, String sessionId, OperationKind kind) {
+        var rows = jdbc.query("SELECT operation_id, session_status_before,"
+                        + " lifecycle_protocol_version FROM"
+                        + " ma_operation WHERE tenant_id = ?"
+                        + " AND session_id = ? AND operation_kind = ? AND"
+                        + " state = 'FAILED' ORDER BY gmt_modified DESC,"
+                        + " gmt_create DESC LIMIT 1",
+                (result, row) -> new FailedLifecycleOperation(
+                        result.getString(1), result.getString(2),
+                        result.getInt(3)),
+                tenantId, sessionId, kind.name());
+        return rows.isEmpty() ? Optional.empty()
+                : Optional.of(rows.getFirst());
+    }
+
+    private record FailedLifecycleOperation(String operationId,
+            String sessionStatusBefore, int lifecycleProtocolVersion) {
+    }
+
     private void requireNoOpenOperation(String tenantId, String sessionId) {
         if (hasOpenOperation(tenantId, sessionId)) {
             throw new ApiException(HttpStatus.CONFLICT,
@@ -5219,6 +5535,11 @@ public class ManagedAgentStore implements AgentStateStore {
     private static Long additiveLong(java.sql.ResultSet result, String name)
             throws java.sql.SQLException {
         return hasColumn(result, name) ? nullableLong(result, name) : null;
+    }
+
+    private static int additiveInt(java.sql.ResultSet result, String name)
+            throws java.sql.SQLException {
+        return hasColumn(result, name) ? result.getInt(name) : 0;
     }
 
     private static boolean hasColumn(java.sql.ResultSet result, String name)
