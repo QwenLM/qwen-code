@@ -1866,6 +1866,26 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
+   * The session scope the router actually routes this channel with, or
+   * undefined when the router does not expose one. The channel's own config is
+   * not authoritative: the constructor rewrites its local copy to 'single' for
+   * `groupAllPolicy`, while the caller built the router from the unrewritten
+   * value, and nothing re-syncs the router afterwards. A purge that trusted the
+   * rewritten config would treat the router's live keys as orphans.
+   */
+  private routerSessionScope(): string | undefined {
+    const router = this.router as unknown as {
+      channelScopes?: { get?: (channelName: string) => unknown };
+      defaultScope?: unknown;
+    };
+    const perChannel = router.channelScopes?.get?.(this.name);
+    if (typeof perChannel === 'string') return perChannel;
+    return typeof router.defaultScope === 'string'
+      ? router.defaultScope
+      : undefined;
+  }
+
+  /**
    * Purge orphaned session mappings left over from older scope eras:
    * `<channel>:__single__` keys (single-scope era, see PR #6457) and this
    * channel's own three-part user-scope keys.
@@ -1907,7 +1927,24 @@ export class QQChannel extends ChannelBase {
    * daemon-side session (see bridge.discardSession below) are torn down.
    */
   private purgeSingleScopeOrphans(): void {
-    const scope: string = this.config.sessionScope;
+    const configScope: string = this.config.sessionScope;
+    // The channel's own config is not authoritative for what the router can
+    // route. The constructor rewrites its local copy to 'single' when
+    // groupAllPolicy is 'keyword'/'all', while the caller built this router
+    // from the unrewritten value and nothing re-syncs it — so a purge trusting
+    // the config would treat the router's LIVE user-scope keys as orphans and
+    // delete them on every start. Reason from the scope the router actually
+    // routes with; when it exposes none, a config scope the rewrite may have
+    // produced cannot be trusted either (see scopeTrusted below).
+    const routerScope = this.routerSessionScope();
+    const scope = routerScope ?? configScope;
+    const scopeTrusted =
+      routerScope !== undefined ||
+      !(
+        (this.qqConfig.groupAllPolicy === 'keyword' ||
+          this.qqConfig.groupAllPolicy === 'all') &&
+        configScope === 'single'
+      );
     // Fail closed on an unrecognized scope. SessionRouter.routingKey() switches
     // on scope with `case 'user': default:`, so any value outside the
     // SessionScope union still builds LIVE `<channel>:<sender>:<chat>` keys.
@@ -2059,6 +2096,7 @@ export class QQChannel extends ChannelBase {
           ownsEntry;
         const isOwnLegacyUserKey =
           knownScope &&
+          scopeTrusted &&
           scope !== 'user' &&
           entry.target?.channelName === this.name &&
           baseKey ===
@@ -2073,6 +2111,20 @@ export class QQChannel extends ChannelBase {
           });
         }
       }
+      // A sessionId a non-doomed route still uses must not be released:
+      // removeSessionId drops every key mapped to a sessionId (a restore's
+      // superseded-id redirect can point several keys at one), so releasing it
+      // would tear that live route — and its daemon session — down with the
+      // orphan. Resolve this before the rescue ledger is written, so the ledger
+      // lists only the routes that are actually released.
+      const doomedKeys = new Set(doomed.map((entry) => entry.key));
+      const liveSessionIds = new Set<string>();
+      for (const entry of all) {
+        if (!doomedKeys.has(entry.key)) liveSessionIds.add(entry.sessionId);
+      }
+      const deletable = doomed.filter(
+        (entry) => !liveSessionIds.has(entry.sessionId),
+      );
       if (doomed.length > 0 && this.qqConfig.purgeLegacySessions !== true) {
         // A default changing is not an operator request to delete persisted
         // conversations, so the destructive half is opt-in.
@@ -2081,7 +2133,21 @@ export class QQChannel extends ChannelBase {
         );
         return;
       }
-      if (doomed.length > 0) {
+      if (!scopeTrusted && this.qqConfig.purgeLegacySessions === true) {
+        // Fail closed and say so: the rewrite may have replaced the channel's
+        // scope and this router exposes none to check it against, so the
+        // user-scope branch is refused rather than guessed at.
+        process.stderr.write(
+          `[QQ:${this.name}] purgeSingleScopeOrphans cannot verify the router's session scope (groupAllPolicy rewrites the channel's own scope), leaving this channel's user-scope routes in place\n`,
+        );
+      }
+      for (const entry of doomed) {
+        if (!liveSessionIds.has(entry.sessionId)) continue;
+        process.stderr.write(
+          `[QQ:${this.name}] purgeSingleScopeOrphans left orphan route ${sanitizeLogText(entry.key, 200)} in place: session ${sanitizeLogText(entry.sessionId, 200)} is still used by a live route\n`,
+        );
+      }
+      if (deletable.length > 0) {
         // Append to any earlier record instead of truncating it: it is the
         // only copy of routes a previous purge already deleted. A file that
         // cannot be read, or does not hold a records list, is quarantined
@@ -2148,7 +2214,7 @@ export class QQChannel extends ChannelBase {
                 {
                   purgedAt: new Date().toISOString(),
                   sessionScope: scope,
-                  routes: doomed,
+                  routes: deletable,
                 },
               ].slice(-QQChannel.MAX_PURGE_RECORDS),
               null,
@@ -2158,7 +2224,7 @@ export class QQChannel extends ChannelBase {
           );
           renameSync(tmpPath, this.sessionsPurgedPath);
           process.stderr.write(
-            `[QQ:${this.name}] Saved ${doomed.length} session route(s) about to be purged to ${this.sessionsPurgedPath}\n`,
+            `[QQ:${this.name}] Saved ${deletable.length} session route(s) about to be purged to ${this.sessionsPurgedPath}\n`,
           );
         } catch (e) {
           // A failed write can leave a partial sibling behind; drop it
@@ -2172,30 +2238,15 @@ export class QQChannel extends ChannelBase {
           // Fail closed: without the rescue copy the deletions are not
           // recoverable by hand, so nothing is removed.
           process.stderr.write(
-            `[QQ:${this.name}] purgeSingleScopeOrphans rescue write failed, leaving ${doomed.length} session route(s) in place: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+            `[QQ:${this.name}] purgeSingleScopeOrphans rescue write failed, leaving ${deletable.length} session route(s) in place: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
           );
           return;
         }
       }
       // Phase 2: perform the deletions exactly as before, one entry at a time.
-      // removeSessionId drops every key mapped to a sessionId — a restore's
-      // superseded-id redirect can point several keys at one — so a sessionId a
-      // non-doomed route still uses must be left alone: releasing it would tear
-      // down that live route and its daemon session with it.
-      const doomedKeys = new Set(doomed.map((entry) => entry.key));
-      const liveSessionIds = new Set<string>();
-      for (const entry of all) {
-        if (!doomedKeys.has(entry.key)) liveSessionIds.add(entry.sessionId);
-      }
       let singlePurged = 0;
       let userPurged = 0;
-      for (const entry of doomed) {
-        if (liveSessionIds.has(entry.sessionId)) {
-          process.stderr.write(
-            `[QQ:${this.name}] purgeSingleScopeOrphans left orphan route ${sanitizeLogText(entry.key, 200)} in place: session ${sanitizeLogText(entry.sessionId, 200)} is still used by a live route\n`,
-          );
-          continue;
-        }
+      for (const entry of deletable) {
         // Release the daemon-side session too: restoreSessions() already
         // re-attached it via bridge.loadSession, so without this the orphan
         // stays alive in the daemon until the process ends. removeSessionId

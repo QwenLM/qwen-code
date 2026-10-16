@@ -1875,7 +1875,9 @@ describe('purgeSingleScopeOrphans', () => {
     // removeSessionId drops every key mapped to a sessionId, so releasing one a
     // live route still owns would tear that route (and its daemon session) down
     // with the orphan. A restore's superseded-id redirect can share one id
-    // across keys.
+    // across keys. The rescue ledger is the only hand-recovery copy, so it must
+    // not claim a route this guard leaves in place.
+    vi.mocked(writeFileSync).mockClear();
     const removeSessionId = vi.fn(() => true);
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
@@ -1903,6 +1905,12 @@ describe('purgeSingleScopeOrphans', () => {
     expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
       'is still used by a live route',
     );
+    // Nothing was released, so nothing may be recorded as released.
+    expect(
+      vi
+        .mocked(writeFileSync)
+        .mock.calls.some((c) => String(c[0]).includes('sessions-purged.json')),
+    ).toBe(false);
     stderrSpy.mockRestore();
   });
 
@@ -1955,6 +1963,105 @@ describe('purgeSingleScopeOrphans', () => {
     expect(files.get(target)).toBe('{"truncated":');
     expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
       'quarantine failed',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('purges by the router scope, not the groupAllPolicy-forced config scope', () => {
+    // The constructor rewrites its local config to 'single' when
+    // groupAllPolicy is 'keyword'/'all', while the caller built the router from
+    // the unrewritten value. A purge that trusted the rewritten config would
+    // treat the router's LIVE user-scope keys as orphans and delete them — and
+    // their daemon sessions — on every start.
+    vi.mocked(existsSync).mockReturnValue(false);
+    const router = new SessionRouter({} as never, '/tmp', 'user');
+    const removeSessionId = vi
+      .spyOn(router, 'removeSessionId')
+      .mockImplementation(() => true);
+    vi.spyOn(router, 'getAll').mockReturnValue([
+      // The live user-scope route the real router resolves with.
+      {
+        key: 'test-bot:u1:c1',
+        sessionId: 'live-user-1',
+        target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+      },
+      // A single-scope-era key: unroutable under the router's 'user' scope.
+      {
+        key: singleScopeRoutingKey('test-bot'),
+        sessionId: 'single-era-1',
+        target: { channelName: 'test-bot' },
+      },
+    ]);
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        groupAllPolicy: 'all',
+        purgeLegacySessions: true,
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    // Precondition of the hazard: the config no longer carries the scope the
+    // router was built with.
+    expect(
+      (ch as unknown as { config: Record<string, unknown> }).config[
+        'sessionScope'
+      ],
+    ).toBe('single');
+
+    callPurge(ch);
+
+    expect(removeSessionId.mock.calls.map((c) => c[0])).toEqual([
+      'single-era-1',
+    ]);
+    expect(discardSession).not.toHaveBeenCalledWith('live-user-1');
+    stderrSpy.mockRestore();
+  });
+
+  it('refuses user-scope cleanup when the forced config scope cannot be checked', () => {
+    // The same hazard with a router that exposes no scope of its own: the
+    // rewritten 'single' cannot be told from an explicit one, so the
+    // user-scope branch must fail closed rather than delete live keys.
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'live-user-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(
+      makeChannelWithRouter(router, {
+        groupAllPolicy: 'all',
+        purgeLegacySessions: true,
+      }),
+    );
+
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      "cannot verify the router's session scope",
     );
     stderrSpy.mockRestore();
   });
