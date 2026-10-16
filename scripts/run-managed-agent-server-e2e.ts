@@ -20,6 +20,9 @@ import {
 import { isDeepStrictEqual } from 'node:util';
 
 const root = process.cwd();
+const databaseEpochMillisSql =
+  'CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000' +
+  ' + FLOOR(EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000)';
 const reliefMarker = 'G3_STEP3_RELIEF_TURN';
 const reliefResponse = 'G3_STEP3_RELIEF_COMPLETED';
 let originalApprovalId: string | undefined;
@@ -206,12 +209,7 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 }
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
-const springModule = path.join(
-  root,
-  'packages',
-  'sdk-java',
-  'managed-agent-server',
-);
+const springModule = path.join(root, 'packages', 'managed-agent-server');
 const springTarget = path.join(springModule, 'target');
 // The pom attaches classified repackage executions alongside the
 // unclassified server jar, so a wildcard over target/ matches several
@@ -1807,7 +1805,7 @@ try {
       if (firstTerminal?.type !== 'turn.completed') {
         const storeHead = runMysql(
           mysqlPort,
-          `SELECT state, writer_generation, writer_id, writer_lease_until, NOW(6), journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+          `SELECT state, writer_generation, writer_id, writer_lease_until, ${databaseEpochMillisSql} AS observed_now, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
         );
         throw new Error(
           `First failover Turn ended with ${firstTerminal?.type ?? 'no terminal event'}; store head=${storeHead || 'missing'}`,
@@ -1980,7 +1978,7 @@ try {
       (remainingMs) =>
         runMysql(
           mysqlPort,
-          `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < CURRENT_TIMESTAMP(6), 1, 0) FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+          `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < (${databaseEpochMillisSql}), 1, 0) FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
           remainingMs,
         ) === '1',
       10_000,
@@ -1991,7 +1989,7 @@ try {
         (remainingMs) =>
           runMysql(
             mysqlPort,
-            `SELECT IF(dispatch_lease_until IS NULL OR dispatch_lease_until < UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000, 1, 0) FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter}`,
+            `SELECT IF(dispatch_lease_until IS NULL OR dispatch_lease_until < (${databaseEpochMillisSql}), 1, 0) FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter}`,
             remainingMs,
           ) === '1',
         10_000,
@@ -2872,7 +2870,7 @@ try {
           (remainingMs) =>
             runMysql(
               mysqlPort,
-              `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < CURRENT_TIMESTAMP(6), 1, 0) FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+              `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < (${databaseEpochMillisSql}), 1, 0) FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
               remainingMs,
             ) === '1',
           10_000,
