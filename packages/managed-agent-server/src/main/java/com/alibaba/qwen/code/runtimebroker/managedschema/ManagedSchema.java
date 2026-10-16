@@ -21,8 +21,9 @@ public final class ManagedSchema {
             "/db/managed-schema/V3__session_list_created_at.sql";
     public static final String WORKSPACE_CREATION = "/db/managed-schema/V4__workspace_creation.sql";
     public static final String MODEL_SELECTION = "/db/managed-schema/V5__session_model_selection.sql";
+    public static final String APPROVAL_SELECTION = "/db/managed-schema/V6__session_approval_selection.sql";
     // Additive migrations over the published V1 baseline, in version order.
-    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION);
+    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION, APPROVAL_SELECTION);
     private static final int CURRENT = EXTENSIONS.size() + 1;
 
     private ManagedSchema() {}

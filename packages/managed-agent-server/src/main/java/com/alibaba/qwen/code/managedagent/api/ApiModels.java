@@ -98,7 +98,8 @@ public final class ApiModels {
             boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
             boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -245,6 +246,22 @@ public final class ApiModels {
 
     public record WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes) {
     }
+
+    public record WebShellApprovalSelection(String mode, long revision) {}
+
+    public record WebShellSessionApproval(String approvalMode, long approvalRevision,
+            List<String> availableApprovalModes, boolean supported) {}
+
+    public record WebShellSessionApprovalRequest(@NotBlank @Size(max = 128) String sessionId) {}
+
+    public record WebShellChangeApprovalRequest(@Size(max = 128) String requestId,
+            @NotBlank @Size(max = 128) String sessionId,
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @NotBlank String approvalMode,
+            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision) {}
+
+    public record WebShellApprovalChangeResult(String sessionId, String approvalMode,
+            long approvalRevision, boolean replayed) {}
 
     public record WebShellModelOption(String modelId, String label) {}
 
@@ -393,7 +410,8 @@ public final class ApiModels {
             WebShellTurn activeTurn, Object environment, long lastSequence,
             WebShellWorkspace workspace,
             WebShellSessionCapabilities capabilities, String approvalMode,
-            WebShellModelContext modelContext, WebShellModelSelection modelSelection) {
+            WebShellModelContext modelContext, WebShellModelSelection modelSelection,
+            Long approvalRevision, String initialApprovalMode) {
     }
 
     /** H6b: the definition fields a create or revise request carries. */

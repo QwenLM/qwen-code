@@ -33,6 +33,7 @@ import { useManagedSession } from './use-managed-session';
 import { useManagedActions } from './use-managed-actions';
 import { useManagedCwdChange } from './use-managed-cwd-change';
 import { useManagedModelChange } from './use-managed-model-change';
+import { useManagedApprovalChange } from './use-managed-approval-change';
 import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
@@ -266,6 +267,14 @@ function ManagedSessionsContent({
     detail.refreshSummary,
     interactive,
   );
+  const approvalChange = useManagedApprovalChange(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
+    interactive,
+  );
   // The reason line below is mounted exactly when this holds, so the dialog can
   // point at it without ever leaving a dangling IDREF. A latch-only render has
   // no `alert` node and no operable option left, so this line is the only place
@@ -401,7 +410,8 @@ function ManagedSessionsContent({
       abort.signal.aborted ||
       busy ||
       cwd.isBlocked() ||
-      modelChange.isBlocked()
+      modelChange.isBlocked() ||
+      approvalChange.isBlocked()
     )
       return;
     setDiscarded(false);
@@ -853,6 +863,7 @@ function ManagedSessionsContent({
                     pendingApproval ||
                     busy ||
                     modelChange.blocked ||
+                    approvalChange.blocked ||
                     pending?.sessionId === sessionId
                       ? t('managed.cwd.busy')
                       : undefined
@@ -861,6 +872,7 @@ function ManagedSessionsContent({
                     if (
                       pendingRef.current?.sessionId === sessionId ||
                       modelChange.isBlocked() ||
+                      approvalChange.isBlocked() ||
                       busy ||
                       active ||
                       pendingApproval
@@ -1128,7 +1140,9 @@ function ManagedSessionsContent({
                   !modelChange.options?.supported ||
                   modelChange.optionsLoading ||
                   modelChange.busy ||
+                  approvalChange.busy ||
                   modelChange.blocked ||
+                  approvalChange.blocked ||
                   busy ||
                   Boolean(active) ||
                   Boolean(pendingApproval) ||
@@ -1146,7 +1160,8 @@ function ManagedSessionsContent({
                           pendingRef.current ||
                           active ||
                           pendingApproval ||
-                          cwd.isBlocked()
+                          cwd.isBlocked() ||
+                          approvalChange.isBlocked()
                         )
                           return;
                         void modelChange.submit(modelId);
@@ -1161,11 +1176,52 @@ function ManagedSessionsContent({
                 contextUsageAlwaysVisible={Boolean(sessionId)}
                 currentMode={summary?.approvalMode ?? ''}
                 availableModes={
-                  summary?.approvalMode ? [summary.approvalMode] : []
+                  approvalChange.options?.availableApprovalModes ??
+                  (summary?.approvalMode ? [summary.approvalMode] : [])
                 }
-                modeControlsDisabled
+                modeControlsDisabled={
+                  !interactive ||
+                  !approvalChange.supported ||
+                  !approvalChange.options?.supported ||
+                  approvalChange.optionsLoading ||
+                  approvalChange.busy ||
+                  approvalChange.blocked ||
+                  busy ||
+                  Boolean(active) ||
+                  Boolean(pendingApproval) ||
+                  Boolean(pending) ||
+                  cwd.blocked ||
+                  modelChange.blocked ||
+                  modelChange.busy ||
+                  approvalChange.options.approvalRevision !==
+                    (summary?.approvalRevision ?? 0)
+                }
+                onSelectMode={
+                  approvalChange.supported
+                    ? (mode) => {
+                        if (
+                          !interactive ||
+                          busy ||
+                          pendingRef.current ||
+                          active ||
+                          pendingApproval ||
+                          cwd.isBlocked() ||
+                          modelChange.isBlocked()
+                        )
+                          return;
+                        if (
+                          mode === 'default' ||
+                          mode === 'auto-edit' ||
+                          mode === 'yolo'
+                        )
+                          void approvalChange.submit(mode);
+                      }
+                    : undefined
+                }
                 showChatWidthToggle={false}
-                isPreparing={busy || cwd.blocked || modelChange.busy}
+                isPreparing={
+                  busy || cwd.blocked || modelChange.busy || approvalChange.busy
+                }
                 dialogOpen={!interactive}
                 isRunning={home && Boolean(active)}
                 onCancel={
@@ -1181,6 +1237,7 @@ function ManagedSessionsContent({
                   busy ||
                   Boolean(pending) ||
                   modelChange.blocked ||
+                  approvalChange.blocked ||
                   Boolean(sessionId && !summary?.capabilities.canSend)
                 }
                 placeholderText={t('managed.prompt')}
@@ -1247,12 +1304,77 @@ function ManagedSessionsContent({
                     )}
                   </p>
                 )}
+              {interactive &&
+                (approvalChange.supported || approvalChange.blocked) && (
+                  <div
+                    className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
+                    role="status"
+                  >
+                    <span>
+                      {t(
+                        approvalChange.busy
+                          ? 'managed.approvalChange.changing'
+                          : approvalChange.blocked
+                            ? 'managed.approvalChange.unconfirmed'
+                            : approvalChange.optionsLoading
+                              ? 'managed.approvalChange.loading'
+                              : approvalChange.optionsError
+                                ? 'managed.approvalChange.optionsError'
+                                : 'managed.approvalChange.nextTurn',
+                      )}
+                    </span>
+                    {approvalChange.pending && (
+                      <span>{approvalChange.pending.approvalMode}</span>
+                    )}
+                    {approvalChange.blocked && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={
+                          approvalChange.busy || !provider.approvalChange
+                        }
+                        onClick={() => void approvalChange.confirm()}
+                      >
+                        {t('managed.approvalChange.confirm')}
+                      </Button>
+                    )}
+                    {approvalChange.optionsError && !approvalChange.blocked && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={approvalChange.reloadOptions}
+                      >
+                        {t('managed.approvalChange.reload')}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              {interactive &&
+                approvalChange.errorCode &&
+                approvalChange.errorCode !== 'unconfirmed' && (
+                  <p className="text-xs text-destructive" role="alert">
+                    {t(
+                      approvalChange.errorCode === 'storage_unavailable'
+                        ? 'managed.approvalChange.storage'
+                        : approvalChange.errorCode ===
+                            'approval_selection_conflict'
+                          ? 'managed.approvalChange.conflict'
+                          : ['turn_active', 'session_context_busy'].includes(
+                                approvalChange.errorCode,
+                              )
+                            ? 'managed.approvalChange.busy'
+                            : 'managed.approvalChange.failed',
+                    )}
+                  </p>
+                )}
               {displayedModel && !modelChange.supported && (
                 <p className="text-xs text-muted-foreground">
                   {t('managed.modelFixed')}
                 </p>
               )}
-              {summary?.approvalMode && (
+              {summary?.approvalMode && !approvalChange.supported && (
                 <p className="text-xs text-muted-foreground">
                   {t('managed.approvalFixed')}
                 </p>
