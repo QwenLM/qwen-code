@@ -376,7 +376,7 @@ class ManagedSessionGuardConvoyIT {
             }
 
             @Override
-            public void requireUnversioned() {
+            public void validateConfiguration() {
             }
         };
         var data = new ToolPublicationDataStore(jdbc, journal.manager, journal.store,
