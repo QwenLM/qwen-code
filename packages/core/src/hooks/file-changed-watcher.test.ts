@@ -102,6 +102,35 @@ describe('FileChangedWatcher with real files', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it('ignores implicit VCS and dependency subtrees while observing ordinary nested files', async () => {
+    const excluded = [
+      path.join(root, '.git', 'objects', 'pack'),
+      path.join(root, 'node_modules', 'package', 'index.js'),
+    ];
+    for (const file of excluded) {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'initial');
+    }
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([root]);
+    for (const file of excluded) await fs.writeFile(file, 'updated');
+    const nested = path.join(root, 'memory', 'deep', 'topic.md');
+    await fs.mkdir(path.dirname(nested), { recursive: true });
+    await fs.writeFile(nested, 'included');
+    await vi.waitFor(
+      () =>
+        expect(notify).toHaveBeenCalledWith(
+          nested,
+          'add',
+          expect.any(AbortSignal),
+        ),
+      waitOptions,
+    );
+    await delay(400);
+    expect(notify.mock.calls.map(([file]) => file)).toEqual([nested]);
+  });
+
   it('watches both missing static files without traversing siblings and retains dynamic recursion', async () => {
     const parent = path.join(root, 'static');
     const dynamic = path.join(root, 'dynamic');

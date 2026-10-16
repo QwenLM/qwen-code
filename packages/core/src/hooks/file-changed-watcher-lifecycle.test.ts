@@ -36,6 +36,54 @@ describe('FileChangedWatcher lifecycle', () => {
     await watcher?.close();
   });
 
+  it('bounds dynamic traversal while preserving explicit paths and discovery ancestors', async () => {
+    watcher = new FileChangedWatcher(vi.fn().mockResolvedValue(undefined));
+    const explicitRoot = path.join(root, 'node_modules', 'selected');
+    const explicitFile = path.join(root, '.git', 'HEAD');
+    const registration = watcher.setPaths(
+      [root, explicitRoot, explicitFile],
+      [explicitFile],
+    );
+    await vi.waitFor(() => expect(watch).toHaveBeenCalledOnce());
+    const ignored = watch.mock.calls[0][1].ignored;
+    const file = { isFile: () => true, isDirectory: () => false };
+    const directory = { isFile: () => false, isDirectory: () => true };
+    for (const candidate of [
+      path.join(root, '.git', 'objects', 'pack'),
+      path.join(root, 'node_modules', 'other', 'index.js'),
+      path.join(root, 'deep', 'node_modules', 'package'),
+      path.join(root, 'deep', '.git'),
+      `${root}-other`,
+    ]) {
+      expect(ignored(candidate)).toBe(true);
+      expect(ignored(candidate, directory)).toBe(true);
+    }
+    for (const candidate of [
+      root,
+      path.dirname(root),
+      path.join(root, 'first', 'second', 'third', 'topic.md'),
+      path.join(root, '.github', 'workflows', 'ci.yml'),
+      path.join(root, 'node_modules-old', 'topic.md'),
+      path.dirname(explicitFile),
+      explicitFile,
+      path.dirname(explicitRoot),
+      explicitRoot,
+      path.join(explicitRoot, 'lib', 'index.js'),
+    ]) {
+      expect(ignored(candidate)).toBe(false);
+      expect(ignored(candidate, file)).toBe(false);
+    }
+    expect(ignored(explicitFile, directory)).toBe(true);
+    expect(
+      ignored(path.join(root, 'socket'), {
+        isFile: () => false,
+        isDirectory: () => false,
+      }),
+    ).toBe(true);
+    nativeWatchers[0].emit('ready');
+    await registration;
+  });
+
   it.each(['before ready', 'after ready'])(
     'retries unchanged paths after an error %s',
     async (timing) => {

@@ -34,7 +34,10 @@ watching remain disabled.
 
 Successful synchronous `SessionStart` and `FileChanged` outputs can return absolute files
 or directories in `hookSpecificOutput.watchPaths`. Directories are watched
-recursively, including future children. Discovery observes the nearest existing
+recursively, including future children. Recursive discovery skips `.git` and
+`node_modules` subtrees unless a path inside them is explicitly registered.
+Only regular files and directories are eligible; no depth limit is imposed.
+Discovery observes the nearest existing
 parent directory so deeply missing paths and deleted/recreated roots can appear
 later. Only requested files and directory descendants produce notifications;
 unrelated subdirectories are excluded before traversal. Discovery may enumerate

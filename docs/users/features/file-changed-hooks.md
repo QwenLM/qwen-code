@@ -68,7 +68,10 @@ explicit absolute dynamic roots stay unchanged.
 
 A successful synchronous `SessionStart` hook can register absolute files or directories
 through `hookSpecificOutput.watchPaths`. Directories are watched recursively,
-including children created later. Initial registration waits for watcher
+including children created later. Recursive discovery skips `.git` and
+`node_modules` subtrees. To observe a path inside them, register that file or
+directory explicitly. Special file types are ignored, and ordinary directories
+have no depth limit. Initial registration waits for watcher
 readiness before `SessionStart` returns. For example, register memory folders:
 
 ```json

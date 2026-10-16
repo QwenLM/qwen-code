@@ -102,8 +102,19 @@ export class FileChangedWatcher {
         const watcher = watch(watchRoots, {
           ignoreInitial: true,
           ignored: (candidate, stats) => {
+            if (stats && !stats.isFile() && !stats.isDirectory()) return true;
             const file = path.resolve(candidate);
-            if (dynamic.some((root) => isWithin(root, file))) return false;
+            if (
+              dynamic.some(
+                (root) =>
+                  isWithin(root, file) &&
+                  !path
+                    .relative(root, file)
+                    .split(path.sep)
+                    .some((part) => part === '.git' || part === 'node_modules'),
+              )
+            )
+              return false;
             if (staticSet.has(file)) return stats?.isDirectory() ?? false;
             // Only ancestors of requested paths may lead discovery downward.
             return !next.some((root) => isWithin(file, root));

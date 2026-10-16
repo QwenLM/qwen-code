@@ -60,7 +60,9 @@
 ## 监听目录及 cwd 外的路径
 
 执行成功的同步 `SessionStart` hook 可通过 `hookSpecificOutput.watchPaths` 注册绝对文件
-或目录路径。目录递归监听，包括之后新增的子文件。首次注册等待 watcher
+或目录路径。目录递归监听，包括之后新增的子文件。递归发现默认跳过 `.git` 和
+`node_modules` 子树；如需观察其中的路径，请显式注册对应文件或目录。特殊文件类型
+会被忽略，普通目录不限制发现深度。首次注册等待 watcher
 就绪后才返回 `SessionStart`。例如，注册 memory 目录：
 
 ```json
