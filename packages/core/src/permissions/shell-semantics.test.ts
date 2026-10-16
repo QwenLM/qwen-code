@@ -141,6 +141,11 @@ describe('extractShellOperations', () => {
     expect(ops).toEqual([{ virtualTool: 'read_file', filePath: '/etc/hosts' }]);
   });
 
+  it('grep: -n is line numbers and does not consume the pattern', () => {
+    const ops = extractShellOperations('grep -n pattern /etc/hosts', CWD);
+    expect(ops).toEqual([{ virtualTool: 'read_file', filePath: '/etc/hosts' }]);
+  });
+
   it('grep: -A value not treated as path', () => {
     const ops = extractShellOperations('grep -A 3 error /var/log/app.log', CWD);
     expect(ops).toEqual([
