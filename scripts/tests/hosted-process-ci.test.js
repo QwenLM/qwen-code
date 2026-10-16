@@ -321,6 +321,11 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg8-cases/',
     );
+    // FG10 follows the same precedent: its per-case evidence lives in
+    // target/fg10-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg10-cases/',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag.
     const evidence = job.steps.find(
@@ -529,6 +534,18 @@ describe('Hosted real-process gates', () => {
     const ceilings = ceilingsOf(
       hostedTestSource('HostedMonitorRunFaultGatesIT'),
     );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedWorkflowFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG10 letters are independent fixtures sharing the fork, the same
+    // per-ceiling shape the FG8 letters are held to.
+    const ceilings = ceilingsOf(hostedTestSource('HostedWorkflowFaultGatesIT'));
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {
       expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
