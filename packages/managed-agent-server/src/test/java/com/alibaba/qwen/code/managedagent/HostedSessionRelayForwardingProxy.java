@@ -31,8 +31,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * The FG9 lose-once/hold reverse proxy. One instance fronts one HTTP
- * boundary (the Session Store or the Harness daemon) and passes every
- * request through unless an armed rule matches its method+path+body; a
+ * boundary (the Session Store, or the public API for one client's own
+ * request) and passes every request through unless an armed rule
+ * matches its method+path+body; a
  * matched rule then drops the reply after the upstream already committed
  * (the lose-once shape fault rounds live on), or holds it until the IT
  * releases the named latch (the controlled-ambiguity shape). The armed
@@ -99,31 +100,37 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
             HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER)
                     .connectTimeout(Duration.ofSeconds(10)).build();
     private final HttpServer server;
-    private final URI upstream;
     private final Path logFile;
+    private volatile URI upstream;
     private final List<Rule> rules = new CopyOnWriteArrayList<>();
     private final Map<String, CompletableFuture<Void>> latches =
             new ConcurrentHashMap<>();
     private final List<String> operations = new CopyOnWriteArrayList<>();
 
-    private HostedSessionRelayForwardingProxy(URI upstream, Path logFile,
+    private HostedSessionRelayForwardingProxy(Path logFile,
             HttpServer server) {
-        this.upstream = upstream;
         this.logFile = logFile;
         this.server = server;
     }
 
-    static HostedSessionRelayForwardingProxy start(String label, URI upstream,
+    /** Binds an ephemeral port now; {@link #forwardTo} names the upstream
+     * once it is listening, so the upstream's own port need not be picked
+     * ahead of its boot. */
+    static HostedSessionRelayForwardingProxy start(String label,
             Path logFile) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(
                 "127.0.0.1", 0), 0);
         HostedSessionRelayForwardingProxy proxy =
-                new HostedSessionRelayForwardingProxy(upstream, logFile,
-                        server);
+                new HostedSessionRelayForwardingProxy(logFile, server);
         server.createContext("/", proxy::handle);
         server.start();
-        proxy.record("PROXY up " + label + " upstream=" + upstream);
+        proxy.record("PROXY up " + label);
         return proxy;
+    }
+
+    void forwardTo(URI target) {
+        upstream = target;
+        record("PROXY upstream=" + target);
     }
 
     String baseUrl() {
