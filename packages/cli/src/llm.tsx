@@ -123,6 +123,7 @@ import {
   superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import { createLocalWorkflowAncestorTrustProvider } from './config/trustedFolders.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -732,7 +733,12 @@ export async function main() {
         undefined,
         undefined,
         undefined,
-        undefined,
+        privateAcpParentCapability === undefined
+          ? {
+              workflowAncestorTrustProvider:
+                createLocalWorkflowAncestorTrustProvider(settings.merged),
+            }
+          : undefined,
         buildEnabledSkillNamesProvider(settings),
       );
 
@@ -1067,7 +1073,12 @@ export async function main() {
       undefined,
       settingsWatcher,
       undefined,
-      undefined,
+      privateAcpParentCapability === undefined
+        ? {
+            workflowAncestorTrustProvider:
+              createLocalWorkflowAncestorTrustProvider(settings.merged),
+          }
+        : undefined,
       buildEnabledSkillNamesProvider(settings),
     );
     markAcpStartup('configConstructionEnd');

@@ -5,6 +5,14 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import {
+  listSavedWorkflows as listRealSavedWorkflows,
+  resolveSavedWorkflowScript,
+} from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -419,5 +427,68 @@ describe('SavedWorkflowLoader', () => {
       aborted,
     );
     expect(cmds).toEqual([]);
+  });
+
+  it('R01 revalidates a cached ancestor command path and name after trust revocation', async () => {
+    const temporary = await mkdtemp(
+      path.join(tmpdir(), 'qwen-workflow-loader-'),
+    );
+    const directory = await realpath(temporary);
+    const repo = path.join(directory, 'repo');
+    const target = path.join(repo, 'packages', 'app');
+    const user = path.join(directory, 'user');
+    const scriptPath = path.join(repo, '.qwen', 'workflows', 'shared.js');
+    const userDirectory = vi
+      .spyOn(Storage, 'getUserWorkflowsDir')
+      .mockReturnValue(user);
+    try {
+      await mkdir(target, { recursive: true });
+      await mkdir(path.join(repo, '.git'));
+      await mkdir(path.dirname(scriptPath), { recursive: true });
+      await writeFile(scriptPath, "return 'DW01_ANCESTOR';");
+      let allowed = true;
+      const config = makeConfig({
+        getTargetDir: () => target,
+        getWorkflowAncestorTrustProvider:
+          () => async (dirs: readonly string[]) =>
+            dirs.map(() => allowed),
+        storage: {
+          getGeneratedWorkflowsDir: () => path.join(directory, 'generated'),
+        },
+      });
+      listMock.mockImplementation(listRealSavedWorkflows);
+      const loader = new SavedWorkflowLoader(config);
+      const [command] = await loader.loadCommands(signal);
+      expect(command.name).toBe('shared');
+      const invocation = await command.action!(ctx, '');
+      expect(invocation).toMatchObject({
+        type: 'tool',
+        toolArgs: { scriptPath },
+      });
+      if (
+        !invocation ||
+        invocation.type !== 'tool' ||
+        typeof invocation.toolArgs['scriptPath'] !== 'string'
+      ) {
+        throw new Error('Expected a workflow tool with a script path');
+      }
+      const cached = { scriptPath: invocation.toolArgs['scriptPath'] };
+      await expect(
+        resolveSavedWorkflowScript(cached, config),
+      ).resolves.toMatchObject({
+        script: "return 'DW01_ANCESTOR';",
+      });
+      allowed = false;
+      await expect(
+        resolveSavedWorkflowScript(cached, config),
+      ).rejects.toThrow();
+      await expect(
+        resolveSavedWorkflowScript('shared', config),
+      ).rejects.toThrow();
+      await expect(loader.loadCommands(signal)).resolves.toEqual([]);
+    } finally {
+      userDirectory.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

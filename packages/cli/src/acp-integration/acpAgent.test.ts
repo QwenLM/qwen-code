@@ -4551,6 +4551,62 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([undefined, '', 'private-parent'])(
+    'H01/H04 injects ancestor trust only for direct ACP provenance %s',
+    async (capability) => {
+      await setupSessionMocks('ancestor-session');
+      const { agent, agentPromise } = await bootAcpAgent({
+        privateParentCapability: capability,
+      });
+      try {
+        if (capability !== undefined) {
+          await expect(
+            agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+          ).rejects.toThrow('Private ACP parent is not initialized');
+          expect(loadCliConfig).not.toHaveBeenCalled();
+          if (capability === '') {
+            await expect(
+              agent.initialize({
+                clientCapabilities: {},
+                _meta: {
+                  'qwen-code/private-parent-capability': 'wrong-capability',
+                },
+              }),
+            ).rejects.toThrow();
+            expect(loadCliConfig).not.toHaveBeenCalled();
+            return;
+          }
+          await agent.initialize({
+            clientCapabilities: {},
+            _meta: {
+              'qwen-code/private-parent-capability': capability,
+            },
+          });
+        }
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: {
+            'qwen-code/private-parent-capability':
+              'client-metadata-is-not-provenance',
+          },
+        });
+        const provider =
+          vi.mocked(loadCliConfig).mock.calls[0]?.[9]
+            ?.workflowAncestorTrustProvider;
+        if (capability === undefined) {
+          expect(provider).toBeTypeOf('function');
+          await expect(provider?.(['/repo'])).resolves.toEqual([true]);
+        } else {
+          expect(provider).toBeUndefined();
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('forwards a caller-supplied sessionId from _meta to loadCliConfig', async () => {
     const innerConfig = await setupSessionMocks('meta-session');
     let configLoadSessionContext: string | undefined;
@@ -4680,6 +4736,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         const [settings, , , , , , , , , hostPolicy] =
           vi.mocked(loadCliConfig).mock.calls[0]!;
         expect(hostPolicy?.executionEngine).toBe('managed');
+        expect(hostPolicy?.workflowAncestorTrustProvider).toBeUndefined();
         // Its tools execute in the session's Runtime worker.
         expect(hostPolicy?.managedRuntimeEnvironment).toBe(
           managedRuntimeEnvironment,
@@ -17262,7 +17319,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('reads a saved workflow definition with its parsed meta', async () => {
+  it('H05 reads saved workflow source, path and body from one resolution', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.isWorkflowsEnabled.mockReturnValue(true);
@@ -17276,13 +17333,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       "return await agent('go')",
       '',
     ].join('\n');
-    mockListSavedWorkflows.mockResolvedValueOnce([
-      { name: 'deep-review', source: 'project', scriptPath },
-    ]);
     mockResolveSavedWorkflowScript.mockResolvedValueOnce({
       name: 'deep-review',
       scriptPath,
       script,
+      source: 'project',
     });
 
     const agentPromise = runAcpAgent(
@@ -17325,8 +17380,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'deep-review',
       expect.anything(),
     );
+    expect(mockListSavedWorkflows).not.toHaveBeenCalled();
 
     // Unknown names and disabled Workflow controls both fail closed to null.
+    mockResolveSavedWorkflowScript.mockRejectedValueOnce(new Error('missing'));
     await expect(
       agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow, {
         sessionId,
@@ -32497,6 +32554,10 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       ).toHaveBeenCalledWith(discoveryConfig),
     );
     expect(discoveryConfigSessionContext).toBe('workspace-mcp-discovery');
+    expect(
+      vi.mocked(loadCliConfig).mock.calls[0]?.[9]
+        ?.workflowAncestorTrustProvider,
+    ).toBeTypeOf('function');
     expect(mockConfig.reinitializeMcpServers).not.toHaveBeenCalled();
 
     const persistedServer = {

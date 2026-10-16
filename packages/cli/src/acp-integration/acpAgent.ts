@@ -387,6 +387,7 @@ import {
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
 import {
+  createLocalWorkflowAncestorTrustProvider,
   isWorkspaceTrusted,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
@@ -4450,7 +4451,12 @@ class QwenAgent implements Agent {
           undefined,
           undefined,
           undefined,
-          undefined,
+          this.expectedPrivateParentCapability === undefined
+            ? {
+                workflowAncestorTrustProvider:
+                  createLocalWorkflowAncestorTrustProvider(settings.merged),
+              }
+            : undefined,
           buildEnabledSkillNamesProvider(settings),
         ),
       );
@@ -9201,16 +9207,14 @@ class QwenAgent implements Agent {
       workflow,
     });
     if (!this.canUseWorkflowControls(config)) return envelope(null);
-    const entry = (await listSavedWorkflows(config)).find(
-      (candidate) => candidate.name === name,
-    );
-    if (!entry) return envelope(null);
-    let script: string;
+    let resolved: Awaited<ReturnType<typeof resolveSavedWorkflowScript>>;
     try {
-      script = (await resolveSavedWorkflowScript(name, config)).script;
+      resolved = await resolveSavedWorkflowScript(name, config);
     } catch {
       return envelope(null);
     }
+    if (!resolved.source) return envelope(null);
+    const { script } = resolved;
     let meta: ServeSessionSavedWorkflowDetail['meta'] = null;
     let metaError: string | undefined;
     try {
@@ -9221,9 +9225,9 @@ class QwenAgent implements Agent {
     return envelope({
       v: STATUS_SCHEMA_VERSION,
       sessionId,
-      name: entry.name,
-      source: entry.source,
-      scriptPath: entry.scriptPath,
+      name: resolved.name,
+      source: resolved.source,
+      scriptPath: resolved.scriptPath,
       script,
       meta,
       ...(metaError !== undefined ? { metaError } : {}),
@@ -15491,6 +15495,10 @@ class QwenAgent implements Agent {
       ...(chatRecording !== undefined ? { chatRecording } : {}),
     };
 
+    const workflowAncestorTrustProvider =
+      this.expectedPrivateParentCapability === undefined
+        ? createLocalWorkflowAncestorTrustProvider(mergedSettings)
+        : undefined;
     const config = await loadCliConfig(
       mergedSettings,
       argvForSession,
@@ -15524,8 +15532,12 @@ class QwenAgent implements Agent {
         restoreOptions ||
         provisionalWorkspace ||
         agentHostReadOnly ||
-        executionEngine
+        executionEngine ||
+        workflowAncestorTrustProvider
         ? {
+            ...(workflowAncestorTrustProvider
+              ? { workflowAncestorTrustProvider }
+              : {}),
             ...(provisionalWorkspace
               ? { provisionalWorkspace: true as const }
               : {}),
