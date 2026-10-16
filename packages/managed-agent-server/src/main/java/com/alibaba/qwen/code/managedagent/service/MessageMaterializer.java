@@ -6,8 +6,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
@@ -27,6 +29,7 @@ public class MessageMaterializer {
     private static final int MAX_BACKOFF_STREAK = 64;
     private final AgentStateStore store;
     private final Map<String, Integer> failures = new ConcurrentHashMap<>();
+    private final Set<String> surfaced = ConcurrentHashMap.newKeySet();
 
     public MessageMaterializer(AgentStateStore store) {
         this.store = store;
@@ -43,6 +46,19 @@ public class MessageMaterializer {
         List<MaterializationTarget> targets =
                 store.findMaterializationTargets(TARGET_LIMIT + 1);
         boolean saturated = targets.size() > TARGET_LIMIT;
+        // A session that stopped being a target (caught up or deleted)
+        // never fails again; drop its entries so both maps track only live
+        // failures. A saturated window is truncated, though, so absence
+        // there means "crowded out by the deferral rotation", not "gone" —
+        // the streak must survive it (review round 12, R12-1).
+        if (!failures.isEmpty() && !saturated) {
+            Set<String> live = new HashSet<>();
+            for (MaterializationTarget target : targets) {
+                live.add(target.tenantId() + ":" + target.sessionId());
+            }
+            failures.keySet().removeIf(key -> !live.contains(key));
+            surfaced.removeIf(key -> !live.contains(key));
+        }
         for (MaterializationTarget target
                 : targets.subList(0, Math.min(TARGET_LIMIT, targets.size()))) {
             String key = target.tenantId() + ":" + target.sessionId();
@@ -63,9 +79,21 @@ public class MessageMaterializer {
                 store.materializeNextBatch(target.tenantId(),
                         target.sessionId(), EVENT_LIMIT);
                 failures.remove(key);
+                surfaced.remove(key);
             } catch (RuntimeException error) {
-                failures.put(key, streak + 1);
+                int next = streak + 1;
+                failures.put(key, next);
                 deferQuietly(target);
+                if (streak == MAX_BACKOFF_STREAK && surfaced.add(key)) {
+                    // A session that survives the whole exponential phase is
+                    // a stuck projection, not a blip: surface it once, then
+                    // keep retrying on the capped gate. One line, no stack —
+                    // the exponential phase already logged it seven times.
+                    LOG.error("Managed Agent session {} projection is stuck"
+                                    + " after {} consecutive failures;"
+                                    + " retrying on the capped gate",
+                            target.sessionId(), next);
+                }
                 if (streak < MAX_BACKOFF_STREAK) {
                     LOG.warn("Failed to materialize Managed Agent session {}",
                             target.sessionId(), error);
