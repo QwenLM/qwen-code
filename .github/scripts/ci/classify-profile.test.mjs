@@ -8,13 +8,52 @@ import {
 
 test('uses docs_only for markdown-only changes', () => {
   assert.equal(
-    classifyChangedFiles(['README.md', 'docs/usage.md', '.qwen/design/foo.md']),
-    'full',
-  );
-  assert.equal(
     classifyChangedFiles(['README.md', 'docs/usage.md']),
     'docs_only',
   );
+  // Markdown outside docs/ skips tests too, but keeps full review.
+  assert.equal(
+    classifyChangedFiles(['README.md', 'docs/usage.md', '.qwen/design/foo.md']),
+    'github_ci_only',
+  );
+});
+
+test('skips application tests for Markdown on any path outside src/ and fixtures', () => {
+  for (const file of [
+    'AGENTS.md',
+    '.qwen/skills/triage/SKILL.md',
+    '.qwen/e2e-tests/web-shell/plan.md',
+    '.github/pull_request_template.md',
+    'packages/web-shell/README.md',
+    'packages/cua-driver/docs/tool-output-format.md',
+    'integrations/external-context/GUIDE.MD',
+  ]) {
+    assert.equal(classifyChangedFiles([file]), 'github_ci_only', file);
+  }
+});
+
+test('keeps Markdown that ships in src/ or feeds fixtures on the full profile', () => {
+  for (const file of [
+    'packages/core/src/skills/bundled/review/SKILL.md',
+    'packages/cli/src/commands/extensions/examples/starter/QWEN.md',
+    'packages/cli/src/commands/review/__fixtures__/comment.md',
+    'integration-tests/fixtures/chat-transcript-contract/v1/turn.md',
+    'integrations/test-failure-explorer/test-fixtures/report.md',
+    'packages/cua-driver/compat-fixtures/apps/notes.md',
+    'packages/foo/Src/notes.md',
+  ]) {
+    assert.equal(classifyChangedFiles([file]), 'full', file);
+  }
+});
+
+test('keeps non-Markdown lookalikes outside docs/ on the full profile', () => {
+  for (const file of [
+    'packages/web-shell/README.mdx',
+    'packages/web-shell/notes.md.ts',
+    'packages/web-shell/notes.md/index.ts',
+  ]) {
+    assert.equal(classifyChangedFiles([file]), 'full', file);
+  }
 });
 
 test('uses docs_only for uppercase and extensionless docs', () => {
@@ -94,6 +133,16 @@ test('classifies renamed files using both old and new paths', () => {
     ]),
     'docs_only',
   );
+  assert.equal(
+    classifyChangedFiles([
+      {
+        filename: '.qwen/skills/new/SKILL.md',
+        previous_filename: 'packages/core/src/skills/bundled/old/SKILL.md',
+        status: 'renamed',
+      },
+    ]),
+    'full',
+  );
 });
 
 test('falls back to full when changed files are unavailable', () => {
@@ -107,11 +156,22 @@ test('falls back to full for source or mixed changes', () => {
     'full',
   );
   assert.equal(
+    classifyChangedFiles(['.qwen/skills/triage/SKILL.md', 'scripts/build.js']),
+    'full',
+  );
+});
+
+test('keeps docs mixed with helper files or Markdown off application tests', () => {
+  assert.equal(
     classifyChangedFiles([
       'README.md',
       '.github/scripts/pr-safety-precheck.mjs',
     ]),
-    'full',
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles(['docs/usage.md', 'packages/web-shell/README.md']),
+    'github_ci_only',
   );
 });
 
@@ -131,12 +191,12 @@ test('falls back to full for classifier changes', () => {
   );
 });
 
-test('falls back to full for runtime markdown assets and instruction files', () => {
+test('never downgrades review for runtime markdown assets and instruction files', () => {
   assert.equal(
     classifyChangedFiles(['packages/core/src/skills/bundled/foo/SKILL.md']),
     'full',
   );
-  assert.equal(classifyChangedFiles(['AGENTS.md']), 'full');
+  assert.equal(classifyChangedFiles(['AGENTS.md']), 'github_ci_only');
 });
 
 test('reserved prose basenames classify docs_only only with inert extensions', () => {
