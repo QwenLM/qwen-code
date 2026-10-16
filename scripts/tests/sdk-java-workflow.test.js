@@ -1,9 +1,29 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { globSync } from 'glob';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { LOCATIONS } from '../flyway-migration-utils.js';
-import { CONTRACT_DOCUMENT } from '../contract-version-utils.js';
+import {
+  CONTRACT_DOCUMENT,
+  CONTRACT_DOCUMENT_PREDECESSOR,
+} from '../contract-version-utils.js';
+
+const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
+  .map((pattern) => `com/alibaba/qwen/code/runtimebroker/**/${pattern}.java`)
+  .join(',');
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
@@ -30,11 +50,8 @@ describe('SDK Java self-hosted workflow guards', () => {
       );
       const verify = steps.findIndex(
         (s) =>
-          (s['working-directory'] ===
-            'packages/sdk-java/managed-agent-server' ||
-            s.run?.includes(
-              '-f packages/sdk-java/managed-agent-server/pom.xml',
-            )) &&
+          (s['working-directory'] === 'packages/managed-agent-server' ||
+            s.run?.includes('-f packages/managed-agent-server/pom.xml')) &&
           s.run?.includes('clean verify'),
       );
       expect(install, name).toBeGreaterThan(-1);
@@ -77,16 +94,108 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('runs Runtime Broker tests from the sibling module on self-hosted Java 21', () => {
+  it('runs Broker tests from the combined Server after installing the SDK on self-hosted Java 21', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
     expect(block).toContain(
       'mvn --batch-mode --no-transfer-progress clean test\n' +
         '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
-        '            cd ../runtime-broker\n' +
-        '            mvn --batch-mode --no-transfer-progress clean test\n' +
+        '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install\n' +
+        '            cd ../../managed-agent-server\n' +
+        `            mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
         '          fi',
+    );
+  });
+
+  it('runs the Broker suite on hosted Java 21 after installing its SDK dependency', () => {
+    const block = step(job('test'), 'Run Runtime Broker state tests');
+    const hosted = parse(workflow).jobs.test.steps.find(
+      (candidate) => candidate.name === 'Run Runtime Broker state tests',
+    );
+    expect(hosted.shell).toBe('bash');
+    expect(block).toContain(
+      "working-directory: 'packages/managed-agent-server'",
+    );
+    expect(block).toContain("matrix.java == '21'");
+    expect(block.indexOf('../sdk-java/qwencode/pom.xml')).toBeLessThan(
+      block.indexOf('clean test'),
+    );
+    expect(block).toContain(`'-Dtest=${brokerTestPattern}'`);
+  });
+
+  it.skipIf(process.platform === 'win32').each([0, 23])(
+    'gates the hosted Broker test command on SDK install exit %s',
+    (installStatus) => {
+      const hosted = parse(workflow).jobs.test.steps.find(
+        (candidate) => candidate.name === 'Run Runtime Broker state tests',
+      );
+      expect(hosted.shell).toBe('bash');
+      const result = spawnSync(
+        hosted.shell,
+        [
+          '--noprofile',
+          '--norc',
+          '-e',
+          '-o',
+          'pipefail',
+          '-c',
+          `mvn() {
+            printf 'ARG<%s>\\n' "$@"
+            if [[ "$*" == *" install" ]]; then return "$SDK_INSTALL_STATUS"; fi
+            printf 'BROKER_TESTS_RAN\\n'
+          }
+          ${hosted.run}`,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, SDK_INSTALL_STATUS: String(installStatus) },
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(installStatus);
+      expect(result.stdout).toContain('ARG<-Dgpg.skip=true>');
+      expect(result.stdout).toContain('ARG<-Dmaven.javadoc.skip=true>');
+      expect(result.stdout.includes('BROKER_TESTS_RAN')).toBe(
+        installStatus === 0,
+      );
+      if (installStatus === 0) {
+        expect(result.stdout).toContain(`ARG<-Dtest=${brokerTestPattern}>`);
+      }
+    },
+  );
+
+  it('keeps the Broker matrix selector matched to every default test including nested packages', () => {
+    const cwd = 'packages/managed-agent-server/src/test/java';
+    const prefix = 'com/alibaba/qwen/code/runtimebroker';
+    const selected = [
+      ...new Set(
+        brokerTestPattern
+          .split(',')
+          .flatMap((pattern) => globSync(pattern, { cwd })),
+      ),
+    ].sort();
+    const defaults = globSync(
+      `${prefix}/**/{Test*,*Test,*Tests,*TestCase}.java`,
+      { cwd },
+    ).sort();
+    expect(selected.length).toBeGreaterThan(0);
+    expect(selected).toEqual(defaults);
+    expect(selected.some((file) => file.includes('/managedworkspace/'))).toBe(
+      true,
+    );
+    expect(selected.some((file) => file.includes('/managedschema/'))).toBe(
+      true,
+    );
+    expect(
+      readFileSync('packages/managed-agent-server/pom.xml', 'utf8'),
+    ).toContain('<failIfNoTests>true</failIfNoTests>');
+  });
+
+  it('checks both package rulesets in the standalone Checkstyle lane', () => {
+    const block = step(job('test'), 'Run Managed Agent Server Checkstyle');
+    expect(block).toContain(
+      'checkstyle:check checkstyle:check@runtime-broker-checkstyle',
     );
   });
 
@@ -109,7 +218,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
       );
       expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
-        { test: 7, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
+        { test: 6, 'mysql-integration': 2, 'daemon-e2e': 1 }[name],
       );
       if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
@@ -164,30 +273,21 @@ describe('SDK Java Flyway migration version guard', () => {
       steps.indexOf('Checkout'),
     );
     expect(block).toContain(
-      "run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'",
+      "run: 'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode'",
     );
   });
 
-  it('scans every sdk-java module that owns a registered migration directory', () => {
-    // The guard's premise is the shared classpath:db/migration namespace —
-    // managed-agent-server depends on runtime-broker, so one invocation must
-    // name every module that owns a migration sequence. Derive the
-    // expectation from the tree: a module that grows a db/migration without
-    // joining the invocation turns this red.
-    const owners = new Set();
-    for (const entry of readdirSync('packages/sdk-java', {
-      withFileTypes: true,
-    })) {
-      if (!entry.isDirectory()) continue;
-      for (const location of LOCATIONS) {
-        if (
-          existsSync(join('packages/sdk-java', entry.name, ...location.dir))
-        ) {
-          owners.add(`packages/sdk-java/${entry.name}`);
-        }
-      }
-    }
-    expect(owners.size).toBeGreaterThan(0);
+  it('scans every Maven module that owns a registered migration directory', () => {
+    const modules = [
+      'packages/managed-agent-server',
+      ...readdirSync('packages/sdk-java', { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => `packages/sdk-java/${entry.name}`),
+    ];
+    const owners = modules.filter((module) =>
+      LOCATIONS.some((location) => existsSync(join(module, ...location.dir))),
+    );
+    expect(owners.length).toBeGreaterThan(0);
     const block = job('flyway-migrations');
     for (const owner of owners) {
       expect(block).toContain(owner);
@@ -274,6 +374,73 @@ describe('SDK Java contract version guard', () => {
     );
     expect(step.run).toContain('node scripts/check-contract-version.js');
   });
+
+  it.skipIf(process.platform === 'win32').each([
+    { changed: false, version: '1.2.0', status: 0 },
+    { changed: true, version: '1.2.0', status: 1 },
+    { changed: true, version: '1.3.0', status: 0 },
+  ])(
+    'compares a renamed contract with its predecessor: changed=$changed version=$version',
+    ({ changed, version, status }) => {
+      const root = mkdtempSync(join(tmpdir(), 'contract-rename-'));
+      try {
+        const bin = join(root, 'bin');
+        mkdirSync(bin);
+        const base = join(root, 'base.json');
+        writeFileSync(base, JSON.stringify({ info: { version: '1.2.0' } }));
+        const document = join(root, CONTRACT_DOCUMENT);
+        mkdirSync(dirname(document), { recursive: true });
+        writeFileSync(
+          document,
+          JSON.stringify({
+            info: { version },
+            ...(changed ? { paths: {} } : {}),
+          }),
+        );
+        symlinkSync(resolve('scripts'), join(root, 'scripts'), 'dir');
+        for (const [name, body] of [
+          ['gh', 'printf \'%s\\n\' "$PREDECESSOR"'],
+          [
+            'git',
+            'if [ "$1" = fetch ]; then exit 0; fi\n' +
+              'if [ "$1" = show ] && [ "$2" = "FETCH_HEAD:$PREDECESSOR" ]; then cat "$BASE_FIXTURE"; else exit 1; fi',
+          ],
+        ]) {
+          writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
+          chmodSync(join(bin, name), 0o755);
+        }
+        const run = parse(
+          readFileSync('.github/workflows/ci.yml', 'utf8'),
+        ).jobs.lint_and_static.steps.find(
+          (step) => step.name === 'Check the API contract version advances',
+        ).run;
+        const result = spawnSync(
+          'bash',
+          [
+            '-euc',
+            `DOCUMENT='${CONTRACT_DOCUMENT}'\n${run.slice(run.indexOf('BASE_DOCUMENT='))}`,
+          ],
+          {
+            cwd: root,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              RUNNER_TEMP: root,
+              BASE_REF: 'main',
+              REPO: 'QwenLM/qwen-code',
+              PR_NUMBER: '1',
+              BASE_FIXTURE: base,
+              PREDECESSOR: CONTRACT_DOCUMENT_PREDECESSOR,
+            },
+          },
+        );
+        expect(result.status, result.stdout + result.stderr).toBe(status);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 // #13742: the guard above sees each PR merged with the main of the moment it
@@ -297,8 +464,9 @@ describe('SDK Java Flyway re-check of open PRs', () => {
     expect(recheck.on.push.branches).toEqual(['main']);
     // Every location the scripts scan, so a new one cannot go unwatched.
     expect(recheck.on.push.paths).toEqual([
-      ...LOCATIONS.map(
-        (location) => `packages/sdk-java/*/${location.dir.join('/')}/**`,
+      ...['packages/sdk-java/*', 'packages/managed-agent-server'].flatMap(
+        (module) =>
+          LOCATIONS.map((location) => `${module}/${location.dir.join('/')}/**`),
       ),
       'scripts/check-flyway-open-prs.js',
       'scripts/flyway-migration-utils.js',
@@ -343,7 +511,7 @@ describe('SDK Java Flyway re-check of open PRs', () => {
     );
   });
 
-  it('scans the same modules as the guard, each one level under packages/sdk-java', () => {
+  it('scans the same Maven modules as the guard', () => {
     const guard = parse(workflow).jobs['flyway-migrations'].steps.find(
       (s) => s.name === 'Check Flyway migration versions are unique',
     ).run;
@@ -355,7 +523,9 @@ describe('SDK Java Flyway re-check of open PRs', () => {
     expect(moduleArgs(run.run)).toEqual(moduleArgs(guard));
     // The push filter's `*` matches one path segment.
     for (const module of moduleArgs(run.run)) {
-      expect(module).toMatch(/^packages\/sdk-java\/[^/]+$/);
+      expect(module).toMatch(
+        /^packages\/(?:sdk-java\/[^/]+|managed-agent-server)$/,
+      );
     }
   });
 });
@@ -406,16 +576,16 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       block.match(
         /MYSQL_PORT: "\$\{\{ job\.services\.mariadb\.ports\['3306'\] \}\}"/g,
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     // The consumer is the link that carries the random port into the tests:
-    // both mvn lines must interpolate ${MYSQL_PORT}, or the declaration is
+    // the mvn line must interpolate ${MYSQL_PORT}, or the declaration is
     // dead and the fixed-port collision returns. hosted-harness-mysql's two
     // -Dmysql.url lines read job.services.mysql and live outside this block.
     expect(
       block.match(
         /-Dmysql\.url="jdbc:mysql:\/\/127\.0\.0\.1:\$\{MYSQL_PORT\}\//g,
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
   it('keeps the MariaDB datadir on tmpfs so a pool run strands no anonymous volume', () => {
@@ -439,7 +609,6 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       (s) => typeof s.run === 'string' && s.run.includes('mvn '),
     );
     expect(mavenSteps.map((s) => s.name)).toEqual([
-      'Run Runtime Broker MySQL integration tests',
       'Install Managed Agent dependencies',
       'Run Managed Agent tests, Checkstyle, and MySQL integration',
     ]);
@@ -488,26 +657,13 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
         '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
       );
     }
-    // The runtime-broker step must not join them: Maven creates the
-    // job-local directory the moment any goal runs with the override, so the
-    // seed's cp -aln would hit an existing destination and nest one level
-    // down (m2-repo/repository/…), and the write-back would extract that
-    // bogus tree into the host-shared repo. The per-job count pin above is
-    // invariant under moving the override between this job's steps, so pin
-    // the step.
-    const broker = steps.find(
-      (s) => s.name === 'Run Runtime Broker MySQL integration tests',
-    );
-    expect(broker?.env?.MAVEN_ARGS, broker?.name).not.toContain(
-      '-Dmaven.repo.local',
-    );
     expect(install.run).toContain(
       'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
     );
     // The write-back closes the cache: 'maven' loop — the seed above only
     // reads the cache-saved ~/.m2, so without it a pom key rotation saves a
     // thin entry that never recaptures the managed-agent-server tree. The
-    // excludes name the three in-house fixed release coordinates, not the
+    // excludes name the two in-house fixed release coordinates, not the
     // whole com/alibaba group, so third-party artifacts under it (druid)
     // still recapture. The pipeline is best-effort like the seed: the
     // warning arm keeps a copy failure from reddening the gate after mvn
@@ -515,7 +671,7 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     // being masked by the extractor's exit 0.
     expect(verify.run).toContain('set -o pipefail');
     expect(verify.run).toContain(
-      'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-runtime-broker --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
+      'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
     );
     expect(verify.run).toContain(
       'tar -C "${HOME}/.m2/repository" --skip-old-files -xf -',
