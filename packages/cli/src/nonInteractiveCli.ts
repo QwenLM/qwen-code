@@ -1217,6 +1217,11 @@ export async function runNonInteractive(
           sessionId,
           apiHistory: cancellation ? [] : history,
           completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
+          // `history` is the full live history (no tail window), so the live
+          // compression boundary indexes it as-is (#14325).
+          compressedTailLength: cancellation
+            ? undefined
+            : llmClient.getChat().getCompressedTailLength?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,

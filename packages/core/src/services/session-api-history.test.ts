@@ -224,6 +224,7 @@ describe('Goal turn end history metadata', () => {
       apiHistory: before,
       completedToolCallIds: ['finish'],
       trailingSystemNotifications: 0,
+      compressedTailLength: null,
     });
     messages.push({
       ...messages[1]!,
@@ -830,5 +831,135 @@ describe('internal Code Mode tool results', () => {
     expect(parts.some((part) => part.functionResponse?.id === 'nested')).toBe(
       false,
     );
+  });
+});
+
+describe('compressedTailLength clean boundary (#14325)', () => {
+  const base = {
+    sessionId: 'session',
+    timestamp: '2026-09-19T00:00:00.000Z',
+    cwd: '/workspace',
+    version: 'test',
+  };
+
+  let seq = 0;
+  function userContent(text: string): Content {
+    return { role: 'user', parts: [{ text }] };
+  }
+  function modelContent(text: string): Content {
+    return { role: 'model', parts: [{ text }] };
+  }
+  function recordOf(type: 'user' | 'assistant', message: Content): ChatRecord {
+    seq += 1;
+    return {
+      ...base,
+      uuid: `r${seq}`,
+      parentUuid: null,
+      type,
+      message,
+    };
+  }
+  function compressionRecord(compressedHistory: Content[]): ChatRecord {
+    seq += 1;
+    return {
+      ...base,
+      uuid: `c${seq}`,
+      parentUuid: null,
+      type: 'system',
+      subtype: 'chat_compression',
+      systemPayload: {
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory,
+      },
+    };
+  }
+
+  it('reports the compressed payload length as the boundary', () => {
+    const summary = userContent('summary');
+    const ack = modelContent('ack');
+    const built = buildSessionHistoryFromConversation({
+      messages: [
+        recordOf('user', summary),
+        recordOf('assistant', ack),
+        compressionRecord([summary, ack]),
+      ],
+    });
+    expect(built.apiHistory).toHaveLength(2);
+    expect(built.compressedTailLength).toBe(2);
+  });
+
+  it('keeps the boundary when records are appended after the compression', () => {
+    const summary = userContent('summary');
+    const ack = modelContent('ack');
+    const built = buildSessionHistoryFromConversation({
+      messages: [
+        recordOf('user', summary),
+        recordOf('assistant', ack),
+        compressionRecord([summary, ack]),
+        recordOf('user', userContent('next request')),
+      ],
+    });
+    expect(built.apiHistory).toHaveLength(3);
+    expect(built.compressedTailLength).toBe(2);
+  });
+
+  it('reports the LAST compression when several completed', () => {
+    const a = userContent('a');
+    const b = modelContent('b');
+    const c = userContent('c');
+    const d = userContent('d');
+    const e = modelContent('e');
+    const built = buildSessionHistoryFromConversation({
+      messages: [
+        recordOf('user', a),
+        recordOf('assistant', b),
+        recordOf('user', c),
+        compressionRecord([a, b, c]),
+        recordOf('user', d),
+        recordOf('assistant', e),
+        compressionRecord([d, e]),
+      ],
+    });
+    expect(built.apiHistory).toHaveLength(2);
+    expect(built.compressedTailLength).toBe(2);
+  });
+
+  it('reports null when the conversation has no compression', () => {
+    const built = buildSessionHistoryFromConversation({
+      messages: [
+        recordOf('user', userContent('hello')),
+        recordOf('assistant', modelContent('hi')),
+      ],
+    });
+    expect(built.compressedTailLength).toBeNull();
+  });
+
+  it('re-measures the boundary when stripping drops a compressed entry', () => {
+    // The pre-strip payload is 3 entries; the thought-only model entry has no
+    // parts left after the strip, so the surviving compression-derived prefix
+    // is 2 — the same invariant the trailing notification count follows.
+    const thoughtOnly: Content = {
+      role: 'model',
+      parts: [{ text: 'thinking…', thought: true }],
+    };
+    const summary = userContent('summary');
+    const ack = modelContent('ack');
+    const built = buildSessionHistoryFromConversation(
+      {
+        messages: [
+          recordOf('user', summary),
+          recordOf('assistant', thoughtOnly),
+          recordOf('assistant', ack),
+          compressionRecord([summary, thoughtOnly, ack]),
+        ],
+      },
+      { stripThoughtsFromHistory: true },
+    );
+    expect(built.apiHistory).toHaveLength(2);
+    expect(built.compressedTailLength).toBe(2);
   });
 });

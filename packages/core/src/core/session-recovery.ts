@@ -76,6 +76,17 @@ export interface BuildSessionRecoveryPlanFromApiHistoryInput {
    * gets no banner and no Retry.
    */
   trailingSystemNotifications?: number;
+  /**
+   * Length of the compressed-history prefix of `apiHistory` at the moment the
+   * last completed `chat_compression` record landed (`null`/absent = no such
+   * record), as reported by `buildSessionHistoryFromConversation` or by
+   * `LlmChat.getCompressedTailLength()` on the live history. Forwarded to
+   * `detectTurnInterruption` so a tail the user settled with an explicit
+   * /compress classifies as a clean boundary instead of an interrupted turn
+   * (#14325). Callers that classify a bounded tail window must shift the value
+   * by the window offset (see `Session.#getRecoveryPlan`).
+   */
+  compressedTailLength?: number | null;
   historyGaps?: HistoryGap[];
   options?: {
     allowAutoContinue?: boolean;
@@ -139,6 +150,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
   apiHistory: inputApiHistory,
   completedToolCallIds,
   trailingSystemNotifications,
+  compressedTailLength,
   historyGaps,
   options,
 }: BuildSessionRecoveryPlanFromApiHistoryInput): SessionRecoveryPlan {
@@ -187,6 +199,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
     originalApiHistory,
     completedToolCallIds,
     trailingSystemNotifications,
+    compressedTailLength ?? undefined,
   );
   if (interruption.kind === 'none') {
     return {

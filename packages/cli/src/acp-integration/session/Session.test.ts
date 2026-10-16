@@ -6778,6 +6778,83 @@ describe('Session', () => {
       expect(promptSpy).not.toHaveBeenCalled();
     });
 
+    it('reports clean at the compression boundary instead of an interrupted prompt', async () => {
+      // The tail a completed /compress swaps in (#14325): the pending tool
+      // result the user chose to summarize — shape-identical to an unfinished
+      // turn. The live chat carries the compression boundary; the tail
+      // getters classify from the full history here (fixtures are small).
+      const compressedTail = [
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'contents' },
+              },
+            },
+          ],
+        },
+      ] as Content[];
+      vi.mocked(mockChat.getHistory).mockReturnValue(compressedTail);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(compressedTail);
+      Object.assign(mockChat, {
+        getCompressedTailLength: vi.fn(() => compressedTail.length),
+      });
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
+    });
+
+    it('still reports interrupted when a real prompt postdates the compression', async () => {
+      // The boundary only covers the compressed prefix; the appended prompt
+      // postdates the user's explicit compress action and must stay recoverable.
+      const tail = [
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'contents' },
+              },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'next request' }] },
+      ] as Content[];
+      vi.mocked(mockChat.getHistory).mockReturnValue(tail);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(tail);
+      Object.assign(mockChat, {
+        getCompressedTailLength: vi.fn(() => 2),
+      });
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_prompt',
+        canContinue: true,
+      });
+    });
+
     it('rejects when the gemini client is not initialized', async () => {
       vi.mocked(mockLlmClient.isInitialized).mockReturnValue(false);
       const promptSpy = vi

@@ -5948,13 +5948,26 @@ export class Session implements SessionContext {
       this.sessionId
         ? this.restoredHistoryGaps
         : undefined);
+    const apiHistory = fullHistory
+      ? chat.getHistory()
+      : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT));
+    // The live compression boundary indexes the FULL non-curated history,
+    // while this call may classify a bounded tail window — shift it by the
+    // window offset. A non-positive result means the window postdates the
+    // compression entirely, so the boundary does not reach into it.
+    let compressedTailLength: number | undefined;
+    const boundary = chat.getCompressedTailLength?.();
+    if (boundary !== undefined) {
+      const fullLength = chat.getHistoryShallow().length;
+      const shifted = boundary - (fullLength - apiHistory.length);
+      if (shifted > 0) compressedTailLength = shifted;
+    }
     return buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
-      apiHistory: fullHistory
-        ? chat.getHistory()
-        : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
-          chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
+      apiHistory,
+      compressedTailLength,
       historyGaps: runtimeGaps?.length
         ? runtimeGaps
         : this.config.getResumedSessionData?.()?.historyGaps,

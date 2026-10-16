@@ -564,10 +564,21 @@ class Session {
       chat.getHistoryShallow(),
       await this.config.getChatRecordingService()!.readActiveTranscriptChain(),
     );
+    // The live compression boundary indexes the FULL live history while this
+    // call classifies a bounded tail window — shift by the window offset
+    // (same rule as Session.#getRecoveryPlan, #14325).
+    let compressedTailLength: number | undefined;
+    const boundary = chat.getCompressedTailLength?.();
+    if (boundary !== undefined && !cancellation) {
+      const fullLength = chat.getHistoryShallow().length;
+      const shifted = boundary - (fullLength - historyTail.length);
+      if (shifted > 0) compressedTailLength = shifted;
+    }
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       apiHistory: cancellation ? [] : historyTail,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
+      compressedTailLength,
     });
     debugLogger.info('[Session] requestContinueLastTurn recovery', {
       sessionId: this.sessionId,

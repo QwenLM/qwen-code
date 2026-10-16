@@ -279,12 +279,33 @@ export function effectiveHistoryEnd(
  *   caller only has raw `Content[]`; supply it when the history came from
  *   `buildSessionHistoryFromConversation`, which can read the records' own
  *   `provenance`.
+ * @param compressedTailLength - Optional count of LEADING `history` entries
+ *   that derive from a completed `chat_compression`'s `compressedHistory`
+ *   payload (the accumulator records the history length at the moment the
+ *   compression record lands; `LlmChat` tracks the same boundary on its live
+ *   history). A completed compression is an explicit clean boundary: the tail
+ *   it leaves behind — a pending tool result the user chose to summarize
+ *   instead of continuing, or an ack entry carrying a folded `functionCall` —
+ *   is settled by definition, and continuing it would re-submit that tail as
+ *   a new turn (the false "interrupted request" banner, #14325). When
+ *   supplied and the last classifiable entry (index `end - 1`) is
+ *   compression-derived (`end - 1 < compressedTailLength`), the result is
+ *   `none`. Entries appended after the compression record grow past the
+ *   boundary, so a genuine post-compression interruption still classifies
+ *   normally. For an `interrupted_prompt`, the trailing-user walk that
+ *   collects the re-submission `parts` also stops at this floor (mirroring
+ *   the same clamp in `LlmChat.stripOrphanedUserEntriesFromHistory`), so the
+ *   settled payload tail is neither reported nor re-shuffled by a retry. The
+ *   value indexes into the `history` array AS PASSED, so a caller that
+ *   classifies a bounded tail window shifts the boundary by the window
+ *   offset (see `Session.#getRecoveryPlan`).
  * @returns The interruption classification; see {@link TurnInterruption}.
  */
 export function detectTurnInterruption(
   history: Content[],
   completedToolCallIds?: readonly string[],
   trailingSystemNotifications?: number,
+  compressedTailLength?: number,
 ): TurnInterruption {
   const boundary = completedToolCallBoundary(history, completedToolCallIds);
   // Trailing background notifications are not an unfinished turn: the daemon
@@ -299,6 +320,15 @@ export function detectTurnInterruption(
     return { kind: 'none' };
   }
 
+  // A completed compression is an explicit clean boundary: the tail it leaves
+  // behind is the state the user chose to summarize, not an unfinished turn.
+  // Everything from `end` on was already trimmed as structural, so a
+  // compression-derived classifiable tail means the session sits exactly at
+  // the compression point.
+  if (compressedTailLength !== undefined && end - 1 < compressedTailLength) {
+    return { kind: 'none' };
+  }
+
   if (last.role === 'user') {
     const trailingUserEntries: Content[] = [];
     // Walk from the REAL end, not the trimmed one, while the verdict above
@@ -310,8 +340,13 @@ export function detectTurnInterruption(
     // recorded-but-undelivered notification from live history permanently:
     // `enqueueBackgroundNotification` short-circuits on
     // `persistedBackgroundNotificationTaskIds`, which `collectSessionTurnState`
-    // primes from the transcript itself, so nothing re-delivers it.
-    for (let i = history.length - 1; i >= boundary; i--) {
+    // primes from the transcript itself, so nothing re-delivers it. The Retry
+    // send path stops at the SAME compression floor
+    // (`LlmChat.stripOrphanedUserEntriesFromHistory`), so the settled payload
+    // tail stays in both: collecting it here would report parts the re-push
+    // never restores (or re-shuffle the payload the strip now preserves).
+    const walkFloor = Math.max(boundary, compressedTailLength ?? 0);
+    for (let i = history.length - 1; i >= walkFloor; i--) {
       const entry = history[i];
       if (!entry || entry.role !== 'user') {
         break;

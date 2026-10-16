@@ -647,6 +647,13 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
+      // The transcript's compression boundary indexes the restored apiHistory
+      // (the same array startChat just loaded) — re-arm the live slot so the
+      // recovery classifier sees the same clean boundary as before the
+      // restart (#14325).
+      if (restoreRuntime.compressedTailLength !== undefined) {
+        chat.setCompressedTailLength(restoreRuntime.compressedTailLength);
+      }
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
         uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
@@ -677,6 +684,11 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restored.completedToolCallIds);
+      // The accumulator reports the compression boundary on the same
+      // apiHistory basis (null = no compression in this conversation).
+      if (restored.compressedTailLength !== null) {
+        chat.setCompressedTailLength(restored.compressedTailLength);
+      }
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
