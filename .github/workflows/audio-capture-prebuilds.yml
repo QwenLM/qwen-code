@@ -86,6 +86,9 @@ jobs:
     steps:
       - name: 'Clear stale prebuilds (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
+        # run steps resolve against defaults.run.working-directory
+        # (packages/audio-capture), unlike the action inputs below which stay
+        # workspace-relative.
         run: 'rm -rf prebuilds'
 
       - name: 'Merge per-platform prebuilds'

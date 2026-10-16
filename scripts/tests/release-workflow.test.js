@@ -35,6 +35,11 @@ const hasGnuRealpath =
     0;
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const audioPrebuildsWorkflow = readFileSync(
+  '.github/workflows/audio-capture-prebuilds.yml',
+  'utf8',
+);
+const audioPrebuildsYaml = parse(audioPrebuildsWorkflow);
 const releaseYaml = parse(workflow);
 const releaseStepScriptPath = '.github/scripts/run-release-step.sh';
 const releaseStepScriptAbsolutePath = join(
@@ -3387,5 +3392,33 @@ describe('release lane runner routing', () => {
     expect(releaseYaml.jobs.notify_failure['runs-on']).not.toContain(
       'ecs-qwen',
     );
+  });
+
+  it('keeps prebuild collection fail-closed on the release-only pool', () => {
+    // collect rides the same opt-in ecs-qwen-release-host lane as publish,
+    // so the runs-on expression must keep the repository condition and the
+    // hosted fallback that keep forks and the unset default on ubuntu-latest.
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      "github.repository == 'QwenLM/qwen-code'",
+    );
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      "vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true'",
+    );
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      'ecs-qwen-release-host',
+    );
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      'ubuntu-latest',
+    );
+    // On the persistent release-host workspace, download-artifact's
+    // merge-multiple merges into existing paths, so a stale prebuilds/ tree
+    // from a previous release would leak into the merged artifact. The wipe
+    // must stay first and self-hosted-only; dropping it (or reordering it
+    // after the merge) re-opens that leak.
+    const [wipe, ...rest] = audioPrebuildsYaml.jobs.collect.steps;
+    expect(wipe.name).toBe('Clear stale prebuilds (self-hosted)');
+    expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
+    expect(wipe.run).toBe('rm -rf prebuilds');
+    expect(rest[0].name).toBe('Merge per-platform prebuilds');
   });
 });
