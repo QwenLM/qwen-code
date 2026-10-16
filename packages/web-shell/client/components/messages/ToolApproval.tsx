@@ -609,6 +609,11 @@ export function ToolApproval({
   const execWarningsDisplay = execWarningsText
     ? sanitizeControlChars(execWarningsText)
     : undefined;
+  // The content text is model- or peer-supplied as well, and this block renders
+  // it in the body, in the `title` tooltip and as the `aria-describedby`
+  // target. Neutralise the text only: `showsContent` above stays on the raw
+  // value so the IDREF is still gated by whether the element renders.
+  const contentDisplay = sanitizeControlChars(contentText);
   const questionText = isGoal
     ? t('approval.goal.hint')
     : showsPlanWorkflow
@@ -701,9 +706,9 @@ export function ToolApproval({
             isExitPlanApproval ? ` ${styles.planContent}` : ''
           }`}
           id={commandId}
-          title={contentText}
+          title={contentDisplay}
         >
-          {contentText}
+          {contentDisplay}
         </pre>
       ) : null}
 

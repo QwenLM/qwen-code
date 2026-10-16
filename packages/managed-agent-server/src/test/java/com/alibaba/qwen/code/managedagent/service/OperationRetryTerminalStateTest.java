@@ -112,7 +112,7 @@ class OperationRetryTerminalStateTest {
                         Clock.systemUTC(),
                         new ManagedAgentProperties());
         if (lifecycleProtocol == 1) {
-            when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+            when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
             when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(true);
             coordinator.setWorkspaceLifecycleStore(mock(
                     com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class));
@@ -556,7 +556,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         doThrow(new RuntimeBrokerException(409,
                 "workspace_close_identity_unverified",
                 "Original worker needs recovery", false))
@@ -621,7 +621,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.completedFuture(null));
         when(harness.isAvailable()).thenReturn(true);
@@ -685,7 +685,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.completedFuture(null));
         when(harness.isAvailable()).thenReturn(true);
@@ -742,7 +742,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(harness.isAvailable()).thenReturn(true);
         HostedHarnessCapabilityMismatchException mismatch =
                 mock(HostedHarnessCapabilityMismatchException.class);
@@ -805,7 +805,7 @@ class OperationRetryTerminalStateTest {
                 .thenThrow(new IllegalStateException("harness unreachable"));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
@@ -861,7 +861,7 @@ class OperationRetryTerminalStateTest {
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
                 lifecycle = mock(
                         com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
@@ -928,7 +928,7 @@ class OperationRetryTerminalStateTest {
         when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.failedFuture(
                         new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(
@@ -989,7 +989,7 @@ class OperationRetryTerminalStateTest {
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
                 lifecycle = mock(
                         com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
@@ -1058,7 +1058,7 @@ class OperationRetryTerminalStateTest {
         when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.failedFuture(
                         new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(
@@ -1119,7 +1119,7 @@ class OperationRetryTerminalStateTest {
         when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.completedFuture(null));
         when(store.completeOperation(eq("tenant"), eq("session"),
@@ -1181,7 +1181,7 @@ class OperationRetryTerminalStateTest {
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
         when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(true);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
@@ -1255,7 +1255,7 @@ class OperationRetryTerminalStateTest {
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
@@ -1326,7 +1326,7 @@ class OperationRetryTerminalStateTest {
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
@@ -1392,7 +1392,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(harness.isAvailable()).thenReturn(true);
         HostedHarnessCapabilityMismatchException mismatch =
                 mock(HostedHarnessCapabilityMismatchException.class);
@@ -1450,7 +1450,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(harness.isAvailable()).thenReturn(true);
         when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(false);
         // The refusal fired before the Harness was asked to stop, so the
@@ -1516,7 +1516,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(harness.isAvailable()).thenReturn(true);
         // The v1 settle refuses permanently before any effects are saved:
         // this Harness speaks no lifecycle protocol.
@@ -1576,7 +1576,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(harness.isAvailable()).thenReturn(true);
         when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(false);
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
@@ -1869,7 +1869,7 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(false);
         // This replica could close the workspace — and still must not, for
         // this shape.
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         // A non-writer completion-write failure: the retirement lost its
         // race with another operation.
         when(store.completeOperation(eq("tenant"), eq("session"),
@@ -1932,7 +1932,7 @@ class OperationRetryTerminalStateTest {
                         BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(store.completeOperation(eq("tenant"), eq("session"),
                 eq("op-delete"), anyString(), eq(1L), anyBoolean()))
                 .thenThrow(new IllegalStateException(
@@ -2042,7 +2042,7 @@ class OperationRetryTerminalStateTest {
         when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.completedFuture(null));
         // settle() completed; only the durable completion write fails.
@@ -2084,13 +2084,15 @@ class OperationRetryTerminalStateTest {
     // closed-Session delete never enters — so CLOSE is the shape that
     // exercises the fallback.
     @ParameterizedTest
-    @ValueSource(ints = {0, 1})
+    @ValueSource(ints = {0, 1, 2})
     void blockedCloseFallsBackToBlockedWhenTheTerminalRecordFails(
             int lifecycleProtocol) {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(false);
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
@@ -2133,6 +2135,10 @@ class OperationRetryTerminalStateTest {
                     eq("workspace_close_identity_unverified"), anyLong());
             verify(store, never()).retryOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyLong());
+            verify(runtimeWarmer, never()).requestWorkspaceClose(anyString(), anyString());
+            verify(runtimeWarmer, never()).closeWorkspace(anyString(), anyString());
+            verify(runtimeWarmer, never()).drain(anyString());
+            verify(runtimeWarmer, never()).supportsWorkspaceClose();
         } finally {
             coordinator.stopRenewals();
         }
