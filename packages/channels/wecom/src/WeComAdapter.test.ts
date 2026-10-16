@@ -3436,7 +3436,8 @@ describe('WeComChannel', () => {
   // Windows ignores them and root with its DAC capabilities bypasses them.
   // Ask the kernel, as the cli and core permission-bits helpers do, so a
   // root lane that drops those capabilities still runs this case. A probe
-  // that cannot measure answers false too, and says so on stderr.
+  // that cannot measure answers false too, and says so on stderr, as a
+  // warning under GitHub Actions.
   const permissionBitsEnforced = ((): boolean => {
     if (process.platform === 'win32') return false;
     let dir: string | undefined;
@@ -3445,7 +3446,8 @@ describe('WeComChannel', () => {
     const inconclusive = (error: unknown): false => {
       try {
         process.stderr.write(
-          `[permission-bits] probe inconclusive (${String(codeOf(error) ?? 'no errno')}) ` +
+          `${process.env['GITHUB_ACTIONS'] === 'true' ? '::warning::' : ''}` +
+            `[permission-bits] probe inconclusive (${String(codeOf(error) ?? 'no errno')}) ` +
             'for WeComAdapter.test.ts; treating permission bits as unenforced, so ' +
             'the attachment cleanup case skips\n',
         );

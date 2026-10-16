@@ -27697,7 +27697,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(accepting.length).toBeGreaterThan(8);
     expect(
       accepting
-        .filter((chunk) => !chunk.startsWith('.skipIf(!hasBashMapfile)('))
+        // Alone or ahead of another guard, however Prettier wraps it.
+        .filter(
+          (chunk) =>
+            !/^\.skipIf\(\s*!hasBashMapfile\s*(?:,?\s*\)|\|\|)/.test(chunk),
+        )
         .map((chunk) => chunk.slice(0, 90)),
     ).toEqual([]);
   });
