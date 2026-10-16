@@ -54,7 +54,7 @@ describe('managed-agent-server e2e runner', () => {
   it('queries tables from the shared fresh-database baseline', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const baseline = read(
-      'packages/sdk-java/runtime-broker/src/main/resources/db/managed-schema/V1__managed_schema.sql',
+      'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__managed_schema.sql',
     );
     const tables = new Set(
       [...baseline.matchAll(/CREATE TABLE (\w+)/g)].map((match) => match[1]),
@@ -219,7 +219,7 @@ describe('managed-agent-server e2e runner', () => {
           .match(/modelBeforeRuntimeAssertionDelayMs = (\d[\d_]*)/)[1]
           .replace(/_/g, ''),
       ) / 1000;
-    expect(read('packages/sdk-java/managed-agent-server/README.md')).toContain(
+    expect(read('packages/managed-agent-server/README.md')).toContain(
       `the ${delaySeconds} seconds the acceptance criterion`,
     );
   });
@@ -247,7 +247,7 @@ describe('managed-agent-server e2e runner', () => {
   // deterministic CI proof, a file that has never existed. Any script the
   // README names must be real.
   it('names only scripts that exist', () => {
-    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const readme = read('packages/managed-agent-server/README.md');
     expect(readme).not.toContain('run-managed-hosted-runtime-e2e');
     for (const script of namedScripts(readme)) {
       expect(
@@ -385,7 +385,7 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain(`'${refusal}'`);
     expect(
       read(
-        'packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/ManagedSessionStore.java',
+        'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/ManagedSessionStore.java',
       ),
     ).toContain(`"${refusal}."`);
     const writerBefore = source.indexOf(
@@ -515,7 +515,7 @@ describe('managed-agent-server e2e runner', () => {
     // shell spelling it does not model. The CLI-side credential names come
     // from the production constants so renaming one reddens this pin instead
     // of stranding the README's spelling.
-    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const readme = read('packages/managed-agent-server/README.md');
     const fencedBlocks = fencedShellBlocks(readme);
     const command =
       'qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web';
@@ -586,7 +586,7 @@ describe('managed-agent-server e2e runner', () => {
     // Spring to 4171 must say the value applies before (or via a restart
     // of) `mvn spring-boot:run`, or the reader's running server stays on
     // the 4170 value exported in Prerequisites.
-    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const readme = read('packages/managed-agent-server/README.md');
     const start = readme.indexOf(
       '## Full WebShell dual-path development entry',
     );
@@ -648,7 +648,7 @@ describe('managed-agent-server e2e runner', () => {
     // current authority, so the false claim reaches integrators in either
     // language.
     const toolTurnIt =
-      'packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
+      'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
     expect(
       existsSync(new URL(`../../${toolTurnIt}`, import.meta.url)) &&
         read('.github/workflows/sdk-java.yml').includes(
@@ -700,7 +700,7 @@ describe('managed-agent-server e2e runner', () => {
     // below matches a polarity phrase, not the bare name: the name alone
     // stays green when the paragraph says the generation is not rejected or
     // the store fence is shipped behavior.
-    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const readme = read('packages/managed-agent-server/README.md');
     const anchor = readme.indexOf('The Java connector caches an attachment');
     expect(anchor).toBeGreaterThan(-1);
     const end = readme.indexOf('\n\n', anchor);
@@ -1183,9 +1183,7 @@ describe('managed-agent-server e2e runner', () => {
     // selects by classifier exclusion with a loud cardinality guard.
     expect(script).toContain('qwen-managed-agent-server-${pomVersion}.jar');
     expect(script).not.toContain('packagedJars');
-    const dockerfile = read(
-      'packages/sdk-java/managed-agent-server/Dockerfile',
-    );
+    const dockerfile = read('packages/managed-agent-server/Dockerfile');
     expect(dockerfile).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
     expect(dockerfile).toContain('/tmp/qwen-managed-agent-server.jar');
     // The exclusion set must cover every classifier the pom declares, or a
@@ -1193,7 +1191,7 @@ describe('managed-agent-server e2e runner', () => {
     // instead of a red here: derive the set from the pom, the one source
     // of truth, rather than pinning a literal copy of it.
     const classifiers = [
-      ...read('packages/sdk-java/managed-agent-server/pom.xml').matchAll(
+      ...read('packages/managed-agent-server/pom.xml').matchAll(
         /<classifier>([^<]+)<\/classifier>/g,
       ),
     ].map((match) => match[1]);
@@ -1222,9 +1220,7 @@ describe('managed-agent-server e2e runner', () => {
     )?.[1];
     expect(patternSource).toBeTruthy();
     const pattern = new Function(`return ${patternSource};`)();
-    const match = read('packages/sdk-java/managed-agent-server/pom.xml').match(
-      pattern,
-    );
+    const match = read('packages/managed-agent-server/pom.xml').match(pattern);
     expect(match?.[0]).toContain(
       '<artifactId>qwen-managed-agent-server</artifactId>',
     );
@@ -1248,9 +1244,7 @@ describe('managed-agent-server e2e runner', () => {
   });
 
   it('keeps the image on the loopback default and the jar guard loud', () => {
-    const dockerfile = read(
-      'packages/sdk-java/managed-agent-server/Dockerfile',
-    );
+    const dockerfile = read('packages/managed-agent-server/Dockerfile');
     // The module has no HTTP authentication, so the published image must
     // not bind beyond loopback by default: publishing is the operator's
     // explicit -e opt-in at docker run, documented in the README's
@@ -1272,7 +1266,7 @@ describe('managed-agent-server e2e runner', () => {
     // --server.address on the command line and the e2e runner passes none,
     // so a flipped yml default would otherwise ship silently.
     const applicationYml = read(
-      'packages/sdk-java/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/src/main/resources/application.yml',
     );
     expect(applicationYml).toMatch(
       /address: '\$\{QWEN_MANAGED_AGENT_SERVER_ADDRESS:127\.0\.0\.1\}'/,
@@ -1292,7 +1286,7 @@ describe('managed-agent-server e2e runner', () => {
     // The container section must document the opt-in and name the
     // default-bridge exposure, or an operator who skips -p concludes the
     // surface is closed.
-    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const readme = read('packages/managed-agent-server/README.md');
     expect(readme).toContain('-e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0');
     expect(readme).toMatch(/with no `-p` at all/);
     // RuntimeBrokerHttpServer refuses a non-loopback broker bind unless the
@@ -1405,11 +1399,9 @@ describe('managed-agent-server e2e runner', () => {
   it.skipIf(!hasShAndCp)(
     'fails the image build loudly when the jar selection is ambiguous',
     () => {
-      const dockerfile = read(
-        'packages/sdk-java/managed-agent-server/Dockerfile',
-      );
+      const dockerfile = read('packages/managed-agent-server/Dockerfile');
       const stage = dockerfile.match(
-        /cd packages\/sdk-java\/managed-agent-server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
+        /cd packages\/managed-agent-server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
       );
       expect(
         stage,
@@ -1455,7 +1447,7 @@ describe('managed-agent-server e2e runner', () => {
           for (const jar of jars) writeFileSync(join(dir, jar), '');
           const fixture = script
             .replace(
-              'cd packages/sdk-java/managed-agent-server/target',
+              'cd packages/managed-agent-server/target',
               `cd '${dir.replaceAll('\\', '/')}'`,
             )
             .replace(
