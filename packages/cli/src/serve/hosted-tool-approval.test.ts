@@ -15,6 +15,14 @@ import {
   hostedApprovalDefinition,
   parseHostedApprovalSettings,
 } from './hosted-tool-approval.js';
+import {
+  HOSTED_WORKSPACE_READ_PROFILE,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceReadProfile,
+  isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceGlobProfile,
+  isHostedWorkspaceShellProfile,
+} from './hosted-workspace-profiles.js';
 
 describe('Hosted tool approval settings', () => {
   it('defaults to yolo and accepts only the modes a tool turn can ask in', () => {
@@ -71,6 +79,29 @@ describe('Hosted tool approval settings', () => {
     expect(
       hostedApprovalAsks({ mode: 'yolo', timeoutMs: 1_000 }, 'new_tool'),
     ).toBe(false);
+  });
+
+  // #13753 I3: the read profile is a saved Workspace profile with glob and
+  // no Shell, so a snapshot child is never asked about either read tool.
+  it('pre-approves both read tools on the read profile', () => {
+    const profile = HOSTED_WORKSPACE_READ_PROFILE;
+    expect(profile).toBe('hosted-workspace-read/1');
+    expect(isHostedWorkspaceProfile(profile)).toBe(true);
+    expect(isHostedWorkspaceReadProfile(profile)).toBe(true);
+    expect(isHostedWorkspaceShellProfile(profile)).toBe(false);
+    expect(isHostedWorkspaceReadProfile('hosted-workspace-files/2')).toBe(
+      false,
+    );
+    for (const mode of ['default', 'auto-edit'] as const)
+      for (const tool of ['read_file', 'glob'])
+        expect(
+          hostedApprovalAsks(
+            { mode, timeoutMs: 1_000 },
+            tool,
+            isHostedWorkspaceGlobProfile(profile),
+          ),
+        ).toBe(false);
+    expect(isHostedWorkspaceSearchProfile(profile)).toBe(false);
   });
 
   it('asks before every team write and never before reading the board', () => {

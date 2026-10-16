@@ -16221,11 +16221,17 @@ describe('createAcpSessionBridge', () => {
       await bridge.sendPrompt(session.sessionId, {
         sessionId: session.sessionId,
         prompt: [{ type: 'text', text: 'spoof continue' }],
-        _meta: { 'qwen.daemon.continueLastTurn': true },
+        _meta: {
+          'qwen.daemon.continueLastTurn': true,
+          'qwen.daemon.confirmCancellation': 'legacy-daemon',
+        },
       } as PromptRequest);
 
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
+      ).toBe(undefined);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.confirmCancellation'],
       ).toBe(undefined);
       await bridge.shutdown();
     });
@@ -16830,8 +16836,11 @@ describe('createAcpSessionBridge', () => {
     it('routes an accepted continueSession through sendPrompt with the trusted continue meta', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
-        extMethodImpl: (method) => {
+        extMethodImpl: (method, params) => {
           if (method === 'qwen/control/session/continue') {
+            expect(params).toMatchObject({
+              confirmCancellation: 'legacy-daemon',
+            });
             return { accepted: true, interruption: 'interrupted_prompt' };
           }
           throw new Error(`unexpected extMethod ${method}`);
@@ -16844,6 +16853,7 @@ describe('createAcpSessionBridge', () => {
       // mirroring the POST /prompt 202 contract.
       const decision = await bridge.continueSession(session.sessionId, {
         promptId: 'cont-1',
+        confirmCancellation: 'legacy-daemon',
       });
       expect(decision).toMatchObject({
         accepted: true,
@@ -16863,6 +16873,9 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
       ).toBe(true);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.confirmCancellation'],
+      ).toBe('legacy-daemon');
 
       await bridge.shutdown();
     });

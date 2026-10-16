@@ -227,7 +227,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
- 'workspace_file_upload',
+ 'workspace_file_upload', 'workspace_directory_create', 'workspace_directory_delete',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
@@ -365,6 +365,8 @@ auto-numbered (`name (1).ext`, `name (2).ext`, ...). It is also a strict
 mutation route.
 
 When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, and `/workspaces/:workspace/file/upload`.
+
+`workspace_directory_create` and `workspace_directory_delete` independently advertise `POST /workspaces/:workspace/directory/create` and `POST /workspaces/:workspace/directory/delete`. Preflight the operation's tag alongside `workspace_qualified_rest_core`; older qualified daemons may lack these routes. Both are strict mutations owned by the trusted active selected local runtime, with no primary fallback or legacy-primary counterpart. Creation is exclusive under an existing parent; deletion is permanent and recursive.
 
 The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces/:workspace/agents` and `/workspaces/:workspace/agents/:agentType`. These plural routes only read or mutate project-level agents for the selected workspace; `global` and `user` scope requests return `400 { code: "global_scope_not_supported_for_workspace_route" }`. Workspace-less `/workspace/agents` routes retain their existing primary-workspace behavior and remain the only REST surface for user-level agent scope.
 
@@ -2053,7 +2055,7 @@ treat `404` as unsupported.
 
 ### Workspace file routes
 
-All file paths are resolved through the daemon's primary workspace. Responses use
+Legacy file routes resolve paths through the primary workspace; `/workspaces/:workspace/...` routes resolve paths through the selected runtime's workspace. Responses use
 workspace-relative paths and never return absolute filesystem paths for normal
 success cases. Successful file responses include:
 
@@ -2327,6 +2329,52 @@ caller named the path. Success responses and audit events include
   "matchedIgnore": null
 }
 ```
+
+#### `POST /workspaces/:workspace/directory/create`
+
+Requires `workspace_qualified_rest_core` and `workspace_directory_create`, strict
+mutation authority, and a trusted active local workspace. Body:
+
+```json
+{ "path": "src/new-folder" }
+```
+
+The parent must exist. Creation is exclusive: an existing file or directory
+returns `409 file_already_exists`; a final symlink returns `400 symlink_escape`.
+Success is `201 { "kind": "directory_create", "path": "src/new-folder" }`.
+The SDK method is
+`WorkspaceDaemonClient.createWorkspaceDirectory(path, clientId?)`.
+
+#### `POST /workspaces/:workspace/directory/delete`
+
+Requires `workspace_qualified_rest_core` and `workspace_directory_delete` under
+the same strict mutation and trusted local-runtime policy. Body:
+
+```json
+{ "path": "src/old-folder" }
+```
+
+Deletes an empty or nonempty directory recursively. Workspace roots, regular
+files, and final symlinks are rejected; nested symlink entries are removed
+without following their targets. A missing target returns `404 path_not_found`.
+Success is `200 { "kind": "directory_delete", "path": "src/old-folder" }`.
+The SDK method is
+`WorkspaceDaemonClient.deleteWorkspaceDirectory(path, clientId?)`.
+
+Both directory routes preserve the lexical final name while resolving its
+parent inside the selected workspace. Paths must not end in a separator;
+suspicious path patterns return `400 path_outside_workspace`, while malformed
+leaf shapes return `400 parse_error`. Unsupported custom factories return `422`;
+SSH workspaces are rejected by the SSH boundary with `501`. Unknown,
+unavailable, removed, or untrusted owners never fall back to primary.
+
+Deletion is permanent and failures may leave partial removal. A concurrent
+writer can cause `ENOTEMPTY`, returned as `503 io_error`; retry the same
+operation after the writer stops. Per-path locks do not serialize a directory
+against every child write, and external directory replacement cannot be made
+atomic by portable path-based checks. Explicit ignored-directory mutations are
+allowed and audit events annotate `matchedIgnore` when applicable; creation
+records `sizeBytes: 0`.
 
 ### `GET /session/:id/context`
 
