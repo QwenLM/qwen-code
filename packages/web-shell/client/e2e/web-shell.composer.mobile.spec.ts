@@ -313,58 +313,33 @@ test('?composer=codemirror escape hatch forces the CodeMirror path', async ({
   await expect(page.locator(COMPOSER_TEXTAREA)).toHaveCount(0);
 });
 
-test('history arrows recall the first welcome submission @smoke', async ({
-  page,
-}, testInfo) => {
-  const scenario = createWebShellDaemonScenario();
-  const daemon = await installScenario(page, scenario, testInfo);
-  await page.goto('/');
-  const textarea = page.locator(COMPOSER_TEXTAREA);
-  await textarea.fill('First input from mobile');
-  await page.locator('[data-web-shell-composer-submit]').tap();
-  await completeReplay(page, daemon, scenario.sessionId);
-  await expect.poll(() => daemon.promptRequests().length).toBe(1);
-  await daemon.sendEvent(turnCompleteEvent('prompt-mobile', { id: 11 }));
-  await expect(textarea).toHaveValue('');
-
-  const draft = 'New draft 😀\nsecond line';
-  await textarea.fill(draft);
-  await page.getByRole('button', { name: 'Previous input', exact: true }).tap();
-  await expect(textarea).toHaveValue('First input from mobile');
-  await expect(textarea).toBeFocused();
-  await page.getByRole('button', { name: 'Next input', exact: true }).tap();
-  await expect(textarea).toHaveValue(draft);
-  expect(daemon.promptRequests()).toHaveLength(1);
-});
-
 for (const width of [390, 240]) {
-  test(`history arrows restore the draft without submitting at ${width}px @smoke`, async ({
+  test(`editing row keeps 44px touch targets and fits the viewport at ${width}px @smoke`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
-    await page.addInitScript(() => {
-      localStorage.setItem(
-        'qwen-web-shell-history',
-        JSON.stringify(['first input', 'second input']),
-      );
-    });
     const scenario = createWebShellDaemonScenario();
     const daemon = await installScenario(page, scenario, testInfo);
     await gotoSession(page, scenario, daemon);
     const textarea = page.locator(COMPOSER_TEXTAREA);
-    const draft = '当前草稿 😀\nsecond line';
-    await textarea.fill(draft);
-    const previous = page.getByRole('button', {
-      name: 'Previous input',
-      exact: true,
-    });
-    const next = page.getByRole('button', { name: 'Next input', exact: true });
-    for (const button of [
-      previous,
-      next,
-      page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+    await textarea.fill('当前草稿 😀\nsecond line');
+    const buttons = page
+      .locator('[data-web-shell-mobile-editing-actions]')
+      .getByRole('button');
+    // Pin the controls this scenario must render before measuring them, so a
+    // dropped button fails the test instead of shrinking the iterated set.
+    // (Hide keyboard renders only while the textarea is focused; fill does
+    // focus it. The standalone dev host always opts into the Add entry, so
+    // the no-Add contextual buttons — Input history and the Shell toggle —
+    // never render here and this loop does not measure them.)
+    await expect(
       page.getByRole('button', { name: 'Expand editor', exact: true }),
-    ]) {
+    ).toHaveCount(1);
+    await expect(
+      page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+    ).toHaveCount(1);
+    expect(await buttons.count()).toBeGreaterThan(0);
+    for (const button of await buttons.all()) {
       const bounds = await button.boundingBox();
       expect(bounds).not.toBeNull();
       expect(bounds!.width).toBeGreaterThanOrEqual(44);
@@ -375,38 +350,8 @@ for (const width of [390, 240]) {
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),
     ).toBe(width);
-    await next.tap();
-    await expect(textarea).toHaveValue(draft);
-    await previous.tap();
-    await expect(textarea).toHaveValue('second input');
-    await expect(textarea).toBeFocused();
-    await previous.tap();
-    await expect(textarea).toHaveValue('first input');
-    await previous.tap();
-    await expect(textarea).toHaveValue('first input');
-    await next.tap();
-    await expect(textarea).toHaveValue('second input');
-    await next.tap();
-    await expect(textarea).toHaveValue(draft);
-    await next.tap();
-    await expect(textarea).toHaveValue(draft);
-    expect(daemon.promptRequests()).toHaveLength(0);
   });
 }
-
-test('history arrows leave the draft intact when history is empty', async ({
-  page,
-}, testInfo) => {
-  const scenario = createWebShellDaemonScenario();
-  const daemon = await installScenario(page, scenario, testInfo);
-  await gotoSession(page, scenario, daemon);
-  const textarea = page.locator(COMPOSER_TEXTAREA);
-  await textarea.fill('keep this draft');
-  await page.getByRole('button', { name: 'Previous input', exact: true }).tap();
-  await page.getByRole('button', { name: 'Next input', exact: true }).tap();
-  await expect(textarea).toHaveValue('keep this draft');
-  expect(daemon.promptRequests()).toHaveLength(0);
-});
 
 test('mobile editing preserves draft, selection and keyboard dismissal @smoke', async ({
   page,
@@ -617,10 +562,10 @@ test('mobile workspace row stays clear of the editing row @smoke', async ({
   const branch = page.locator('[data-web-shell-git-branch]');
   await expect(branch).toBeVisible({ timeout: 10_000 });
   const branchBox = (await branch.boundingBox())!;
-  const previousBox = (await page
-    .getByRole('button', { name: 'Previous input' })
+  const editingBox = (await page
+    .locator('[data-web-shell-mobile-editing-actions]')
     .boundingBox())!;
-  expect(previousBox.y).toBeGreaterThanOrEqual(branchBox.y + branchBox.height);
+  expect(editingBox.y).toBeGreaterThanOrEqual(branchBox.y + branchBox.height);
 });
 
 // 412x450 is a Pixel 7 once the soft keyboard has resized the viewport. A

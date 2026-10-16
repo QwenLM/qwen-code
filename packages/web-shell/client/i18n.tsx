@@ -1,4 +1,12 @@
 import {
+  TRAJECTORY_EXECUTION_MESSAGES_EN,
+  TRAJECTORY_EXECUTION_MESSAGES_ZH,
+} from './trajectory/execution-messages.js';
+import {
+  FILES_MESSAGES_EN,
+  FILES_MESSAGES_ZH,
+} from './components/artifacts/files-messages.js';
+import {
   createContext,
   useContext,
   useMemo,
@@ -17,6 +25,10 @@ import {
 
 import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
+import {
+  MCP_APP_MESSAGES_EN,
+  MCP_APP_MESSAGES_ZH,
+} from './mcp-app/messages.js';
 import {
   COLLAB_MESSAGES_EN,
   COLLAB_MESSAGES_ZH,
@@ -121,6 +133,9 @@ const EN: Messages = {
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
+  'managed.executionMode': 'Execution mode',
+  'managed.localMode': 'Local',
+  'managed.managedMode': 'Managed',
   'managed.sessions': 'Managed sessions',
   'managed.conversation': 'Managed conversation',
   'managed.new': 'New managed task',
@@ -194,6 +209,10 @@ const EN: Messages = {
   'managed.phase.created': 'Created',
   'managed.workspaceCreateTitle': 'Create a Workspace session',
   'managed.workspaceLabel': 'Workspace',
+  'managed.modelPreset': 'Model / Agent preset',
+  'managed.modelDefault': 'Server default model',
+  'managed.modelPinned':
+    'Choose the initial model and Agent preset. Supported conversations can change model while idle.',
   'managed.workspaceChoose': 'Choose a Workspace',
   'managed.workspaceDirectory': 'Relative directory',
   'managed.cwd.change': 'Change directory',
@@ -230,6 +249,43 @@ const EN: Messages = {
   'managed.workspaceSharedFiles':
     'Sessions in the same Workspace share files. Directory availability is checked before execution.',
   'managed.workspaceEmpty': 'No readable Workspaces are available.',
+  'managed.newWorkspaceTitle': 'New workspace',
+  'managed.modelFixed':
+    'The model is fixed for this task. Start a new task to choose another model.',
+  'managed.model.loading': 'Loading available models…',
+  'managed.model.optionsError': 'Could not load available models.',
+  'managed.model.reload': 'Reload models',
+  'managed.model.nextTurn':
+    'Change the model while idle. Your next message uses the selected model; conversation history is kept.',
+  'managed.model.changing': 'Changing model…',
+  'managed.model.unconfirmed':
+    'The model change is not confirmed. Continue confirming the original request.',
+  'managed.model.confirm': 'Continue confirming',
+  'managed.model.busy':
+    'Finish the active task, approval or unconfirmed request before changing model.',
+  'managed.model.storage':
+    'Browser session storage is unavailable. The model change cannot start safely.',
+  'managed.model.conflict':
+    'The model has changed. Review the current selection and try again.',
+  'managed.model.failed':
+    'The model change was refused. Review the available models and try again.',
+  'managed.approvalOptionsLoading': 'Loading approval modes…',
+  'managed.approvalOptionsLoadFailed': 'Could not load approval modes.',
+  'managed.approvalOptionsInvalid':
+    'The service returned unsupported approval modes.',
+  'managed.approvalFixed':
+    'Approval mode is fixed for this task. Start a new task to choose another mode.',
+  'managed.newWorkspaceDescription':
+    'Create an empty workspace for Managed tasks.',
+  'managed.newWorkspaceName': 'Workspace name',
+  'managed.newWorkspaceNameInvalid':
+    'Use a name of 1–128 characters without control characters.',
+  'managed.newWorkspaceCreate': 'Create workspace',
+  'managed.newWorkspaceCreating': 'Creating workspace…',
+  'managed.newWorkspaceUncertain':
+    'The creation is not yet confirmed. Retry to check the same workspace.',
+  'managed.newWorkspaceResume': 'Resume workspace creation',
+  'managed.newWorkspaceClose': 'Close',
   'managed.workspaceUnsupported':
     'This service does not support Workspace binding.',
   'managed.workspacePermission':
@@ -246,6 +302,8 @@ const EN: Messages = {
   'managed.workspaceAbandon': 'Abandon local confirmation',
   'managed.workspaceAbandonWarning':
     'The original empty session may still exist. Abandoning this record does not delete it.',
+  'managed.workspaceAbandonInputWarning':
+    'A session with this input may already exist or be running. Abandoning this record does not cancel it. Sending it again starts a new request and may repeat its effects.',
   'managed.workspaceSwitchTitle': 'Switch Workspace?',
   'managed.workspaceSwitchDescription':
     'Switching resets the relative directory to the Workspace root.',
@@ -766,6 +824,20 @@ const EN: Messages = {
   'common.downloadFailed': (v) => `Download failed: ${v?.message ?? ''}`,
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
+  'excel.worksheet': 'Worksheet',
+  'excel.row': 'Row',
+  'excel.truncated': (v) =>
+    `Preview limited to ${v?.cells} cells per worksheet. Download the original for all content.`,
+  'excel.previousWorksheets': 'Previous worksheets',
+  'excel.nextWorksheets': 'Next worksheets',
+  'excel.empty': 'This worksheet is empty.',
+  'excel.notCalculated': 'Not calculated',
+  'excel.tooLarge':
+    'Excel preview supports files up to 10 MiB. Download the original to open it.',
+  'excel.invalid':
+    'Unable to preview this workbook. It may be damaged, password protected, too complex, or unsupported by this browser. You can download the original.',
+  'excel.timeout':
+    'This workbook took too long to preview. Download the original to open it.',
   'artifact.openLink': 'Open link',
   'artifact.longDocument': 'File is large. Source is shown by default.',
   'artifact.renderFullPreview': 'Render full preview',
@@ -894,8 +966,6 @@ const EN: Messages = {
   'composerMobile.commands': 'All commands',
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
-  'composerMobile.previousInput': 'Previous input',
-  'composerMobile.nextInput': 'Next input',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,
@@ -944,8 +1014,13 @@ const EN: Messages = {
   'session.recovery.degraded_history':
     'Conversation history is incomplete. The interrupted task cannot be continued.',
   'session.recovery.continue': 'Continue execution',
+  'session.recovery.confirmContinue': 'Confirm and continue',
   'session.recovery.continuing': 'Continuing…',
   'session.recovery.failed': 'Could not continue the conversation.',
+  'session.recovery.unknownCancellation':
+    'This older session was cancelled, but the reason was not recorded. Confirm before continuing.',
+  'session.recovery.confirmCancellation':
+    'This turn may have been stopped intentionally. Do you want to continue it?',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -1778,7 +1853,7 @@ const EN: Messages = {
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
   'webPreview.title': 'Web preview',
-  'webPreview.openHint': 'Preview a running web app',
+  'webPreview.openHint': 'Preview web apps',
   'webPreview.address': 'Development URL',
   'webPreview.open': 'Open',
   'webPreview.refresh': 'Refresh preview',
@@ -1846,6 +1921,7 @@ const EN: Messages = {
     'Which workspace this conversation belongs to is not known yet.',
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
+  ...FILES_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -3288,6 +3364,8 @@ const EN: Messages = {
   'contextUsage.previousReading':
     'Could not refresh. Showing a previous reading.',
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
+  'contextUsage.unknown':
+    'Context usage has not been observed for this session yet.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
   'tokenUsage.input': 'Input',
@@ -3310,7 +3388,7 @@ const EN: Messages = {
   'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
   'trajectory.title': 'Trajectory',
-  'trajectory.description': 'See where a run spent its time and tokens',
+  'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
@@ -3405,6 +3483,10 @@ const EN: Messages = {
   'trajectory.noStart':
     'Recorded durations have no start time, so no bars can be plotted.',
   'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
+  'trajectory.historyGap':
+    'History may have changed while disconnected. Refresh the latest window to update.',
+  'trajectory.lifecycleIncomplete':
+    'Lifecycle details may be incomplete or outside the retained limit.',
   'trajectory.selected.label': 'Selected',
   'trajectory.selected.none': 'Choose a record',
   'trajectory.selected.noTiming': 'no request or tool timing',
@@ -4352,11 +4434,13 @@ const EN: Messages = {
   'welcome.prompt': 'What would you like to do?',
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
+  ...MCP_APP_MESSAGES_EN,
   ...VOICE_MESSAGES_EN,
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
+  ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
@@ -4425,6 +4509,9 @@ const ZH: Messages = {
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
+  'managed.executionMode': '执行方式',
+  'managed.localMode': '本地',
+  'managed.managedMode': '托管',
   'managed.sessions': '托管会话',
   'managed.conversation': '托管会话内容',
   'managed.new': '新建托管任务',
@@ -4491,6 +4578,10 @@ const ZH: Messages = {
   'managed.phase.created': '已创建',
   'managed.workspaceCreateTitle': '创建工作区会话',
   'managed.workspaceLabel': '工作区',
+  'managed.modelPreset': '模型 / Agent 预设',
+  'managed.modelDefault': '服务端默认模型',
+  'managed.modelPinned':
+    '选择初始模型和 Agent 预设；支持的会话可在空闲时切换模型。',
   'managed.workspaceChoose': '选择工作区',
   'managed.workspaceDirectory': '相对目录',
   'managed.cwd.change': '切换目录',
@@ -4520,6 +4611,34 @@ const ZH: Messages = {
   'managed.workspaceSharedFiles':
     '同一工作区的会话共享文件；目录可用性将在执行前验证。',
   'managed.workspaceEmpty': '没有可读取的工作区。',
+  'managed.newWorkspaceTitle': '新建工作区',
+  'managed.modelFixed': '当前任务的模型已固定；如需更换，请新建任务。',
+  'managed.model.loading': '正在加载可用模型…',
+  'managed.model.optionsError': '加载可用模型失败。',
+  'managed.model.reload': '重新加载模型',
+  'managed.model.nextTurn':
+    '空闲时可切换模型；下一条消息使用所选模型，对话历史保留。',
+  'managed.model.changing': '正在切换模型…',
+  'managed.model.unconfirmed': '模型切换尚未确认，请继续确认原请求。',
+  'managed.model.confirm': '继续确认',
+  'managed.model.busy':
+    '请先完成正在执行的任务、审批或未确认请求，再切换模型。',
+  'managed.model.storage': '浏览器会话存储不可用，无法安全发起模型切换。',
+  'managed.model.conflict': '当前模型已变化，请检查选择后重试。',
+  'managed.model.failed': '模型切换被拒绝，请检查可用模型后重试。',
+  'managed.approvalOptionsLoading': '正在加载审批策略…',
+  'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
+  'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
+  'managed.approvalFixed': '当前任务的审批策略已固定；如需更换，请新建任务。',
+  'managed.newWorkspaceDescription': '为托管任务创建一个空工作区。',
+  'managed.newWorkspaceName': '工作区名称',
+  'managed.newWorkspaceNameInvalid':
+    '名称需为 1–128 个字符，不能包含控制字符。',
+  'managed.newWorkspaceCreate': '创建工作区',
+  'managed.newWorkspaceCreating': '正在创建工作区…',
+  'managed.newWorkspaceUncertain': '创建结果尚未确认，重试将查询同一个工作区。',
+  'managed.newWorkspaceResume': '继续确认工作区创建',
+  'managed.newWorkspaceClose': '关闭',
   'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',
   'managed.workspacePermission': '没有发现工作区的权限。',
   'managed.workspaceLoadFailed': '加载工作区失败。',
@@ -4534,6 +4653,8 @@ const ZH: Messages = {
   'managed.workspaceAbandon': '放弃本地确认记录',
   'managed.workspaceAbandonWarning':
     '原空会话可能已经存在；放弃记录不会删除服务端会话。',
+  'managed.workspaceAbandonInputWarning':
+    '包含该输入的会话可能已存在或仍在运行；放弃记录不会取消它。再次发送会开启新请求，可能重复执行。',
   'managed.workspaceSwitchTitle': '切换工作区？',
   'managed.workspaceSwitchDescription': '切换后相对目录将重置为工作区根目录。',
   'managed.workspaceKeep': '保留原选择',
@@ -5113,6 +5234,18 @@ const ZH: Messages = {
   'common.downloadFailed': (v) => `下载失败：${v?.message ?? ''}`,
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
+  'excel.worksheet': '工作表',
+  'excel.row': '行',
+  'excel.truncated': (v) =>
+    `每个工作表最多预览 ${v?.cells} 个单元格。下载原文件查看全部内容。`,
+  'excel.previousWorksheets': '上一组工作表',
+  'excel.nextWorksheets': '下一组工作表',
+  'excel.empty': '此工作表为空。',
+  'excel.notCalculated': '未计算',
+  'excel.tooLarge': 'Excel 预览支持最大 10 MiB 的文件，请下载原文件打开。',
+  'excel.invalid':
+    '无法预览此工作簿，文件可能已损坏、受密码保护、复杂度过高，或当前浏览器不支持。你可以下载原文件。',
+  'excel.timeout': '工作簿预览超时，请下载原文件打开。',
   'artifact.openLink': '打开链接',
   'artifact.longDocument': '文件过大，默认展示源码。',
   'artifact.renderFullPreview': '完整排版预览',
@@ -5233,8 +5366,6 @@ const ZH: Messages = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜索命令',
   'composerMobile.history': '输入历史',
-  'composerMobile.previousInput': '上一条输入',
-  'composerMobile.nextInput': '下一条输入',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已添加附件/图片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此处没有可用的添加操作',
@@ -5279,8 +5410,13 @@ const ZH: Messages = {
   'session.recovery.interrupted_turn': '上次任务已中断，部分工具结果未保存。',
   'session.recovery.degraded_history': '会话历史不完整，无法继续中断的任务。',
   'session.recovery.continue': '继续执行',
+  'session.recovery.confirmContinue': '确认并继续',
   'session.recovery.continuing': '正在继续…',
   'session.recovery.failed': '无法继续此会话。',
+  'session.recovery.unknownCancellation':
+    '此旧会话已取消，但未记录来源。继续前需要你确认。',
+  'session.recovery.confirmCancellation':
+    '此轮任务可能已被主动停止，但未记录原因。确定要继续执行吗？',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
@@ -6043,7 +6179,7 @@ const ZH: Messages = {
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
   'webPreview.title': '网页预览',
-  'webPreview.openHint': '预览正在运行的网页应用',
+  'webPreview.openHint': '预览网页应用',
   'webPreview.address': '开发地址',
   'webPreview.open': '打开',
   'webPreview.refresh': '刷新预览',
@@ -6107,6 +6243,7 @@ const ZH: Messages = {
   'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
+  ...FILES_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -7432,6 +7569,7 @@ const ZH: Messages = {
   'contextUsage.loadError': '上下文使用情况加载失败。',
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
+  'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
   'tokenUsage.input': '输入',
@@ -7454,7 +7592,7 @@ const ZH: Messages = {
   'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
   'trajectory.title': '轨迹',
-  'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
+  'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
   'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
@@ -7538,6 +7676,8 @@ const ZH: Messages = {
   'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
   'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
+  'trajectory.historyGap': '断线期间历史记录可能已变化，请刷新最新窗口。',
+  'trajectory.lifecycleIncomplete': '生命周期详情可能不完整或超出保留上限。',
   'trajectory.selected.label': '所选',
   'trajectory.selected.none': '请选择一条记录',
   'trajectory.selected.noTiming': '无请求或工具计时',
@@ -8410,11 +8550,13 @@ const ZH: Messages = {
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
+  ...MCP_APP_MESSAGES_ZH,
   ...VOICE_MESSAGES_ZH,
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
+  ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };

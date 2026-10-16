@@ -162,7 +162,19 @@ function injectCssModules(): Plugin {
 // Windows build would blow the budget this exists to protect.
 const TRANSCRIPT_STUBS = new Map(
   [
+    [
+      './client/trajectory/execution-messages.ts',
+      './client/trajectory/execution-messages.transcript-stub.ts',
+    ],
     ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
+    [
+      './client/mcp-app/messages.ts',
+      './client/mcp-app/messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/files-messages.ts',
+      './client/components/artifacts/files-messages.transcript-stub.ts',
+    ],
     [
       './client/voice/messages.ts',
       './client/voice/messages.transcript-stub.ts',
@@ -186,6 +198,10 @@ const TRANSCRIPT_STUBS = new Map(
     [
       './client/components/messages/SelectionCopyMenu.tsx',
       './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
+    ],
+    [
+      './client/components/messages/workflow-agent-details.ts',
+      './client/components/messages/workflow-agent-details.transcript-stub.ts',
     ],
     [
       './client/components/managed/managed-task-messages.ts',
@@ -256,38 +272,45 @@ export default defineConfig(({ mode }) => ({
       fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
-      external: [
-        'react',
-        'react/jsx-runtime',
-        'react/jsx-dev-runtime',
-        'react-dom',
-        'react-dom/client',
-        'radix-ui',
-        'lucide-react',
-        'class-variance-authority',
-        'clsx',
-        'tailwind-merge',
-        'vaul',
-        '@qwen-code/sdk',
-        /^@qwen-code\/sdk\//,
-        '@datafe-open/markdown-chart',
-        '@datafe-open/markdown-chart-echarts',
-        '@datafe-open/markdown-chart-react',
-        'echarts',
-        /^echarts\//,
-        'react-markdown',
-        'remark-cjk-friendly',
-        /^remark-cjk-friendly\//,
-        'remark-gfm',
-        'remark-math',
-        'rehype-katex',
-        'shiki',
-        'mermaid',
-        'katex',
-        /^katex\/(?!dist\/katex\.min\.css$)/,
-        'codemirror',
-        /^@codemirror\//,
-      ],
+      external: (id, importer) => {
+        // Pierre requires Shiki 3/4; keep its copy inside the lazy preview bundle.
+        if (id === 'shiki') return !importer?.includes('/@pierre/');
+        return [
+          'react',
+          'react/jsx-runtime',
+          'react/jsx-dev-runtime',
+          'react-dom',
+          'react-dom/client',
+          'radix-ui',
+          'lucide-react',
+          'class-variance-authority',
+          'clsx',
+          'tailwind-merge',
+          'vaul',
+          '@qwen-code/sdk',
+          /^@qwen-code\/sdk\//,
+          '@datafe-open/markdown-chart',
+          '@datafe-open/markdown-chart-echarts',
+          '@datafe-open/markdown-chart-react',
+          'echarts',
+          /^echarts\//,
+          'react-markdown',
+          'remark-cjk-friendly',
+          /^remark-cjk-friendly\//,
+          'remark-gfm',
+          'remark-math',
+          'rehype-katex',
+          'mermaid',
+          'katex',
+          /^katex\/(?!dist\/katex\.min\.css$)/,
+          'codemirror',
+          /^@codemirror\//,
+        ].some((dependency) =>
+          typeof dependency === 'string'
+            ? dependency === id
+            : dependency.test(id),
+        );
+      },
     },
   },
   define: {

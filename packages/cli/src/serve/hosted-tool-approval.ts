@@ -45,14 +45,22 @@ export interface HostedApprovalSettings {
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file', 'task_list'],
-  'auto-edit': ['read_file', 'write_file', 'edit', 'task_list'],
+  default: ['read_file', 'task_list', 'exit_plan_mode', 'team_plan_approval'],
+  'auto-edit': [
+    'read_file',
+    'write_file',
+    'edit',
+    'task_list',
+    'exit_plan_mode',
+    'team_plan_approval',
+  ],
 };
 
-// `glob` ships with the `/2` search profiles, so those pre-approve it and no
-// other profile does. A name-keyed allowance would also pre-approve an
-// MCP-declared tool that happens to be called `glob` — the MCP server picks
-// its own names — and dispatch it without ever asking the operator.
+// `glob` ships with the `/2` search profiles and the read profile (#13753 I3),
+// so those pre-approve it and no other profile does. A name-keyed allowance
+// would also pre-approve an MCP-declared tool that happens to be called
+// `glob` — the MCP server picks its own names — and dispatch it without ever
+// asking the operator.
 const SEARCH_PREAPPROVED_TOOLS: readonly string[] = ['glob'];
 
 /**
@@ -107,7 +115,7 @@ export function hostedApprovalDefinition(
 
 /**
  * Whether a call asks the operator. `searchProfile` is the Session's own
- * `/2` search profile, the only place `glob` is pre-approved.
+ * `/2` search or read profile, the only places `glob` is pre-approved.
  */
 export function hostedApprovalAsks(
   settings: HostedApprovalSettings,

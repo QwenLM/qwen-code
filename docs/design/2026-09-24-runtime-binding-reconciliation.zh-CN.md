@@ -2,7 +2,7 @@
 
 [English](2026-09-24-runtime-binding-reconciliation.md) | [简体中文](2026-09-24-runtime-binding-reconciliation.zh-CN.md)
 
-状态：已在 `packages/sdk-java/runtime-broker` 实现。2026-09-27 更新：生产本地进程 provisioner 已使用持久身份，但 worker 归属仍仅在进程内保存，尚未实现重启后的接管。
+状态：已在 `packages/managed-agent-server` 实现。2026-09-27 更新：生产本地进程 provisioner 已使用持久身份，但 worker 归属仍仅在进程内保存，尚未实现重启后的接管。
 
 相关：#12380（Managed Agent 分阶段交付）、#12358 的集成预览，以及该分支上的端点恢复参考设计 `docs/design/2026-09-21-managed-runtime-endpoint-recovery.md`。
 
@@ -82,7 +82,7 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 ## 4. 验证
 
-在 `packages/sdk-java/runtime-broker` 执行 `mvn test`：188 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 29 例（受门控的对账-接管、unknown 观察永不替换并重试到截止期、starting 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、每一项持久身份不匹配都阻塞、不可重试 attestation 失败会阻塞恢复、不可重试与可重试的 reconcile 失败、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、可重试 ensure 失败保留已确保资源、可重试 provision 失败让新绑定可重试、provision 受操作截止期约束、并发 provision 与回收各只收敛一次、迟到的 ensure 结果不能覆盖新 owner、SPI 默认实现失败关闭、丢失仅在空闲时创建新代数、丢失在有活跃会话或活跃执行时保持阻塞直至可以安全释放、瞬时 attestation 失败选择等待而非阻塞恢复、崩溃遗留的 `ACQUIRING` 或 `RELEASING` 会话仍可对已丢失绑定结算、Runtime 未被证明消失时绝不本地结算）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储、认领续租后 seed 密文保持不变、200 字符 provisioner kind 可往返，并覆盖 `releaseOperation` 移交与其拒绝路径。`mvn checkstyle:check` 通过。
+在 `packages/managed-agent-server` 执行 `mvn test`：188 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 29 例（受门控的对账-接管、unknown 观察永不替换并重试到截止期、starting 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、每一项持久身份不匹配都阻塞、不可重试 attestation 失败会阻塞恢复、不可重试与可重试的 reconcile 失败、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、可重试 ensure 失败保留已确保资源、可重试 provision 失败让新绑定可重试、provision 受操作截止期约束、并发 provision 与回收各只收敛一次、迟到的 ensure 结果不能覆盖新 owner、SPI 默认实现失败关闭、丢失仅在空闲时创建新代数、丢失在有活跃会话或活跃执行时保持阻塞直至可以安全释放、瞬时 attestation 失败选择等待而非阻塞恢复、崩溃遗留的 `ACQUIRING` 或 `RELEASING` 会话仍可对已丢失绑定结算、Runtime 未被证明消失时绝不本地结算）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储、认领续租后 seed 密文保持不变、200 字符 provisioner kind 可往返，并覆盖 `releaseOperation` 移交与其拒绝路径。`mvn checkstyle:check` 通过。
 
 ## 5. 后续工作
 
