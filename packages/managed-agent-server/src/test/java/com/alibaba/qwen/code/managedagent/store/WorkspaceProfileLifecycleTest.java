@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
+import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
@@ -259,6 +260,70 @@ class WorkspaceProfileLifecycleTest {
         } else {
             assertThatThrownBy(verify::run).isInstanceOf(ApiException.class);
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"not_started", "pre_dispatch_cancel"})
+    void closesOnlyAuthoritativelyUnusedPublicationsForTheOriginalExecution(String status) {
+        var f = fixture();
+        var publication = PublicationJournalFixture.createSessionIsolated(f.jdbc.getDataSource());
+        publication.reserve();
+        var original = publication.executions.findByExecutionCallId("execution-1");
+        if ("pre_dispatch_cancel".equals(status)) {
+            publication.executions.requestCancel(original.getExecutionCallId(), original.getVersion());
+        } else {
+            var dispatched = publication.executions.claimDispatch("execution-1", "dispatcher", Duration.ofSeconds(30));
+            var result = new java.util.HashMap<String, Object>();
+            result.put("executionStatus", "not_started");
+            result.put("capture", null);
+            assertThat(publication.executions.compareAndSet(dispatched,
+                    dispatched.withResult(result, 0, java.time.Instant.now()), "dispatcher", dispatched.getDispatchGeneration())).isNotNull();
+        }
+        var settled = publication.executions.findByExecutionCallId("execution-1");
+        assertThat(settled.isSettled()).isTrue();
+        assertThat(settled.getExecutionStatus()).isEqualTo("not_started");
+        assertThat(settled.getDispatchGeneration()).isEqualTo("pre_dispatch_cancel".equals(status) ? 0 : 1);
+        var envelope = f.json.createObjectNode().put("executionStatus", settled.getExecutionStatus()).putNull("capture");
+        envelope.putArray("responseParts");
+        var outcome = f.json.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
+        outcome.set("envelope", envelope);
+        var outcomeRef = PublicationJournalFixture.ref("unused-outcome", "managed-tool-outcome", outcome);
+        var receipt = f.json.createObjectNode().put("executionCallId", "execution-1")
+                .put("historyRevision", publication.sequence + 1).putNull("resultRef");
+        receipt.set("toolOutcomeRef", outcomeRef);
+        receipt.putArray("resources");
+        var event = PublicationJournalFixture.eventNode(publication.sequence + 1, "tool.receipt", receipt, publication.binding.path("sessionKey"), 1);
+        publication.append("recordToolResult", publication.event(publication.sequence + 1, "tool.receipt", receipt)
+                + PublicationJournalFixture.COMMIT_MARKER, 1, java.util.List.of(PublicationJournalFixture.resource(outcomeRef, outcome)), null);
+        var results = new ManagedToolResultStore(f.jdbc, publication.manager, f.store);
+        results.captureEvents("tenant-1", "workspace-1", "session-1", publication.revision, java.util.List.of(event));
+        var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
+        beans.registerSingleton("results", results);
+        var verifier = new WorkspaceProfileLifecycleVerifier(f.jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
+                beans.getBeanProvider(ManagedToolResultStore.class));
+        var operation = new OperationRecord("tenant-1", "session-1", "close", OperationKind.CLOSE,
+                "digest", "RUNNING", "ACCEPTED", "PENDING", "ACTIVE", null, "server", 1, 1, null, 2);
+        Runnable verifyPublications = () -> f.transactions.executeWithoutResult(ignored -> verifier.verifyPublications(operation));
+        Runnable verifyResources = () -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation,
+                java.util.List.of(publication.bindings.findById("binding-1")), WorkspaceToolProfiles.SHELL));
+        assertThatThrownBy(verifyPublications::run).isInstanceOf(ApiException.class);
+        assertThatThrownBy(verifyResources::run).isInstanceOf(ApiException.class);
+        assertThat(publication.store.apply(publication.request("close_not_started"), PublicationJournalFixture.WRITER_TOKEN, null)
+                .path("state").asText()).isEqualTo("NOT_STARTED");
+        assertThat(f.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture WHERE tenant_id = ?", String.class, "tenant-1")).isEqualTo("OPEN");
+        verifyPublications.run();
+        verifyResources.run();
+        for (String mutation : java.util.List.of("state = 'FENCED'", "producer_phase = 'FINISHING'", "quarantined = TRUE", "terminal_resource_id = 'unexpected'")) {
+            f.jdbc.update("UPDATE ma_output_capture SET " + mutation + " WHERE tenant_id = ?", "tenant-1");
+            assertThatThrownBy(verifyPublications::run).isInstanceOf(ApiException.class);
+            assertThatThrownBy(verifyResources::run).isInstanceOf(ApiException.class);
+            f.jdbc.update("UPDATE ma_output_capture SET state = 'NOT_STARTED', producer_phase = 'OPEN', quarantined = FALSE, terminal_resource_id = NULL WHERE tenant_id = ?", "tenant-1");
+        }
+        var conflicting = publication.binding.deepCopy().put("runtimeBindingId", "other-binding");
+        f.jdbc.update("UPDATE ma_output_capture SET binding_json = ?, binding_digest = ? WHERE tenant_id = ?",
+                conflicting.toString(), ToolPublicationContract.bindingDigest(conflicting), "tenant-1");
+        assertThatThrownBy(verifyPublications::run).isInstanceOf(ApiException.class);
+        assertThatThrownBy(verifyResources::run).isInstanceOf(ApiException.class);
     }
 
     @ParameterizedTest

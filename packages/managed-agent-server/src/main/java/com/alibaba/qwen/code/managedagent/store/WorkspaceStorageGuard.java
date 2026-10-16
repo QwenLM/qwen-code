@@ -44,6 +44,7 @@ public class WorkspaceStorageGuard {
     private final WorkspaceCreationRoots createdRoots;
     private final boolean enabled;
     private final IdentityReader identities;
+    private SshWorkspaceStore ssh;
     private final ObjectMapper json = new ObjectMapper();
 
     @Autowired
@@ -71,6 +72,11 @@ public class WorkspaceStorageGuard {
 
     public boolean enabled() {
         return enabled;
+    }
+
+    @Autowired
+    void configureSsh(SshWorkspaceStore store, ManagedAgentProperties properties) {
+        this.ssh = properties.getRuntimeBroker().getSsh().getNodes().isEmpty() ? null : store;
     }
 
     public String inspect(String tenantId, String storageId) {
@@ -179,6 +185,9 @@ public class WorkspaceStorageGuard {
     }
 
     public void verify(ContextBinding binding) {
+        if (ssh != null && ssh.verify(binding)) {
+            return;
+        }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (!enabled) {
             return;
@@ -188,6 +197,9 @@ public class WorkspaceStorageGuard {
     }
 
     void verifyLocked(ContextBinding binding) {
+        if (ssh != null && ssh.verify(binding)) {
+            return;
+        }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (enabled) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
@@ -228,6 +240,7 @@ public class WorkspaceStorageGuard {
         String key = LocalStorageOwners.physicalKey(identity);
         Registration prepared = transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            requireNonOverlapping(identity);
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             prepareAlias(tenantId, storageId, key, operationId);
             jdbc.update("INSERT INTO ma_storage_owner"
@@ -483,6 +496,9 @@ public class WorkspaceStorageGuard {
     // is deliberately untouched: re-classifying inside verify() would flip
     // tool-turn verdicts.
     public void verifyProbe(ContextBinding binding) {
+        if (ssh != null && ssh.verify(binding)) {
+            return;
+        }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (!enabled) {
             return;
@@ -699,6 +715,7 @@ public class WorkspaceStorageGuard {
     void promoteMigration(RecoveryRegistration source, Identity target, String registration, String operation) {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, source.tenantId());
+            requireNonOverlapping(target);
             recoveryRegistration(source.tenantId(), source.storageId(), source.mountRevision(), source.fenceOperationId());
             if (!source.hostId().equals(target.hostId()) || !target.equals(identity(Path.of(target.root())))
                     || !new String(migrationMarker(source.tenantId(), source.storageId(), target, registration), StandardCharsets.UTF_8)
@@ -726,6 +743,14 @@ public class WorkspaceStorageGuard {
         try {
             return json.writeValueAsString(readMarker(root));
         } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private void requireNonOverlapping(Identity identity) {
+        try {
+            LocalStorageOwners.requireNonOverlapping(jdbc, identity);
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException conflict) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
