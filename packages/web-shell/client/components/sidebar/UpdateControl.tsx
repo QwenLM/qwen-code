@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { DaemonClient, DaemonUpdateStatus } from '@qwen-code/sdk/daemon';
 import { ArrowUpCircleIcon, LoaderCircleIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
@@ -13,6 +14,8 @@ interface UpdateControlProps {
   currentVersion: string;
   onError: (error: unknown, fallback: string) => void;
   onRestarted?: (url: string) => void;
+  /** Keep background update/restart polling alive when the menu closes. */
+  portalContainer?: HTMLElement | null;
 }
 
 function reloadPage(url: string) {
@@ -26,6 +29,7 @@ export function UpdateControl({
   currentVersion,
   onError,
   onRestarted = reloadPage,
+  portalContainer,
 }: UpdateControlProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<DaemonUpdateStatus | null>(null);
@@ -124,7 +128,7 @@ export function UpdateControl({
   if (status?.state !== 'ready' && restarting === null) return null;
   const label = t(restarting !== null ? 'update.restarting' : 'update.button');
   const Icon = restarting !== null ? LoaderCircleIcon : ArrowUpCircleIcon;
-  return (
+  const button = (
     <Button
       type="button"
       variant="secondary"
@@ -148,4 +152,9 @@ export function UpdateControl({
       {!collapsed && label}
     </Button>
   );
+  return portalContainer === undefined
+    ? button
+    : portalContainer
+      ? createPortal(button, portalContainer)
+      : null;
 }

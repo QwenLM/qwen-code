@@ -71,13 +71,11 @@ describe('HostedTextDeltaStream', () => {
     const session = await openSession(root);
     try {
       const stream = new HostedTextDeltaStream(session, 'turn-1');
-      expect(stream.published()).toBe(false);
       await stream.delta('Hello, ');
-      expect(stream.published()).toBe(true);
       await stream.delta('world');
       const messageId = stream.takeMessageId();
       expect(messageId).toBeDefined();
-      expect(stream.published()).toBe(false);
+      expect(stream.takeMessageId()).toBeUndefined();
       const events = session.authority
         .eventsInSequenceRange(1, session.authority.committedSequence)
         .filter((event) => event.kind === 'message.delta');
@@ -175,6 +173,55 @@ describe('HostedTextDeltaStream', () => {
         .filter((event) => event.kind === 'message.delta')
         .map((event) => event.payload['messageId']);
       expect(ids).toEqual([first, second]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('journals a retraction keyed by the first delta sequence and resets', async () => {
+    const session = await openSession(root);
+    try {
+      const stream = new HostedTextDeltaStream(session, 'turn-1');
+      await stream.delta('orphaned ');
+      await stream.delta('prefix');
+      const deltas = session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .filter((event) => event.kind === 'message.delta');
+      expect(deltas).toHaveLength(2);
+
+      await stream.retract();
+
+      const retractions = session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .filter((event) => event.kind === 'message.retracted');
+      expect(retractions).toHaveLength(1);
+      expect(retractions[0]!.payload['messageId']).toBe(
+        deltas[0]!.payload['messageId'],
+      );
+      expect(retractions[0]!.payload['turnId']).toBe('turn-1');
+      expect(retractions[0]!.payload['fromSequence']).toBe(deltas[0]!.sequence);
+      expect(retractions[0]!.sequence).toBeGreaterThan(deltas[1]!.sequence);
+      expect(retractions[0]!.subject?.type).toBe('activation');
+
+      // The replay publishes under a fresh identity.
+      await stream.delta('recovered');
+      const recoveredId = stream.takeMessageId();
+      expect(recoveredId).toBeDefined();
+      expect(recoveredId).not.toBe(deltas[0]!.payload['messageId']);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('retracts nothing when nothing was published', async () => {
+    const session = await openSession(root);
+    try {
+      const stream = new HostedTextDeltaStream(session, 'turn-1');
+      await stream.retract();
+      const retractions = session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .filter((event) => event.kind === 'message.retracted');
+      expect(retractions).toHaveLength(0);
     } finally {
       await session.close();
     }

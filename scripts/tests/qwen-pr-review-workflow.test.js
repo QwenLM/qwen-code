@@ -22,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { parse } from 'yaml';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const workflow = readFileSync(
   '.github/workflows/qwen-code-pr-review.yml',
@@ -3903,7 +3904,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.stdout).not.toContain('repaired');
   });
 
-  it.skipIf(!hasGnuMktemp)(
+  // Both cases make a directory unwritable, which only binds where
+  // permission bits do: not for root with its DAC capabilities.
+  it.skipIf(!hasGnuMktemp || !arePermissionBitsEnforced())(
     'repairs a single unwritable directory instead of failing fast',
     () => {
       // Mutant control: a status=1 right after the first failed touch would
@@ -3914,15 +3917,20 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     },
   );
 
-  it('fails fast when repair is impossible', () => {
-    // Mutant control: dropping the post-repair re-probe would report this
-    // unusable directory as repaired (exit 0) and die at FinalizeJob — the
-    // exact PR #8894 death the probe exists to prevent.
-    const r = runHealthProbe({ breakDir: 'home', sudoMode: 'fail' });
-    expect(r.status).toBe(1);
-    expect(r.stdout).toContain('still unusable after repair');
-    expect(r.stdout).toContain('failing fast instead of dying at job finalize');
-  });
+  it.skipIf(!arePermissionBitsEnforced())(
+    'fails fast when repair is impossible',
+    () => {
+      // Mutant control: dropping the post-repair re-probe would report this
+      // unusable directory as repaired (exit 0) and die at FinalizeJob — the
+      // exact PR #8894 death the probe exists to prevent.
+      const r = runHealthProbe({ breakDir: 'home', sudoMode: 'fail' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('still unusable after repair');
+      expect(r.stdout).toContain(
+        'failing fast instead of dying at job finalize',
+      );
+    },
+  );
 
   it('does not probe _diag when it does not exist', () => {
     // Polarity: an inverted `[ -d ]` guard probes the missing directory,

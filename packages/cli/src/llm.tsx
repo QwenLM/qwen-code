@@ -45,7 +45,10 @@ import path from 'node:path';
 import v8 from 'node:v8';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
-import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
+import {
+  processBootLoaderEnv,
+  scrubAndReportInheritedLoaderEnv,
+} from './config/shared-env-keys.js';
 import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -594,7 +597,7 @@ export async function main() {
   // check corruptedPath directly to keep stderr visible in relaunch.
   if (settings.corruptedPath) {
     writeStderrLine(
-      'Warning: Settings file had invalid JSON and was reset. ' +
+      'Warning: Workspace settings had invalid JSON. ' +
         'A copy of the corrupted file has been saved at: ' +
         settings.corruptedPath,
     );
@@ -887,7 +890,12 @@ export async function main() {
     // respawn this process with process.env and still need the loader to
     // boot, and the respawned child re-runs this scrub itself. Only the
     // final process (no relaunch) reaches here.
-    scrubAndReportInheritedLoaderEnv(process.env, 'qwen', 'ACP child');
+    scrubAndReportInheritedLoaderEnv(
+      process.env,
+      'qwen',
+      'ACP child',
+      processBootLoaderEnv,
+    );
   }
 
   // When --worktree is going to chdir us into a worktree below, resolve
@@ -1288,6 +1296,12 @@ export async function main() {
       markAcpStartup('acpImportStart');
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
       markAcpStartup('acpImportEnd');
+      // A Managed host runs its sessions' tools in Runtime workers.
+      const managedRuntimeEnvironment =
+        argv.acpExecutionEngine === 'managed'
+          ? (await import('./serve/managed-runtime-session-worker.js'))
+              .createManagedRuntimeEnvironment
+          : undefined;
       try {
         await runAcpAgent(config, settings, argv, {
           privateParentCapability: isAcpMode
@@ -1295,6 +1309,7 @@ export async function main() {
             : undefined,
           conversationsRuntimeProvenance,
           executionEngine: argv.acpExecutionEngine,
+          managedRuntimeEnvironment,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
@@ -1389,6 +1404,12 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      if (settings.merged.experimental?.mods) {
+        const { createInteractiveModSession } = await import(
+          './services/interactive-mod-session.js'
+        );
+        createInteractiveModSession(config, settings);
+      }
       // Renderer dispatch for the ink→OpenTUI migration: QWEN_TUI_RENDERER
       // selects the experimental backend only on a runtime that can drive it;
       // every other case — including a failed load or boot of the entry —

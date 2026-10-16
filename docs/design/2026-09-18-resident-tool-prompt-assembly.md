@@ -69,7 +69,10 @@ getCoreSystemPrompt(
   outputStyle?: OutputStyleDefinition | null,
   todoWriteEnabled?: boolean,
   codeModeOnly?: boolean,
-  options?: { declaredTools?: ReadonlySet<string> },
+  options?: {
+    declaredTools?: ReadonlySet<string>;
+    agentReachable?: boolean;
+  },
 ): string;
 ```
 
@@ -79,7 +82,7 @@ getCoreSystemPrompt(
 
 | Section                                                                                   | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `## Using Your Tools` bullets                                                             | A bullet is kept only when **every** tool it names is declared — a bullet that still named a missing tool would send the model after something it cannot call, which is the defect being fixed. Sub-bullets are keyed on the single tool they name, and the "prefer dedicated tools" bullet goes when none of its sub-bullets survive.                                                                                                                                                                                                                                                                           |
+| `## Using Your Tools` bullets                                                             | A bullet is kept only when **every** tool it names is declared — a bullet that still named a missing tool would send the model after something it cannot call, which is the defect being fixed. Sub-bullets are keyed on the single tool they name, and the "prefer dedicated tools" bullet goes when none of its sub-bullets survive. One later exception: bridge reachability satisfies the Agent prerequisite in the two Agent bullets (§4.6); Codebase Search still requires declared `grep_search` and `glob`.                                                                                              |
 | `# Examples` transcripts                                                                  | A block is kept only when every tool it calls is declared. Blocks are matched as `<example>`/`</example>` pairs, not split on blank lines: an example can contain blank lines of its own, and splitting on them orphans the tool calls in its later paragraphs from the tag that gates them (caught by the test suite while implementing). Every surviving block calls at least one tool, so any of them can be gated, and when none survive the filter the `# Examples` heading is dropped with the section; the model-specific XML and JSON formats use no `[tool_call: …]` notation so they are left ungated. |
 | `## Software Engineering Tasks`, tone, communication                                      | Unchanged; already flag-gated.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `getActionsSection`, security and safety rules, Core Mandates                             | Unconditional. A dangerous-action or denied-call clause must never depend on which tools are declared.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -93,6 +96,21 @@ The prompt depends only on the session-start snapshot, so `setStaticSystemPrefix
 ### 4.5 `/context`
 
 `collectContextData` builds the prompt through `getMainSessionBaseSystemPrompt` and reads declarations separately, and it does not warm the registry. It therefore reads the same snapshot, which keeps its system-prompt row consistent with the request. This lands on top of the breakdown rework in [#12119](https://github.com/QwenLM/qwen-code/pull/12119) (#12033), whose numbers are the measurement instrument for §7.
+
+### 4.6 Agent bridge reachability (#13033)
+
+#13033 defers `agent` by default, which made the absolute form of the §4.3
+rule self-defeating: the Subagent Delegation and Codebase Search bullets are
+the policy that sends the model to the deferred-tool bridge to discover Agent,
+so dropping them whenever `agent` is undeclared would turn deferral into
+silent removal. `PromptToolSurface` therefore carries one more input,
+`agentReachable`, set in `startChat` when `agent` is declared or is registered
+behind both bridge halves and listed in the deferred summary. That input
+satisfies only their Agent prerequisite: Codebase Search still requires
+declared `grep_search` and `glob`. No other gated line gains an exception —
+`monitor` stays gated on declaration — and an Agent withheld from the eager
+reveal in an incomplete-bridge session is neither declared nor
+bridge-reachable, so both lines still drop there.
 
 ## 5. Design decisions
 
@@ -120,15 +138,15 @@ The prompt depends only on the session-start snapshot, so `setStaticSystemPrefix
 Items 1-4 are automated in this PR's `prompts.test.ts`, so every push re-checks them; item 5 needs a real session and is handed off in [`docs/verification/resident-tool-prompt-assembly/README.md`](../verification/resident-tool-prompt-assembly/README.md).
 
 1. **Default-session regression (in CI).** The 17 existing full-prompt snapshots cover the no-snapshot path, and `renders identically when every tool is declared` covers the all-declared path. Together they are the guard that makes the change safe for the common case.
-2. **Effect, and no drift outside it (in CI).** Two tests bracket the saving: a file-work allowlist must drop 900-1,400 characters (measured 1,104, ~276 tokens — policy bullets only, since that allowlist keeps every example), and a narrower allowlist must drop 3,800-5,000 (measured 4,327, ~1,082 tokens, three example blocks included). A third asserts all four model-specific example notations are gated, not just the bracket form. Together they fail on a lost saving and on newly added ungated tool text. `changes nothing outside the two gated sections` strips `## Using Your Tools` and `# Examples` from both renders and asserts the remainder is identical.
-3. **Invariant, both directions (in CI).** `never names an undeclared tool inside the gated sections` sweeps every `ToolNames` value against the gated text with a word-boundary match, and `gates every tool name the gated sections can mention, on every example set` makes that config-independent by withholding each of the 66 names in turn against all four example sets — the check that would have caught the model-specific notations going ungated. `keeps the policy text of every tool that is declared` pins the opposite direction so gating cannot over-reach. Scoped to those sections because of the residues in §6.
-4. **Reverse checks and plumbing (in CI).** `leaves CodeModeOnly guidance untouched by the declared set` asserts code mode renders identically with and without a snapshot, and `takes the declared set from the Config snapshot` asserts `getMainSessionBaseSystemPrompt` reads `Config.getPromptToolSnapshot()` — the property that keeps `/context` and the request on one source.
+2. **Effect, and no drift outside it (in CI).** The file-work bracket is pinned in the two states the reachability exception (§4.6) distinguishes, and the pinned bounds below are exactly the ones `prompts.test.ts` asserts: with `agentReachable` unset the drop must stay within 900-1,500 characters (measured 1,135 — delegation 448 + codebase search 368 + monitor 317 of bullet text, plus dropped line breaks); with `agentReachable: true` — the default in practice, since the bridge pair is exempt from `tools.eager` — both Agent bullets survive and only the monitor policy drops (must stay within 250-450; measured 317). A narrower allowlist drops 3,158 characters (Agent unreachable) or 2,709 (reachable — the default this PR creates), two example blocks included, measured at this commit; no CI bracket pins the narrow case, so those figures are descriptive (the pre-exception measurement was 4,327 with three example blocks). A third test asserts all four model-specific example notations are gated, not just the bracket form. Together they fail on a lost saving and on newly added ungated tool text. `changes nothing outside the two gated sections` strips `## Using Your Tools` and `# Examples` from both renders and asserts the remainder is identical.
+3. **Invariant, both directions (in CI).** Undeclared Agent is permitted only under the reachability exception (§4.6); other named tools must remain declared. `never names an undeclared tool inside the gated sections` sweeps every `ToolNames` value against the gated text with a word-boundary match, and `gates every tool name the gated sections can mention, on every example set` makes that config-independent by withholding each of the 66 names in turn against all four example sets — the check that would have caught the model-specific notations going ungated. `keeps the policy text of every tool that is declared` pins the opposite direction so gating cannot over-reach. Scoped to those sections because of the residues in §6.
+4. **Reverse checks and plumbing (in CI).** `leaves CodeModeOnly guidance untouched by the declared set` asserts code mode renders identically with and without a snapshot, and `keeps Agent guidance when Agent is bridge-reachable` asserts `getMainSessionBaseSystemPrompt` reads the `Config` session snapshots (`getPromptToolSnapshot()`, plus `getPromptAgentReachable()` since #13033) — the property that keeps `/context` and the request on one source.
 5. **Token measurement (handed off).** On a session with a trimmed `tools.eager` allowlist, compare the system-prompt row before and after, anchored on the provider's `input_token_count` (the category ruler itself is being fixed in #12119). The brief also carries the three-way run that separates this change's saving from `tools.eager`'s own, and the weakened recall check that is all the repo's missing eval harness allows.
 
 ## 8. Acceptance criteria
 
-- A default session's base prompt is unchanged, byte for byte.
-- In a trimmed session, no bullet or example names a tool that is not declared, and every declared tool's policy text is still present.
+- No-snapshot and all-declared base prompts are unchanged, byte for byte.
+- In a trimmed session, no bullet or example names a tool the session cannot call — declared, or bridge-reachable for the Agent bullets (§4.6) — and every declared tool's policy text is still present.
 - Safety, permission, and dangerous-action text is present in every configuration.
 - `setStaticSystemPrefix` is written no more often than before this change.
 - `/context`'s system-prompt row and the request's system instruction come from the same snapshot.

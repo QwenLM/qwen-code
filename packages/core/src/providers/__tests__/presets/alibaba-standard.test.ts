@@ -22,6 +22,7 @@ describe('alibabaStandardProvider', () => {
       protocol: AuthType.USE_OPENAI,
       envKey: 'DASHSCOPE_API_KEY',
       modelsEditable: true,
+      uiGroup: 'alibaba',
     });
   });
 

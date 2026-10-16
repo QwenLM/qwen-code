@@ -1,5 +1,5 @@
-// Runner-routing regression guards for ci.yml, serve-ab.yml, e2e.yml, and
-// the qwen-autofix.yml scan lane.
+// Runner-routing regression guards for ci.yml, serve-ab.yml, e2e.yml, the
+// qwen-autofix.yml scan lane, and the trusted-PR lanes of #13245.
 //
 // classify_pr carries the routing logic TWICE — the `runs-on` expression
 // (which selects the classify job's own runner) and the `pick_runner` shell
@@ -69,6 +69,7 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'merge_group'/,
       String(eventName === 'merge_group'),
     ],
+    [/github\.event_name == 'push'/, String(eventName === 'push')],
     // Longest term first as a convention; both patterns are quote-anchored
     // (the closing quote is part of each regex), so neither can match
     // inside the other and the substitution order is behaviorally inert.
@@ -77,8 +78,16 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       String(eventName !== 'pull_request_review'),
     ],
     [
+      /github\.event_name != 'pull_request_target'/,
+      String(eventName !== 'pull_request_target'),
+    ],
+    [
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
+    ],
+    [
+      /github\.event_name == 'pull_request'/,
+      String(eventName === 'pull_request'),
     ],
     [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
@@ -224,44 +233,21 @@ describe('ci.yml classify_pr runner routing', () => {
     );
   });
 
-  it('a push to main reaches ECS, and the kill-switch still wins', () => {
-    // The post-merge fast signal (Classify PR + Test on `main`) runs the same
-    // ten-plus-minute Test job a pull request does, in the most trusted
-    // context there is: the code is already merged and the YAML is main's
-    // own. Route it to the pool instead of spending a scarce hosted Linux
-    // runner on every merge. A push carries no author association, so this
-    // arm is necessarily event-based.
-    assert.equal(
-      runPickRunner({
-        ecsDisabled: false,
+  it('routes the push classifier and downstream jobs to the same pool', () => {
+    for (const ecsDisabled of [false, true]) {
+      const inputs = {
+        ecsDisabled,
         sameRepo: false,
         assoc: '',
         eventName: 'push',
-      }),
-      ECS,
-    );
-    assert.equal(
-      runPickRunner({
-        ecsDisabled: true,
-        sameRepo: false,
-        assoc: '',
-        eventName: 'push',
-      }),
-      HOSTED,
-      'kill-switch must revert post-merge runs to hosted',
-    );
-  });
-
-  it('keeps the push arm out of the classify runs-on expression', () => {
-    // classify_pr routes twice, and on a push the two halves deliberately
-    // disagree: the shell step sends downstream Linux jobs to ECS while this
-    // expression leaves classify_pr itself hosted. Pin the asymmetry so a
-    // future "drift fix" has to read why first — this expression is the
-    // canonical association-routing text that sdk-java.yml and serve-ab.yml
-    // mirror, a push has no association to route on, and classify_pr is a
-    // seconds-long job whose pool costs nothing either way. The drift guard
-    // above evaluates both halves on pull_request, where they must agree.
-    assert.doesNotMatch(classifyRunsOn, /github\.event_name == 'push'/);
+      };
+      const expected = ecsDisabled ? HOSTED : ECS;
+      assert.deepEqual(
+        evalRunsOn(classifyRunsOn, inputs),
+        JSON.parse(expected),
+      );
+      assert.equal(runPickRunner(inputs), expected);
+    }
   });
 
   it('the runs-on expression keeps the trusted clause and kill-switch', () => {
@@ -703,4 +689,156 @@ describe('qwen-autofix.yml scan-lane runner routing', () => {
       }
     });
   }
+});
+
+describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
+  // Each lane reaches the pool for in-repo heads, write-access authors and
+  // its non-PR triggers; an untrusted fork stays hosted (these either build
+  // PR code or hold a write token), and the kill-switch wins everywhere.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+  const lanes = [
+    ['tui-parity.yml', 'parity', 'pull_request', ['workflow_dispatch']],
+    ['tui-parity.yml', 'noflicker', 'pull_request', ['workflow_dispatch']],
+    [
+      'sdk-java.yml',
+      'flyway-migrations',
+      'pull_request',
+      ['push', 'workflow_dispatch'],
+    ],
+    [
+      'assign-pr-owner.yml',
+      'assign',
+      'pull_request_target',
+      ['workflow_dispatch'],
+    ],
+  ];
+
+  for (const [file, jobName, prEvent, otherEvents] of lanes) {
+    const doc = parse(readFileSync(join(workflowsDir, file), 'utf8'));
+    const job = doc.jobs[jobName];
+    const runsOn = String(job['runs-on']);
+    const route = (eventName, sameRepo, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo, assoc });
+
+    it(`${file} ${jobName}: trusted PRs and non-PR triggers reach the pool`, () => {
+      assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+      assert.deepEqual(route(prEvent, true, 'NONE'), ECS_LABELS);
+      for (const assoc of TRUSTED) {
+        assert.deepEqual(route(prEvent, false, assoc), ECS_LABELS, assoc);
+      }
+      for (const eventName of otherEvents) {
+        assert.deepEqual(route(eventName, false, ''), ECS_LABELS, eventName);
+      }
+    });
+
+    it(`${file} ${jobName}: untrusted forks stay hosted`, () => {
+      for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE']) {
+        assert.deepEqual(route(prEvent, false, assoc), HOSTED_LABELS, assoc);
+      }
+    });
+
+    it(`${file} ${jobName}: the kill-switch wins on every event`, () => {
+      for (const eventName of [prEvent, ...otherEvents]) {
+        assert.deepEqual(
+          route(eventName, true, 'OWNER', true),
+          HOSTED_LABELS,
+          eventName,
+        );
+      }
+    });
+
+    it(`${file} ${jobName}: restores pool workspace ownership before checkout`, () => {
+      const names = job.steps.map((s) => s.name);
+      const heal = names.indexOf('Restore workspace ownership');
+      const checkout = job.steps.findIndex((s) =>
+        String(s.uses || '').startsWith('actions/checkout'),
+      );
+      assert.ok(heal !== -1 && heal < checkout);
+      assert.equal(
+        job.steps[heal].if,
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+    });
+  }
+
+  it('release-managed-agent-reference.yml build: only trusted PR dry runs reach the pool', () => {
+    const doc = parse(
+      readFileSync(
+        join(workflowsDir, 'release-managed-agent-reference.yml'),
+        'utf8',
+      ),
+    );
+    const runsOn = String(doc.jobs.build['runs-on']);
+    const route = (eventName, sameRepo, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo, assoc });
+    assert.deepEqual(route('pull_request', true, 'NONE'), ECS_LABELS);
+    for (const assoc of TRUSTED) {
+      assert.deepEqual(route('pull_request', false, assoc), ECS_LABELS, assoc);
+    }
+    for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE']) {
+      assert.deepEqual(route('pull_request', false, assoc), HOSTED_LABELS);
+    }
+    // The dispatch build produces the published assets.
+    assert.deepEqual(route('workflow_dispatch', true, ''), HOSTED_LABELS);
+    assert.deepEqual(route('pull_request', true, 'OWNER', true), HOSTED_LABELS);
+    assert.equal(doc.jobs.publish['runs-on'], 'ubuntu-latest');
+  });
+
+  it('release-managed-agent-reference.yml build is safe on a shared pool host', () => {
+    const text = readFileSync(
+      join(workflowsDir, 'release-managed-agent-reference.yml'),
+      'utf8',
+    );
+    const build = parse(text).jobs.build;
+    assert.deepEqual(build.services.mysql.ports, ['3306/tcp']);
+    assert.match(build.services.mysql.options, /type=tmpfs/);
+    const run = (name) => build.steps.find((s) => s.name === name).run;
+    assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
+    assert.match(
+      run('Build Java components'),
+      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/qwen-managed-agent-server"/,
+    );
+    const boot = run('Verify and boot the exact archive');
+    assert.match(boot, /SERVER_PORT="\$\{server_port\}"/);
+    assert.doesNotMatch(boot, /:8080|:3306\//);
+    const setupNode = build.steps.find((s) =>
+      String(s.uses || '').startsWith('actions/setup-node'),
+    );
+    assert.equal(setupNode.if, "${{ runner.environment == 'github-hosted' }}");
+  });
+
+  it('tui-parity keeps setup-node and the pnpm cache off the pool', () => {
+    // nodejs.org may be unreachable through the pool's egress proxy, and the
+    // pool keeps its pnpm store on local disk — the ci.yml split.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'tui-parity.yml'), 'utf8'),
+    );
+    for (const jobName of ['parity', 'noflicker']) {
+      const steps = doc.jobs[jobName].steps;
+      const hostedOnly = steps.filter(
+        (s) =>
+          String(s.uses || '').startsWith('actions/setup-node') ||
+          s.uses === './.github/actions/pnpm-store-cache',
+      );
+      assert.equal(hostedOnly.length, 2, jobName);
+      for (const s of hostedOnly) {
+        assert.equal(s.if, "${{ runner.environment == 'github-hosted' }}");
+      }
+      const preflight = steps.find(
+        (s) => s.uses === './.github/actions/self-hosted-node',
+      );
+      assert.equal(preflight?.if, "${{ runner.environment == 'self-hosted' }}");
+      assert.ok(
+        steps.some((s) => String(s.run || '').includes('check-disk-floor.sh')),
+        `${jobName} must fail fast on a saturated host`,
+      );
+    }
+    // accept-noflicker.sh defaults its report to a fixed /tmp path; one ECS
+    // host runs many jobs at once, so the report must be runner-scoped.
+    const gate = doc.jobs.noflicker.steps.find((s) =>
+      String(s.run || '').includes('accept-noflicker.sh'),
+    );
+    assert.equal(gate.env?.OUT, '${{ runner.temp }}/opentui-noflicker-out');
+  });
 });

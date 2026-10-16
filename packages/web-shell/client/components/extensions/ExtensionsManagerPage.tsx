@@ -24,6 +24,7 @@ import {
 import {
   DaemonHttpError,
   type DaemonExtensionEntry,
+  type DaemonExtensionSummary,
   type DaemonExtensionUpdateState,
   type ExtensionActivationState,
   type ExtensionInteractionResponse,
@@ -129,7 +130,8 @@ function isValidExtensionArchiveFilename(filename: string): boolean {
   });
 }
 
-type ManagedExtensionEntry = DaemonExtensionEntry & {
+type ManagedExtensionEntry = DaemonExtensionSummary & {
+  details?: DaemonExtensionEntry['details'];
   defaultActivation?: ExtensionActivationState;
   workspaceActivation?: 'inherit' | ExtensionActivationState;
 };
@@ -148,7 +150,7 @@ interface ExtensionsManagerPageProps {
   embedded?: EmbeddedManagerPage;
 }
 
-function extensionTitle(extension: DaemonExtensionEntry): string {
+function extensionTitle(extension: DaemonExtensionSummary): string {
   return extension.displayName || extension.name;
 }
 
@@ -443,8 +445,17 @@ export function ExtensionsManagerPage({
     workspace.capabilities?.features.includes(
       'extension_activation_explicit_refresh',
     ) === true;
+  const splitExtensionDetails =
+    workspace.capabilities?.features.includes('extension_list_details') ===
+    true;
   const [extensions, setExtensions] = useState<ManagedExtensionEntry[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [detailResult, setDetailResult] = useState<{
+    summary: ManagedExtensionEntry;
+    entry?: DaemonExtensionEntry;
+    error?: string;
+  } | null>(null);
+  const [detailRetry, setDetailRetry] = useState(0);
   const [query, setQuery] = useState('');
   const [updateStates, setUpdateStates] = useState<
     Record<string, DaemonExtensionUpdateState>
@@ -529,7 +540,12 @@ export function ExtensionsManagerPage({
             .workspaceExtensions()
             .catch(() => null)
         : Promise.resolve(null);
-      return Promise.all([actions.loadExtensionsStatus(), projection])
+      return Promise.all([
+        splitExtensionDetails
+          ? actions.loadExtensionSummaries()
+          : actions.loadExtensionsStatus(),
+        projection,
+      ])
         .then(([status, activation]) => {
           // Keep the last known trust when the projection fails: defaulting
           // to trusted would re-arm a refresh the runtime must reject.
@@ -542,16 +558,18 @@ export function ExtensionsManagerPage({
               entry,
             ]),
           );
-          const nextExtensions = (status.extensions ?? []).map((extension) => {
-            const entry = activations.get(extension.id);
-            return entry
-              ? {
-                  ...extension,
-                  defaultActivation: entry.defaultActivation,
-                  workspaceActivation: entry.workspaceActivation ?? 'inherit',
-                }
-              : extension;
-          });
+          const nextExtensions = (status.extensions ?? []).map(
+            (extension): ManagedExtensionEntry => {
+              const entry = activations.get(extension.id);
+              return entry
+                ? {
+                    ...extension,
+                    defaultActivation: entry.defaultActivation,
+                    workspaceActivation: entry.workspaceActivation ?? 'inherit',
+                  }
+                : extension;
+            },
+          );
           setExtensions((current) => {
             const uninstallName = uninstallInFlightNameRef.current;
             if (
@@ -592,7 +610,7 @@ export function ExtensionsManagerPage({
         })
         .finally(() => setLoading(false));
     },
-    [actions, workspace.client, workspace.workspaceCwd],
+    [actions, workspace.client, workspace.workspaceCwd, splitExtensionDetails],
   );
 
   useEffect(() => {
@@ -1197,6 +1215,28 @@ export function ExtensionsManagerPage({
   );
 
   useEffect(() => {
+    if (!splitExtensionDetails || !selectedExtension) return;
+    let cancelled = false;
+    setDetailResult(null);
+    void actions.loadExtensionDetails(selectedExtension.name).then(
+      (entry) => {
+        if (!cancelled) setDetailResult({ summary: selectedExtension, entry });
+      },
+      (error: unknown) => {
+        if (!cancelled) {
+          setDetailResult({
+            summary: selectedExtension,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [actions, selectedExtension, splitExtensionDetails, detailRetry]);
+
+  useEffect(() => {
     embedded?.onDetailChange(Boolean(selectedExtension));
   }, [embedded, selectedExtension]);
 
@@ -1300,7 +1340,15 @@ export function ExtensionsManagerPage({
   ) : null;
 
   if (selectedExtension) {
-    const details = selectedExtension.details;
+    const currentDetail =
+      detailResult?.summary === selectedExtension ? detailResult : null;
+    const details = splitExtensionDetails
+      ? currentDetail?.entry?.details
+      : selectedExtension.details;
+    const detailsLoading = splitExtensionDetails && !currentDetail;
+    const detailsError = splitExtensionDetails
+      ? currentDetail?.error
+      : undefined;
     const updateState =
       updateStates[selectedExtension.name] ?? selectedExtension.updateState;
     const busy =
@@ -1510,116 +1558,136 @@ export function ExtensionsManagerPage({
             </CardContent>
           </Card>
 
-          <Tabs defaultValue="overview">
-            <TabsList className="max-w-full overflow-x-auto">
-              <TabsTrigger value="overview">
-                {t('extensions.manage.overview')}
-              </TabsTrigger>
-              <TabsTrigger value="commands">
-                {trimDialogLabel(t('extensions.manage.commands'))}{' '}
-                {commands.length}
-              </TabsTrigger>
-              <TabsTrigger value="skills">
-                {trimDialogLabel(t('extensions.manage.skills'))} {skills.length}
-              </TabsTrigger>
-              <TabsTrigger value="agents">
-                {trimDialogLabel(t('extensions.manage.agents'))} {agents.length}
-              </TabsTrigger>
-              <TabsTrigger value="mcp">
-                {trimDialogLabel(t('extensions.manage.mcpServers'))}{' '}
-                {mcpServers.length}
-              </TabsTrigger>
-              <TabsTrigger value="context">
-                {trimDialogLabel(t('extensions.manage.contextFiles'))}{' '}
-                {contextFiles.length}
-              </TabsTrigger>
-            </TabsList>
-            <TabsContent value="overview" className="pt-4">
-              <Card>
-                <CardHeader>
-                  <CardTitle>{t('extensions.manage.overview')}</CardTitle>
-                  {selectedExtension.description ? (
-                    <CardDescription>
-                      {selectedExtension.description}
-                    </CardDescription>
-                  ) : null}
-                </CardHeader>
-                <CardContent className="grid gap-6 sm:grid-cols-2">
-                  <DetailField
-                    label={t('extensions.manage.name')}
-                    value={selectedExtension.name}
-                  />
-                  <DetailField
-                    label={t('extensions.manage.version')}
-                    value={selectedExtension.version}
-                  />
-                  <DetailField
-                    label={t('extensions.manage.status')}
-                    value={statusLabel(selectedExtension, t)}
-                  />
-                  <DetailField
-                    label={t('extensions.manage.source')}
-                    value={selectedExtension.source ?? '-'}
-                  />
-                  <DetailField
-                    label={t('extensions.manage.path')}
-                    value={selectedExtension.path}
-                  />
-                  <DetailField
-                    label={t('extensions.manage.updateStatus')}
-                    value={updateLabel(updateState, t)}
-                  />
-                  <DetailField
-                    label={t('extensions.manage.installType')}
-                    value={selectedExtension.installType ?? '-'}
-                  />
-                  <DetailField
-                    label={t('extensions.manage.origin')}
-                    value={selectedExtension.originSource ?? '-'}
-                  />
-                  <DetailField
-                    label={t('extensions.manage.settings')}
-                    value={(details?.settings ?? []).join(', ') || '-'}
-                  />
-                </CardContent>
-              </Card>
-            </TabsContent>
-            <TabsContent value="commands" className="pt-4">
-              <CapabilityList
-                items={commands}
-                empty={t('extensions.manage.emptyCommands')}
-                icon={CommandIcon}
-              />
-            </TabsContent>
-            <TabsContent value="skills" className="pt-4">
-              <CapabilityList
-                items={skills}
-                empty={t('extensions.manage.emptySkills')}
-                icon={SparklesIcon}
-              />
-            </TabsContent>
-            <TabsContent value="agents" className="pt-4">
-              <CapabilityList
-                items={agents}
-                empty={t('extensions.manage.emptyAgents')}
-                icon={BotIcon}
-              />
-            </TabsContent>
-            <TabsContent value="mcp" className="pt-4">
-              <CapabilityList
-                items={mcpServers}
-                empty={t('extensions.manage.emptyMcpServers')}
-                icon={ServerIcon}
-              />
-            </TabsContent>
-            <TabsContent value="context" className="pt-4">
-              <CapabilityList
-                items={contextFiles}
-                empty={t('extensions.manage.emptyContextFiles')}
-                icon={FileTextIcon}
-              />
-            </TabsContent>
-          </Tabs>
+          {detailsLoading ? (
+            <div role="status" className="flex items-center gap-2">
+              <Spinner /> {t('common.loading')}
+            </div>
+          ) : detailsError ? (
+            <Alert variant="destructive">
+              <AlertDescription>
+                {detailsError}
+                <Button
+                  variant="outline"
+                  onClick={() => setDetailRetry((value) => value + 1)}
+                >
+                  {t('common.retry')}
+                </Button>
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <Tabs defaultValue="overview">
+              <TabsList className="max-w-full overflow-x-auto">
+                <TabsTrigger value="overview">
+                  {t('extensions.manage.overview')}
+                </TabsTrigger>
+                <TabsTrigger value="commands">
+                  {trimDialogLabel(t('extensions.manage.commands'))}{' '}
+                  {commands.length}
+                </TabsTrigger>
+                <TabsTrigger value="skills">
+                  {trimDialogLabel(t('extensions.manage.skills'))}{' '}
+                  {skills.length}
+                </TabsTrigger>
+                <TabsTrigger value="agents">
+                  {trimDialogLabel(t('extensions.manage.agents'))}{' '}
+                  {agents.length}
+                </TabsTrigger>
+                <TabsTrigger value="mcp">
+                  {trimDialogLabel(t('extensions.manage.mcpServers'))}{' '}
+                  {mcpServers.length}
+                </TabsTrigger>
+                <TabsTrigger value="context">
+                  {trimDialogLabel(t('extensions.manage.contextFiles'))}{' '}
+                  {contextFiles.length}
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="overview" className="pt-4">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>{t('extensions.manage.overview')}</CardTitle>
+                    {selectedExtension.description ? (
+                      <CardDescription>
+                        {selectedExtension.description}
+                      </CardDescription>
+                    ) : null}
+                  </CardHeader>
+                  <CardContent className="grid gap-6 sm:grid-cols-2">
+                    <DetailField
+                      label={t('extensions.manage.name')}
+                      value={selectedExtension.name}
+                    />
+                    <DetailField
+                      label={t('extensions.manage.version')}
+                      value={selectedExtension.version}
+                    />
+                    <DetailField
+                      label={t('extensions.manage.status')}
+                      value={statusLabel(selectedExtension, t)}
+                    />
+                    <DetailField
+                      label={t('extensions.manage.source')}
+                      value={selectedExtension.source ?? '-'}
+                    />
+                    <DetailField
+                      label={t('extensions.manage.path')}
+                      value={selectedExtension.path}
+                    />
+                    <DetailField
+                      label={t('extensions.manage.updateStatus')}
+                      value={updateLabel(updateState, t)}
+                    />
+                    <DetailField
+                      label={t('extensions.manage.installType')}
+                      value={selectedExtension.installType ?? '-'}
+                    />
+                    <DetailField
+                      label={t('extensions.manage.origin')}
+                      value={selectedExtension.originSource ?? '-'}
+                    />
+                    <DetailField
+                      label={t('extensions.manage.settings')}
+                      value={(details?.settings ?? []).join(', ') || '-'}
+                    />
+                  </CardContent>
+                </Card>
+              </TabsContent>
+              <TabsContent value="commands" className="pt-4">
+                <CapabilityList
+                  items={commands}
+                  empty={t('extensions.manage.emptyCommands')}
+                  icon={CommandIcon}
+                />
+              </TabsContent>
+              <TabsContent value="skills" className="pt-4">
+                <CapabilityList
+                  items={skills}
+                  empty={t('extensions.manage.emptySkills')}
+                  icon={SparklesIcon}
+                />
+              </TabsContent>
+              <TabsContent value="agents" className="pt-4">
+                <CapabilityList
+                  items={agents}
+                  empty={t('extensions.manage.emptyAgents')}
+                  icon={BotIcon}
+                />
+              </TabsContent>
+              <TabsContent value="mcp" className="pt-4">
+                <CapabilityList
+                  items={mcpServers}
+                  empty={t('extensions.manage.emptyMcpServers')}
+                  icon={ServerIcon}
+                />
+              </TabsContent>
+              <TabsContent value="context" className="pt-4">
+                <CapabilityList
+                  items={contextFiles}
+                  empty={t('extensions.manage.emptyContextFiles')}
+                  icon={FileTextIcon}
+                />
+              </TabsContent>
+            </Tabs>
+          )}
         </div>
 
         <AlertDialog
