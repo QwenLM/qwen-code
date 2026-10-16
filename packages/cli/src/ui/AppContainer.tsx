@@ -156,6 +156,7 @@ import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import { getInteractiveModSession } from '../services/interactive-mod-session.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
@@ -163,6 +164,7 @@ import {
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
+import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -844,6 +846,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [props.extensionRefreshState],
   );
   const historyManager = useHistory();
+  const addHistoryItem = historyManager.addItem;
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribe((text) => {
+        addHistoryItem({ type: MessageType.INFO, text }, Date.now());
+      }),
+    [config, addHistoryItem],
+  );
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
   // would rebuild them on every message. Mirror history into a ref so
@@ -1134,8 +1144,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initialize config (runs once on mount)
   useEffect(() => {
     (async () => {
-      // Note: the program will not work if this fails so let errors be
-      // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       // Bound the goal-runtime gate: under session-writer lease contention
@@ -1232,7 +1240,15 @@ export const AppContainer = (props: AppContainerProps) => {
             config.getSessionId(),
           ),
         );
+      }
 
+      // Restore the transcript before Mod diagnostics, without making input
+      // or Mod startup wait for asynchronous session recovery.
+      void getInteractiveModSession(config)
+        ?.initialize()
+        .catch(() => {});
+
+      if (resumedSessionData) {
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
         );
@@ -1319,7 +1335,17 @@ export const AppContainer = (props: AppContainerProps) => {
           Date.now(),
         );
       }
-    })();
+    })().catch((error: unknown) => {
+      getInteractiveModSession(config)?.failStartup(error);
+      debugLogger.error('Failed to initialize session:', error);
+      historyManager.addItem(
+        {
+          type: MessageType.ERROR,
+          text: `Failed to initialize session: ${sanitizeTerminalLine(getErrorMessage(error)).slice(0, 2000)}`,
+        },
+        Date.now(),
+      );
+    });
 
     // Register SessionEnd cleanup for process exit
     registerCleanup(async () => {
@@ -1621,6 +1647,13 @@ export const AppContainer = (props: AppContainerProps) => {
       ),
   );
 
+  useEffect(() => {
+    getInteractiveModSession(config)?.setPresentation({
+      isFullscreen: useTerminalBuffer,
+      columns: terminalWidth,
+    });
+  }, [config, useTerminalBuffer, terminalWidth]);
+
   // The VP post-shrink clear window (terminal-resize-reflow) wipes one-shot
   // <Static> content from the viewport just like the wake path; pair it with
   // the same remount bump so keyed statics (agent tab history) re-emit. The
@@ -1867,7 +1900,6 @@ export const AppContainer = (props: AppContainerProps) => {
     };
   }, [config]);
 
-  const addHistoryItem = historyManager.addItem;
   useEffect(() => {
     if (typeof config.onChatRecordingFailure !== 'function') return;
     return config.onChatRecordingFailure(() => {
@@ -3832,18 +3864,30 @@ export const AppContainer = (props: AppContainerProps) => {
       const ac = new AbortController();
       suggestionAbortRef.current = ac;
 
-      // Only clone the tail — full structuredClone of a large resumed session
-      // causes transient heap peaks that trigger OOM (#4624).
-      const conversationHistory = llmClient.getHistoryTail(40, true);
-      generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        // On by default: the schema declares `default: true`, but
-        // `mergeSettings` doesn't apply schema defaults, so an unset value is
-        // `undefined` and a `=== true` gate left the cache-aware fork as dead
-        // code unless the flag was explicitly set (#9230). Only an explicit
-        // `false` opts out of cache sharing. This flag does not inherit the
-        // follow-up suggestion runtime gate.
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
-      })
+      const generate = async () => {
+        const mods = getInteractiveModSession(config);
+        if (mods) await mods.ready;
+        ac.signal.throwIfAborted();
+        // Only clone the tail — full structuredClone of a large resumed session
+        // causes transient heap peaks that trigger OOM (#4624).
+        const conversationHistory = llmClient.getHistoryTail(40, true);
+        return generatePromptSuggestion(
+          config,
+          conversationHistory,
+          ac.signal,
+          {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value is
+            // `undefined` and a `=== true` gate left the cache-aware fork as dead
+            // code unless the flag was explicitly set (#9230). Only an explicit
+            // `false` opts out of cache sharing. This flag does not inherit the
+            // follow-up suggestion runtime gate.
+            enableCacheSharing:
+              settings.merged.ui?.enableCacheSharing !== false,
+          },
+        );
+      };
+      void generate()
         .then((result) => {
           if (ac.signal.aborted) return;
           if (result.suggestion) {

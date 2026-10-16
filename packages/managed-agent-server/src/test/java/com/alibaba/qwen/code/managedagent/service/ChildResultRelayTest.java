@@ -169,7 +169,7 @@ class ChildResultRelayTest {
         when(childWorkspaces.capable()).thenReturn(true);
         // As the store does: a recorded finish request answers its row;
         // the same request — and a discard over a recorded discard_pinned
-        // — answers the row unchanged.
+        // — answers the row unchanged; a snapshot's merge is its discard.
         when(childWorkspaces.requestFinish(anyString(), anyString(),
                 anyString(), anyString())).thenAnswer(args -> {
                     ChildWorkspaceStore.Row before = childWorkspaces.find(
@@ -178,7 +178,10 @@ class ChildResultRelayTest {
                     if (before == null) {
                         return null;
                     }
-                    String finish = args.getArgument(3);
+                    String asked = args.getArgument(3);
+                    String finish = ChildWorkspaceStore.MERGE.equals(asked)
+                            && before.snapshot() ? ChildWorkspaceStore.DISCARD
+                                    : asked;
                     if (finish.equals(before.finishRequest())
                             || ChildWorkspaceStore.DISCARD.equals(finish)
                                     && ChildWorkspaceStore.DISCARD_PINNED
@@ -1702,7 +1705,24 @@ class ChildResultRelayTest {
         return new ChildWorkspaceStore.Row(TENANT, PARENT, RUN, WORKSPACE_ID,
                 "workspace", 1, "storage", ".", ".", ".", "b".repeat(40),
                 result, null, null, state, finish, outcome, conflicts, null,
-                null, null, 1, 0, 0, 0, 0);
+                null, null, 1, 0, 0, 0, 0, ChildWorkspaceStore.WORKTREE);
+    }
+
+    // ---- #13753 I3: snapshot runs ----
+
+    private void snapshotRun(String completion) {
+        when(store.readResource(TENANT, PARENT, "resource-body")).thenReturn(
+                "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
+                        + "\"completion\":\"" + completion + "\","
+                        + "\"workspaceMode\":\"snapshot\"}");
+    }
+
+    private static ChildWorkspaceStore.Row snapshotRow(String state,
+            String finish, String outcome) {
+        return new ChildWorkspaceStore.Row(TENANT, PARENT, RUN, WORKSPACE_ID,
+                "workspace", 1, "storage", ".", ".", ".", "b".repeat(40),
+                null, null, null, state, finish, outcome, List.of(), null,
+                null, null, 1, 0, 0, 0, 0, ChildWorkspaceStore.SNAPSHOT);
     }
 
     private static ChildWorkspaceStore.Row withFinish(
@@ -1717,7 +1737,7 @@ class ChildResultRelayTest {
                 row.outcomeCode(), row.conflictPaths(), row.lastError(),
                 row.claimedBy(), row.claimedUntil(), row.claimGeneration(),
                 row.attempts(), row.nextRetryAt(), row.createdAt(),
-                row.updatedAt());
+                row.updatedAt(), row.workspaceMode());
     }
 
     private static ApiException refusal(String code) {
@@ -1728,7 +1748,8 @@ class ChildResultRelayTest {
     @Test
     void aWorktreeRunCreatesItsChildOnlyOnceItsWorkspaceIsReady() {
         worktreeRun("sent");
-        when(childWorkspaces.request(TENANT, PARENT, RUN)).thenReturn(
+        when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.WORKTREE)).thenReturn(
                 workspaceRow(ChildWorkspaceStore.PREPARING, null, null,
                         List.of(), null));
         relay.scan();
@@ -1742,7 +1763,8 @@ class ChildResultRelayTest {
                 anyString(), anyString(), anyString(), Mockito.anyBoolean());
         assertThat(row.get().state()).isEqualTo("creating");
 
-        when(childWorkspaces.request(TENANT, PARENT, RUN)).thenReturn(
+        when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.WORKTREE)).thenReturn(
                 workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         when(sessions.createChildSession(TENANT, PARENT, RUN,
@@ -1753,6 +1775,178 @@ class ChildResultRelayTest {
         assertThat(row.get().childSessionId()).isEqualTo(CHILD);
         verify(sessions, never()).createChildSession(anyString(), anyString(),
                 anyString(), anyString(), anyString(), Mockito.eq(false));
+    }
+
+    @Test
+    void aSnapshotRunPreparesItsCopyAndCreatesItsChildIsolated() {
+        snapshotRun("sent");
+        when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.SNAPSHOT)).thenReturn(snapshotRow(
+                        ChildWorkspaceStore.PREPARING, null, null));
+        relay.scan();
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                Mockito.eq(now + 5_000L), anyLong(), anyLong());
+        verify(sessions, never()).createChildSession(anyString(), anyString(),
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
+
+        when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.SNAPSHOT)).thenReturn(snapshotRow(
+                        ChildWorkspaceStore.READY, null, null));
+        when(sessions.createChildSession(TENANT, PARENT, RUN,
+                "audit the diff", "review", true)).thenReturn(
+                    new CommandAdmission(CHILD, null, "accepted", false));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(row.get().childSessionId()).isEqualTo(CHILD);
+        verify(childWorkspaces, never()).request(anyString(), anyString(),
+                anyString(), Mockito.eq(ChildWorkspaceStore.WORKTREE));
+    }
+
+    // A mode this relay does not serve is never run as shared: the run
+    // settles never started, and nothing is created or prepared.
+    @Test
+    void aRunInAModeThisRelayDoesNotServeNeverStartsAsShared() {
+        when(store.readResource(TENANT, PARENT, "resource-body")).thenReturn(
+                "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
+                        + "\"completion\":\"sent\","
+                        + "\"workspaceMode\":\"readonly\"}");
+        relay.scan();
+        assertThat(harness.operations).singleElement()
+                .satisfies(fail -> assertThat(fail)
+                        .containsEntry("kind", "fail")
+                        .containsEntry("stopReason", "creation_failed")
+                        .containsEntry("started", false));
+        assertThat(row.get().state()).isEqualTo("done");
+        verify(sessions, never()).createChildSession(anyString(), anyString(),
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
+        verify(childWorkspaces, never()).request(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    // Production writes the mode on every launch, so a shared run names
+    // it: that run creates its child shared, never fails closed.
+    @Test
+    void aRunNamingSharedCreatesItsChildShared() {
+        when(store.readResource(TENANT, PARENT, "resource-body")).thenReturn(
+                "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
+                        + "\"completion\":\"sent\","
+                        + "\"workspaceMode\":\"shared\"}");
+        when(sessions.createChildSession(TENANT, PARENT, RUN,
+                "audit the diff", "review", false)).thenReturn(
+                    new CommandAdmission(CHILD, null, "accepted", false));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(row.get().childSessionId()).isEqualTo(CHILD);
+        assertThat(harness.operations).noneSatisfy(operation ->
+                assertThat(operation).containsEntry("kind", "fail"));
+        verify(childWorkspaces, never()).request(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    // A snapshot changed nothing: its result commits at once, with no
+    // workspace member, and its copy is asked to discard, never to merge.
+    @Test
+    void aCompletedSnapshotChildCommitsAtOnceAndDiscardsItsCopy() {
+        snapshotRun("sent");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("child result");
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                snapshotRow(ChildWorkspaceStore.READY, null, null));
+        relay.scan();
+        assertThat(harness.operations).extracting(op -> op.get("kind"))
+                .containsExactly("commit_result", "accept");
+        assertThat((String) harness.operations.get(0).get("receipt"))
+                .doesNotContain("workspace");
+        verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.DISCARD);
+        verify(childWorkspaces, never()).requestFinish(anyString(),
+                anyString(), anyString(),
+                Mockito.eq(ChildWorkspaceStore.MERGE));
+        verify(store, never()).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+        assertThat(row.get().state()).isEqualTo("delivering");
+    }
+
+    @Test
+    void aSnapshotsCompletedTaskNeverAsksAMergeWhileMessagesRun() {
+        snapshotRun("sent");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now, null));
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                snapshotRow(ChildWorkspaceStore.READY, null, null));
+        relay.scan();
+        verify(childWorkspaces, never()).requestFinish(anyString(),
+                anyString(), anyString(), anyString());
+        assertThat(harness.operations).isEmpty();
+    }
+
+    // Every arm that holds a worktree's settlement for its merge settles a
+    // snapshot at once, asking only its discard.
+    @Test
+    void aSnapshotNeverHoldsAQuotaAStopOrAGiveUpForAMerge() {
+        snapshotRun("sent");
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                snapshotRow(ChildWorkspaceStore.READY, null, null));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("x".repeat(64 * 1024 + 1));
+        relay.scan();
+        assertThat(harness.operations).extracting(op -> op.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "quota_exceeded");
+
+        // A stop that cancelled the message turn after a completed task.
+        harness.operations.clear();
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0,
+                        Set.of("msg_1:message"), now,
+                        new ChildResultRelayStore.SettledTurn("turn-2",
+                                "cancelled", "session_message", now)));
+        relay.scan();
+        assertThat(harness.operations).extracting(op -> op.get("kind"))
+                .containsExactly("close_scope");
+        assertThat(row.get().state()).isEqualTo("done");
+
+        // A give-up after a completed Turn.
+        harness.operations.clear();
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(null);
+        when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(false);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
+        relay.scan();
+        assertThat(harness.operations).extracting(op -> op.get("kind"))
+                .containsExactly("fail");
+
+        verify(childWorkspaces, never()).requestFinish(anyString(),
+                anyString(), anyString(),
+                Mockito.eq(ChildWorkspaceStore.MERGE));
+        verify(childWorkspaces, Mockito.times(3)).requestFinish(TENANT,
+                PARENT, RUN, ChildWorkspaceStore.DISCARD);
+        verify(store, never()).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
     }
 
     @Test
@@ -1768,7 +1962,8 @@ class ChildResultRelayTest {
             harness.operations.clear();
             row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                     "creating", "owner", now + 30_000, 0, 0, null, now, now));
-            when(childWorkspaces.request(TENANT, PARENT, RUN))
+            when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.WORKTREE))
                     .thenReturn(unusable);
             when(childWorkspaces.find(TENANT, PARENT, RUN))
                     .thenReturn(unusable);
@@ -1799,7 +1994,8 @@ class ChildResultRelayTest {
             harness.operations.clear();
             row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                     "creating", "owner", now + 30_000, 0, 0, null, now, now));
-            when(childWorkspaces.request(TENANT, PARENT, RUN))
+            when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.WORKTREE))
                     .thenThrow(refusal(code));
             relay.scan();
             assertThat(row.get().state()).as(code).isEqualTo("done");
@@ -1815,7 +2011,8 @@ class ChildResultRelayTest {
         // A row an earlier attempt admitted is still asked to discard.
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 0, 0, null, now, now));
-        when(childWorkspaces.request(TENANT, PARENT, RUN))
+        when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.WORKTREE))
                 .thenThrow(refusal("child_workspace_unsupported"));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
                 workspaceRow(ChildWorkspaceStore.PREPARING, null, null,
@@ -1830,7 +2027,8 @@ class ChildResultRelayTest {
         worktreeRun("sent");
         ChildWorkspaceStore.Row ready = workspaceRow(ChildWorkspaceStore.READY,
                 null, null, List.of(), null);
-        when(childWorkspaces.request(TENANT, PARENT, RUN)).thenReturn(ready);
+        when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.WORKTREE)).thenReturn(ready);
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(ready);
         when(sessions.createChildSession(TENANT, PARENT, RUN,
                 "audit the diff", "review", true)).thenThrow(
@@ -2303,7 +2501,8 @@ class ChildResultRelayTest {
         ChildWorkspaceStore.Row ready = workspaceRow(ChildWorkspaceStore.READY,
                 null, null, List.of(), null);
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(ready);
-        when(childWorkspaces.request(TENANT, PARENT, RUN)).thenReturn(ready);
+        when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.WORKTREE)).thenReturn(ready);
         when(sessions.createChildSession(TENANT, PARENT, RUN,
                 "audit the diff", "review", true)).thenReturn(
                     new CommandAdmission(CHILD, null, "accepted", false));
@@ -2661,7 +2860,8 @@ class ChildResultRelayTest {
     @Test
     void aCreationJudgedUnableToStartRetriesWhenItsChildExists() {
         worktreeRun("sent");
-        when(childWorkspaces.request(TENANT, PARENT, RUN))
+        when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.WORKTREE))
                 .thenThrow(refusal("child_workspace_unsupported"));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
                 workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
@@ -2683,7 +2883,8 @@ class ChildResultRelayTest {
     @Test
     void aWorktreeGiveUpWithALostCreationDiscardsInsteadOfMerging() {
         worktreeRun("sent");
-        when(childWorkspaces.request(TENANT, PARENT, RUN))
+        when(childWorkspaces.request(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.WORKTREE))
                 .thenThrow(refusal("child_workspace_unsupported"));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
                 workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
@@ -2748,7 +2949,7 @@ class ChildResultRelayTest {
         relay.scan();
         // A shared run has no row: the fail arm only looks.
         verify(childWorkspaces, never()).request(anyString(), anyString(),
-                anyString());
+                anyString(), anyString());
         verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
                 anyString(), anyString());
     }
