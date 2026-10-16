@@ -206,6 +206,16 @@ function findTitle(displayName: string): HTMLElement {
   return titles[0];
 }
 
+function findTitleLabel(displayName: string): HTMLElement {
+  // The rename handler sits on the inner label span; the outer
+  // [data-web-shell-session-title] span is the container that also holds
+  // the search snippet, so a user's click on the title targets the first
+  // element child.
+  const label = findTitle(displayName).firstElementChild;
+  expect(label).not.toBeNull();
+  return label as HTMLElement;
+}
+
 function findRow(displayName: string): HTMLElement {
   return findTitle(displayName).closest('[role="button"]') as HTMLElement;
 }
@@ -256,6 +266,9 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   window.localStorage.clear();
+  // The jsdom document outlives the test: drop any text selection so a
+  // selection-guard case cannot leak into the next one.
+  window.getSelection()?.removeAllRanges();
 });
 
 describe('WebShellSidebar session title single-click rename (issue #14327)', () => {
@@ -266,7 +279,7 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
     await flushSidebar();
 
     await act(async () => {
-      click(findTitle('First session'));
+      click(findTitleLabel('First session'));
     });
 
     const input = renameInput();
@@ -282,7 +295,7 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
     await flushSidebar();
 
     await act(async () => {
-      click(findTitle('First session'));
+      click(findTitleLabel('First session'));
     });
     const input = renameInput();
     expect(input).not.toBeNull();
@@ -313,7 +326,7 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
     await flushSidebar();
 
     await act(async () => {
-      click(findTitle('First session'));
+      click(findTitleLabel('First session'));
     });
     const input = renameInput();
     expect(input).not.toBeNull();
@@ -337,7 +350,7 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
     // First click of the pair already mounts the form; the second click
     // lands on the form input, which keeps the row's open handler out.
     await act(async () => {
-      click(findTitle('First session'));
+      click(findTitleLabel('First session'));
     });
     const input = renameInput();
     expect(input).not.toBeNull();
@@ -409,6 +422,96 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
 
     await act(async () => {
       click(findTitle('First session'));
+    });
+
+    expect(loadSession).toHaveBeenCalledWith('s1', '/tmp/project');
+    expect(renameInput()).toBeNull();
+  });
+
+  it('opens the session on a single click of the title container blank area', async () => {
+    active.sessions = [makeSession('s1', { displayName: 'First session' })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    // The outer [data-web-shell-session-title] span is the flex container;
+    // beside a short label the click lands on its blank remainder, so it
+    // must open the session, not rename.
+    await act(async () => {
+      click(findTitle('First session'));
+    });
+
+    expect(loadSession).toHaveBeenCalledWith('s1', '/tmp/project');
+    expect(renameInput()).toBeNull();
+  });
+
+  it('opens the session on a single click of the content-search snippet', async () => {
+    const hit = makeSession('s1', { displayName: 'First session' });
+    active.sessions = [hit];
+    active.data = active.sessions;
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [{ session: hit, snippet: 'the matched line' }],
+    });
+    renderSidebar();
+    await flushSidebar();
+
+    // A content-search hit renders its matched-message excerpt inside the
+    // title container; clicking the excerpt must open the found session.
+    const searchToggle = container.querySelector(
+      'button[aria-label="Search sessions"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      click(searchToggle);
+    });
+    const searchBox = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(searchBox).not.toBeNull();
+    const setValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    await act(async () => {
+      setValue?.call(searchBox as HTMLInputElement, 'zzz');
+      (searchBox as HTMLInputElement).dispatchEvent(
+        new Event('input', { bubbles: true }),
+      );
+    });
+    // useSessionContentSearch debounces the daemon call by 300ms.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    await flushSidebar();
+
+    const snippet = container.querySelector(
+      '[class*="sessionSearchSnippet"]',
+    ) as HTMLElement;
+    expect(snippet).not.toBeNull();
+    await act(async () => {
+      click(snippet);
+    });
+
+    expect(loadSession).toHaveBeenCalledWith('s1', '/tmp/project');
+    expect(renameInput()).toBeNull();
+  });
+
+  it('keeps the selection and opens the session when a text selection is active', async () => {
+    active.sessions = [makeSession('s1', { displayName: 'First session' })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    // A drag that ends on the title leaves a live selection; the same
+    // guard SessionOverviewPanel's row click uses keeps that click out of
+    // rename and lets the row's open handler take it.
+    const label = findTitleLabel('First session');
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(label);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    await act(async () => {
+      click(label);
     });
 
     expect(loadSession).toHaveBeenCalledWith('s1', '/tmp/project');

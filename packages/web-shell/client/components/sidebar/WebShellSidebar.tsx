@@ -4988,21 +4988,26 @@ export function WebShellSidebar({
             </form>
           ) : (
             <>
-              <span
-                className={styles.sessionText}
-                data-web-shell-session-title
-                onClick={(event) => {
-                  // A single click on the title opens the same rename entry
-                  // point the row's double click uses; without rename
-                  // available the click falls through to the row's open
-                  // handler.
-                  if (!showRename) return;
-                  event.stopPropagation();
-                  if (standalone) standalone.onRename();
-                  else startRename(session);
-                }}
-              >
-                <span className={styles.sessionTextInner}>{label}</span>
+              <span className={styles.sessionText} data-web-shell-session-title>
+                <span
+                  className={styles.sessionTextInner}
+                  onClick={(event) => {
+                    // A single click on the title opens the same rename entry
+                    // point the row's double click uses; without rename
+                    // available the click falls through to the row's open
+                    // handler. The search snippet and the container's blank
+                    // space fall through the same way, as does a click that
+                    // finishes a text selection (SessionOverviewPanel's
+                    // guard).
+                    if (!showRename) return;
+                    if (window.getSelection()?.isCollapsed === false) return;
+                    event.stopPropagation();
+                    if (standalone) standalone.onRename();
+                    else startRename(session);
+                  }}
+                >
+                  {label}
+                </span>
                 {searchSnippet && (
                   <span className={styles.sessionSearchSnippet}>
                     {searchSnippet}
