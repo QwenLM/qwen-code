@@ -574,7 +574,7 @@ class TaskCancelCoordinatorTest {
                 OperationKind.TASK_CANCEL, "digest", state, "JAVA_DURABLE",
                 "RUNNING".equals(state) ? "LEASED" : "BLOCKED", "ACTIVE",
                 null, "owner", attempts + 1, attempts, null, null, null,
-                null, 0, null, TASK);
+                null, 0, 0, null, TASK);
     }
 
     private static final class DirectExecutor

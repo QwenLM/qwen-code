@@ -736,6 +736,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration retryMaxDelay = Duration.ofMinutes(1);
         private int maxPreAdmissionRetries = 5;
+        private int maxPostAdmissionRetries = 10;
+        private int maxOperationRetries = 10;
 
         public Duration getLeaseDuration() {
             return leaseDuration;
@@ -775,6 +777,22 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setMaxPreAdmissionRetries(int maxPreAdmissionRetries) {
             this.maxPreAdmissionRetries = maxPreAdmissionRetries;
+        }
+
+        public int getMaxPostAdmissionRetries() {
+            return maxPostAdmissionRetries;
+        }
+
+        public void setMaxPostAdmissionRetries(int maxPostAdmissionRetries) {
+            this.maxPostAdmissionRetries = maxPostAdmissionRetries;
+        }
+
+        public int getMaxOperationRetries() {
+            return maxOperationRetries;
+        }
+
+        public void setMaxOperationRetries(int maxOperationRetries) {
+            this.maxOperationRetries = maxOperationRetries;
         }
     }
 

@@ -624,6 +624,7 @@ public final class ApiModels {
             @Size(max = 1000) List<@NotNull Map<String, Object>> skills,
             @JsonProperty("mcp_servers") @Size(max = 100)
                     List<@NotNull Map<String, Object>> mcpServers,
+            @JsonProperty("hook_catalog") Map<String, Object> hookCatalog,
             @JsonProperty("permission_policy") @NotNull
                     Map<String, Object> permissionPolicy,
             @JsonProperty("environment_template_id") @Size(max = 128)
