@@ -57,6 +57,27 @@ function describeRenewalError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Rejects a close whose activation release and writer seal both failed.
+ *
+ * `errors` keeps both failures. The seal failure is the one that says what
+ * state the writer was left in, so a caller that classifies a close failure
+ * (a writer conflict, a lost writer) reads `sealError` rather than this
+ * wrapper, whose own class names neither.
+ */
+export class ManagedSessionCloseError extends AggregateError {
+  constructor(
+    readonly sealError: unknown,
+    readonly releaseError: unknown,
+  ) {
+    super(
+      [sealError, releaseError],
+      `Managed Session close failed to seal the writer (${describeRenewalError(sealError)}) after releasing the activation failed (${describeRenewalError(releaseError)})`,
+    );
+    this.name = 'ManagedSessionCloseError';
+  }
+}
+
 export interface OpenManagedSessionOptions {
   readonly runtimeBaseDir: string;
   readonly sessionId: string;
@@ -139,6 +160,8 @@ export interface ManagedSession {
   /**
    * Seals the writer, leaving the at-rest barrier in place. Omit activation
    * release only when an external permanent lifecycle fence forbids appends.
+   * When both the release and the seal fail, the close rejects with a
+   * `ManagedSessionCloseError`; otherwise with the failure itself.
    */
   close(options?: { readonly releaseActivation?: boolean }): Promise<void>;
 }
@@ -267,6 +290,7 @@ export async function openManagedSession(
     // (review round 1, R1-4). The seal error itself is left untouched: the
     // lease hands the same memoized rejection to every later seal, and the
     // seal often carries a cause of its own (review round 1, R1-3 and R1-4).
+    // The wrapper exposes the seal error for callers that classify it.
     close: async (options) => {
       renewal.stop();
       if (adopted) return;
@@ -287,10 +311,7 @@ export async function openManagedSession(
         await authority.close();
       } catch (sealError) {
         if (released) throw sealError;
-        throw new AggregateError(
-          [sealError, releaseError],
-          `Managed Session close failed to seal the writer (${describeRenewalError(sealError)}) after releasing the activation failed (${describeRenewalError(releaseError)})`,
-        );
+        throw new ManagedSessionCloseError(sealError, releaseError);
       }
       if (!released) throw releaseError;
     },

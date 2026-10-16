@@ -17,6 +17,7 @@ import {
   ManagedSessionNotFoundError,
 } from './managed-session-authority.js';
 import {
+  ManagedSessionCloseError,
   openManagedSession,
   type ManagedSession,
 } from './managed-session-assembly.js';
@@ -272,7 +273,13 @@ describe('managed session assembly', () => {
       () => undefined,
       (error: unknown) => error,
     );
+    expect(failure).toBeInstanceOf(ManagedSessionCloseError);
     expect(failure).toBeInstanceOf(AggregateError);
+    // A caller classifies a close failure on what the seal reported.
+    expect((failure as ManagedSessionCloseError).sealError).toBe(sealError);
+    expect((failure as ManagedSessionCloseError).releaseError).toBe(
+      releaseError,
+    );
     expect((failure as AggregateError).errors).toEqual([
       sealError,
       releaseError,
@@ -298,7 +305,9 @@ describe('managed session assembly', () => {
     const sealError = new Error('journal seal failed');
     vi.spyOn(session.authority, 'close').mockRejectedValue(sealError);
 
-    await expect(session.close()).rejects.toBeInstanceOf(AggregateError);
+    await expect(session.close()).rejects.toBeInstanceOf(
+      ManagedSessionCloseError,
+    );
     const second = await session.close().then(
       () => undefined,
       (error: unknown) => error,
