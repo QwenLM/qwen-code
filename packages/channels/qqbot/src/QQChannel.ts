@@ -1940,13 +1940,13 @@ export class QQChannel extends ChannelBase {
 
   /**
    * Expose the QQ group-management surface to the agent as client MCP tools.
-   * A no-op when the channel disables them (moderationTools: false) or when
-   * the bridge has no client MCP tool support. Tools are owned by this channel
-   * instance: one bridge can serve several channels, and the owner is what
-   * keeps each channel's sessions on their own credentials.
+   * Opt-in: a no-op unless the channel sets moderationTools: true, and also a
+   * no-op when the bridge has no client MCP tool support. Tools are owned by
+   * this channel instance: one bridge can serve several channels, and the
+   * owner is what keeps each channel's sessions on their own credentials.
    */
   private registerModerationTools(): void {
-    if (this.qqConfig.moderationTools === false) return;
+    if (this.qqConfig.moderationTools !== true) return;
     const register = this.bridge.registerChannelTool?.bind(this.bridge);
     if (!register) return;
     for (const tool of buildModerationTools({

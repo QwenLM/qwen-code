@@ -74,12 +74,12 @@ export QQ_APP_SECRET=<your-app-secret>
 
 ### QQ-Specific Options
 
-| Option            | Default | Description                                                                                                                                                       |
-| ----------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `appID`           | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.                                                                                            |
-| `appSecret`       | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.                                                                                  |
-| `sandbox`         | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`)                                                                                 |
-| `moderationTools` | `true`  | Expose the QQ group-management tools to the agent — see [Group Management Tools](#group-management-tools). Set `false` to keep the agent out of group management. |
+| Option            | Default | Description                                                                                                                                      |
+| ----------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `appID`           | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.                                                                           |
+| `appSecret`       | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.                                                                 |
+| `sandbox`         | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`)                                                                |
+| `moderationTools` | `false` | Expose the QQ group-management tools to the agent — see [Group Management Tools](#group-management-tools). Off by default; set `true` to opt in. |
 
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
 `privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
@@ -111,7 +111,7 @@ See [Group Chats](./overview#group-chats) for full details on group policies and
 
 ## Group Management Tools
 
-With `moderationTools` on (the default), the channel exposes the QQ group-management API to the agent as **client MCP tools in that channel's sessions**. The agent calls them itself while answering — there is no slash command to type and no operator gate: the tools run with the bot's own token, and the platform's own rules are the only limit. Set `moderationTools: false` to register none of them.
+With `moderationTools: true`, the channel exposes the QQ group-management API to the agent as **client MCP tools in that channel's sessions**. The tools are **off by default**: they are destructive and run with the bot's own token, so an existing deployment keeps them off until an operator opts in per channel. Once enabled, the agent calls them itself while answering — there is no slash command to type and no operator gate: the platform's own rules are the only limit.
 
 | Tool                | QQ endpoint                                                                             | Requirement                                                                                                                                                     |
 | ------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -2790,8 +2790,8 @@ describe('inbound media', () => {
 });
 
 // The moderation tools are what the model calls for group management, so the
-// registration path, the two-way config switch, and the recall target ring are
-// pinned here rather than only in the tool-unit tests.
+// registration path, the opt-in switch, and the recall target ring are pinned
+// here rather than only in the tool-unit tests.
 describe('qqbot moderation tools', () => {
   const RECALL_WINDOW_MS = 120_000;
 
@@ -2805,8 +2805,14 @@ describe('qqbot moderation tools', () => {
     return registered;
   }
 
-  it('registers the recall tool on the bridge', () => {
-    const names = registeredTools().map((tool) => tool.name);
+  it('registers nothing by default', () => {
+    expect(registeredTools()).toEqual([]);
+  });
+
+  it('registers the recall tool when moderationTools is true', () => {
+    const names = registeredTools({ moderationTools: true }).map(
+      (tool) => tool.name,
+    );
     expect(names).toEqual(['qq_recall_message']);
   });
 
@@ -2814,12 +2820,12 @@ describe('qqbot moderation tools', () => {
     expect(registeredTools({ moderationTools: false })).toEqual([]);
   });
 
-  it('treats any other moderationTools value as enabled', () => {
-    expect(registeredTools({ moderationTools: true })).toHaveLength(1);
+  it('registers nothing for a truthy but non-boolean value', () => {
+    expect(registeredTools({ moderationTools: 'yes' })).toEqual([]);
   });
 
   it('skips registration on bridges without channel tool support', () => {
-    expect(() => makeChannel()).not.toThrow();
+    expect(() => makeChannel({ moderationTools: true })).not.toThrow();
   });
 
   it('resolves the newest still-recallable message per sender', () => {
@@ -3001,7 +3007,7 @@ describe('qqbot moderation tool ownership and recovery', () => {
   it('tags every registered tool with the owning channel', () => {
     const tools: Array<{ name: string; owner?: string }> = [];
     makeChannel(
-      {},
+      { moderationTools: true },
       {
         registerChannelTool: (tool: { name: string; owner?: string }) =>
           tools.push(tool),
@@ -3015,7 +3021,7 @@ describe('qqbot moderation tool ownership and recovery', () => {
     const first: string[] = [];
     const second: string[] = [];
     const ch = makeChannel(
-      {},
+      { moderationTools: true },
       {
         registerChannelTool: (tool: { name: string }) => first.push(tool.name),
       },
@@ -3053,7 +3059,7 @@ describe('qqbot moderation tool ownership and recovery', () => {
       ) => Promise<unknown>;
     }> = [];
     makeChannel(
-      {},
+      { moderationTools: true },
       {
         registerChannelTool: (tool: { name: string }) =>
           tools.push(tool as never),
