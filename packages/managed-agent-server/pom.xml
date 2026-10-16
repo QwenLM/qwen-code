@@ -353,7 +353,12 @@
                                  lane-measured 3600 s fork already covers
                                  them: one 600 s ceiling plus the
                                  re-derived healthy runtime still fits
-                                 with headroom. -->
+                                 with headroom. Its slice 2 (FG9d, FG9e)
+                                 brings the class to four letters
+                                 measuring 308–314 s healthy locally on
+                                 JDK 21 + MySQL 8.4 (~534 s budgeted at
+                                 the same 1.7×), which the same fork
+                                 still covers. -->
                             <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
@@ -461,7 +466,7 @@
                     <!-- The FG9 letters are independent fixtures sharing
                          one fork — each letter boots its own Spring,
                          Harness, and proxies on its own tenant prefix,
-                         so a stall in one letter leaves the other
+                         so a stall in one letter leaves the others
                          running — like the FG8 letters' shape. The
                          per-ceiling relation is pinned against the
                          hosted-harness-mysql lane's fork budget (the
