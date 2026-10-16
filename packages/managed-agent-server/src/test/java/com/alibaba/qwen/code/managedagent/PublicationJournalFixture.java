@@ -94,17 +94,23 @@ public final class PublicationJournalFixture {
             boolean journalHeadAuthorization, WorkspaceCsiRegistration registration) {
         PublicationJournalFixture fixture =
                 new PublicationJournalFixture(source, journalHeadAuthorization);
-        fixture.populate(source, registration);
+        fixture.populate(source, registration, false);
         return fixture;
     }
 
-    private void populate(DataSource source, WorkspaceCsiRegistration registration) {
+    public static PublicationJournalFixture createSessionIsolated(DataSource source) {
+        var fixture = new PublicationJournalFixture(source, false);
+        fixture.populate(source, null, true);
+        return fixture;
+    }
+
+    private void populate(DataSource source, WorkspaceCsiRegistration registration, boolean sessionIsolated) {
         boolean csi = registration != null;
         var scope = new RuntimeScope("tenant-1", "workspace-1", csi ? "1" : "generation-1",
-                "/workspace", csi ? "sha256:" + "a".repeat(64) : "capability", csi ? "session" : "workspace");
+                "/workspace", csi ? "sha256:" + "a".repeat(64) : "capability", csi || sessionIsolated ? "session" : "workspace");
         var runtime = bindings.findOrCreate(csi
                 ? new RuntimeProvisionRequest(scope, "session-1", "kubernetes-workspace", registration.storageId())
-                : new RuntimeProvisionRequest(scope, null));
+                : new RuntimeProvisionRequest(scope, sessionIsolated ? "session-1" : null));
         runtime = bindings.claimOperation(runtime.getBindingId(), "owner", Duration.ofMinutes(1));
         if (csi) {
             var csiStore = new WorkspaceCsiReservationStore(jdbc, manager, JSON);

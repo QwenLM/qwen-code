@@ -142,6 +142,44 @@ export class JavaManagedAgentClient {
     );
   }
 
+  listRuntimeNodes(signal?: AbortSignal) {
+    return this.post<Schemas['WebShellRuntimeNodePage']>(
+      '/runtime-nodes/query',
+      {},
+      signal,
+    );
+  }
+
+  checkWorkspaceDirectory(
+    request: Schemas['WebShellWorkspaceDirectoryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellWorkspaceDirectory']>(
+      '/workspaces/check-directory',
+      request,
+      signal,
+    );
+  }
+
+  registerWorkspace(
+    request: Schemas['WebShellWorkspaceRegisterRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
+      '/workspaces/register',
+      request,
+      signal,
+    );
+  }
+
+  getWorkspaceOperation(operationId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
+      '/workspaces/operations/get',
+      { operationId },
+      signal,
+    );
+  }
+
   createWorkspace(
     request: Schemas['WebShellWorkspaceCreateRequest'],
     signal?: AbortSignal,
