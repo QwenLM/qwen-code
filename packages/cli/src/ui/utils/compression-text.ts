@@ -10,10 +10,13 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
+// Estimated counts (#9309) get a '~' prefix so structured/headless consumers
+// don't treat locally estimated numbers as API-reported token counts.
 export const formatCompressionTokenCount = (
-  count: number,
+  count: number | undefined,
   isEstimated?: boolean,
-) => (isEstimated ? `~${count}` : String(count));
+) =>
+  count === undefined ? 'unknown' : isEstimated ? `~${count}` : String(count);
 
 export interface CompressionStatusTextOptions {
   isPending?: boolean;
