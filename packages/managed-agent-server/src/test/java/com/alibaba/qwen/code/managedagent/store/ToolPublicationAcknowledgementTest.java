@@ -127,7 +127,7 @@ class ToolPublicationAcknowledgementTest {
                 duringObjectRead.run();
                 return new ByteArrayInputStream(objects.get(key));
             }
-            public void requireUnversioned() { }
+            public void validateConfiguration() { }
         };
         sessions.setPublicationObjects(bucket);
         data = new ToolPublicationDataStore(jdbc, manager, grants, sessions, bucket,

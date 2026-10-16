@@ -672,8 +672,39 @@ describe('OpenTuiInputPrompt submit guard', () => {
     expect(editor.plainText).toBe('echo hi!');
   });
 
+  it('Esc cancels a running slash command before restoring the prompt queue', async () => {
+    const onCancelCommand = vi.fn(() => true);
+    const onPopQueue = vi.fn(() => 'queued text');
+    const onInterrupt = vi.fn();
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCancelCommand={onCancelCommand}
+        onInterrupt={onInterrupt}
+        queueLength={1}
+        onPopQueue={onPopQueue}
+      />,
+    );
+    await typeText('draft');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(onCancelCommand).toHaveBeenCalledOnce();
+    expect(onPopQueue).not.toHaveBeenCalled();
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(currentEditor().plainText).toBe('draft');
+    onCancelCommand.mockReturnValue(false);
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(onPopQueue).toHaveBeenCalledOnce();
+    expect(currentEditor().plainText).toBe('queued text\ndraft');
+  });
+
   it('Esc in shell mode exits the mode before the queue restore (U-33)', async () => {
     const onToggleShellMode = vi.fn();
+    const onCancelCommand = vi.fn(() => true);
     const onPopQueue = vi.fn(() => 'queued text');
     render(
       <OpenTuiInputPrompt
@@ -681,6 +712,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
         userMessages={[]}
         shellModeActive
         onToggleShellMode={onToggleShellMode}
+        onCancelCommand={onCancelCommand}
         queueLength={1}
         onPopQueue={onPopQueue}
       />,
@@ -689,30 +721,39 @@ describe('OpenTuiInputPrompt submit guard', () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
     });
     expect(onToggleShellMode).toHaveBeenCalledTimes(1);
+    expect(onCancelCommand).not.toHaveBeenCalled();
     expect(onPopQueue).not.toHaveBeenCalled();
   });
 
-  it('Esc in shell mode while streaming exits the mode and interrupts (R1-57)', async () => {
-    // Ink does both on one keypress: InputPrompt exits the mode with no
-    // streaming gate and AppContainer's broadcast handler cancels the turn.
-    const onToggleShellMode = vi.fn();
-    const onInterrupt = vi.fn();
-    render(
-      <OpenTuiInputPrompt
-        onSubmit={() => {}}
-        userMessages={[]}
-        streaming
-        shellModeActive
-        onToggleShellMode={onToggleShellMode}
-        onInterrupt={onInterrupt}
-      />,
-    );
-    await act(async () => {
-      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
-    });
-    expect(onToggleShellMode).toHaveBeenCalledTimes(1);
-    expect(onInterrupt).toHaveBeenCalledTimes(1);
-  });
+  it.each([false, true])(
+    'Esc while streaming interrupts without cancelling a slash command (shell mode: %s)',
+    async (shellModeActive) => {
+      // Ink does both on one keypress: InputPrompt exits the mode with no
+      // streaming gate and AppContainer's broadcast handler cancels the turn.
+      const onToggleShellMode = vi.fn();
+      const onInterrupt = vi.fn();
+      const onCancelCommand = vi.fn(() => true);
+      render(
+        <OpenTuiInputPrompt
+          onSubmit={() => {}}
+          userMessages={[]}
+          streaming
+          shellModeActive={shellModeActive}
+          onToggleShellMode={onToggleShellMode}
+          onInterrupt={onInterrupt}
+          onCancelCommand={onCancelCommand}
+        />,
+      );
+      await act(async () => {
+        lastKeyboardHandler()(
+          baseKeyEvent({ name: 'escape', sequence: '\x1b' }),
+        );
+      });
+      expect(onToggleShellMode).toHaveBeenCalledTimes(shellModeActive ? 1 : 0);
+      expect(onInterrupt).toHaveBeenCalledTimes(1);
+      expect(onCancelCommand).not.toHaveBeenCalled();
+    },
+  );
 
   it('a late @ resolution cannot reopen the dropdown over a cleared buffer (R1-54)', async () => {
     let releaseSearch!: () => void;
