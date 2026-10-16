@@ -14,6 +14,7 @@ import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -211,6 +212,11 @@ const proxy = createServer(async (req, res) => {
           `${url}: ${bytes}`,
         );
         report.staleWriterConflicts++;
+      } else if (url.pathname.endsWith(':release-mount')) {
+        assert(
+          isLegitimateMountRelease(upstream.status, json.code),
+          `${upstream.status} ${url}: ${bytes}`,
+        );
       } else if (upstream.status === 409) {
         assert(
           injected &&

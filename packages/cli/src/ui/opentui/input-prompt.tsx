@@ -192,6 +192,7 @@ export interface InputPromptProps {
   streaming?: boolean;
   /** Esc-while-streaming hook (aborts the live turn in the parent). */
   onInterrupt?: () => void;
+  onCancelCommand?: () => boolean;
   approvalMode?: ApprovalMode;
   placeholder?: string;
   focus?: boolean;
@@ -242,6 +243,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     config,
     streaming = false,
     onInterrupt,
+    onCancelCommand,
     approvalMode,
     placeholder = DEFAULT_PLACEHOLDER,
     focus = true,
@@ -945,6 +947,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         onInterrupt?.();
         return;
       }
+      const commandCancelled = onCancelCommand?.() ?? false;
+      if (commandCancelled) return;
       if (completionModeRef.current !== CompletionMode.IDLE) {
         completionModeRef.current = CompletionMode.IDLE;
         setRawSuggestions([]);
