@@ -20,7 +20,10 @@ import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/mana
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
-import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import {
+  answerResumedTurnCalls,
+  settleCancelledCommandWaitRuns,
+} from './hosted-runtime-recovery.js';
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
@@ -354,6 +357,79 @@ async function journaledResults(): Promise<string> {
       .flatMap((entry) => entry.message?.parts ?? []),
   );
 }
+
+// #14063: every wait settlement preserves the member-message guidance.
+it.each([
+  ['live', 'accepting'],
+  ['live', 'unknown'],
+  ['resumed', 'accepting'],
+  ['resumed', 'unknown'],
+  ['interrupted', 'accepting'],
+  ['interrupted', 'unknown'],
+] as const)(
+  'does not suggest resending a member message in the %s %s path',
+  async (route, state) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }),
+    );
+    const callId = 'call-message-timeout';
+    const commandId = commandIdOf(callId);
+    let live: Promise<Part[]> | undefined;
+    let runs: HarnessCommandWaitRun[] = [];
+    if (route === 'live') {
+      live = execute(createTurn(), [
+        call({ to: 'bob', message: 'sync at noon' }, callId, 'send_message'),
+      ]);
+      await vi.waitFor(
+        () => expect(commands.command(commandId)).toBeDefined(),
+        { timeout: 10_000 },
+      );
+    } else {
+      runs = await parkCalls([{ callId, toolName: 'send_message' }]);
+      await commands.runCommand({
+        commandId,
+        kind: 'member_message',
+        args: { to: 'bob', message: 'sync at noon' },
+        executionCallId: callId,
+        closing: false,
+      });
+    }
+    await commands.handover(commandId, PARENT);
+    if (state === 'unknown') await commands.settle(commandId, 'unknown');
+
+    if (route === 'live') {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 121_000);
+      await live;
+      vi.useRealTimers();
+    } else if (route === 'resumed') {
+      await createManagedHarnessHandle(session).markCommandWaitTimeout();
+      await createTurn().resumeCommandWaitRuns(
+        runs,
+        false,
+        'model',
+        new AbortController().signal,
+      );
+    } else {
+      await settleCancelledCommandWaitRuns({
+        managed: session,
+        sessionId: sessionKey.sessionId,
+        promptId: 'prompt',
+        cwd: rootDir,
+        runs,
+        commands,
+      });
+    }
+
+    const answered = await journaledResults();
+    expect(answered).toContain(
+      sessionCommandEvidenceText(state, 'member_message'),
+    );
+    expect(answered).not.toMatch(/read the board/i);
+    expect(answered).toContain('Do not send it again');
+    expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
+  },
+);
 
 async function runnableCheckpoint() {
   const authorization = await session.authority.harnessRunAuthorization();

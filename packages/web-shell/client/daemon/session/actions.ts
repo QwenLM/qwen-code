@@ -1433,7 +1433,7 @@ export function createDaemonSessionActions({
       }
     },
 
-    async continueSession() {
+    async continueSession(options = {}) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -1499,7 +1499,7 @@ export function createDaemonSessionActions({
           : current,
       );
       try {
-        const accepted = await session.continueSession(ctrl.signal);
+        const accepted = await session.continueSession(ctrl.signal, options);
         admitted = accepted.accepted;
         refreshRecovery = !admitted;
         if (!accepted.accepted || !isCurrentConversation()) return;
