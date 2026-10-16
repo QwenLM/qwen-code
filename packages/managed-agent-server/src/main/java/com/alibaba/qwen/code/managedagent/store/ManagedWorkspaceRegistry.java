@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -20,7 +21,14 @@ import java.util.List;
 
 @Repository
 public class ManagedWorkspaceRegistry {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
+    private com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings ssh;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void configureSsh(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties properties) {
+        this.ssh = properties.getRuntimeBroker().getSsh();
+    }
 
     public ManagedWorkspaceRegistry(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
@@ -306,6 +314,22 @@ public class ManagedWorkspaceRegistry {
                     "workspace_forbidden", "Workspace cannot be used.");
         }
         WorkspaceRecord record = records.getFirst();
+        var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
+                String.class, com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenantId, record.getStorageId()));
+        if (!remote.isEmpty()) {
+            boolean allowed = false;
+            if (ssh != null && ssh.isEnabled()) {
+                try {
+                    String nodeId = JSON.readTree(remote.getFirst()).path("nodeId").asText();
+                    allowed = ssh.getNodes().stream().anyMatch(node -> node.nodeId().equals(nodeId) && node.admits(tenantId, actorId));
+                } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+                    throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable", "Workspace registration is invalid.");
+                }
+            }
+            if (!allowed) {
+                throw new ApiException(HttpStatus.FORBIDDEN, "runtime_node_forbidden", "New SSH Sessions are disabled or unauthorized.");
+            }
+        }
         if (record.getState() != WorkspaceState.ACTIVE) {
             if (selection == null) {
                 throw workspaceRequired();
