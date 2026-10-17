@@ -5,13 +5,17 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -169,6 +173,79 @@ class ManagedTurnCommandOperationTest {
         assertThat(operation.receiptId()).isNull();
     }
 
+    // D7-2: a null epoch does not prove non-admission (R10-4). An input
+    // whose submit no Harness answered parks, and only the Session journal
+    // decides it: the prompt's submitInput commit completes it.
+    @Test
+    void anInputWhoseSubmitNoHarnessAnsweredParksUntilTheJournalDecides() {
+        Admission admitted = attemptedThenFailed("submit-1");
+        OperationRecord parked = operation(admitted.operationId());
+        assertThat(parked.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(parked.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(parked.deliveryState()).isEqualTo("BLOCKED");
+        assertThat(parked.failureCode()).isEqualTo("submit_input_unconfirmed");
+        assertThat(parked.receiptId()).isNull();
+        ParkedOperation due = new ParkedOperation(TENANT, sessionId,
+                admitted.operationId(), OperationKind.SUBMIT_INPUT);
+        assertThat(store.findParkedOperations(50)).containsExactly(due);
+        // No managed journal, then a live one without the commit: a writer
+        // may still commit the admission, so nothing is proven.
+        assertThat(acceptance(admitted)).isEqualTo(AcceptanceVerdict.unknown());
+        managedHead("ACTIVE", 0);
+        assertThat(acceptance(admitted)).isEqualTo(AcceptanceVerdict.unknown());
+        // A sealed journal takes a new writer, which may still commit it.
+        jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");
+        assertThat(acceptance(admitted)).isEqualTo(AcceptanceVerdict.unknown());
+        journalAdmission(admitted, "c".repeat(64));
+        assertThat(acceptance(admitted))
+                .isEqualTo(AcceptanceVerdict.committed());
+        assertThat(store.settleParkedOperation(due,
+                AcceptanceVerdict.committed(), 0)).isTrue();
+        OperationRecord completed = operation(admitted.operationId());
+        assertThat(completed.state()).isEqualTo("COMPLETED");
+        assertThat(completed.admissionStage()).isEqualTo("HARNESS_CONFIRMED");
+        assertThat(completed.deliveryState()).isEqualTo("CONFIRMED");
+        assertThat(completed.receiptId()).startsWith("rcpt_");
+        assertThat(completed.failureCode()).isNull();
+        assertThat(store.findParkedOperations(50)).isEmpty();
+        // A settled outcome is never rewritten.
+        assertThat(store.settleParkedOperation(due,
+                AcceptanceVerdict.notCommitted("hosted_harness_unavailable"),
+                0)).isFalse();
+    }
+
+    // A journal that no writer can extend any more, and that compaction has
+    // not touched, is complete: its missing commit proves the input never
+    // landed, and it fails with its Turn's code.
+    @Test
+    void anInputFailsOnceItsCompleteJournalLacksTheAdmission() {
+        Admission admitted = attemptedThenFailed("submit-1");
+        managedHead("DELETING", 0);
+        // A commit under the same prompt with another payload is not this
+        // input's admission: nothing is proven either way.
+        journalAdmission(admitted, "d".repeat(64));
+        assertThat(acceptance(admitted)).isEqualTo(AcceptanceVerdict.unknown());
+        jdbc.update("DELETE FROM ma_session_journal_tx");
+        assertThat(acceptance(admitted)).isEqualTo(
+                AcceptanceVerdict.notCommitted("hosted_harness_unavailable"));
+        // Once compaction starts the journal may have lost the commit.
+        jdbc.update("UPDATE ma_session_head SET state = 'DELETED',"
+                + " compacted_through_revision = 1");
+        assertThat(acceptance(admitted)).isEqualTo(AcceptanceVerdict.unknown());
+        jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 0");
+        ParkedOperation due = new ParkedOperation(TENANT, sessionId,
+                admitted.operationId(), OperationKind.SUBMIT_INPUT);
+        assertThat(store.settleParkedOperation(due, acceptance(admitted), 0))
+                .isTrue();
+        OperationRecord failed = operation(admitted.operationId());
+        assertThat(failed.state()).isEqualTo("FAILED");
+        assertThat(failed.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(failed.deliveryState()).isEqualTo("BLOCKED");
+        assertThat(failed.failureCode()).isEqualTo("hosted_harness_unavailable");
+        assertThat(failed.receiptId()).isNull();
+        assertThat(store.findParkedOperations(50)).isEmpty();
+    }
+
     @Test
     void aCancelBeforeAdmissionCancelsTheInputAndCompletesInJava() {
         Admission admitted = submit("submit-1", "digest-1");
@@ -285,7 +362,7 @@ class ManagedTurnCommandOperationTest {
         now.addAndGet(Duration.ofMinutes(10).toMillis());
         assertThat(store.findDeliverableOperations(now.get(), 50)).isEmpty();
         assertThat(store.findDeliverableTaskCancels(50)).isEmpty();
-        assertThat(store.findParkedTaskCancels(50)).isEmpty();
+        assertThat(store.findParkedOperations(50)).isEmpty();
         // The open Turn still refuses the close, as before D7-1; its pending
         // cancel is not a Session operation.
         refused(() -> store.beginOperation(TENANT, sessionId,
@@ -318,6 +395,56 @@ class ManagedTurnCommandOperationTest {
                 "epoch-" + key, 0);
         store.releaseTurnLease(TENANT, sessionId, admitted.turnId(), OWNER);
         return admitted;
+    }
+
+    // A Turn whose dispatcher sent the submit and then failed it without
+    // any Harness answer: no event epoch, but the submission mark is set.
+    Admission attemptedThenFailed(String key) {
+        Admission admitted = submit(key, "digest-" + key);
+        claim(admitted);
+        store.markSubmissionAttempted(TENANT, sessionId, admitted.turnId(),
+                OWNER);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "hosted_harness_unavailable", "gone");
+        return admitted;
+    }
+
+    AcceptanceVerdict acceptance(Admission turn) {
+        return store.turnInputAcceptance(TENANT, sessionId,
+                turn.operationId());
+    }
+
+    void managedHead(String state, long compactedThrough) {
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key,"
+                        + " tenant_id, session_id, harness_session_id, head_kind,"
+                        + " state, storage_version, writer_generation,"
+                        + " journal_revision, committed_sequence, activation_epoch,"
+                        + " compacted_through_revision, gmt_create, gmt_modified)"
+                        + " VALUES (?, ?, ?, ?, ?, 'MANAGED_SESSION', ?, 1, 1, 1, 1, 0,"
+                        + " ?, 0, 0)",
+                JdbcRuntimeBindingRepository.harnessDrainKey(TENANT),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), TENANT,
+                sessionId, sessionId, state, compactedThrough);
+    }
+
+    // The row the Harness's submitInput commit leaves: keyed by operation
+    // and prompt, carrying the payload digest without its prefix.
+    void journalAdmission(Admission turn, String contentDigest) {
+        String promptId = store.findTurn(TENANT, sessionId, turn.turnId())
+                .orElseThrow().promptId();
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id,"
+                        + " session_id, journal_revision, command_key_hash,"
+                        + " transaction_id, operation, command_id, content_digest,"
+                        + " first_sequence, last_sequence, event_count,"
+                        + " writer_generation, writer_id, writer_token_hash,"
+                        + " activation_epoch, record_encoding, record_bytes,"
+                        + " byte_length, record_digest, gmt_create) VALUES (?, 'ws',"
+                        + " ?, 1, ?, 'tx-1', 'submitInput', ?, ?, 1, 1, 1, 1, 'writer',"
+                        + " ?, 0, 'identity', ?, 0, ?, 0)",
+                TENANT, sessionId,
+                DigestUtils.sha256Hex("submitInput\u0000" + promptId),
+                promptId, contentDigest, "0".repeat(64), new byte[0],
+                "0".repeat(64));
     }
 
     void claim(Admission turn) {

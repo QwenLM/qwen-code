@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore.TaskCancelOutcom
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -64,7 +66,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * A delivery whose outcome stays unproven retries with the dispatch
  * backoff, bounded at {@link #ATTEMPT_BUDGET} claims; past it the
  * operation parks as {@code recovery_blocked} — acceptance unknown, never
- * delivered again — and only reconciles from the record: a later stop
+ * delivered again — and only the {@link OperationReconciler} settles it,
+ * from this class's {@link AcceptanceEvidence}, the record: a later stop
  * request (another cancel, the close cascade) completes it, an end
  * without one fails it. A parked cancel holds no lifecycle hostage. The
  * budget counts claims, not completed retries, and a live delivery
@@ -75,14 +78,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * either.
  */
 @Component
-public class TaskCancelCoordinator {
+public class TaskCancelCoordinator implements AcceptanceEvidence {
     private static final Logger LOG = LoggerFactory.getLogger(
             TaskCancelCoordinator.class);
     private static final int SCAN_LIMIT = 50;
     /** Claims before an unproven outcome parks (one claim per attempt). */
     static final int ATTEMPT_BUDGET = 16;
-    /** How often a parked cancel re-reads its task's record. */
-    static final Duration PARKED_RECHECK = Duration.ofMinutes(5);
+    /** How long a cancel parks before its task's record is read again. */
+    static final Duration PARKED_RECHECK = OperationReconciler.RECHECK;
     /**
      * How long one attempt's send may run before the delivery stops
      * waiting for it, at least: well past a healthy attempt at the default
@@ -186,29 +189,24 @@ public class TaskCancelCoordinator {
             dispatch(target.tenantId(), target.sessionId(),
                     target.operationId());
         }
-        for (OperationTarget target : store.findParkedTaskCancels(
-                SCAN_LIMIT)) {
-            try {
-                reconcileParked(target);
-            } catch (RuntimeException error) {
-                // An unreadable record must not pin the parked row at the
-                // head of the page: it waits a whole recheck like any
-                // other unproven one.
-                LOG.warn("Parked task cancel reconciliation failed tenant={}"
-                                + " session={} operation={} failure={}",
-                        target.tenantId(), target.sessionId(),
-                        target.operationId(), error.getMessage());
-                try {
-                    store.settleTaskCancel(target.tenantId(),
-                            target.sessionId(), target.operationId(), null,
-                            0, TaskCancelOutcome.recoveryBlocked(UNCONFIRMED),
-                            Math.addExact(clock.millis(),
-                                    PARKED_RECHECK.toMillis()));
-                } catch (RuntimeException ignored) {
-                    // The next scan retries the whole reconciliation.
-                }
-            }
+    }
+
+    @Override
+    public OperationKind kind() {
+        return OperationKind.TASK_CANCEL;
+    }
+
+    /** A parked cancel resolves only from the record; it is never re-sent. */
+    @Override
+    public AcceptanceVerdict read(OperationRecord operation) {
+        Verdict verdict = verdict(operation);
+        if (verdict.live()) {
+            return AcceptanceVerdict.unknown();
         }
+        return "completed".equals(verdict.outcome().status())
+                ? AcceptanceVerdict.committed()
+                : AcceptanceVerdict.notCommitted(
+                        verdict.outcome().failureCode());
     }
 
     /** What the task's committed record proves about a cancellation. */
@@ -466,21 +464,5 @@ public class TaskCancelCoordinator {
                 Math.addExact(clock.millis(), delay));
         LOG.debug("Task cancel will retry operation={} failure={}",
                 operation.operationId(), failure);
-    }
-
-    /** A parked cancel resolves only from evidence; it is never re-sent. */
-    private void reconcileParked(OperationTarget target) {
-        OperationRecord operation = store.findOperation(target.tenantId(),
-                target.sessionId(), target.operationId()).orElse(null);
-        if (operation == null
-                || !"RECOVERY_BLOCKED".equals(operation.state())) {
-            return;
-        }
-        Verdict verdict = verdict(operation);
-        store.settleTaskCancel(operation.tenantId(), operation.sessionId(),
-                operation.operationId(), null, 0,
-                verdict.live() ? TaskCancelOutcome.recoveryBlocked(UNCONFIRMED)
-                        : verdict.outcome(),
-                Math.addExact(clock.millis(), PARKED_RECHECK.toMillis()));
     }
 }

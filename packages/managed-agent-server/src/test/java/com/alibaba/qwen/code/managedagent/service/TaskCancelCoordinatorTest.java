@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -40,7 +39,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockingDetails;
@@ -464,26 +462,6 @@ class TaskCancelCoordinatorTest {
                 .count();
     }
 
-    // An unreadable record must not pin a parked cancel at the head of
-    // the page: it is parked again for a whole recheck.
-    @Test
-    void aParkedReconciliationThatFailsWaitsAWholeRecheck() {
-        when(store.findParkedTaskCancels(anyInt()))
-                .thenReturn(List.of(new OperationTarget(TENANT, SESSION,
-                        OPERATION)));
-        when(store.findOperation(TENANT, SESSION, OPERATION))
-                .thenReturn(Optional.of(operation("RECOVERY_BLOCKED", 16)));
-        when(records.findTaskTarget(TENANT, SESSION, TASK))
-                .thenThrow(new IllegalStateException("resource gone"));
-        coordinator.recover();
-        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
-                eq(OPERATION), isNull(), eq(0L),
-                eq(TaskCancelOutcome.recoveryBlocked(
-                        "task_cancel_unconfirmed")),
-                eq(1_000 + TaskCancelCoordinator.PARKED_RECHECK.toMillis()));
-        assertThat(sent).isEmpty();
-    }
-
     @Test
     void aTaskWithoutACancelPathFailsWithoutDelivery() {
         target.set(new TaskTarget("automation_run", "automation-1",
@@ -707,41 +685,12 @@ class TaskCancelCoordinatorTest {
                         "task_cancel_unconfirmed")), anyLong());
     }
 
-    @Test
-    void aParkedCancelResolvesOnlyFromEvidence() {
-        when(store.findParkedTaskCancels(anyInt()))
-                .thenReturn(List.of(new OperationTarget(TENANT, SESSION,
-                        OPERATION)));
-        when(store.findOperation(TENANT, SESSION, OPERATION))
-                .thenReturn(Optional.of(operation("RECOVERY_BLOCKED", 16)));
-        target.set(childRun("running", false));
-        coordinator.recover();
-        // Still unproven: re-parked, never re-sent.
-        assertThat(sent).isEmpty();
-        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
-                eq(OPERATION), isNull(), eq(0L),
-                eq(TaskCancelOutcome.recoveryBlocked(
-                        "task_cancel_unconfirmed")), anyLong());
-        // The close cascade recorded a stop since: the parked cancel's
-        // request is recorded too.
-        target.set(childRun("running", true));
-        coordinator.recover();
-        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
-                eq(OPERATION), isNull(), eq(0L),
-                eq(TaskCancelOutcome.completed()), anyLong());
-        assertThat(sent).isEmpty();
-    }
-
     @SuppressWarnings("unchecked")
     private ObjectProvider<RuntimeBrokerService> brokers() {
         ObjectProvider<RuntimeBrokerService> provider =
                 mock(ObjectProvider.class);
         when(provider.getIfAvailable()).thenReturn(broker);
         return provider;
-    }
-
-    private static int anyInt() {
-        return org.mockito.ArgumentMatchers.anyInt();
     }
 
     private static TaskTarget childRun(String state, boolean stopRequested) {
