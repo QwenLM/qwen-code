@@ -353,7 +353,24 @@
                                  lane-measured 3600 s fork already covers
                                  them: one 600 s ceiling plus the
                                  re-derived healthy runtime still fits
-                                 with headroom. -->
+                                 with headroom. Its slice 2 (FG9d, FG9e)
+                                 brings the class to four letters
+                                 measuring 308–314 s healthy locally on
+                                 JDK 21 + MySQL 8.4 (~534 s budgeted at
+                                 the same 1.7×), which the same fork
+                                 still covers. The FG8c process-crash
+                                 letter (seven cases, 144 s healthy
+                                 locally on a fresh MySQL 8.4.6) rides
+                                 inside the same envelope. The FG10a
+                                 workflow digest letter
+                                 (HostedWorkflowFaultGatesIT: four
+                                 cases, 15.9–16.2 s healthy locally on
+                                 macOS JDK 26 + MySQL 8.4.6 across four
+                                 acceptance runs, ~33 s budgeted at
+                                 2×) joins the same fork — one 600 s
+                                 ceiling plus the re-derived healthy
+                                 sum (2963 s) still fits the 3600 s
+                                 fork with headroom. -->
                             <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
@@ -436,8 +453,9 @@
                 <configuration>
                     <includes><include>**/HostedMonitorRun*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <!-- The class's five letters (fg8e/fg8f/fg8a/fg8b/fg8d)
-                         are independent fixtures sharing one fork: each
+                    <!-- The class's six letters (fg8e/fg8f/fg8a/fg8b/fg8d
+                         and fg8c) are independent fixtures sharing one
+                         fork: each
                          letter's @Timeout ceiling (600 s) plus the healthy
                          runtime must fit, the per-ceiling relation the CI
                          profile pins. Fork measured on the lane (run
@@ -461,7 +479,7 @@
                     <!-- The FG9 letters are independent fixtures sharing
                          one fork — each letter boots its own Spring,
                          Harness, and proxies on its own tenant prefix,
-                         so a stall in one letter leaves the other
+                         so a stall in one letter leaves the others
                          running — like the FG8 letters' shape. The
                          per-ceiling relation is pinned against the
                          hosted-harness-mysql lane's fork budget (the
@@ -469,6 +487,24 @@
                          this local-run profile keeps step with that
                          budget (#14164). -->
                     <forkedProcessTimeoutInSeconds>2100</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-workflow-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedWorkflow*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- The class's letters are independent fixtures
+                         sharing one fork: each letter's @Timeout ceiling
+                         (600 s) plus the healthy runtime must fit, the
+                         per-ceiling relation the CI profile pins. -->
+                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

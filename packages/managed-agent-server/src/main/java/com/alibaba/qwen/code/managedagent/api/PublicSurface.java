@@ -5,9 +5,9 @@ import org.springframework.http.server.PathContainer;
 import org.springframework.web.util.ServletRequestPathUtils;
 
 /**
- * The public-surface predicate shared by the tenant and signature filters.
- * Both decide coverage on the path Spring routes with, so a normalized
- * spelling (percent-encoding, path parameters) cannot slip between them.
+ * The surface predicates shared by the filters and the exception handler.
+ * Each decides on the path Spring routes with, so a normalized spelling
+ * (percent-encoding, path parameters) cannot slip between them.
  */
 public final class PublicSurface {
     private PublicSurface() {
@@ -26,6 +26,13 @@ public final class PublicSurface {
             }
         }
         return path.toString();
+    }
+
+    // The routes the routing filter keeps on the internal listener. The
+    // exception handler asks here too, so what it treats as internal is
+    // what the router serves as internal.
+    public static boolean internal(HttpServletRequest request) {
+        return pathWithinApplication(request).startsWith("/internal/");
     }
 
     public static boolean covers(String path) {
