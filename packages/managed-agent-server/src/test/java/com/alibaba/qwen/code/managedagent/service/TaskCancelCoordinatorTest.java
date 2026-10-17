@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.Task
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -679,6 +680,48 @@ class TaskCancelCoordinatorTest {
                 eq(OPERATION), anyString(), eq(1L),
                 eq(TaskCancelOutcome.failed("task_already_settled")),
                 eq(0L));
+    }
+
+    // The channel route re-runs the route Session's Workspace authority on
+    // every operation, a cached attachment included: while its creator
+    // lacks the execution grant the cancel sends nothing, retries and
+    // parks. Parked, it is never sent again, so a delivery an adapter sent
+    // after the grant returned fails it from the record.
+    @Test
+    void aDeliveryCancelTheRouteRefusesParksAndSettlesFromTheRecord() {
+        when(harness.runChannelOperation(eq(TENANT), eq(SESSION), any()))
+                .thenThrow(WorkspaceExecutionStore.unavailable());
+        target.set(delivery("pending", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).retryOperation(eq(TENANT), eq(SESSION), eq(OPERATION),
+                anyString(), eq(1L), anyLong());
+        attempts = TaskCancelCoordinator.ATTEMPT_BUDGET - 1;
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(),
+                eq((long) TaskCancelCoordinator.ATTEMPT_BUDGET),
+                eq(TaskCancelOutcome.recoveryBlocked(
+                        "task_cancel_unconfirmed")),
+                eq(1_000 + TaskCancelCoordinator.PARKED_RECHECK.toMillis()));
+
+        when(store.findParkedTaskCancels(anyInt()))
+                .thenReturn(List.of(new OperationTarget(TENANT, SESSION,
+                        OPERATION)));
+        when(store.findOperation(TENANT, SESSION, OPERATION))
+                .thenReturn(Optional.of(operation("RECOVERY_BLOCKED", 16)));
+        coordinator.recover();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), isNull(), eq(0L),
+                eq(TaskCancelOutcome.recoveryBlocked(
+                        "task_cancel_unconfirmed")), anyLong());
+        target.set(delivery("completed", false));
+        coordinator.recover();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), isNull(), eq(0L),
+                eq(TaskCancelOutcome.failed("task_already_settled")),
+                anyLong());
+        verify(harness, org.mockito.Mockito.times(2)).runChannelOperation(
+                eq(TENANT), eq(SESSION), any());
     }
 
     // A Broker process that holds no context for the Runtime Session (a
