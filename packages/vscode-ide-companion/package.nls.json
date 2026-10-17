@@ -1,5 +1,14 @@
 {
   "qwen-code.copyMessage.title": "Copy Message",
   "qwen-code.copyAllMessages.title": "Copy All Messages",
-  "qwen-code.copyLastReply.title": "Copy Last Reply"
+  "qwen-code.copyLastReply.title": "Copy Last Reply",
+  "qwen.diff.accept.title": "Qwen Code: Accept Current Diff",
+  "qwen.diff.cancel.title": "Qwen Code: Close Diff Editor",
+  "qwen-code.runQwenCode.title": "Qwen Code: Run",
+  "qwen-code.showNotices.title": "Qwen Code: View Third-Party Notices",
+  "qwen-code.openChat.title": "Qwen Code: Open",
+  "qwen-code.auth.title": "Qwen Code: Auth",
+  "qwen-code.focusChat.title": "Qwen Code: Focus Chat View",
+  "qwen-code.newConversation.title": "Qwen Code: New Conversation",
+  "qwen-code.showLogs.title": "Qwen Code: Show Logs"
 }
