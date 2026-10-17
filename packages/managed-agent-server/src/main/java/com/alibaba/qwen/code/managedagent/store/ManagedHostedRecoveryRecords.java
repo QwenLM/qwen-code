@@ -226,7 +226,7 @@ public final class ManagedHostedRecoveryRecords {
         ManagedExtensionRecords.closed(source, Set.of("activationId", "epoch"), "source activation");
         ManagedExtensionRecords.id(source.get("activationId"), "activationId");
         ManagedExtensionRecords.count(source.get("epoch"), 1, ManagedSessionStoreModels.MAX_SAFE_COUNTER, "source epoch");
-        ManagedExtensionRecords.count(body.get("round"), 0, 15, "round");
+        ManagedExtensionRecords.count(body.get("round"), 0, ManagedSessionStoreModels.MAX_SAFE_COUNTER, "round");
         for (String field : List.of("definitionRef", "rootSnapshotRef")) {
             ManagedExtensionRecords.durableRef(body.get(field), field);
         }

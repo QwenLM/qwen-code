@@ -228,7 +228,8 @@ public class ManagedTaskService {
                 view.runtimeState(), view.createdAt(), view.startedAt(),
                 view.settledAt(), outputCursor(tenantId, sessionId, task.taskId(), positions),
                 positions.artifactRefs(),
-                actions(task, view, sessionActive));
+                actions(task, view, sessionActive),
+                records.childSessionId(tenantId, sessionId, task));
     }
 
     private WebShellTask webShellTask(String tenantId, String sessionId,
@@ -241,7 +242,8 @@ public class ManagedTaskService {
                 view.createdAt(), view.startedAt(), view.settledAt(),
                 outputCursor(tenantId, sessionId, task.taskId(), positions),
                 positions.artifactRefs(),
-                actions(task, view, sessionActive));
+                actions(task, view, sessionActive),
+                records.childSessionId(tenantId, sessionId, task));
     }
 
     /** The task's own actions, and none in a Session that is not active:
