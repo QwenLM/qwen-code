@@ -39,7 +39,7 @@ Issue：[#12867](https://github.com/QwenLM/qwen-code/issues/12867)，属于 [#12
 
 - `closeSession`、`archiveSession`、`deleteSession`、`getSessionCwdOperation`，以及 WebShell 的 `closeWebShellSession`、`archiveWebShellSession`、`deleteWebShellSession`、`webShellQueryCwdOperation` 改为 `implemented`。operation 路由虽然服务所有操作类型，但保留原 `operationId`，以免改动已发布的名字。
 - 删除 `DeletedSession`：delete 返回命令 operation。
-- 这些路由用到的 schema 去掉 `planned` 标记：`PublicCommandOperation`、`WebShellCommandOperation`、`PublicOperation`、`WebShellOperation`、`WebShellLifecycleRequest`、`WebShellOperationRequest`。除了只有任务取消才携带的 `task_id` 之外，还有三处仍为 `planned`：两个 operation 联合类型中的 cwd 成员（W2）、`action_resolution`（D6），以及没有任何生命周期操作会设置的 `failure_code`。因此生成的 WebShell 类型中 `WebShellOperation` 即 `WebShellCommandOperation`。
+- 这些路由用到的 schema 去掉 `planned` 标记：`PublicCommandOperation`、`WebShellCommandOperation`、`PublicOperation`、`WebShellOperation`、`WebShellLifecycleRequest`、`WebShellOperationRequest`。除了只有任务取消才携带的 `task_id` 之外，还有三处仍为 `planned`：两个 operation 联合类型中的 cwd 成员（W2）、`action_resolution`（D6），以及 v1.18 时还没有任何生命周期操作会设置的 `failure_code`。因此生成的 WebShell 类型中 `WebShellOperation` 即 `WebShellCommandOperation`。v1.25 随权限 Action 响应（D6b）实现了 `failure_code`；现在生命周期操作在重试预算耗尽后、或处于 `recovery_blocked` 时会设置它（4.5、4.6）。
 - `SessionCapabilities.session_lifecycle` 改为已实现：未绑定 Workspace 的 Session 为 `true`，绑定的为 `false`（4.9）。本次变更中 WebShell 的 capability 对象仍为 `planned`；阶段 H0c 的工作正在把它改为已实现。
 - close、archive、delete、unarchive 与 operation 路由的描述写明下文的行为。已知差异文件不再有任何条目，其头部注释改为指向 #12867。
 

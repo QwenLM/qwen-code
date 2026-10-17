@@ -2601,6 +2601,56 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 });
     }
 
+    /**
+     * H4f: the public task cancel's stop of one background Shell or
+     * Monitor watch, named by the call that started it inside the Harness
+     * Session that owns the task. It runs the drain sweep's status → stop
+     * → status for that one hold row, so only the worker's exit evidence
+     * settles the row, and the worker answers a stop only after the
+     * stop-marked finalize that settles the task's record has returned.
+     * It runs unfenced, like a client Monitor control: the hold row itself
+     * keeps the Runtime Session from releasing while the process may run,
+     * so a racing close's drain is never refused busy because of it.
+     */
+    public CompletionStage<ToolExecutionRecord> stopBackgroundProcess(
+            String tenantId, String harnessSessionId,
+            String executionCallId) {
+        requireOpen();
+        String invocationId = BrokerValues.requireId(executionCallId,
+                "executionCallId");
+        ToolExecutionRecord row = executionRepository.findByExecutionCallId(
+                invocationId + ":process");
+        if (row == null || !row.getHarnessSessionId().equals(harnessSessionId)) {
+            return failed(notFound("runtime_execution_not_found",
+                    "The background process was not found"));
+        }
+        return requireReadySession(harnessSessionId, row.getRuntimeSessionId())
+                .thenCompose(context -> {
+                    if (!context.session().getScope().getTenantId()
+                            .equals(tenantId)) {
+                        throw notFound("runtime_execution_not_found",
+                                "The background process was not found");
+                    }
+                    ToolExecutionRecord invocation = requireExecution(context,
+                            invocationId);
+                    ToolExecutionRecord process = requireExecution(context,
+                            row.getExecutionCallId());
+                    return observeScannedProcessRow(context, invocation,
+                            process)
+                            .thenCompose(current -> current.isTerminal()
+                                    ? CompletableFuture.completedFuture(
+                                            current)
+                                    : controlProcessRow(context, invocation,
+                                            current, stopKind(current),
+                                            false))
+                            .thenCompose(current -> current.isTerminal()
+                                    ? CompletableFuture.completedFuture(
+                                            current)
+                                    : observeScannedProcessRow(context,
+                                            invocation, current));
+                });
+    }
+
     private CompletionStage<ToolExecutionRecord> observeProcessRow(
             SessionContext context, ToolExecutionRecord invocation,
             ToolExecutionRecord process) {
