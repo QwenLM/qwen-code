@@ -41,6 +41,7 @@ let root: Root | null = null;
 async function mount(
   rewind: (id: string) => Promise<void>,
   entries = snapshots,
+  transcriptBlocks = blocks,
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -49,7 +50,7 @@ async function mount(
     root!.render(
       <I18nProvider language="en">
         <RewindDialog
-          blocks={blocks}
+          blocks={transcriptBlocks}
           loadSnapshots={() => Promise.resolve({ snapshots: entries })}
           rewind={rewind}
           onError={vi.fn()}
@@ -124,6 +125,26 @@ describe('RewindDialog keyboard', () => {
       rewindButton().click();
     });
     expect(rewind).toHaveBeenCalledWith('p1');
+  });
+
+  it('numbers the checkpoint the way the chat numbers it past an injected row', async () => {
+    // The chat renders `mid_turn_message_injected` as a system row, so it never
+    // numbers it; the dialog ordinal has to skip it too.
+    const withInjected = [
+      blocks[0]!,
+      {
+        id: 'injected',
+        kind: 'user',
+        text: 'injected mid turn',
+        promptId: 'daemon-B',
+        meta: { source: 'mid_turn_message_injected' },
+      },
+      blocks[1]!,
+    ] as unknown as DaemonTranscriptBlock[];
+    const rewind = vi.fn().mockResolvedValue(undefined);
+    await mount(rewind, [snapshots[1]!], withInjected);
+    expect(container!.textContent).toContain('#2 second turn');
+    expect(container!.textContent).not.toContain('#3');
   });
 
   it.each(['missing', 'unknown', 'duplicate'])(

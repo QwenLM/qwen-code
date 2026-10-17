@@ -78,12 +78,15 @@ export function RewindDialog({
             ).length === 1
               ? findDaemonRewindUserBlock(blocks, snapshot.daemonPromptId)
               : undefined;
+          // The ordinal has to match what the chat numbers, so it skips the
+          // same rows `findDaemonRewindUserBlock` above skips.
           const turnIndex = block
             ? blocks
                 .filter(
                   (entry) =>
                     entry.kind === 'user' &&
-                    entry.meta?.['source'] !== 'background_notification',
+                    entry.meta?.['source'] !== 'background_notification' &&
+                    entry.meta?.['source'] !== 'mid_turn_message_injected',
                 )
                 .indexOf(block)
             : undefined;
