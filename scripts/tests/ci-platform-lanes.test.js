@@ -40,10 +40,10 @@ const LANES = ['test_macos', 'test_windows'];
 const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
-// The extended ceilings are scoped to the ECS pool: `runs-on` falls back to
-// ubuntu-latest for fork PRs from untrusted authors and when
-// MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths keep the
-// pre-contention ceiling. Evaluate the real timeout expression for both
+// The extended ceilings below, except the test lane's, are scoped to the ECS
+// pool: `runs-on` falls back to ubuntu-latest for fork PRs from untrusted
+// authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths
+// keep the pre-contention ceiling. Evaluate the real timeout expression for both
 // routings instead of pinning a bare number -- the same
 // substitute-then-evaluate technique
 // `.github/scripts/ci-runner-routing.test.mjs` uses on `runs-on` -- so a
@@ -71,13 +71,12 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
   return Number(new Function(`return (${expr});`)());
 };
 
-it('keeps the shared Linux test lane above its contention budget on ECS', () => {
+it('gives the shared Linux test lane one ceiling on both pools', () => {
+  // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
+  // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
   expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
-});
-
-it('keeps the shared Linux test lane on its pre-contention ceiling when hosted', () => {
-  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('test', '')).toBe(60);
+  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(120);
+  expect(timeoutMinutesOn('test', '')).toBe(120);
 });
 
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {

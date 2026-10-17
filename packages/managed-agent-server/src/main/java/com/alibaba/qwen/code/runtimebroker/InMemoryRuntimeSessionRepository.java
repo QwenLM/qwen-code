@@ -109,6 +109,25 @@ public final class InMemoryRuntimeSessionRepository
     }
 
     @Override
+    public synchronized java.util.List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId,
+            String harnessSessionId, RuntimeSessionRecord after, int limit) {
+        BrokerValues.requireId(tenantId, "tenantId");
+        BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Release batch must contain 1-100 Sessions");
+        }
+        Comparator<RuntimeSessionRecord> order = Comparator
+                .comparing((RuntimeSessionRecord record) -> JdbcRepositorySupport.scopeKey(record.getSession().getScope()))
+                .thenComparing(RuntimeSessionRecord::getRuntimeSessionId);
+        return records.values().stream().flatMap(scoped -> scoped.values().stream())
+                .filter(RuntimeSessionRecord::isActive)
+                .filter(record -> tenantId.equals(record.getSession().getScope().getTenantId())
+                        && harnessSessionId.equals(record.getSession().getHarnessSessionId())
+                        && (after == null || order.compare(record, after) > 0))
+                .sorted(order).limit(limit).toList();
+    }
+
+    @Override
     public synchronized long countActiveByBinding(String bindingId,
             long runtimeGeneration) {
         String id = BrokerValues.requireId(bindingId, "bindingId");

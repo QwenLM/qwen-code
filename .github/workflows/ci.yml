@@ -392,13 +392,14 @@ jobs:
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Shared ECS hosts can stretch the normally 25-minute lane beyond an hour
-    # while tests are still making progress. Keep a finite ceiling without
-    # turning host contention into a false cancellation. The extension is
-    # scoped to the pool that shows the contention: fork PRs from untrusted
-    # authors and MAINTAINER_ECS_RUNNER_DISABLED=true fall back to
-    # GitHub-hosted runners (see classify_pr), which keep the pre-contention
-    # ceiling so a genuine hang there does not burn the extra 60 minutes.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''120'' || ''60'') }}'
+    # while tests are still making progress. The full suite no longer fits
+    # 60 minutes on GitHub-hosted runners either. Those runners take fork PRs
+    # from untrusted authors and everything when
+    # MAINTAINER_ECS_RUNNER_DISABLED=true. On 2026-10-17, 13 hosted runs
+    # passed in 45-59 minutes, and 17 were cancelled at 60 while still
+    # passing tests. Both pools get the same finite ceiling. The test step's
+    # own 110-minute cap still bounds a genuine hang.
+    timeout-minutes: 120
     outputs:
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     permissions:
