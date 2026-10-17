@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/test-failure-explorer",
-  "version": "0.25.2",
+  "version": "0.25.2-nightly.20261017.39c237af3b",
   "private": true,
   "description": "Workspace-bound queries over immutable Vitest JSON reports",
   "repository": {
