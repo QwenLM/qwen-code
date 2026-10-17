@@ -607,6 +607,54 @@ class TaskCancelCoordinatorTest {
                 anyLong());
     }
 
+    // #13746 F3: a pending delivery takes its cancel through its route
+    // Session's channel operation route; its cancelRequested flag is the
+    // request the outcome is read from.
+    @Test
+    void aPendingDeliveryTakesItsCancelThroughTheChannelRoute() {
+        List<Map<String, Object>> channel = new CopyOnWriteArrayList<>();
+        when(harness.runChannelOperation(eq(TENANT), eq(SESSION), any()))
+                .thenAnswer(args -> {
+                    channel.add(Map.copyOf(args.getArgument(2)));
+                    target.set(delivery("cancelled", true));
+                    return Map.of();
+                });
+        target.set(delivery("pending", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).isEmpty();
+        assertThat(channel).hasSize(1);
+        assertThat(channel.getFirst()).containsEntry("kind", "cancel_delivery")
+                .containsEntry("deliveryId", "delivery-1")
+                .containsKey("operationId");
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    // An adapter that claimed it first keeps sending it: the request is
+    // recorded and the delivery keeps its natural outcome; one that was
+    // delivered without a request fails the cancel definitively.
+    @Test
+    void aDeliveryClaimedFirstKeepsItsOutcome() {
+        when(harness.runChannelOperation(eq(TENANT), eq(SESSION), any()))
+                .thenAnswer(args -> {
+                    target.set(delivery("running", true));
+                    return Map.of();
+                });
+        target.set(delivery("pending", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+        target.set(delivery("completed", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(harness).runChannelOperation(eq(TENANT), eq(SESSION), any());
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.failed("task_already_settled")),
+                eq(0L));
+    }
+
     // A Broker process that holds no context for the Runtime Session (a
     // fresh one before a turn or the close acquires it again) cannot stop
     // the process on any retry: the cancel parks at once, so it stops
@@ -723,6 +771,14 @@ class TaskCancelCoordinatorTest {
         return new TaskTarget("monitor_run", "monitor-1", "monitor", state,
                 3, JSON.createObjectNode().put("monitorId", "monitor-1")
                         .put("stopReason", stopReason));
+    }
+
+    private static TaskTarget delivery(String state,
+            boolean cancelRequested) {
+        return new TaskTarget("channel_delivery", "delivery-1",
+                "channel_delivery", state, 3, JSON.createObjectNode()
+                        .put("deliveryId", "delivery-1")
+                        .put("cancelRequested", cancelRequested));
     }
 
     private static TaskTarget workflowRun(String state,
