@@ -65,20 +65,40 @@ describe('ImageGenTool', () => {
       requestId: 'request-1',
     });
     const tool = new ImageGenTool(
-      createConfig(workspace, true) as Config,
+      {
+        ...createConfig(workspace, true),
+        getImageGenerationConfig: () => ({
+          model: 'image-01',
+          baseUrl: 'https://api.minimax.io/v1',
+          apiKeyEnv: 'TEST_IMAGE_API_KEY',
+        }),
+      } as Config,
       generateImage,
     );
 
     const result = await tool.buildAndExecute(
-      { prompt: 'A Qwen Code poster', size: '1536*864' },
+      {
+        prompt: 'A Qwen Code poster',
+        size: '1536*864',
+        referenceImage: 'https://reference.example.com/portrait.png',
+      },
       new AbortController().signal,
     );
 
+    expect(
+      tool
+        .build({
+          prompt: 'A Qwen Code poster',
+          referenceImage: 'https://reference.example.com/portrait.png',
+        })
+        .getDescription(),
+    ).toContain('using a reference image');
     expect(generateImage).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: 'qwen-image-2.0',
+        model: 'image-01',
         prompt: 'A Qwen Code poster',
         size: '1536*864',
+        referenceImage: 'https://reference.example.com/portrait.png',
         apiKey: 'secret',
       }),
     );
@@ -96,7 +116,7 @@ describe('ImageGenTool', () => {
         mimeType: 'image/png',
         sizeBytes: PNG_BYTES.length,
         metadata: {
-          model: 'qwen-image-2.0',
+          model: 'image-01',
           requestId: 'request-1',
           size: '1536*864',
         },
@@ -134,6 +154,18 @@ describe('ImageGenTool', () => {
     expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
     expect(result.resultFilePaths).toHaveLength(1);
     expect(result.artifacts?.[0]?.kind).toBe('image');
+  });
+
+  it('rejects reference images before approval for unsupported providers', () => {
+    const tool = new ImageGenTool(createConfig('/tmp', true) as Config);
+    expect(() =>
+      tool.build({
+        prompt: 'Portrait variation',
+        referenceImage: 'https://reference.example.com/portrait.png',
+      }),
+    ).toThrow(
+      'Reference images are not supported by the configured image endpoint.',
+    );
   });
 
   it('rejects image sizes outside the documented total-pixel range', () => {
