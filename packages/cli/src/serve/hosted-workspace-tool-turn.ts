@@ -1826,16 +1826,7 @@ export class HostedWorkspaceToolTurn {
               parametersJsonSchema: schema,
             };
           }
-          return ['write_file', 'edit'].includes(tool.name ?? '')
-            ? {
-                ...tool,
-                description:
-                  tool.description +
-                  (this.mcp
-                    ? ' This MCP profile provides no file backups or undo for Write/Edit.'
-                    : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
-              }
-            : tool;
+          return hostedWorkspaceDeclarations([tool], Boolean(this.mcp))[0];
         }),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
@@ -7672,4 +7663,22 @@ export function truncateHostedGlobResponse(
     lines.pop();
   }
   return undefined;
+}
+
+export function hostedWorkspaceDeclarations(
+  tools: readonly FunctionDeclaration[],
+  mcp: boolean,
+): FunctionDeclaration[] {
+  return tools.map((tool) =>
+    ['write_file', 'edit'].includes(tool.name ?? '')
+      ? {
+          ...tool,
+          description:
+            tool.description +
+            (mcp
+              ? ' This MCP profile provides no file backups or undo for Write/Edit.'
+              : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
+        }
+      : tool,
+  );
 }
