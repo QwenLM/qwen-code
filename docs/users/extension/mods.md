@@ -1,6 +1,6 @@
 # Experimental Mods
 
-Qwen Code can run a small subset of the Claude Code Mod API in headless sessions.
+Qwen Code can run a small subset of the Claude Code Mod API in headless and interactive terminal sessions.
 This feature is opt-in and requires a trusted workspace and an enabled Claude or
 native Qwen extension. Agent Plugins v1 packages continue to ignore hooks.
 
@@ -67,7 +67,35 @@ qwen -p '/hello Qwen' --output-format json
 
 Normal CLI authentication configuration is still required at startup. The Mod
 command itself makes no model request. Text, JSON and stream-json headless output
-are supported. A stream-json process retains module variables between turns.
+are supported. A stream-json or interactive process retains module variables between turns.
+
+To use the same `/hello Qwen` command in the terminal UI, start `qwen` without
+`-p`. Both Ink and OpenTUI load Mod commands with the same opt-in setting.
+Interactive `session.start` receives `surface: 'terminal'` and
+`isInteractive: true`; `command.run` receives `origin: { kind: 'composer' }`
+and `presentation: { isFullscreen, columns }` from the active renderer. These
+host fields stay pinned. Headless sessions retain `surface: null`,
+`isInteractive: false`, and `origin: { kind: 'sdk' }`.
+
+Interactive transcript logs appear as informational messages and never enter
+model context. Debug-only logs stay in the debug logger. Terminal text is
+control-character sanitized, preserving ordinary newlines and tabs, and each transcript log is limited to 2,000
+characters. These UI logs need not survive a restart or resume. Esc cancels
+the current Mod command; the next command waits for worker cancellation to
+settle. Clear, resume and branch retain the loaded modules and their variables,
+send `session.end` for the replaced session, and do not repeat `session.start`.
+
+Interactive support currently covers commands, lifecycle and logs. Explicit
+`tool.call`, `tool.check` and `tool.*` registrations reject initialization before
+a model request. Broad wildcard or negated patterns that also match tool events
+receive a visible diagnostic and apply only to supported events. Tool
+interception below is available only in headless sessions.
+
+If Mod initialization fails in an interactive terminal, the error remains visible
+and the input stays available for the built-in `/help` and `/quit` commands.
+Other commands and model requests remain blocked; fix the Mod configuration and
+restart the session. File or plugin commands named `help` or `quit` do not gain
+this recovery exception.
 
 ## Supported subset
 
@@ -77,7 +105,7 @@ are supported. A stream-json process retains module variables between turns.
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
-| Tools      | Intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                                              |
+| Tools      | In headless sessions only, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                   |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                                       |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
@@ -119,8 +147,8 @@ command identity fields stay pinned.
 ## Tool interception
 
 `tool.call` receives the Qwen tool's arguments as flat fields alongside `tool`
-and `tool_use_id`. Names, argument schemas and output records use Qwen's native
-contracts, so a Mod written for Claude's built-in tools may need adaptation.
+and `tool_use_id`. By default, names, argument schemas and output records use
+Qwen's native contracts, including for plugins installed in Claude format.
 There is no separate `tool.result` event; inspect or change the value returned
 by `await next(e)`:
 
@@ -197,6 +225,60 @@ Goal tool calls also keep the native path: this stage does not allow Mod-authore
 results to enter a Goal's catalog as external evidence.
 Child agents and nested code-mode schedulers do not inherit this middleware.
 
+### Opt into Claude tool inputs
+
+To run a Mod that consumes the supported Claude input fields or passes through
+native results, select its tool dialect in user or system settings and restart:
+
+```json
+{
+  "experimental": { "mods": true },
+  "pluginConfigs": {
+    "my-mod": { "toolDialect": "claude" }
+  }
+}
+```
+
+Use `name@marketplace` for marketplace installations; local installations accept
+`name` or `name@inline`. The setting follows the same operator precedence as
+Mod options. Workspace settings cannot select a dialect. `"native"` is the
+default and explicitly restores the original view. This setting is separate
+from `options` passed to `register` and does not require a `userConfig` declaration.
+Unsupported dialect values fail initialization before any Mod starts.
+
+| Native tool         | Claude name | Fields available to the Mod                            |
+| ------------------- | ----------- | ------------------------------------------------------ |
+| `run_shell_command` | `Bash`      | `command`                                              |
+| `edit`              | `Edit`      | `file_path`, `old_string`, `new_string`, `replace_all` |
+| `write_file`        | `Write`     | `file_path`, `content`                                 |
+
+Both `tool.call` matchers/flat arguments and `tool.check` matchers/`input` use
+this view. Invocation IDs and host identity remain pinned. Inputs are converted
+back to Qwen arguments before the next plugin; native and Claude plugins may
+coexist in either order. The scheduler, native permission rules and recording
+continue to use Qwen names. `tool.check` input is still immutable and cannot
+relax native permissions.
+
+Other tools bypass that plugin's Claude tool hooks, including Read, MultiEdit
+and custom/MCP tools, even if a custom tool is named `Bash`, `Edit` or `Write`.
+Lifecycle, commands and logging are unaffected. This is a selected input
+contract, not compatibility with every Claude tool or Mod.
+
+Native-only parameters such as shell `directory`, `timeout`, `is_background`
+and write `record_as_artifact` are preserved by the host and hidden from this
+view. They cannot be added or changed through a Claude continuation. Unsupported
+fields raise a hook error; existing `.catch` and fallback behavior applies, so
+an uncaught error can still execute the original native request. Return `{deny}`
+to block a call. Omitting a supported field really removes it from the native
+arguments, including required fields; native validation still applies.
+
+Results remain Qwen-native, including refs, errors, images and execution facts.
+In particular, Bash results do not provide Claude's separate `stdout`/`stderr`
+schema. Foreground timeout and background behavior retain Qwen semantics; the
+60-second Mod root limit still applies. This stage supports input guards,
+observers and rewrites using the fields above, not full UI-based Mods such as
+Blast Radius or Replay Theater.
+
 ## Command recovery
 
 ```javascript
@@ -249,7 +331,7 @@ uninterrupted guest execution slice at 10 seconds. All `session.end` work shares
 1.5 seconds. An outer handler that finishes early abandons pending downstream
 work; cancellation never starts a fallback operation. Retained next/API functions
 cannot perform work after their invocation ends. A worker that cannot acknowledge
-cancellation within 250 milliseconds is terminated, requiring a new session.
+cancellation within 250 milliseconds is terminated; restart the CLI to reload Mods.
 
 There are at most 32 Mod environments, 64 registered commands, 128 registrations
 per plugin, and 4,096 root/API event chains per root call. Passing through another
@@ -259,7 +341,7 @@ and configuration failures still reject initialization; ordinary hook failure
 can recover without resetting module state. Guest promise jobs run only while a
 host request is active, including its queued notification drain.
 
-Mods do not run in TUI, ACP, managed/SSH, sandbox or session-agent entry points in
+Mods do not run in ACP, managed/SSH, sandbox or session-agent entry points in
 this version. Safe mode, bare mode and `disableAllHooks` also prevent loading.
 Restart after changing plugin code, options or extension activation. An already loaded
 command rechecks every participating plugin before execution and refuses a changed

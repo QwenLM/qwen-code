@@ -61,6 +61,7 @@ import {
 } from './managed-workspace-binding.js';
 import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js';
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
+import { readHostedSkills } from './hosted-skill-catalog.js';
 import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -176,6 +177,7 @@ const DOMAINS = [
 const RESOURCE_KINDS = new Set([
   'managed-definition',
   'managed-agent-instructions',
+  'managed-agent-skills',
   'managed-root',
   'managed-input',
   'managed-admission',
@@ -644,6 +646,14 @@ export async function verifyRecoverySession(
     const outcome = object(json(await read(outcomeRef)));
     const envelope = parseToolResultEnvelope(outcome['envelope']);
     const manifestRef = envelope.capture?.manifest ?? null;
+    const lostCancellation =
+      outcome['version'] === 1 &&
+      outcome['decision'] === 'blocked' &&
+      envelope.executionStatus === 'cancelled' &&
+      envelope.capture?.captureStatus === 'unavailable' &&
+      envelope.capture.captureReason === 'producer_lost' &&
+      envelope.capture.deliveryStatus === 'pending' &&
+      manifestRef === null;
     requireValue(
       event.payload['historyRevision'] === event.sequence &&
         isDeepStrictEqual(event.payload['resultRef'], manifestRef) &&
@@ -656,7 +666,8 @@ export async function verifyRecoverySession(
           (outcome['decision'] === 'committed' &&
             envelope.capture?.captureStatus === 'complete') ||
           (outcome['decision'] === 'blocked' &&
-            envelope.capture?.captureStatus === 'detached')),
+            envelope.capture?.captureStatus === 'detached') ||
+          lostCancellation),
       'unsettled or conflicting Shell receipt',
     );
     if (outcome['version'] === 1) {
@@ -667,7 +678,8 @@ export async function verifyRecoverySession(
           identity['executionCallId'] === event.payload['executionCallId'],
         'local Shell identity conflicts',
       );
-      if (envelope.executionStatus === 'not_started') return;
+      if (envelope.executionStatus === 'not_started' || lostCancellation)
+        return;
       requireValue(manifestRef, 'local Shell receipt has no capture');
       const parsed = await manifest(manifestRef);
       requireValue(
@@ -1051,6 +1063,8 @@ export async function verifyRecoverySession(
         'agent instructions exceed 64 KiB',
       );
       new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } else if (ref.kind === 'managed-agent-skills') {
+      await readHostedSkills(ref, { read: async () => bytes });
     } else if (ref.kind === 'managed-api-history') {
       const history = json(bytes);
       requireValue(Array.isArray(history), 'invalid API history');
