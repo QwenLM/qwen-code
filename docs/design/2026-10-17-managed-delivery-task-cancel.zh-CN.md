@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-delivery-task-cancel.md) | [简体中文](2026-10-17-managed-delivery-task-cancel.zh-CN.md)
 
-状态：已在本变更中实现。channel 投递投影为其路由 Session 的一个任务（kind `channel_delivery`），并且在尚无适配器认领它时，公开任务取消可以服务它。契约在 `1.57.0` 中点名该 kind（main 现为 `1.56.0`：child Session 链接切片占用 `1.55.0`，#14405 占用 `1.56.0`；若合入前另有 PR 先占用 `1.57.0` 则再改号）。没有新路由、新操作类型或新失败码。本变更建立在已合入的 [H4f-c](2026-10-17-managed-h3-task-cancel.zh-CN.md) 之上，与它共用可取消类型规则与投递分支。
+状态：已在本变更中实现。channel 投递投影为其路由 Session 的一个任务（kind `channel_delivery`），并且在尚无适配器认领它时，公开任务取消可以服务它。契约在 `1.57.0` 中点名该 kind。没有新路由、新操作类型或新失败码。本变更建立在已合入的 [H4f-c](2026-10-17-managed-h3-task-cancel.zh-CN.md) 之上，与它共用可取消类型规则与投递分支。
 
 这是 [#13746](https://github.com/QwenLM/qwen-code/issues/13746) 的 F3，即「H5 的那一半」：一条取消路径同时服务 child 任务与 channel 投递，两者都不另长词汇。它属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的阶段 H，在 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 下跟踪。它替代 [H4f 文档](2026-10-10-managed-task-cancel.zh-CN.md)的决策 10：那条决策把投递留在任务模型之外，并把它的取消留给 H5 的公开变更路由。issue 自己的表述已经回答了这个问题：channel 投递就是带投递行的任务。
 
