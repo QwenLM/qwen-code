@@ -411,7 +411,10 @@ export function isSubpath(parentPath: string, childPath: string): boolean {
   );
 }
 
-export function isSubpaths(parentPath: string[], childPath: string): boolean {
+export function isSubpaths(
+  parentPath: readonly string[],
+  childPath: string,
+): boolean {
   return parentPath.some((p) => isSubpath(p, childPath));
 }
 

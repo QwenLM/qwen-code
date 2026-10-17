@@ -6,6 +6,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { NativeLspService } from './native-lsp-service.js';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -518,33 +520,40 @@ describe('NativeLspService Integration Tests', () => {
       await expect(service.discoverAndPrepare()).resolves.not.toThrow();
     });
 
-    it('should return empty results when no server is ready', async () => {
-      // Before starting any servers, operations should return empty
-      const results = await lspService.workspaceSymbols('test');
-      expect(results).toEqual([]);
+    it('reports unavailable workspace queries instead of empty results', async () => {
+      await expect(lspService.workspaceSymbols('test')).rejects.toThrow(
+        'No LSP servers are configured',
+      );
+      await expect(lspService.workspaceDiagnostics()).rejects.toThrow(
+        'No LSP servers are configured',
+      );
+      await expect(lspService.workspaceDiagnostics('absent')).rejects.toThrow(
+        'No LSP server named absent is configured or running',
+      );
     });
 
     it('should reject diagnostics when no server is ready', async () => {
-      const uri = 'file:///test/workspace/src/app.ts';
+      const uri = pathToFileURL(
+        path.resolve(mockConfig.rootPath, 'src/app.ts'),
+      ).toString();
       await expect(lspService.diagnostics(uri)).rejects.toThrow(
         'No LSP servers are configured or running',
       );
     });
 
-    it('should return empty code actions when no server is ready', async () => {
-      const uri = 'file:///test/workspace/src/app.ts';
+    it('should report unavailable code actions when no server is ready', async () => {
+      const uri = pathToFileURL(
+        path.resolve(mockConfig.rootPath, 'src/app.ts'),
+      ).toString();
       const context = {
         diagnostics: [],
         only: undefined,
         triggerKind: 'invoked' as const,
       };
 
-      const results = await lspService.codeActions(
-        uri,
-        range(0, 0, 0, 10),
-        context,
-      );
-      expect(results).toEqual([]);
+      await expect(
+        lspService.codeActions(uri, range(0, 0, 0, 10), context),
+      ).rejects.toThrow('No LSP servers are configured');
     });
   });
 
