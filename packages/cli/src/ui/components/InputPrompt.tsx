@@ -147,10 +147,23 @@ export function classifyPastedImagePaths(pasted: string): {
     if (normalized.startsWith('file://')) {
       // A terminal or helper may inject the uri-list form of a copied file;
       // fileURLToPath also percent-decodes the name.
+      let url: URL | undefined;
       try {
-        normalized = fileURLToPath(normalized);
+        url = new URL(normalized);
       } catch {
-        // Not a parseable file URI — keep the token as-is.
+        url = undefined;
+      }
+      if (url && (url.host === '' || url.host === 'localhost')) {
+        try {
+          normalized = fileURLToPath(url);
+        } catch {
+          // Not convertible on this host — keep the token as-is.
+        }
+      } else {
+        // A remote host would become a UNC path that fs.stat authenticates
+        // to (Windows SMB): drop the token from image classification.
+        allImages = false;
+        continue;
       }
     }
     if (PASTED_IMAGE_EXTENSIONS.test(normalized)) {
@@ -214,15 +227,16 @@ export const CLIPBOARD_PASTE_FRAMING = [
  * cost one attribution instead of N.
  */
 export function wrapClipboardPaste(text: string): string {
+  // Escape the escape character first so the pair with the unescape in
+  // unframeClipboardPastes stays injective: a payload already carrying the
+  // escaped form must not round-trip into a real marker the user never typed.
   return [
     '<clipboard-paste>',
-    text.replace(/<(\/?)clipboard-paste>/g, '<\\$1clipboard-paste>'),
+    text
+      .replace(/\\/g, '\\\\')
+      .replace(/<(\/?)clipboard-paste>/g, '<\\$1clipboard-paste>'),
     '</clipboard-paste>',
   ].join('\n');
-}
-
-export function describeClipboardPaste(text: string): string {
-  return `${wrapClipboardPaste(text)}\n${CLIPBOARD_PASTE_FRAMING}`;
 }
 
 /**
@@ -246,13 +260,22 @@ function framePasteExpansion(
     `[ \\t]*(?:${escapedPlaceholders.join('|')})[ \\t]*`,
     'g',
   );
+  let matched = 0;
   const expanded = value
-    .replace(placeholderRegex, (match) =>
-      wrapClipboardPaste(pendingPastes.get(match.trim()) ?? match),
-    )
+    .replace(placeholderRegex, (match) => {
+      matched += 1;
+      return wrapClipboardPaste(pendingPastes.get(match.trim()) ?? match);
+    })
     .replace(/([^\n])(<clipboard-paste>)/g, '$1\n$2')
     .replace(/(<\/clipboard-paste>)([^\n])/g, '$1\n$2')
     .trim();
+  // A discarded paste (ESC-ESC, mode toggle, …) leaves entries in
+  // pendingPastes whose placeholders are gone from the buffer; when no block
+  // was produced there is nothing to attribute, so the prose must not ride a
+  // prompt the user typed by hand.
+  if (matched === 0) {
+    return value;
+  }
   return `${expanded}\n${CLIPBOARD_PASTE_FRAMING}`;
 }
 
@@ -273,7 +296,9 @@ export function unframeClipboardPastes(value: string): string {
     .replace(
       /<clipboard-paste>\n([\s\S]*?)\n<\/clipboard-paste>/g,
       (_m, payload: string) =>
-        payload.replace(/<\\(\/?)clipboard-paste>/g, '<$1clipboard-paste>'),
+        payload
+          .replace(/<\\(\/?)clipboard-paste>/g, '<$1clipboard-paste>')
+          .replace(/\\\\/g, '\\'),
     )
     .trim();
 }
@@ -746,6 +771,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     [],
   );
 
+  // Paired reset for the paste map and the placeholder-id pool: the two
+  // must move together or later same-size pastes keep numbering at #2.
+  const clearPendingPastes = useCallback(() => {
+    setPendingPastes(new Map());
+    activePlaceholderIds.current.clear();
+  }, []);
+
   // Ref to inputHistory.resetHistoryNav, populated after useInputHistory runs.
   // Needed because handleSubmitAndClear is passed into useInputHistory as
   // onSubmit, so we can't reference inputHistory directly here without a cycle.
@@ -767,16 +799,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // command's argument is likewise data the command consumes, not a
         // message to the model, so it gets the raw expansion too — the same
         // classifier the dispatcher routes on.
-        const rawExpansion = expandPendingPastePlaceholders(
-          finalValue,
-          pendingPastes,
-        );
         finalValue =
           shellModeActive || isSlashCommand(submittedValue)
-            ? rawExpansion
+            ? expandPendingPastePlaceholders(finalValue, pendingPastes)
             : framePasteExpansion(finalValue, pendingPastes);
-        setPendingPastes(new Map());
-        activePlaceholderIds.current.clear();
+        clearPendingPastes();
       }
       if (shellModeActive) {
         shellHistory.addCommandToHistory(finalValue);
@@ -828,6 +855,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       config,
       targetDir,
       pendingPastes,
+      clearPendingPastes,
       followup,
       onPromptSuggestionDismiss,
     ],
@@ -842,6 +870,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // History holds the submitted (framed) value; recall restores the
       // user's own characters, not the model-facing attribution.
       const restored = unframeClipboardPastes(newText);
+      // The refill replaces the buffer, so a clipboard read started before
+      // the recall must not land at the recalled prompt's cursor.
+      submitEpochRef.current += 1;
       buffer.setText(restored);
       setHistoryRestoredText(restored);
     },
@@ -949,6 +980,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // guard any other large paste takes.
   const promotePastedImagePaths = useCallback(
     async (imagePaths: string[], originalPasted: string) => {
+      // The stat/copy loop below outlives the keystroke that started it; a
+      // submit in between must not find its cleared buffer and attachment
+      // list refilled by this late continuation.
+      const submitEpoch = submitEpochRef.current;
       const cwd = config.getTargetDir();
       const clipboardDir = path.join(Storage.getGlobalTempDir(), 'clipboard');
       const attachments: Attachment[] = [];
@@ -973,6 +1008,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         } catch {
           // Source missing or copy failed — skip this token.
         }
+      }
+      if (submitEpochRef.current !== submitEpoch) {
+        return;
       }
       if (attachments.length > 0) {
         cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
@@ -1387,6 +1425,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       const popQueueIntoInput = (): boolean => {
         const popped = uiActions.popAllQueuedMessages();
         if (!popped) return false;
+        // Refilling from the queue replaces the buffer content, superseding
+        // a clipboard read still in flight exactly like a submit does.
+        submitEpochRef.current += 1;
         const currentText = buffer.text;
         if (currentText) {
           const currentCursorOffset = logicalPosToOffset(
@@ -1421,6 +1462,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Switching modes discards the buffer, so a clipboard read started
         // before the toggle must not land in the new mode's empty buffer.
         submitEpochRef.current += 1;
+        clearPendingPastes();
         setShellModeActive(!shellModeActive);
         buffer.setText(''); // Clear the '!' from input
         return true;
@@ -1450,6 +1492,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         ) => {
           setActive(false);
           resetCompletion();
+          submitEpochRef.current += 1;
           buffer.setText(textBeforeReverseSearch);
           const offset = logicalPosToOffset(
             buffer.lines,
@@ -1544,8 +1587,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         } else {
           // clear input and immediately reset state; the bump drops any
           // clipboard read still in flight so it cannot refill the buffer the
-          // user just emptied.
+          // user just emptied, and the discarded paste state goes with it so
+          // a later typed prompt is not framed by a paste no longer on screen.
           submitEpochRef.current += 1;
+          clearPendingPastes();
           buffer.setText('');
           resetCompletionState();
           resetEscapeState();
@@ -1617,6 +1662,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
           if (keyMatchers[Command.ACCEPT_SUGGESTION_REVERSE_SEARCH](key)) {
             uiActions.invalidateSubmittedPromptProvenance();
+            // Accepting a suggestion replaces the buffer, superseding any
+            // clipboard read still in flight.
+            submitEpochRef.current += 1;
             sc.handleAutocomplete(activeSuggestionIndex);
             resetState();
             setActive(false);
@@ -2134,6 +2182,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Ctrl+C with completion active — also reset completion state
       if (keyMatchers[Command.CLEAR_INPUT](key)) {
         exportCompletion.reset();
+        // BaseTextInput empties the buffer on this key; a clipboard read
+        // started before the clear must not land in it afterwards.
+        submitEpochRef.current += 1;
         if (buffer.text.length > 0) {
           resetCompletionState();
         }
@@ -2189,6 +2240,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       reportClipboardUnavailable,
       promotePastedImagePaths,
       collapseLargePaste,
+      clearPendingPastes,
       resetCompletionState,
       dismissCompletion,
       escPressCount,

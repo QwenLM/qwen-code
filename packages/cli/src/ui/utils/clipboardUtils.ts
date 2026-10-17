@@ -813,16 +813,30 @@ export async function readClipboardText(): Promise<string | null> {
         // 16 MiB per type only to report nothing.
         return null;
       }
-      if (result.trim()) {
-        const text = result
-          .replace(/\r\n/g, '\n')
-          .replace(/\r/g, '\n')
-          .replace(/\n+$/, '');
-        return type.raw.trim().toLowerCase().split(';')[0].trim() ===
-          'text/uri-list'
+      // '' is the failure channel (empty clipboard, unreachable tool, spawn
+      // failure, timeout); only a failed read falls through to the next offer.
+      // A successful read is the selection's own answer and is never traded
+      // for a lower-tier representation of the same content.
+      if (result === '') {
+        continue;
+      }
+      const text = result
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n+$/, '');
+      const converted =
+        type.raw.trim().toLowerCase().split(';')[0].trim() === 'text/uri-list'
           ? uriListToPaths(text)
           : text;
+      // A uri-list of only comment lines converts to nothing; keep looking.
+      if (converted === '') {
+        continue;
       }
+
+      // A whitespace-only read means there is nothing to paste — returning
+      // null here keeps a blank-line copy from being replaced by the same
+      // selection's text/html markup further down the tier loop.
+      return converted.trim() ? converted : null;
     }
   }
   return null;

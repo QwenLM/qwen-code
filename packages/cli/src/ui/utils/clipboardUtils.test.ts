@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { fileURLToPath } from 'node:url';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
 const { mockSpawn, mockExecSync, clipboardMockState, mockDebugLogger } =
@@ -470,6 +471,17 @@ describe('clipboardUtils', () => {
         );
     }
 
+    // fileURLToPath follows host semantics; on Windows these URIs have no
+    // drive letter and the production catch keeps the raw URI instead, so the
+    // expectation is derived rather than hardcoded POSIX.
+    const fileUriToPath = (uri: string): string => {
+      try {
+        return fileURLToPath(uri);
+      } catch {
+        return uri;
+      }
+    };
+
     const cases: Array<{
       name: string;
       tool: 'wl-paste' | 'xclip';
@@ -514,7 +526,10 @@ describe('clipboardUtils', () => {
         payloads: {
           'text/uri-list': 'file:///a/shot.png\r\nfile:///a/My%20Shot.png\r\n',
         },
-        expected: '/a/shot.png\n/a/My Shot.png',
+        expected: [
+          fileUriToPath('file:///a/shot.png'),
+          fileUriToPath('file:///a/My%20Shot.png'),
+        ].join('\n'),
         reads: ['text/uri-list'],
       },
       {
@@ -524,7 +539,7 @@ describe('clipboardUtils', () => {
         payloads: {
           'text/uri-list': '# a comment\r\nfile:///a/shot.png\r\n',
         },
-        expected: '/a/shot.png',
+        expected: fileUriToPath('file:///a/shot.png'),
         reads: ['text/uri-list'],
       },
       {
@@ -581,6 +596,25 @@ describe('clipboardUtils', () => {
         payloads: { 'text/plain': '  \n' },
         expected: null,
         reads: ['text/plain'],
+      },
+      {
+        name: 'returns nothing for a whitespace-only plain read instead of falling through to markup',
+        tool: 'wl-paste',
+        types: ['text/plain', 'text/html'],
+        payloads: { 'text/plain': '  \n', 'text/html': '<b>markup</b>' },
+        expected: null,
+        reads: ['text/plain'],
+      },
+      {
+        name: 'keeps looking when a uri-list offer holds only comment lines',
+        tool: 'wl-paste',
+        types: ['text/uri-list', 'text/html'],
+        payloads: {
+          'text/uri-list': '# nothing but a comment\r\n',
+          'text/html': '<b>markup</b>',
+        },
+        expected: '<b>markup</b>',
+        reads: ['text/uri-list', 'text/html'],
       },
     ];
 
